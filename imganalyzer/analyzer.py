@@ -1,0 +1,115 @@
+"""Main analysis orchestrator."""
+from __future__ import annotations
+
+import dataclasses
+from pathlib import Path
+from typing import Any
+
+from rich.console import Console
+
+console = Console()
+
+# All RAW extensions supported by LibRaw/rawpy
+RAW_EXTENSIONS = {
+    ".3fr", ".ari", ".arw", ".bay", ".braw", ".crw", ".cr2", ".cr3",
+    ".cap", ".data", ".dcs", ".dcr", ".dng", ".drf", ".eip", ".erf",
+    ".fff", ".gpr", ".iiq", ".k25", ".kdc", ".mdc", ".mef", ".mos",
+    ".mrw", ".nef", ".nrw", ".obm", ".orf", ".pef", ".ptx", ".pxn",
+    ".r3d", ".raf", ".raw", ".rwl", ".rw2", ".rwz", ".sr2", ".srf",
+    ".srw", ".tif", ".x3f",
+}
+
+
+@dataclasses.dataclass
+class AnalysisResult:
+    source_path: Path
+    format: str = ""
+    width: int = 0
+    height: int = 0
+    metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+    technical: dict[str, Any] = dataclasses.field(default_factory=dict)
+    ai_analysis: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_path": str(self.source_path),
+            "format": self.format,
+            "width": self.width,
+            "height": self.height,
+            "metadata": self.metadata,
+            "technical": self.technical,
+            "ai_analysis": self.ai_analysis,
+        }
+
+    def write_xmp(self, path: Path) -> None:
+        from imganalyzer.output.xmp import XMPWriter
+        writer = XMPWriter(self)
+        writer.write(path)
+
+
+class Analyzer:
+    def __init__(
+        self,
+        ai_backend: str = "none",
+        run_technical: bool = True,
+        verbose: bool = False,
+    ) -> None:
+        self.ai_backend = ai_backend
+        self.run_technical = run_technical
+        self.verbose = verbose
+
+    def analyze(self, path: Path) -> AnalysisResult:
+        suffix = path.suffix.lower()
+        is_raw = suffix in RAW_EXTENSIONS
+
+        if self.verbose:
+            console.print(f"  [dim]Reading {'RAW' if is_raw else 'standard'} image...[/dim]")
+
+        # Read image
+        if is_raw:
+            from imganalyzer.readers.raw import RawReader
+            reader = RawReader(path)
+        else:
+            from imganalyzer.readers.standard import StandardReader
+            reader = StandardReader(path)
+
+        image_data = reader.read()
+
+        result = AnalysisResult(
+            source_path=path,
+            format=image_data["format"],
+            width=image_data["width"],
+            height=image_data["height"],
+        )
+
+        # Metadata / EXIF
+        if self.verbose:
+            console.print("  [dim]Extracting metadata...[/dim]")
+        from imganalyzer.analysis.metadata import MetadataExtractor
+        result.metadata = MetadataExtractor(path, image_data).extract()
+
+        # Technical analysis
+        if self.run_technical:
+            if self.verbose:
+                console.print("  [dim]Running technical analysis...[/dim]")
+            from imganalyzer.analysis.technical import TechnicalAnalyzer
+            result.technical = TechnicalAnalyzer(image_data).analyze()
+
+        # AI analysis
+        if self.ai_backend and self.ai_backend != "none":
+            if self.verbose:
+                console.print(f"  [dim]Running AI analysis ({self.ai_backend})...[/dim]")
+            if self.ai_backend == "local":
+                from imganalyzer.analysis.ai.local import LocalAI
+                result.ai_analysis = LocalAI().analyze(image_data)
+            elif self.ai_backend == "openai":
+                from imganalyzer.analysis.ai.cloud import CloudAI
+                result.ai_analysis = CloudAI(backend="openai").analyze(path, image_data)
+            elif self.ai_backend == "anthropic":
+                from imganalyzer.analysis.ai.cloud import CloudAI
+                result.ai_analysis = CloudAI(backend="anthropic").analyze(path, image_data)
+            elif self.ai_backend == "google":
+                from imganalyzer.analysis.ai.cloud import CloudAI
+                result.ai_analysis = CloudAI(backend="google").analyze(path, image_data)
+
+        return result
