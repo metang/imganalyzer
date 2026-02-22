@@ -79,7 +79,7 @@ class XMPWriter:
             dc_desc = ET.SubElement(desc, _ns("dc", "description"))
             _alt_lang(dc_desc, ai_desc)
 
-        # Subject / keywords
+        # Subject / keywords — merge AI keywords, scene/mood, and detected object labels
         keywords: list[str] = []
         if ai.get("keywords"):
             if isinstance(ai["keywords"], list):
@@ -90,6 +90,11 @@ class XMPWriter:
             keywords.append(ai["scene_type"])
         if ai.get("mood"):
             keywords.append(ai["mood"])
+        # Add detected object labels (strip confidence percentages) as keywords
+        for obj in (ai.get("detected_objects") or []):
+            label = obj.split(":")[0].strip()
+            if label and label not in keywords:
+                keywords.append(label)
         if keywords:
             dc_subject = ET.SubElement(desc, _ns("dc", "subject"))
             _rdf_bag(dc_subject, [k.strip() for k in keywords if k.strip()])
@@ -235,6 +240,22 @@ class XMPWriter:
             _rdf_bag(objs, ai["detected_objects"])
         if ai.get("landmark"):
             desc.set(_ns("imganalyzer", "AILandmark"), ai["landmark"])
+
+        # Aesthetic scoring
+        if ai.get("aesthetic_score") is not None:
+            desc.set(_ns("imganalyzer", "AestheticScore"), str(ai["aesthetic_score"]))
+        if ai.get("aesthetic_label"):
+            desc.set(_ns("imganalyzer", "AestheticLabel"), ai["aesthetic_label"])
+
+        # Face analysis
+        if ai.get("face_count") is not None:
+            desc.set(_ns("imganalyzer", "FaceCount"), str(ai["face_count"]))
+        if ai.get("face_identities"):
+            fi_elem = ET.SubElement(desc, _ns("imganalyzer", "FaceIdentities"))
+            _rdf_bag(fi_elem, ai["face_identities"])
+        if ai.get("face_details"):
+            fd_elem = ET.SubElement(desc, _ns("imganalyzer", "FaceDetails"))
+            _rdf_bag(fd_elem, ai["face_details"])
 
         # RAW-specific
         if meta.get("raw_white_level"):

@@ -14,7 +14,7 @@ def read(path: Path) -> dict[str, Any]:
     except ImportError:
         raise ImportError("rawpy is required for RAW files: pip install rawpy")
 
-    with rawpy.imread(str(path)) as raw:
+    with rawpy.imread(str(path)) as raw:  # rawpy requires str path (cross-platform str() is safe)
         # Get raw dimensions first to check size
         raw_h, raw_w = raw.raw_image.shape[:2]
         rgb = raw.postprocess(

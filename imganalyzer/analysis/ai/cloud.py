@@ -24,7 +24,7 @@ def _encode_image(path: Path, max_size_kb: int = 1024) -> tuple[str, str]:
     from PIL import Image
     import io
 
-    img = Image.open(str(path))
+    img = Image.open(path)  # Path objects work on both Windows and macOS
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
 
@@ -132,7 +132,7 @@ class CloudAI:
 
         client = vision.ImageAnnotatorClient()
 
-        with open(str(path), "rb") as f:
+        with open(path, "rb") as f:  # Path objects work on both Windows and macOS
             content = f.read()
 
         image = vision.Image(content=content)

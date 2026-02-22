@@ -53,10 +53,16 @@ class Analyzer:
         ai_backend: str = "none",
         run_technical: bool = True,
         verbose: bool = False,
+        detection_prompt: str | None = None,
+        detection_threshold: float | None = None,
+        face_match_threshold: float | None = None,
     ) -> None:
         self.ai_backend = ai_backend
         self.run_technical = run_technical
         self.verbose = verbose
+        self.detection_prompt = detection_prompt
+        self.detection_threshold = detection_threshold
+        self.face_match_threshold = face_match_threshold
 
     def analyze(self, path: Path) -> AnalysisResult:
         suffix = path.suffix.lower()
@@ -100,8 +106,13 @@ class Analyzer:
             if self.verbose:
                 console.print(f"  [dim]Running AI analysis ({self.ai_backend})...[/dim]")
             if self.ai_backend == "local":
-                from imganalyzer.analysis.ai.local import LocalAI
-                result.ai_analysis = LocalAI().analyze(image_data)
+                from imganalyzer.analysis.ai.local_full import LocalAIFull
+                result.ai_analysis = LocalAIFull().analyze(
+                    image_data,
+                    detection_prompt=self.detection_prompt,
+                    detection_threshold=self.detection_threshold,
+                    face_match_threshold=self.face_match_threshold,
+                )
             elif self.ai_backend == "openai":
                 from imganalyzer.analysis.ai.cloud import CloudAI
                 result.ai_analysis = CloudAI(backend="openai").analyze(path, image_data)

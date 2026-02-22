@@ -14,7 +14,7 @@ def read(path: Path) -> dict[str, Any]:
     except ImportError:
         raise ImportError("Pillow is required: pip install Pillow")
 
-    img = Image.open(str(path))
+    img = Image.open(path)  # Path objects work on both Windows and macOS
     fmt = img.format or path.suffix.upper().lstrip(".")
     mode = img.mode
 
