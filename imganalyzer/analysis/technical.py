@@ -12,6 +12,17 @@ class TechnicalAnalyzer:
 
     def analyze(self) -> dict[str, Any]:
         rgb: np.ndarray = self.image_data["rgb_array"]  # uint8 H×W×3
+
+        # Downsample to max 1000px on longest side for analysis to cap memory usage
+        h, w = rgb.shape[:2]
+        max_dim = 1000
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            new_h, new_w = int(h * scale), int(w * scale)
+            # Simple stride-based downsampling (no scipy needed)
+            sh, sw = max(1, h // new_h), max(1, w // new_w)
+            rgb = rgb[::sh, ::sw, :]
+
         gray = self._to_gray(rgb)
         result: dict[str, Any] = {}
 
@@ -44,12 +55,12 @@ class TechnicalAnalyzer:
             lap = sk_laplace(gray / 255.0)
             score = float(np.var(lap) * 1e6)
 
-        # Normalise to 0-100 range (empirical scale)
-        score_norm = min(100.0, score / 200.0)
+        # Normalise to 0-100 range (empirical scale, tuned for half-size RAW)
+        score_norm = min(100.0, score / 20.0)
         return {
             "sharpness_score": round(score_norm, 2),
             "sharpness_raw": round(score, 2),
-            "sharpness_label": _label(score_norm, [(20, "Blurry"), (50, "Soft"), (75, "Sharp"), (100, "Very Sharp")]),
+            "sharpness_label": _label(score_norm, [(10, "Blurry"), (30, "Soft"), (60, "Sharp"), (100, "Very Sharp")]),
         }
 
     # ── Exposure ──────────────────────────────────────────────────────────────
@@ -113,9 +124,9 @@ class TechnicalAnalyzer:
         hist, _ = np.histogram(gray.flatten(), bins=256, range=(0, 256))
         hist_norm = hist / hist.sum()
 
-        # Zone distribution (Ansel Adams zones 0-10)
-        zones = np.split(hist_norm, 10)
-        zone_dist = [round(float(z.sum()), 4) for z in zones]
+        # Zone distribution (Ansel Adams zones 0-9, split 256 bins into 10 equal parts)
+        zone_size = 256 // 10  # 25 bins each, skip last 6 bins
+        zone_dist = [round(float(hist_norm[i * zone_size:(i + 1) * zone_size].sum()), 4) for i in range(10)]
 
         return {
             "histogram_mean": round(float(np.mean(gray)), 2),

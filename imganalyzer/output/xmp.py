@@ -46,7 +46,7 @@ def _rdf_seq(parent: ET.Element, items: list[str]) -> None:
 def _alt_lang(parent: ET.Element, text: str, lang: str = "x-default") -> None:
     alt = ET.SubElement(parent, _ns("rdf", "Alt"))
     li = ET.SubElement(alt, _ns("rdf", "li"))
-    li.set(_ns("xml", "lang"), lang)
+    li.set("{http://www.w3.org/XML/1998/namespace}lang", lang)
     li.text = text
 
 

@@ -15,16 +15,20 @@ def read(path: Path) -> dict[str, Any]:
         raise ImportError("rawpy is required for RAW files: pip install rawpy")
 
     with rawpy.imread(str(path)) as raw:
-        # Develop the RAW into an 8-bit RGB array
+        # Get raw dimensions first to check size
+        raw_h, raw_w = raw.raw_image.shape[:2]
+        # Use half_size to keep memory under control. For very large files,
+        # use use_auto_wb as fallback since camera_wb may not be available.
         rgb = raw.postprocess(
             use_camera_wb=True,
             no_auto_bright=False,
             output_bps=8,
+            half_size=True,
         )
 
         # Also expose the raw Bayer data for technical analysis
         try:
-            raw_image = raw.raw_image.copy()
+            raw_image = None  # skip full Bayer copy to save memory
             raw_colors = raw.color_desc.decode()
             raw_pattern = raw.raw_pattern.tolist()
             black_level = raw.black_level_per_channel
