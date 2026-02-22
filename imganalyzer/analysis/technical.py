@@ -13,13 +13,12 @@ class TechnicalAnalyzer:
     def analyze(self) -> dict[str, Any]:
         rgb: np.ndarray = self.image_data["rgb_array"]  # uint8 H×W×3
 
-        # Downsample to max 1000px on longest side for analysis to cap memory usage
+        # Downsample to max 3000px on longest side for analysis (sufficient for accuracy)
         h, w = rgb.shape[:2]
-        max_dim = 1000
+        max_dim = 3000
         if max(h, w) > max_dim:
             scale = max_dim / max(h, w)
             new_h, new_w = int(h * scale), int(w * scale)
-            # Simple stride-based downsampling (no scipy needed)
             sh, sw = max(1, h // new_h), max(1, w // new_w)
             rgb = rgb[::sh, ::sw, :]
 

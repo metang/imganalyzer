@@ -17,13 +17,11 @@ def read(path: Path) -> dict[str, Any]:
     with rawpy.imread(str(path)) as raw:
         # Get raw dimensions first to check size
         raw_h, raw_w = raw.raw_image.shape[:2]
-        # Use half_size to keep memory under control. For very large files,
-        # use use_auto_wb as fallback since camera_wb may not be available.
         rgb = raw.postprocess(
             use_camera_wb=True,
             no_auto_bright=False,
             output_bps=8,
-            half_size=True,
+            half_size=False,
         )
 
         # Also expose the raw Bayer data for technical analysis
