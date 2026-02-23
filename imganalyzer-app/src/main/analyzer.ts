@@ -52,6 +52,9 @@ export async function runAnalysis(
 
     let stderr = ''
     let lastPct = 0
+    // Line buffers — pipe chunks may split across line boundaries
+    let stdoutBuf = ''
+    let stderrBuf = ''
 
     const emitProgress = (line: string) => {
       for (const [re, pct, label] of STAGE_MAP) {
@@ -63,15 +66,23 @@ export async function runAnalysis(
       }
     }
 
+    const processLines = (buf: string, chunk: string): string => {
+      const combined = buf + chunk
+      const lines = combined.split('\n')
+      // Last element may be an incomplete line — keep it in the buffer
+      const incomplete = lines.pop() ?? ''
+      lines.forEach(emitProgress)
+      return incomplete
+    }
+
     child.stdout.on('data', (chunk: Buffer) => {
-      const text = chunk.toString()
-      text.split('\n').forEach(emitProgress)
+      stdoutBuf = processLines(stdoutBuf, chunk.toString())
     })
 
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString()
       stderr += text
-      text.split('\n').forEach(emitProgress)
+      stderrBuf = processLines(stderrBuf, text)
     })
 
     child.on('close', async (code) => {

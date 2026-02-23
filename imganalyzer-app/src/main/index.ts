@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
-import { listImages, getThumbnail } from './images'
+import { listImages, getThumbnail, getFullImage } from './images'
 import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
 
@@ -61,6 +61,11 @@ ipcMain.handle('fs:listImages', async (_evt, folderPath: string) => {
 // ─── IPC: Get thumbnail ───────────────────────────────────────────────────────
 ipcMain.handle('fs:getThumbnail', async (_evt, imagePath: string) => {
   return getThumbnail(imagePath)
+})
+
+// ─── IPC: Get full-resolution image for lightbox ──────────────────────────────
+ipcMain.handle('fs:getFullImage', async (_evt, imagePath: string) => {
+  return getFullImage(imagePath)
 })
 
 // ─── IPC: Read XMP sidecar ───────────────────────────────────────────────────

@@ -110,8 +110,8 @@ function XmpResults({ xmp }: { xmp: XmpData }) {
             <ScoreBar value={xmp.sharpnessScore} />
           </div>
         )}
-        {xmp.exposureEV !== undefined && <Row label="Exposure EV" value={`${xmp.exposureEV > 0 ? '+' : ''}${xmp.exposureEV.toFixed(2)} (${xmp.exposureLabel ?? ''})`} />}
-        {xmp.noiseLevel !== undefined && <Row label="Noise" value={`${xmp.noiseLevel.toFixed(2)} (${xmp.noiseLabel ?? ''})`} />}
+        {xmp.exposureEV !== undefined && <Row label="Exposure EV" value={`${xmp.exposureEV > 0 ? '+' : ''}${xmp.exposureEV.toFixed(2)}${xmp.exposureLabel ? ` (${xmp.exposureLabel})` : ''}`} />}
+        {xmp.noiseLevel !== undefined && <Row label="Noise" value={`${xmp.noiseLevel.toFixed(2)}${xmp.noiseLabel ? ` (${xmp.noiseLabel})` : ''}`} />}
         {xmp.snrDb !== undefined && <Row label="SNR" value={`${xmp.snrDb.toFixed(1)} dB`} />}
         {xmp.dynamicRangeStops !== undefined && <Row label="Dynamic Range" value={`${xmp.dynamicRangeStops.toFixed(1)} stops`} />}
         {xmp.highlightClippingPct !== undefined && <Row label="Highlight Clip" value={`${xmp.highlightClippingPct.toFixed(2)}%`} />}

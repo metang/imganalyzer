@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import type { XmpData, AnalysisProgress } from '../global'
 
 export type AnalysisState =
@@ -10,8 +10,11 @@ export type AnalysisState =
 
 export function useAnalysis(imagePath: string | null) {
   const [state, setState] = useState<AnalysisState>({ status: 'idle' })
+  // Ref incremented on every new imagePath / cancel so in-flight awaits can
+  // detect they've been superseded without needing a closure over a boolean.
+  const epochRef = useRef(0)
 
-  // Subscribe to progress events once
+  // Subscribe to progress events
   useEffect(() => {
     const unsub = window.api.onAnalysisProgress((p: AnalysisProgress) => {
       if (p.imagePath !== imagePath) return
@@ -27,19 +30,18 @@ export function useAnalysis(imagePath: string | null) {
       return
     }
 
-    let cancelled = false
+    // Bump epoch — any in-flight reanalyze from previous image becomes stale
+    const epoch = ++epochRef.current
 
     async function init() {
-      if (!imagePath) return
-      const cached = await window.api.readXmp(imagePath)
-      if (cancelled) return
+      const cached = await window.api.readXmp(imagePath!)
+      if (epochRef.current !== epoch) return
       if (cached) {
         setState({ status: 'cached', xmp: cached })
       } else {
-        // Auto-analyze
         setState({ status: 'analyzing', stage: 'Starting…', pct: 0 })
-        const result = await window.api.runAnalysis(imagePath, 'local')
-        if (cancelled) return
+        const result = await window.api.runAnalysis(imagePath!, 'local')
+        if (epochRef.current !== epoch) return
         if (result.error) {
           setState({ status: 'error', message: result.error })
         } else if (result.xmp) {
@@ -51,13 +53,15 @@ export function useAnalysis(imagePath: string | null) {
     }
 
     init()
-    return () => { cancelled = true }
+    // No cleanup needed — epoch guards stale results
   }, [imagePath])
 
   const reanalyze = useCallback(async () => {
     if (!imagePath) return
+    const epoch = ++epochRef.current
     setState({ status: 'analyzing', stage: 'Starting…', pct: 0 })
     const result = await window.api.runAnalysis(imagePath, 'local')
+    if (epochRef.current !== epoch) return
     if (result.error) {
       setState({ status: 'error', message: result.error })
     } else if (result.xmp) {
@@ -68,10 +72,11 @@ export function useAnalysis(imagePath: string | null) {
   }, [imagePath])
 
   const cancel = useCallback(() => {
-    if (imagePath) {
-      window.api.cancelAnalysis(imagePath)
-      setState({ status: 'idle' })
-    }
+    if (!imagePath) return
+    // Bump epoch so any pending runAnalysis result is ignored when it resolves
+    epochRef.current++
+    window.api.cancelAnalysis(imagePath).catch(() => {})
+    setState({ status: 'idle' })
   }, [imagePath])
 
   return { state, reanalyze, cancel }

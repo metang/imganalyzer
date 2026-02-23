@@ -18,6 +18,9 @@ const ZOOM_STEP_WHEEL = 0.12 // per wheel tick (multiplied by deltaY magnitude)
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)) }
 
 export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) {
+  // thumb = low-res placeholder shown immediately while full-res loads
+  const [thumb, setThumb] = useState<string>('')
+  // src = full-resolution image; replaces thumb once loaded
   const [src, setSrc] = useState<string>('')
   const { state, reanalyze, cancel } = useAnalysis(image.path)
 
@@ -34,13 +37,24 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
     setOffset({ x: 0, y: 0 })
   }, [image.path])
 
-  // Load thumbnail
+  // Load thumbnail first (fast), then replace with full-res
   useEffect(() => {
     let cancelled = false
+    setThumb('')
     setSrc('')
+
+    // Step 1: low-res thumbnail as placeholder (already cached in most cases)
     window.api.getThumbnail(image.path).then((url) => {
-      if (!cancelled) setSrc(url)
-    })
+      if (!cancelled && url) setThumb(url)
+    }).catch(() => {})
+
+    // Step 2: full-resolution image
+    window.api.getFullImage(image.path).then((url) => {
+      if (!cancelled && url) {
+        setSrc(url)
+      }
+    }).catch(() => {})
+
     return () => { cancelled = true }
   }, [image.path])
 
@@ -241,7 +255,28 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
         onMouseLeave={handleMouseUp}
         onDoubleClick={handleDblClick}
       >
-        {src ? (
+        {/* Show spinner only when nothing at all is available yet */}
+        {!thumb && !src && (
+          <div className="w-8 h-8 border-2 border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
+        )}
+
+        {/* Blurred thumbnail placeholder — visible until full-res is ready */}
+        {thumb && !src && (
+          <img
+            src={thumb}
+            alt={image.name}
+            className="max-w-full max-h-full object-contain select-none"
+            style={{
+              filter: 'blur(8px)',
+              transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom * 1.05})`,
+              transformOrigin: 'center center',
+            }}
+            draggable={false}
+          />
+        )}
+
+        {/* Full-resolution image */}
+        {src && (
           <img
             src={src}
             alt={image.name}
@@ -253,8 +288,14 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
             }}
             draggable={false}
           />
-        ) : (
-          <div className="w-8 h-8 border-2 border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
+        )}
+
+        {/* Loading indicator while full-res is still fetching */}
+        {thumb && !src && (
+          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/60 text-neutral-400 text-xs">
+            <div className="w-3 h-3 border border-neutral-500 border-t-neutral-300 rounded-full animate-spin" />
+            Loading full resolution…
+          </div>
         )}
       </div>
 
