@@ -19,8 +19,10 @@ class TechnicalAnalyzer:
         if max(h, w) > max_dim:
             scale = max_dim / max(h, w)
             new_h, new_w = int(h * scale), int(w * scale)
-            sh, sw = max(1, h // new_h), max(1, w // new_w)
-            rgb = rgb[::sh, ::sw, :]
+            from PIL import Image as _PILImage
+            pil_img = _PILImage.fromarray(rgb)
+            pil_img = pil_img.resize((new_w, new_h), _PILImage.LANCZOS)
+            rgb = np.array(pil_img)
 
         gray = self._to_gray(rgb)
         result: dict[str, Any] = {}
@@ -43,23 +45,21 @@ class TechnicalAnalyzer:
     # ── Sharpness ─────────────────────────────────────────────────────────────
 
     def _sharpness(self, gray: np.ndarray) -> dict[str, Any]:
-        """Laplacian variance — higher = sharper."""
-        try:
-            from scipy.ndimage import laplace
-            lap = laplace(gray)
-            score = float(np.var(lap))
-        except ImportError:
-            # Manual Laplacian kernel without scipy
-            from skimage.filters import laplace as sk_laplace
-            lap = sk_laplace(gray / 255.0)
-            score = float(np.var(lap) * 1e6)
+        """Patch-based, center-weighted sharpness using Laplacian variance.
 
-        # Normalise to 0-100 range (empirical scale, tuned for half-size RAW)
-        score_norm = min(100.0, score / 20.0)
+        Divides the image into 64×64 patches, applies a Gaussian center weight
+        (giving more importance to the primary subject), takes the top 15% of
+        patches by sharpness, and returns their weighted mean.  The raw score
+        is log-normalised to a 0–100 scale.
+        """
+        score = _patch_sharpness(gray)
+        # Log-scale normalisation: ref=2000 calibrated against a test corpus
+        # (well-focused full-res RAW ≈ 1000–4500, smooth content-limited ≈ 5–20)
+        score_norm = min(100.0, float(np.log1p(score) / np.log1p(2000.0) * 100.0))
         return {
             "sharpness_score": round(score_norm, 2),
             "sharpness_raw": round(score, 2),
-            "sharpness_label": _label(score_norm, [(10, "Blurry"), (30, "Soft"), (60, "Sharp"), (100, "Very Sharp")]),
+            "sharpness_label": _label(score_norm, [(40, "Blurry"), (70, "Soft"), (85, "Sharp"), (100, "Very Sharp")]),
         }
 
     # ── Exposure ──────────────────────────────────────────────────────────────
@@ -183,6 +183,44 @@ class TechnicalAnalyzer:
             "avg_saturation": round(saturation, 4),
             "dominant_colors": dominant_colors,
         }
+
+
+def _patch_sharpness(gray: np.ndarray, patch_size: int = 64, top_pct: float = 0.15) -> float:
+    """Compute center-weighted patch-based Laplacian sharpness.
+
+    Splits *gray* into non-overlapping *patch_size*×*patch_size* tiles, scores
+    each tile by its Laplacian variance, applies a Gaussian center weight, then
+    returns the weighted mean of the top *top_pct* fraction of tiles.
+    Falls back to a plain global Laplacian variance for very small images.
+    """
+    from scipy.ndimage import laplace
+
+    h, w = gray.shape
+    rows, cols = h // patch_size, w // patch_size
+    if rows == 0 or cols == 0:
+        return float(np.var(laplace(gray)))
+
+    scores: list[float] = []
+    weights: list[float] = []
+    cy, cx = rows / 2.0, cols / 2.0
+    sigma = max(rows, cols) * 0.5
+
+    for r in range(rows):
+        for c in range(cols):
+            patch = gray[r * patch_size:(r + 1) * patch_size, c * patch_size:(c + 1) * patch_size]
+            patch_score = float(np.var(laplace(patch)))
+            dist2 = ((r - cy) / sigma) ** 2 + ((c - cx) / sigma) ** 2
+            w_val = float(np.exp(-0.5 * dist2))
+            scores.append(patch_score)
+            weights.append(w_val)
+
+    scores_arr = np.array(scores)
+    weights_arr = np.array(weights)
+    k = max(1, int(len(scores_arr) * top_pct))
+    top_idx = np.argpartition(scores_arr, -k)[-k:]
+    top_weights = weights_arr[top_idx]
+    top_weights = top_weights / top_weights.sum()
+    return float(np.dot(scores_arr[top_idx], top_weights))
 
 
 def _label(value: float, thresholds: list[tuple[float, str]]) -> str:
