@@ -107,7 +107,7 @@ function XmpResults({ xmp }: { xmp: XmpData }) {
               <span className="text-neutral-500 text-xs">Sharpness</span>
               {xmp.sharpnessLabel && <span className="text-xs text-neutral-400">{xmp.sharpnessLabel}</span>}
             </div>
-            <ScoreBar value={xmp.sharpnessScore} />
+            <ScoreBar value={xmp.sharpnessScore} max={100} />
           </div>
         )}
         {xmp.exposureEV !== undefined && <Row label="Exposure EV" value={`${xmp.exposureEV > 0 ? '+' : ''}${xmp.exposureEV.toFixed(2)}${xmp.exposureLabel ? ` (${xmp.exposureLabel})` : ''}`} />}
