@@ -1,12 +1,16 @@
 /**
  * Cloud AI analysis via the GitHub Copilot SDK (model: gpt-4.1).
  *
- * The CopilotClient spawns / connects to the GitHub Copilot CLI process.
- * Each call creates a fresh session, sends the image as a file attachment,
- * waits for the structured JSON response, then tears down the session.
+ * @github/copilot-sdk is a pure ESM package that uses import.meta.resolve()
+ * internally to locate the bundled Copilot CLI. It cannot be statically
+ * imported into a CJS Electron main bundle — doing so causes Vite to inline
+ * and mangle import.meta.resolve into (void 0), breaking CLI discovery.
+ *
+ * Solution: use a dynamic import() at call-time. Electron's Node runtime
+ * supports top-level await-free dynamic import() in CJS modules, and the SDK
+ * is marked as external in electron.vite.config.ts so it is never bundled.
  */
 
-import { CopilotClient } from '@github/copilot-sdk'
 import type { XmpData } from './xmp'
 
 // ─── Prompt ──────────────────────────────────────────────────────────────────
@@ -26,7 +30,6 @@ Return ONLY valid JSON with no extra text, no markdown fences.`
 
 function parseJsonResponse(text: string): Record<string, unknown> {
   let t = text.trim()
-  // Strip ```json ... ``` or ``` ... ```
   if (t.startsWith('```')) {
     t = t.split('\n').slice(1).join('\n')
     t = t.split('```')[0]
@@ -34,7 +37,6 @@ function parseJsonResponse(text: string): Record<string, unknown> {
   try {
     return JSON.parse(t) as Record<string, unknown>
   } catch {
-    // Best-effort: wrap as description-only
     return { description: text, keywords: [] }
   }
 }
@@ -55,7 +57,6 @@ function mapToXmpData(raw: Record<string, unknown>): XmpData {
     return []
   }
 
-  // Build description: combine description + technical_notes
   const desc = str('description')
   const notes = str('technical_notes')
   if (desc && notes) {
@@ -82,7 +83,12 @@ function mapToXmpData(raw: Record<string, unknown>): XmpData {
 export async function runCopilotAnalysis(
   imagePath: string
 ): Promise<{ xmp: XmpData | null; error?: string }> {
-  let client: CopilotClient | null = null
+  // Dynamic import keeps the ESM package out of the CJS bundle entirely.
+  // eslint-disable-next-line @typescript-eslint/consistent-type-imports
+  type SDK = typeof import('@github/copilot-sdk')
+  const { CopilotClient } = await import('@github/copilot-sdk') as SDK
+
+  let client: InstanceType<SDK['CopilotClient']> | null = null
 
   try {
     client = new CopilotClient()
@@ -103,12 +109,13 @@ export async function runCopilotAnalysis(
         }
 
         session.on('assistant.message', (event) => {
-          const content = event.data?.content
+          const content = (event as { data?: { content?: string } }).data?.content
           if (typeof content === 'string') responseText += content
         })
 
         session.on('session.error', (event) => {
-          finish({ xmp: null, error: String((event as { data?: { message?: string } }).data?.message ?? event) })
+          const msg = (event as { data?: { message?: string } }).data?.message
+          finish({ xmp: null, error: msg ? String(msg) : 'Unknown session error' })
         })
 
         session.on('session.idle', () => {
@@ -141,7 +148,7 @@ export async function runCopilotAnalysis(
     return { xmp: null, error: String(err) }
   } finally {
     if (client) {
-      await client.stop().catch(() => {})
+      await (client as { stop(): Promise<void> }).stop().catch(() => {})
     }
   }
 }
