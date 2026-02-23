@@ -17,9 +17,10 @@
  * spawn the CLI using the system node executable instead.
  */
 
-import { spawn, execSync } from 'child_process'
-import { existsSync } from 'fs'
-import { dirname, join } from 'path'
+import { spawn, execSync, execFileSync } from 'child_process'
+import { existsSync, unlinkSync, writeFileSync } from 'fs'
+import { dirname, join, extname } from 'path'
+import { tmpdir } from 'os'
 import type { XmpData } from './xmp'
 
 // Resolve the system node binary (not Electron's embedded node).
@@ -38,7 +39,63 @@ function findSystemNode(): string {
 
 const SYSTEM_NODE = findSystemNode()
 
-// ─── Prompt ──────────────────────────────────────────────────────────────────
+// ─── RAW preprocessing ────────────────────────────────────────────────────────
+
+// Extensions that cannot be sent directly to the Copilot SDK vision model.
+const RAW_EXTENSIONS = new Set([
+  '.arw', '.cr2', '.cr3', '.crw', '.dng', '.nef', '.nrw', '.orf', '.pef',
+  '.raf', '.raw', '.rw2', '.rwl', '.sr2', '.srf', '.srw', '.x3f', '.iiq',
+  '.3fr', '.fff', '.mef', '.mos', '.mrw', '.rwz', '.erf',
+])
+
+// Python script: decode RAW with rawpy, resize to ≤1568px, write temp JPEG.
+// Mirrors the approach used in cloud.py (_encode_image) and images.ts thumbnails.
+const RAW_CONVERT_SCRIPT = `
+import sys, rawpy, io
+from PIL import Image
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+
+with rawpy.imread(str(src)) as raw:
+    rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
+
+img = Image.fromarray(rgb)
+w, h = img.size
+max_dim = 1568
+if max(w, h) > max_dim:
+    ratio = max_dim / max(w, h)
+    img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+
+img.save(str(dst), format='JPEG', quality=85)
+`
+
+/**
+ * Convert a RAW file to a temporary JPEG using the conda imganalyzer environment.
+ * Returns the temp JPEG path (caller must delete it when done).
+ */
+function convertRawToJpeg(rawPath: string): string {
+  const scriptPath = join(tmpdir(), 'copilot_raw_convert.py')
+  const jpegPath   = join(tmpdir(), `copilot_raw_${Date.now()}.jpg`)
+
+  writeFileSync(scriptPath, RAW_CONVERT_SCRIPT, 'utf-8')
+
+  const pkgRoot = process.env.IMGANALYZER_PKG_ROOT || 'D:\\Code\\imganalyzer'
+
+  execFileSync(
+    'conda',
+    ['run', '-n', 'imganalyzer', '--no-capture-output', 'python', scriptPath, rawPath, jpegPath],
+    { cwd: pkgRoot, timeout: 60_000 }
+  )
+
+  if (!existsSync(jpegPath)) {
+    throw new Error(`RAW conversion produced no output for: ${rawPath}`)
+  }
+  return jpegPath
+}
+
+
 
 const SYSTEM_PROMPT = `You are an expert photography analyst. Analyze the provided image and return a JSON object with exactly these fields:
 - description: (string) A detailed 2-3 sentence description of the image content
@@ -116,6 +173,19 @@ function mapToXmpData(raw: Record<string, unknown>): XmpData {
 export async function runCopilotAnalysis(
   imagePath: string
 ): Promise<{ xmp: XmpData | null; error?: string }> {
+  // Preprocess RAW files: convert to a temp JPEG before sending to cloud AI.
+  let analysisPath = imagePath
+  let tempJpeg: string | null = null
+
+  if (RAW_EXTENSIONS.has(extname(imagePath).toLowerCase())) {
+    try {
+      tempJpeg = convertRawToJpeg(imagePath)
+      analysisPath = tempJpeg
+    } catch (err) {
+      return { xmp: null, error: `RAW conversion failed: ${String(err)}` }
+    }
+  }
+
   // Dynamic import keeps the ESM package out of the CJS bundle entirely.
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   type SDK = typeof import('@github/copilot-sdk')
@@ -265,7 +335,7 @@ export async function runCopilotAnalysis(
         session
           .send({
             prompt: 'Analyze this image.\n\n' + SYSTEM_PROMPT,
-            attachments: [{ type: 'file', path: imagePath }],
+            attachments: [{ type: 'file', path: analysisPath }],
           })
           .catch((err: unknown) => {
             finish({ xmp: null, error: String(err) })
@@ -280,6 +350,9 @@ export async function runCopilotAnalysis(
   } finally {
     if (client) {
       await (client as { stop(): Promise<void> }).stop().catch(() => {})
+    }
+    if (tempJpeg) {
+      try { unlinkSync(tempJpeg) } catch { /* ignore cleanup errors */ }
     }
   }
 }
