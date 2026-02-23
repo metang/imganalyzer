@@ -48,6 +48,8 @@ const SYSTEM_PROMPT = `You are an expert photography analyst. Analyze the provid
 - mood: (string) Emotional tone e.g. "serene", "dramatic", "intimate", "moody"
 - keywords: (array of strings) 10-15 descriptive keywords suitable as photo tags
 - technical_notes: (string) Notable photographic or technical observations
+- aesthetic_score: (number) Overall aesthetic quality score from 0.0 to 10.0. Consider composition, lighting, subject interest, technical quality, and emotional impact. Be critical and realistic: 0-3 = poor, 4-5 = average, 6-7 = good, 8-9 = excellent, 10 = exceptional/masterpiece
+- aesthetic_label: (string) One-word label matching the score: "Poor" (0-3), "Average" (4-5), "Good" (6-7), "Excellent" (8-9), "Masterpiece" (10)
 
 Return ONLY valid JSON with no extra text, no markdown fences.`
 
@@ -99,6 +101,12 @@ function mapToXmpData(raw: Record<string, unknown>): XmpData {
 
   const kws = strArr('keywords')
   if (kws.length > 0) xmp.keywords = kws
+
+  const aScore = raw['aesthetic_score']
+  if (typeof aScore === 'number' && isFinite(aScore)) {
+    xmp.aestheticScore = Math.max(0, Math.min(10, aScore))
+  }
+  xmp.aestheticLabel = str('aesthetic_label')
 
   return xmp
 }

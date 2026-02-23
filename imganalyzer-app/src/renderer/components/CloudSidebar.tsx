@@ -41,6 +41,22 @@ function TagList({ items }: { items: string[] }) {
   )
 }
 
+function ScoreBar({ value, max = 10 }: { value: number; max?: number }) {
+  const pct = Math.max(0, Math.min(1, value / max))
+  const color =
+    pct >= 0.7 ? 'bg-purple-500' :
+    pct >= 0.4 ? 'bg-purple-400' :
+                 'bg-purple-700'
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct * 100}%` }} />
+      </div>
+      <span className="text-neutral-400 text-xs w-6 text-right">{value.toFixed(1)}</span>
+    </div>
+  )
+}
+
 // ─── Cloud icon ───────────────────────────────────────────────────────────
 
 function CloudIcon() {
@@ -58,6 +74,17 @@ function CloudResults({ xmp }: { xmp: XmpData }) {
   return (
     <div className="overflow-y-auto">
       <Section title="AI Analysis">
+        {xmp.aestheticScore !== undefined && (
+          <div className="py-1 border-b border-neutral-800">
+            <div className="flex justify-between mb-1">
+              <span className="text-neutral-500 text-xs">Aesthetic</span>
+              {xmp.aestheticLabel && (
+                <span className="text-xs text-purple-400">{xmp.aestheticLabel}</span>
+              )}
+            </div>
+            <ScoreBar value={xmp.aestheticScore} />
+          </div>
+        )}
         {xmp.description && <Row label="Description" value={xmp.description} />}
         {xmp.sceneType   && <Row label="Scene"       value={xmp.sceneType} />}
         {xmp.mainSubject && <Row label="Subject"     value={xmp.mainSubject} />}
