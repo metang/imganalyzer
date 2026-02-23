@@ -30,3 +30,7 @@ Thumbs.db
 
 # Model cache
 .cache/
+
+# Electron app
+imganalyzer-app/node_modules/
+imganalyzer-app/out/

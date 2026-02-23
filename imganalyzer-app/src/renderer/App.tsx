@@ -1,0 +1,67 @@
+import { useState, useCallback } from 'react'
+import type { ImageFile } from './global'
+import { FolderPicker } from './components/FolderPicker'
+import { Gallery } from './components/Gallery'
+import { Lightbox } from './components/Lightbox'
+
+export default function App() {
+  const [folderPath, setFolderPath] = useState<string | null>(null)
+  const [images, setImages] = useState<ImageFile[]>([])
+  const [lightboxImage, setLightboxImage] = useState<ImageFile | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const handleFolderChange = useCallback(async (path: string) => {
+    setFolderPath(path)
+    setLightboxImage(null)
+    setLoading(true)
+    try {
+      const imgs = await window.api.listImages(path)
+      setImages(imgs)
+    } catch (err) {
+      console.error('Failed to list images:', err)
+      setImages([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  return (
+    <div className="h-full flex flex-col">
+      <FolderPicker folderPath={folderPath} onFolderChange={handleFolderChange} />
+
+      {loading && (
+        <div className="flex-1 flex items-center justify-center text-neutral-600 text-sm gap-2">
+          <div className="w-4 h-4 border-2 border-neutral-700 border-t-neutral-400 rounded-full animate-spin" />
+          Loading images…
+        </div>
+      )}
+
+      {!loading && !folderPath && (
+        <div className="flex-1 flex flex-col items-center justify-center text-neutral-600 gap-3">
+          <svg className="w-16 h-16 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+            <path strokeLinecap="round" strokeLinejoin="round"
+              d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3 3l18 18M3.75 9A.75.75 0 014.5 8.25H6" />
+          </svg>
+          <p className="text-sm">Open a folder to get started</p>
+        </div>
+      )}
+
+      {!loading && folderPath && (
+        <Gallery
+          images={images}
+          selectedPath={lightboxImage?.path ?? null}
+          onSelect={setLightboxImage}
+        />
+      )}
+
+      {lightboxImage && (
+        <Lightbox
+          image={lightboxImage}
+          images={images}
+          onClose={() => setLightboxImage(null)}
+          onNavigate={setLightboxImage}
+        />
+      )}
+    </div>
+  )
+}
