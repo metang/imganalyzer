@@ -1,8 +1,9 @@
 import { readdir } from 'fs/promises'
 import { join, extname, basename } from 'path'
-import { statSync } from 'fs'
+import { statSync, writeFileSync, unlinkSync, existsSync } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { tmpdir } from 'os'
 
 const execFileAsync = promisify(execFile)
 
@@ -111,40 +112,55 @@ export async function getThumbnail(imagePath: string): Promise<string> {
   return promise
 }
 
+// Write the thumbnail script to a temp file once, reuse it for all calls.
+// conda run rejects multiline -c arguments, so we must use a file.
+let THUMB_SCRIPT_PATH: string | null = null
+
+function getThumbnailScriptPath(): string {
+  if (THUMB_SCRIPT_PATH && existsSync(THUMB_SCRIPT_PATH)) return THUMB_SCRIPT_PATH
+
+  const script = [
+    'import sys, io',
+    'from pathlib import Path',
+    '',
+    'path = Path(sys.argv[1])',
+    'ext = path.suffix.lower()',
+    '',
+    "if ext in ('.heic', '.heif'):",
+    '    from pillow_heif import register_heif_opener',
+    '    register_heif_opener()',
+    '',
+    'from PIL import Image',
+    '',
+    "if ext in ('.arw','.cr2','.cr3','.nef','.nrw','.orf','.raf','.rw2',",
+    "           '.dng','.pef','.srw','.erf','.kdc','.mrw','.3fr','.fff',",
+    "           '.sr2','.srf','.x3f','.iiq','.mos','.raw'):",
+    '    import rawpy',
+    '    with rawpy.imread(str(path)) as raw:',
+    '        rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)',
+    '    import numpy as np',
+    '    img = Image.fromarray(rgb)',
+    'else:',
+    '    img = Image.open(path)',
+    "    img = img.convert('RGB')",
+    '',
+    'img.thumbnail((400, 300), Image.LANCZOS)',
+    'buf = io.BytesIO()',
+    "img.save(buf, format='JPEG', quality=80)",
+    'sys.stdout.buffer.write(buf.getvalue())',
+  ].join('\n')
+
+  const p = join(tmpdir(), 'imganalyzer_thumb.py')
+  writeFileSync(p, script, 'utf-8')
+  THUMB_SCRIPT_PATH = p
+  return p
+}
+
 async function pythonThumbnail(imagePath: string): Promise<Buffer> {
-  const script = `
-import sys, io
-from pathlib import Path
-
-path = Path(sys.argv[1])
-ext = path.suffix.lower()
-
-if ext in ('.heic', '.heif'):
-    from pillow_heif import register_heif_opener
-    register_heif_opener()
-
-from PIL import Image
-
-if ext in ('.arw','.cr2','.cr3','.nef','.nrw','.orf','.raf','.rw2',
-           '.dng','.pef','.srw','.erf','.kdc','.mrw','.3fr','.fff',
-           '.sr2','.srf','.x3f','.iiq','.mos','.raw'):
-    import rawpy
-    with rawpy.imread(str(path)) as raw:
-        rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
-    import numpy as np
-    img = Image.fromarray(rgb)
-else:
-    img = Image.open(path)
-    img = img.convert('RGB')
-
-img.thumbnail((400, 300), Image.LANCZOS)
-buf = io.BytesIO()
-img.save(buf, format='JPEG', quality=80)
-sys.stdout.buffer.write(buf.getvalue())
-`
+  const scriptPath = getThumbnailScriptPath()
   const { stdout } = await execFileAsync(
     'conda',
-    ['run', '-n', 'imganalyzer', '--no-capture-output', 'python', '-c', script, imagePath],
+    ['run', '-n', 'imganalyzer', '--no-capture-output', 'python', scriptPath, imagePath],
     { encoding: 'buffer', maxBuffer: 10 * 1024 * 1024, timeout: 30000 }
   )
   return stdout as unknown as Buffer
