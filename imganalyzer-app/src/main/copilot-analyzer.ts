@@ -9,9 +9,34 @@
  * Solution: use a dynamic import() at call-time. Electron's Node runtime
  * supports top-level await-free dynamic import() in CJS modules, and the SDK
  * is marked as external in electron.vite.config.ts so it is never bundled.
+ *
+ * ELECTRON NODE VERSION MISMATCH:
+ * The @github/copilot CLI requires node:sqlite (Node ≥22.5). Electron 31
+ * bundles Node 20, so spawning the CLI via process.execPath (the SDK default)
+ * fails. Fix: we monkey-patch startCLIServer on the CopilotClient instance to
+ * spawn the CLI using the system node executable instead.
  */
 
+import { spawn, execSync } from 'child_process'
+import { existsSync } from 'fs'
+import { dirname, join } from 'path'
 import type { XmpData } from './xmp'
+
+// Resolve the system node binary (not Electron's embedded node).
+// Falls back to process.execPath if not found, which may fail on old Electron.
+function findSystemNode(): string {
+  try {
+    const result = execSync('where node', { encoding: 'utf8' }).trim()
+    // 'where' may return multiple lines — take the first real node.exe
+    const first = result.split('\n')[0].trim()
+    if (first && existsSync(first)) return first
+  } catch {
+    // ignore
+  }
+  return process.execPath
+}
+
+const SYSTEM_NODE = findSystemNode()
 
 // ─── Prompt ──────────────────────────────────────────────────────────────────
 
@@ -88,10 +113,108 @@ export async function runCopilotAnalysis(
   type SDK = typeof import('@github/copilot-sdk')
   const { CopilotClient } = await import('@github/copilot-sdk') as SDK
 
+  // Resolve CLI path without import.meta.resolve (unavailable in CJS Electron).
+  // @github/copilot/sdk is the entry point exported by the CLI package; the
+  // CLI's main index.js lives two directories up from it.
+  let resolvedCliPath: string | undefined
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const sdkPath: string = require.resolve('@github/copilot/sdk')
+    resolvedCliPath = join(dirname(dirname(sdkPath)), 'index.js')
+  } catch {
+    // fall back: let SDK call getBundledCliPath() via import.meta.resolve
+  }
+
   let client: InstanceType<SDK['CopilotClient']> | null = null
 
   try {
-    client = new CopilotClient()
+    client = resolvedCliPath
+      ? new CopilotClient({ cliPath: resolvedCliPath })
+      : new CopilotClient()
+
+    // Patch startCLIServer to use the system node binary instead of
+    // process.execPath (which points to the Electron binary on Electron).
+    // The SDK's default spawn is: spawn(process.execPath, [cliPath, ...args])
+    // We replace it with:         spawn(SYSTEM_NODE, [cliPath, ...args])
+    const anyClient = client as Record<string, unknown>
+    const origStartCLI = anyClient['startCLIServer'] as () => Promise<void>
+    anyClient['startCLIServer'] = async function patchedStartCLI(this: Record<string, unknown>) {
+      const opts = this['options'] as {
+        cliPath: string
+        cliArgs: string[]
+        cwd: string
+        port: number
+        useStdio: boolean
+        logLevel: string
+        githubToken?: string
+        useLoggedInUser?: boolean
+        env?: Record<string, string>
+      }
+
+      // If cliPath is not a .js file, fall through to original
+      if (!opts.cliPath.endsWith('.js')) {
+        return origStartCLI.call(this)
+      }
+
+      return new Promise<void>((resolve, reject) => {
+        const args = [
+          opts.cliPath,
+          ...opts.cliArgs,
+          '--headless',
+          '--no-auto-update',
+          '--log-level',
+          opts.logLevel,
+        ]
+        if (opts.useStdio) args.push('--stdio')
+        else if (opts.port > 0) args.push('--port', String(opts.port))
+        if (opts.githubToken) args.push('--auth-token-env', 'COPILOT_SDK_AUTH_TOKEN')
+        if (!opts.useLoggedInUser) args.push('--no-auto-login')
+
+        const env = { ...process.env, ...(opts.env ?? {}) }
+        delete env['NODE_DEBUG']
+        if (opts.githubToken) env['COPILOT_SDK_AUTH_TOKEN'] = opts.githubToken
+
+        const stdioConfig = opts.useStdio
+          ? (['pipe', 'pipe', 'pipe'] as const)
+          : (['ignore', 'pipe', 'pipe'] as const)
+
+        const proc = spawn(SYSTEM_NODE, args, {
+          stdio: stdioConfig,
+          cwd: opts.cwd,
+          env,
+          windowsHide: true,
+        })
+
+        this['cliProcess'] = proc
+
+        if (opts.useStdio) {
+          resolve()
+          return
+        }
+
+        // TCP mode: wait for "Listening on port NNNN"
+        let stdout = ''
+        let resolved = false
+        proc.stdout?.on('data', (chunk: Buffer) => {
+          stdout += chunk.toString()
+          const m = stdout.match(/Listening on port (\d+)/)
+          if (m && !resolved) {
+            resolved = true
+            ; (this as Record<string, unknown>)['actualPort'] = parseInt(m[1], 10)
+            resolve()
+          }
+        })
+        proc.stderr?.on('data', (chunk: Buffer) => {
+          ; (this as Record<string, unknown>)['stderrBuffer'] =
+            ((this as Record<string, unknown>)['stderrBuffer'] as string) + chunk.toString()
+        })
+        proc.on('error', reject)
+        proc.on('exit', (code) => {
+          if (!resolved) reject(new Error(`CLI exited with code ${code}`))
+        })
+      })
+    }
+
     await client.start()
 
     const session = await client.createSession({ model: 'gpt-4.1' })
