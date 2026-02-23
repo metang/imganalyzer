@@ -34,3 +34,7 @@ Thumbs.db
 # Electron app
 imganalyzer-app/node_modules/
 imganalyzer-app/out/
+
+# Test images (large binaries)
+test_images/
+test_thumb.jpg

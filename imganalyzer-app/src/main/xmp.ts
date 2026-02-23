@@ -51,6 +51,19 @@ function attr(desc: Record<string, unknown>, key: string): string | undefined {
   return v !== undefined ? String(v) : undefined
 }
 
+/** Resolve EXIF rational like "11/1" → "11", "28/5" → "5.6" */
+function resolveRational(raw: string | undefined): string | undefined {
+  if (!raw) return undefined
+  const m = raw.match(/^(\d+)\/(\d+)$/)
+  if (!m) return raw
+  const num = parseInt(m[1])
+  const den = parseInt(m[2])
+  if (den === 0) return raw
+  const val = num / den
+  // Display with reasonable precision: integers as integers, otherwise 1 decimal
+  return Number.isInteger(val) ? String(val) : val.toFixed(1)
+}
+
 function bagItems(desc: Record<string, unknown>, key: string): string[] {
   const val = desc[key] as Record<string, unknown> | undefined
   if (!val) return []
@@ -109,8 +122,13 @@ export function parseXmp(xml: string): XmpData {
 
   const rdf = (parsed['x:xmpmeta'] as Record<string, unknown>)?.['rdf:RDF'] as Record<string, unknown>
   if (!rdf) return {}
-  const desc = rdf['rdf:Description'] as Record<string, unknown>
-  if (!desc) return {}
+  // fast-xml-parser may produce a single object or an array of objects for rdf:Description
+  const rawDesc = rdf['rdf:Description']
+  if (!rawDesc) return {}
+  // Merge all descriptions into one flat object (later keys win, but imganalyzer only writes one block)
+  const desc: Record<string, unknown> = Array.isArray(rawDesc)
+    ? rawDesc.reduce((acc, d) => ({ ...acc, ...(d as Record<string, unknown>) }), {} as Record<string, unknown>)
+    : (rawDesc as Record<string, unknown>)
 
   const result: XmpData = {}
 
@@ -169,9 +187,9 @@ export function parseXmp(xml: string): XmpData {
   result.cameraMake = attr(desc, 'tiff:Make')
   result.cameraModel = attr(desc, 'tiff:Model')
   result.lens = attr(desc, 'photoshop:Lens')
-  result.fNumber = attr(desc, 'exif:FNumber')
+  result.fNumber = resolveRational(attr(desc, 'exif:FNumber'))
   result.exposureTime = attr(desc, 'exif:ExposureTime')
-  result.focalLength = attr(desc, 'exif:FocalLength')
+  result.focalLength = resolveRational(attr(desc, 'exif:FocalLength'))
   result.createDate = attr(desc, 'xmp:CreateDate')
   const w = attr(desc, 'tiff:ImageWidth')
   if (w) result.imageWidth = parseInt(w)
