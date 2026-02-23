@@ -71,6 +71,7 @@ declare global {
       readXmp(imagePath: string): Promise<XmpData | null>
       runAnalysis(imagePath: string, aiBackend: string): Promise<{ xmp: XmpData | null; error?: string }>
       cancelAnalysis(imagePath: string): Promise<void>
+      runCopilotAnalysis(imagePath: string): Promise<{ xmp: XmpData | null; error?: string }>
       onAnalysisProgress(cb: (p: AnalysisProgress) => void): () => void
     }
   }

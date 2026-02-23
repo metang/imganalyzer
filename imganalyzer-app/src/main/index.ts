@@ -5,6 +5,7 @@ import { existsSync } from 'fs'
 import { listImages, getThumbnail, getFullImage } from './images'
 import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
+import { runCopilotAnalysis } from './copilot-analyzer'
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -89,4 +90,9 @@ ipcMain.handle('analyze:run', async (evt, imagePath: string, aiBackend: string) 
 
 ipcMain.handle('analyze:cancel', async (_evt, imagePath: string) => {
   cancelAnalysis(imagePath)
+})
+
+// ─── IPC: Cloud analysis via GitHub Copilot SDK ───────────────────────────
+ipcMain.handle('analyze:copilot', async (_evt, imagePath: string) => {
+  return runCopilotAnalysis(imagePath)
 })

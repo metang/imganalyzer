@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld('api', {
   cancelAnalysis: (imagePath: string): Promise<void> =>
     ipcRenderer.invoke('analyze:cancel', imagePath),
 
+  runCopilotAnalysis: (imagePath: string): Promise<{ xmp: XmpData | null; error?: string }> =>
+    ipcRenderer.invoke('analyze:copilot', imagePath),
+
   onAnalysisProgress: (cb: (p: AnalysisProgress) => void) => {
     const handler = (_evt: Electron.IpcRendererEvent, p: AnalysisProgress) => cb(p)
     ipcRenderer.on('analyze:progress', handler)
