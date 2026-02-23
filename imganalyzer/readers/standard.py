@@ -14,6 +14,16 @@ def read(path: Path) -> dict[str, Any]:
     except ImportError:
         raise ImportError("Pillow is required: pip install Pillow")
 
+    # Register HEIC/HEIF support if available
+    if path.suffix.lower() in (".heic", ".heif"):
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        except ImportError:
+            raise ImportError(
+                "pillow-heif is required for HEIC/HEIF files: pip install pillow-heif"
+            )
+
     img = Image.open(path)  # Path objects work on both Windows and macOS
     fmt = img.format or path.suffix.upper().lstrip(".")
     mode = img.mode

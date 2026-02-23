@@ -1,4 +1,10 @@
-"""Local AI analysis using HuggingFace BLIP-2 (offline, no API key)."""
+"""Local AI analysis using HuggingFace BLIP-2 (offline, no API key).
+
+Model: Salesforce/blip2-flan-t5-xl (~8 GB)
+- FlanT5 encoder-decoder backbone handles VQA reliably
+- Captioning: image-only input → encoder+decoder generates description
+- VQA: image+question input → decoder answers from scratch (no prompt-slicing needed)
+"""
 from __future__ import annotations
 
 import os
@@ -9,6 +15,9 @@ import numpy as np
 
 
 CACHE_DIR = os.getenv("IMGANALYZER_MODEL_CACHE", str(Path.home() / ".cache" / "imganalyzer"))
+
+# Model ID — FlanT5-XL gives reliable VQA answers; opt-2.7b only works for captioning
+_MODEL_ID = "Salesforce/blip2-flan-t5-xl"
 
 
 class LocalAI:
@@ -32,13 +41,13 @@ class LocalAI:
         # Load model lazily (cached after first load)
         if LocalAI._processor is None:
             from rich.console import Console
-            Console().print("[dim]Loading BLIP-2 model (first run downloads ~3GB)...[/dim]")
+            Console().print(f"[dim]Loading BLIP-2 model {_MODEL_ID} (first run downloads ~8 GB)...[/dim]")
             LocalAI._processor = Blip2Processor.from_pretrained(
-                "Salesforce/blip2-opt-2.7b", cache_dir=CACHE_DIR
+                _MODEL_ID, cache_dir=CACHE_DIR
             )
             device = "cuda" if torch.cuda.is_available() else "cpu"
             LocalAI._model = Blip2ForConditionalGeneration.from_pretrained(
-                "Salesforce/blip2-opt-2.7b",
+                _MODEL_ID,
                 torch_dtype=torch.float16 if device == "cuda" else torch.float32,
                 cache_dir=CACHE_DIR,
             ).to(device)
@@ -49,24 +58,26 @@ class LocalAI:
 
         results: dict[str, Any] = {}
 
-        # 1. Image captioning
+        # 1. Image captioning (no text prompt → pure captioning mode)
         inputs = processor(pil_img, return_tensors="pt").to(device)
         out = model.generate(**inputs, max_new_tokens=100)
         caption = processor.decode(out[0], skip_special_tokens=True).strip()
         results["description"] = caption
 
-        # 2. VQA: scene type
+        # 2. VQA — FlanT5 encoder-decoder generates the answer directly;
+        #    no prompt-slicing needed because the decoder output is answer-only.
         for question, key in [
-            ("What type of scene is this? (landscape, portrait, street, architecture, macro, etc.)", "scene_type"),
-            ("What is the main subject of this image?", "main_subject"),
-            ("What time of day or lighting condition is present?", "lighting"),
-            ("What is the mood or aesthetic of this image?", "mood"),
+            ("What type of scene is this? Answer in 1-3 words.", "scene_type"),
+            ("What is the main subject of this image? Answer in 1-5 words.", "main_subject"),
+            ("What is the lighting condition or time of day? Answer in 1-3 words.", "lighting"),
+            ("What is the mood or aesthetic of this image? Answer in 1-3 words.", "mood"),
         ]:
             try:
                 inputs = processor(pil_img, question, return_tensors="pt").to(device)
-                out = model.generate(**inputs, max_new_tokens=50)
+                out = model.generate(**inputs, max_new_tokens=30)
                 answer = processor.decode(out[0], skip_special_tokens=True).strip()
-                results[key] = answer
+                if answer:
+                    results[key] = answer
             except Exception:
                 pass
 

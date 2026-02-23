@@ -29,7 +29,7 @@ def _aesthetic_label(score: float) -> str:
 class AestheticScorer:
     """LAION Aesthetic Predictor V2 — outputs a 0–10 aesthetic quality score.
 
-    Model: shunk031/aesthetic-predictor-v2-sac-logos-ava1-l14-linearMSE
+    Model: sitatech/aesthetic-predictor-v2 (sac+logos+ava1-l14-linearMSE)
     Requires: open_clip_torch, torch  (pip install 'imganalyzer[local-ai]')
     """
 
@@ -118,25 +118,24 @@ class AestheticScorer:
 def _load_aesthetic_weights(model: "Any", device: str) -> None:
     """Download and load the aesthetic predictor weights from HuggingFace."""
     import torch
-    from pathlib import Path as _Path
 
-    cache_path = _Path(CACHE_DIR) / "aesthetic_predictor_v2.pth"
+    cache_path = Path(CACHE_DIR) / "aesthetic_predictor_v2.pth"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not cache_path.exists():
         try:
             from huggingface_hub import hf_hub_download
             weights_path = hf_hub_download(
-                repo_id="shunk031/aesthetic-predictor-v2-sac-logos-ava1-l14-linearMSE",
-                filename="pytorch_model.bin",
+                repo_id="sitatech/aesthetic-predictor-v2",
+                filename="sac+logos+ava1-l14-linearMSE.pth",
                 cache_dir=CACHE_DIR,
             )
         except Exception:
             # Fallback: direct URL download
             import urllib.request
             url = (
-                "https://huggingface.co/shunk031/aesthetic-predictor-v2-sac-logos-ava1-l14-linearMSE"
-                "/resolve/main/pytorch_model.bin"
+                "https://huggingface.co/sitatech/aesthetic-predictor-v2"
+                "/resolve/main/sac%2Blogos%2Bava1-l14-linearMSE.pth"
             )
             urllib.request.urlretrieve(url, str(cache_path))
             weights_path = str(cache_path)

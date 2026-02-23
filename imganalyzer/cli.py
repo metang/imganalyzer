@@ -70,10 +70,26 @@ def analyze(
         import os
         ai = os.getenv("IMGANALYZER_DEFAULT_AI", "none")
 
-    # Expand globs
+    # Expand globs and directories
+    IMAGE_EXTENSIONS = {
+        ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp", ".gif",
+        ".heic", ".heif",
+        ".arw", ".cr2", ".cr3", ".nef", ".nrw", ".orf", ".raf", ".rw2",
+        ".dng", ".pef", ".srw", ".erf", ".kdc", ".mrw", ".3fr", ".fff",
+    }
     resolved: list[Path] = []
     for img in images:
-        if img.exists():
+        if img.is_dir():
+            # Expand directory to all image files (non-recursive)
+            found = sorted(
+                p for p in img.iterdir()
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            if found:
+                resolved.extend(found)
+            else:
+                console.print(f"[yellow]Warning: No image files found in '{img}', skipping.[/yellow]")
+        elif img.exists():
             resolved.append(img)
         else:
             # Try glob expansion from cwd

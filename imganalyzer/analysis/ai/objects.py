@@ -84,7 +84,7 @@ class ObjectDetector:
             results = processor.post_process_grounded_object_detection(
                 outputs,
                 inputs["input_ids"],
-                box_threshold=conf_threshold,
+                threshold=conf_threshold,
                 text_threshold=conf_threshold,
                 target_sizes=[pil_img.size[::-1]],  # (height, width)
             )[0]
@@ -93,7 +93,8 @@ class ObjectDetector:
         has_person = False
 
         scores = results["scores"].cpu().tolist()
-        text_labels = results["labels"]
+        # Use "text_labels" (string names) — "labels" returns int IDs in transformers>=4.51
+        text_labels = results.get("text_labels") or results.get("labels") or []
 
         for label, score in zip(text_labels, scores):
             label_clean = str(label).strip().lower()
@@ -130,9 +131,12 @@ class ObjectDetector:
         cls._processor = AutoProcessor.from_pretrained(
             model_id, cache_dir=CACHE_DIR
         )
+        # Always load in float32 — GroundingDINO mixes float32 text-encoder
+        # internals with the visual backbone, so float16 causes dtype errors
+        # in the text enhancer layers. float32 avoids this at minimal cost.
         cls._model = AutoModelForZeroShotObjectDetection.from_pretrained(
             model_id,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.float32,
             cache_dir=CACHE_DIR,
         ).to(device)
         cls._model.eval()
