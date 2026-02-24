@@ -63,6 +63,7 @@ function XmpResults({ xmp }: { xmp: XmpData }) {
         {xmp.mainSubject && <Row label="Subject" value={xmp.mainSubject} />}
         {xmp.lighting && <Row label="Lighting" value={xmp.lighting} />}
         {xmp.mood && <Row label="Mood" value={xmp.mood} />}
+        {xmp.ocrText && <Row label="OCR Text" value={xmp.ocrText} />}
         {xmp.detectedObjects && xmp.detectedObjects.length > 0 && (
           <div className="py-1 border-b border-neutral-800">
             <span className="text-neutral-500 text-xs block mb-1">Objects</span>

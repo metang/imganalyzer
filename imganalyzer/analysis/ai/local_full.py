@@ -3,7 +3,8 @@
 Pipeline per image:
   1. BLIP-2 captioning
   2. GroundingDINO object detection  (sequential)
-  3. InsightFace face analysis       (gated: only if has_person=True)
+  3. TrOCR OCR                       (gated: only if has_text=True)
+  4. InsightFace face analysis       (gated: only if has_person=True)
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ class LocalAIFull:
         _con = Console()
 
         # ── Stage 1: BLIP-2 captioning ────────────────────────────────────
-        _con.print("[dim]  [1/3] Captioning...[/dim]")
+        _con.print("[dim]  [1/4] Captioning...[/dim]")
 
         blip_result: dict[str, Any] = {}
 
@@ -43,7 +44,7 @@ class LocalAIFull:
             _con.print(f"[yellow]  BLIP-2 warning: {exc}[/yellow]")
 
         # ── Stage 2: Object detection ──────────────────────────────────────
-        _con.print("[dim]  [2/3] Object detection...[/dim]")
+        _con.print("[dim]  [2/4] Object detection...[/dim]")
         object_result: dict[str, Any] = {}
         try:
             from imganalyzer.analysis.ai.objects import ObjectDetector
@@ -56,11 +57,25 @@ class LocalAIFull:
             _con.print(f"[yellow]  Object detection warning: {exc}[/yellow]")
 
         has_person: bool = object_result.get("has_person", False)
+        has_text: bool = object_result.get("has_text", False)
+        text_boxes: list = object_result.get("text_boxes", [])
 
-        # ── Stage 3: Face analysis (gated on has_person) ───────────────────
+        # ── Stage 3: OCR (gated on has_text) ──────────────────────────────
+        ocr_result: dict[str, Any] = {}
+        if has_text:
+            _con.print("[dim]  [3/4] OCR — reading text...[/dim]")
+            try:
+                from imganalyzer.analysis.ai.ocr import OCRAnalyzer
+                ocr_result = OCRAnalyzer().analyze(image_data, text_boxes=text_boxes)
+            except Exception as exc:
+                _con.print(f"[yellow]  OCR warning: {exc}[/yellow]")
+        else:
+            _con.print("[dim]  [3/4] No text detected — skipping OCR.[/dim]")
+
+        # ── Stage 4: Face analysis (gated on has_person) ───────────────────
         face_result: dict[str, Any] = {}
         if has_person:
-            _con.print("[dim]  [3/3] Face detection & recognition...[/dim]")
+            _con.print("[dim]  [4/4] Face detection & recognition...[/dim]")
             try:
                 from imganalyzer.analysis.ai.faces import FaceAnalyzer
                 from imganalyzer.analysis.ai.face_db import FaceDatabase
@@ -73,12 +88,13 @@ class LocalAIFull:
             except Exception as exc:
                 _con.print(f"[yellow]  Face analysis warning: {exc}[/yellow]")
         else:
-            _con.print("[dim]  [3/3] No people detected — skipping face analysis.[/dim]")
+            _con.print("[dim]  [4/4] No people detected — skipping face analysis.[/dim]")
 
         # ── Merge results ──────────────────────────────────────────────────
         merged: dict[str, Any] = {}
         merged.update(blip_result)
         merged.update(object_result)
+        merged.update(ocr_result)
         merged.update(face_result)
 
         # Merge detected object labels (stripped of confidence) into keywords
@@ -93,7 +109,9 @@ class LocalAIFull:
         if keywords:
             merged["keywords"] = keywords
 
-        # Remove internal flag — not needed in the output dict
+        # Remove internal flags — not needed in the output dict
         merged.pop("has_person", None)
+        merged.pop("has_text", None)
+        merged.pop("text_boxes", None)
 
         return merged

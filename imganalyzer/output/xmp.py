@@ -240,6 +240,8 @@ class XMPWriter:
             _rdf_bag(objs, ai["detected_objects"])
         if ai.get("landmark"):
             desc.set(_ns("imganalyzer", "AILandmark"), ai["landmark"])
+        if ai.get("ocr_text"):
+            desc.set(_ns("imganalyzer", "AIOCRText"), ai["ocr_text"])
 
         # Face analysis
         if ai.get("face_count") is not None:

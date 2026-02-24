@@ -13,6 +13,7 @@ export interface XmpData {
   faceIdentities?: string[]
   faceDetails?: string[]
   detectedObjects?: string[]
+  ocrText?: string
   keywords?: string[]
   // Technical
   sharpnessScore?: number
@@ -158,6 +159,9 @@ export function parseXmp(xml: string): XmpData {
   result.faceIdentities = bagItems(desc, 'imganalyzer:FaceIdentities')
   result.faceDetails = bagItems(desc, 'imganalyzer:FaceDetails')
   result.detectedObjects = bagItems(desc, 'imganalyzer:AIDetectedObjects')
+
+  const ocrText = attr(desc, 'imganalyzer:AIOCRText')
+  if (ocrText) result.ocrText = ocrText
 
   // Technical
   const sh = attr(desc, 'imganalyzer:SharpnessScore')

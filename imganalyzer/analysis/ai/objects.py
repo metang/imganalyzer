@@ -91,21 +91,29 @@ class ObjectDetector:
 
         labels: list[str] = []
         has_person = False
+        has_text = False
+        text_boxes: list[list[float]] = []
 
         scores = results["scores"].cpu().tolist()
+        boxes = results["boxes"].cpu().tolist()
         # Use "text_labels" (string names) — "labels" returns int IDs in transformers>=4.51
         text_labels = results.get("text_labels") or results.get("labels") or []
 
-        for label, score in zip(text_labels, scores):
+        for label, score, box in zip(text_labels, scores, boxes):
             label_clean = str(label).strip().lower()
             pct = int(round(score * 100))
             labels.append(f"{label_clean}:{pct}%")
             if label_clean in ("person", "people", "man", "woman", "child", "boy", "girl", "human"):
                 has_person = True
+            if label_clean == "text":
+                has_text = True
+                text_boxes.append(box)
 
         return {
             "detected_objects": labels,
             "has_person": has_person,
+            "has_text": has_text,
+            "text_boxes": text_boxes,
         }
 
     @classmethod

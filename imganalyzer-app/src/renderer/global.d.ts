@@ -13,6 +13,7 @@ export interface XmpData {
   faceIdentities?: string[]
   faceDetails?: string[]
   detectedObjects?: string[]
+  ocrText?: string
   keywords?: string[]
   sharpnessScore?: number
   sharpnessLabel?: string
