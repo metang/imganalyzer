@@ -241,12 +241,6 @@ class XMPWriter:
         if ai.get("landmark"):
             desc.set(_ns("imganalyzer", "AILandmark"), ai["landmark"])
 
-        # Aesthetic scoring
-        if ai.get("aesthetic_score") is not None:
-            desc.set(_ns("imganalyzer", "AestheticScore"), str(ai["aesthetic_score"]))
-        if ai.get("aesthetic_label"):
-            desc.set(_ns("imganalyzer", "AestheticLabel"), ai["aesthetic_label"])
-
         # Face analysis
         if ai.get("face_count") is not None:
             desc.set(_ns("imganalyzer", "FaceCount"), str(ai["face_count"]))

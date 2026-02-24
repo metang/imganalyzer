@@ -326,11 +326,6 @@ def _print_summary(result: "AnalysisResult", xmp_path: Path, verbose: bool) -> N
             desc = ai["description"][:120]
             suffix = "..." if len(ai["description"]) > 120 else ""
             console.print(f"  [dim]AI: {desc}{suffix}[/dim]")
-        if ai.get("aesthetic_score") is not None:
-            console.print(
-                f"  [dim]Aesthetic: {ai['aesthetic_score']:.1f}/10 "
-                f"({ai.get('aesthetic_label', '')})[/dim]"
-            )
         if ai.get("detected_objects"):
             objs = ", ".join(ai["detected_objects"][:5])
             console.print(f"  [dim]Objects: {objs}[/dim]")

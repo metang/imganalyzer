@@ -14,14 +14,12 @@ const running = new Map<string, ChildProcess>()
 
 // Stage keywords from CLI stdout → progress %
 const STAGE_MAP: Array<[RegExp, number, string]> = [
-  [/\[1\/4\]/, 5, 'Caption + aesthetic scoring'],
+  [/\[1\/3\]/, 5, 'Captioning'],
   [/Loading BLIP-2/, 8, 'Loading BLIP-2 model…'],
-  [/Loading.*aesthetic/i, 12, 'Loading aesthetic model…'],
-  [/\[2\/4\]/, 40, 'Object detection'],
+  [/\[2\/3\]/, 40, 'Object detection'],
   [/Loading.*GroundingDINO|Loading.*object/i, 42, 'Loading GroundingDINO…'],
-  [/\[3\/4\]/, 65, 'Face detection & recognition'],
+  [/\[3\/3\]/, 65, 'Face detection & recognition'],
   [/buffalo_l|Loading.*face/i, 67, 'Loading InsightFace…'],
-  [/\[4\/4\]/, 90, 'Merging results'],
   [/XMP written|Done\./i, 100, 'Done'],
 ]
 

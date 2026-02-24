@@ -63,15 +63,6 @@ function XmpResults({ xmp }: { xmp: XmpData }) {
         {xmp.mainSubject && <Row label="Subject" value={xmp.mainSubject} />}
         {xmp.lighting && <Row label="Lighting" value={xmp.lighting} />}
         {xmp.mood && <Row label="Mood" value={xmp.mood} />}
-        {xmp.aestheticScore !== undefined && (
-          <div className="py-1 border-b border-neutral-800">
-            <div className="flex justify-between mb-1">
-              <span className="text-neutral-500 text-xs">Aesthetic</span>
-              {xmp.aestheticLabel && <span className="text-xs text-neutral-400">{xmp.aestheticLabel}</span>}
-            </div>
-            <ScoreBar value={xmp.aestheticScore} />
-          </div>
-        )}
         {xmp.detectedObjects && xmp.detectedObjects.length > 0 && (
           <div className="py-1 border-b border-neutral-800">
             <span className="text-neutral-500 text-xs block mb-1">Objects</span>
