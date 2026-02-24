@@ -241,7 +241,11 @@ class XMPWriter:
         if ai.get("landmark"):
             desc.set(_ns("imganalyzer", "AILandmark"), ai["landmark"])
         if ai.get("ocr_text"):
-            desc.set(_ns("imganalyzer", "AIOCRText"), ai["ocr_text"])
+            # Store multi-line OCR text as an element (not an attribute) so
+            # raw newlines are valid XML text content rather than illegal
+            # attribute characters.
+            ocr_elem = ET.SubElement(desc, _ns("imganalyzer", "AIOCRText"))
+            ocr_elem.text = ai["ocr_text"]
 
         # Face analysis
         if ai.get("face_count") is not None:

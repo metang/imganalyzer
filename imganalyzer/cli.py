@@ -299,7 +299,7 @@ def info(
 
 def _print_summary(result: "AnalysisResult", xmp_path: Path, verbose: bool) -> None:
     from imganalyzer.analyzer import AnalysisResult
-    console.print(f"  [green]✓[/green] XMP written → {xmp_path}")
+    console.print(f"  [green]OK[/green] XMP written -> {xmp_path}")
     if result.metadata:
         m = result.metadata
         parts = []
