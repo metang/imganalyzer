@@ -159,5 +159,21 @@ class OCRAnalyzer:
         cls._model = VisionEncoderDecoderModel.from_pretrained(
             _MODEL_ID,
             cache_dir=CACHE_DIR,
-        ).to(device)
+        ).to(device)  # type: ignore[union-attr]
+
+        # Workaround: when accelerate is installed and another model (e.g.
+        # GroundingDINO) was loaded first, TrOCRSinusoidalPositionalEmbedding
+        # keeps its `weights` tensor on the meta device (non-persistent buffer,
+        # so .to() doesn't move it).  Re-compute the sinusoidal table on the
+        # correct device using the module's own get_embedding() method.
+        for mod in cls._model.modules():  # type: ignore[union-attr]
+            if type(mod).__name__ == "TrOCRSinusoidalPositionalEmbedding":
+                w = vars(mod).get("weights")
+                if isinstance(w, torch.Tensor) and w.device.type == "meta":
+                    num_embeddings = w.shape[0]
+                    # get_embedding creates on CPU; move result to target device
+                    mod.weights = mod.get_embedding(
+                        num_embeddings, mod.embedding_dim, mod.padding_idx
+                    ).to(device)
+
         cls._model.eval()  # type: ignore[union-attr]
