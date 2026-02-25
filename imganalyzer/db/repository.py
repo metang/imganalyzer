@@ -35,6 +35,25 @@ class Repository:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
+        self._column_cache: dict[str, set[str]] = {}
+
+    def _known_columns(self, table: str) -> set[str]:
+        """Return the set of column names for *table* (cached per instance)."""
+        if table not in self._column_cache:
+            rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            self._column_cache[table] = {r["name"] for r in rows}
+        return self._column_cache[table]
+
+    def _filter_to_known_columns(self, table: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Drop keys from *data* that don't correspond to columns in *table*.
+
+        This prevents INSERT failures when the analyser returns fields that were
+        added after the schema was created (e.g. camera_serial, sharpness_raw).
+        Unknown fields are silently discarded rather than crashing the whole
+        transaction.
+        """
+        known = self._known_columns(table)
+        return {k: v for k, v in data.items() if k in known}
 
     # ── images ─────────────────────────────────────────────────────────────
 
@@ -136,6 +155,7 @@ class Repository:
 
     def upsert_metadata(self, image_id: int, data: dict[str, Any]) -> None:
         """Atomic write of the full metadata analysis result."""
+        data = self._filter_to_known_columns("analysis_metadata", data)
         data = self._apply_override_mask(image_id, "analysis_metadata", data)
         self.conn.execute("DELETE FROM analysis_metadata WHERE image_id = ?", [image_id])
         cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]
@@ -151,6 +171,7 @@ class Repository:
         # JSON-encode list fields
         if "dominant_colors" in data and isinstance(data["dominant_colors"], list):
             data["dominant_colors"] = json.dumps(data["dominant_colors"])
+        data = self._filter_to_known_columns("analysis_technical", data)
         data = self._apply_override_mask(image_id, "analysis_technical", data)
         self.conn.execute("DELETE FROM analysis_technical WHERE image_id = ?", [image_id])
         cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]
@@ -171,6 +192,7 @@ class Repository:
         # Coerce has_people to int
         if "has_people" in data:
             data["has_people"] = 1 if data["has_people"] else 0
+        data = self._filter_to_known_columns("analysis_local_ai", data)
         data = self._apply_override_mask(image_id, "analysis_local_ai", data)
         self.conn.execute("DELETE FROM analysis_local_ai WHERE image_id = ?", [image_id])
         cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]
@@ -190,6 +212,7 @@ class Repository:
                 data[key] = json.dumps(data[key])
         if "raw_response" in data and not isinstance(data["raw_response"], str):
             data["raw_response"] = json.dumps(data["raw_response"])
+        data = self._filter_to_known_columns("analysis_cloud_ai", data)
         data = self._apply_override_mask(image_id, "analysis_cloud_ai", data)
         self.conn.execute(
             "DELETE FROM analysis_cloud_ai WHERE image_id = ? AND provider = ?",

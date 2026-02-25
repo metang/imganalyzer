@@ -42,6 +42,8 @@ _RAW_EXTENSIONS = frozenset({
     ".raf", ".raw", ".rw2", ".rwl", ".sr2", ".srf", ".srw", ".x3f", ".iiq",
     ".3fr", ".fff", ".mef", ".mos", ".mrw", ".rwz", ".erf",
 })
+# Non-RAW formats that also need JPEG conversion for the Copilot SDK attachment.
+_NEEDS_JPEG_CONVERSION = _RAW_EXTENSIONS | frozenset({".heic", ".heif", ".avif"})
 
 
 def _encode_image(path: Path, max_size_kb: int = 1024) -> tuple[str, str]:
@@ -244,10 +246,10 @@ class CloudAI:
             finally:
                 await client.stop()
 
-        # RAW files must be converted to JPEG before submission.
+        # RAW and HEIC/HEIF/AVIF files must be converted to JPEG before submission.
         temp_jpeg: Path | None = None
         analysis_path = path
-        if path.suffix.lower() in _RAW_EXTENSIONS:
+        if path.suffix.lower() in _NEEDS_JPEG_CONVERSION:
             temp_jpeg = _convert_raw_to_jpeg(path)
             analysis_path = temp_jpeg
 
@@ -262,22 +264,29 @@ class CloudAI:
 
 
 def _convert_raw_to_jpeg(raw_path: Path) -> Path:
-    """Decode a RAW file with rawpy, resize to ≤1568 px, return a temp JPEG path.
+    """Decode a RAW or HEIC/HEIF/AVIF file, resize to ≤1568 px, return a temp JPEG path.
 
-    Mirrors the RAW_CONVERT_SCRIPT logic in copilot-analyzer.ts.
+    - True RAW files (in _RAW_EXTENSIONS) are decoded via rawpy.
+    - HEIC/HEIF/AVIF and other non-RAW formats are opened directly with Pillow
+      (requires pillow-heif plugin for HEIC/HEIF).
     Caller is responsible for deleting the returned file.
     """
     from PIL import Image
 
-    try:
-        import rawpy
-    except ImportError:
-        raise ImportError("rawpy required for RAW conversion: pip install rawpy")
+    if raw_path.suffix.lower() in _RAW_EXTENSIONS:
+        try:
+            import rawpy
+        except ImportError:
+            raise ImportError("rawpy required for RAW conversion: pip install rawpy")
+        with rawpy.imread(str(raw_path)) as raw:
+            rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
+        img = Image.fromarray(rgb)
+    else:
+        # HEIC/HEIF/AVIF — Pillow opens these directly (with pillow-heif registered).
+        img = Image.open(raw_path)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
 
-    with rawpy.imread(str(raw_path)) as raw:
-        rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
-
-    img = Image.fromarray(rgb)
     w, h = img.size
     max_dim = 1568
     if max(w, h) > max_dim:
@@ -287,5 +296,5 @@ def _convert_raw_to_jpeg(raw_path: Path) -> Path:
     tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     tmp.close()
     img.save(tmp.name, format="JPEG", quality=85)
-    log.debug("RAW converted to temp JPEG: %s", tmp.name)
+    log.debug("Converted %s to temp JPEG: %s", raw_path.suffix, tmp.name)
     return Path(tmp.name)

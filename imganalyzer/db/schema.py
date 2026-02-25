@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -24,6 +24,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     migrations = {
         1: _migrate_v1,
+        2: _migrate_v2,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -31,7 +32,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if fn is None:
             raise RuntimeError(f"Missing migration function for schema version {v}")
         fn(conn)
-        if current == 0:
+        if v == 1 and current == 0:
             conn.execute("INSERT INTO schema_version (version) VALUES (?)", [v])
         else:
             conn.execute("UPDATE schema_version SET version = ?", [v])
@@ -239,3 +240,23 @@ def _migrate_v1(conn: sqlite3.Connection) -> None:
             tokenize='porter unicode61'
         );
     """)
+
+
+# ── Migration v2: Add missing metadata columns ────────────────────────────────
+
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    """Add camera_serial and any other metadata columns discovered post-v1."""
+    # Use ADD COLUMN IF NOT EXISTS (SQLite 3.37+). Fall back to try/except for older.
+    for col_def in (
+        "camera_serial TEXT",
+        "software TEXT",
+        "copyright TEXT",
+        "artist TEXT",
+    ):
+        col_name = col_def.split()[0]
+        try:
+            conn.execute(
+                f"ALTER TABLE analysis_metadata ADD COLUMN {col_def}"
+            )
+        except Exception:
+            pass  # column already exists
