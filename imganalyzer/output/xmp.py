@@ -247,6 +247,12 @@ class XMPWriter:
             ocr_elem = ET.SubElement(desc, _ns("imganalyzer", "AIOCRText"))
             ocr_elem.text = ai["ocr_text"]
 
+        # Aesthetic scoring (from copilot / other cloud backends)
+        if ai.get("aesthetic_score") is not None:
+            desc.set(_ns("imganalyzer", "AestheticScore"), str(round(float(ai["aesthetic_score"]), 2)))
+        if ai.get("aesthetic_label"):
+            desc.set(_ns("imganalyzer", "AestheticLabel"), ai["aesthetic_label"])
+
         # Face analysis
         if ai.get("face_count") is not None:
             desc.set(_ns("imganalyzer", "FaceCount"), str(ai["face_count"]))

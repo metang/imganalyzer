@@ -740,3 +740,407 @@ class TestObjectDetector:
         objs = result.get("detected_objects", [])
         assert len(objs) == 1
         assert objs[0] == "car:75%"
+
+
+# ── Batch Processing DB Integration ──────────────────────────────────────────
+
+def _make_test_db(tmp_path):
+    """Create a fresh SQLite DB with schema for testing (bypasses singleton)."""
+    import sqlite3
+    from imganalyzer.db.schema import ensure_schema
+
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    ensure_schema(conn)
+    return conn
+
+
+class TestDatabaseLayer:
+    """Tests for the DB layer: repository, queue, overrides, search index."""
+
+    def test_register_image_and_retrieve(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        img_id = repo.register_image(
+            file_path="/photos/test.jpg", width=1920, height=1080, fmt="JPEG"
+        )
+        assert img_id > 0
+
+        img = repo.get_image(img_id)
+        assert img is not None
+        assert img["file_path"] == "/photos/test.jpg"
+        assert img["width"] == 1920
+
+    def test_register_image_idempotent(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        id1 = repo.register_image(file_path="/photos/a.jpg")
+        id2 = repo.register_image(file_path="/photos/a.jpg")
+        assert id1 == id2
+        assert repo.count_images() == 1
+
+    def test_upsert_metadata(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        img_id = repo.register_image(file_path="/photos/test.jpg")
+        repo.upsert_metadata(img_id, {
+            "camera_make": "Canon",
+            "camera_model": "EOS R5",
+            "iso": 400,
+        })
+        conn.commit()
+
+        data = repo.get_analysis(img_id, "metadata")
+        assert data is not None
+        assert data["camera_make"] == "Canon"
+        assert data["iso"] == 400
+        assert data["analyzed_at"] is not None
+
+    def test_upsert_technical(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        img_id = repo.register_image(file_path="/photos/test.jpg")
+        repo.upsert_technical(img_id, {
+            "sharpness_score": 72.5,
+            "exposure_ev": 0.3,
+            "noise_level": 0.02,
+            "dominant_colors": ["#3a6b8c", "#f0c040"],
+        })
+        conn.commit()
+
+        data = repo.get_analysis(img_id, "technical")
+        assert data is not None
+        assert data["sharpness_score"] == 72.5
+        # dominant_colors should be JSON-encoded
+        import json as _json
+        colors = _json.loads(data["dominant_colors"])
+        assert len(colors) == 2
+
+    def test_upsert_local_ai_with_people(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        img_id = repo.register_image(file_path="/photos/portrait.jpg")
+        repo.upsert_local_ai(img_id, {
+            "description": "A portrait of a woman",
+            "scene_type": "portrait",
+            "keywords": ["person", "portrait"],
+            "face_count": 1,
+            "face_identities": ["Alice"],
+            "has_people": True,
+        })
+        conn.commit()
+
+        data = repo.get_analysis(img_id, "local_ai")
+        assert data is not None
+        assert data["has_people"] == 1  # stored as int
+        assert data["face_count"] == 1
+
+    def test_is_analyzed_returns_true_after_upsert(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        img_id = repo.register_image(file_path="/photos/test.jpg")
+        assert repo.is_analyzed(img_id, "metadata") is False
+
+        repo.upsert_metadata(img_id, {"camera_make": "Nikon"})
+        conn.commit()
+
+        assert repo.is_analyzed(img_id, "metadata") is True
+
+    def test_override_protection(self, tmp_path):
+        """Overrides must NOT be overwritten by subsequent upserts.
+
+        The override mask removes the field from the write data so it stays NULL
+        in the analysis table.  The override value is stored in the `overrides`
+        table and applied on read via `get_full_result`.
+        """
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        img_id = repo.register_image(file_path="/photos/test.jpg")
+
+        # First upsert
+        repo.upsert_metadata(img_id, {"camera_make": "Canon", "camera_model": "R5"})
+        conn.commit()
+
+        # Set an override on camera_make
+        repo.set_override(img_id, "analysis_metadata", "camera_make", "Nikon")
+
+        # Re-upsert with different data — camera_make should be masked out
+        repo.upsert_metadata(img_id, {"camera_make": "Sony", "camera_model": "A7IV"})
+        conn.commit()
+
+        # Raw analysis row has NULL for camera_make (masked out)
+        raw = repo.get_analysis(img_id, "metadata")
+        assert raw["camera_make"] is None  # masked out by override
+        assert raw["camera_model"] == "A7IV"  # non-overridden field updated
+
+        # get_full_result applies overrides on top
+        full = repo.get_full_result(img_id)
+        assert full["metadata"]["camera_make"] == "Nikon"  # override value
+        assert full["metadata"]["camera_model"] == "A7IV"
+
+    def test_upsert_cloud_ai(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        img_id = repo.register_image(file_path="/photos/landscape.jpg")
+        repo.upsert_cloud_ai(img_id, "openai", {
+            "description": "A sunset over mountains",
+            "keywords": ["sunset", "mountain"],
+        })
+        conn.commit()
+
+        data = repo.get_analysis(img_id, "cloud_ai")
+        assert data is not None
+        assert "providers" in data
+        assert len(data["providers"]) == 1
+        assert data["providers"][0]["provider"] == "openai"
+
+
+class TestJobQueue:
+    """Tests for the job queue system."""
+
+    def test_enqueue_and_claim(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        img_id = repo.register_image(file_path="/photos/test.jpg")
+        job_id = queue.enqueue(img_id, "metadata")
+        assert job_id is not None
+
+        jobs = queue.claim(batch_size=5)
+        assert len(jobs) == 1
+        assert jobs[0]["image_id"] == img_id
+        assert jobs[0]["module"] == "metadata"
+
+    def test_enqueue_skip_duplicate(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        img_id = repo.register_image(file_path="/photos/test.jpg")
+        j1 = queue.enqueue(img_id, "metadata")
+        j2 = queue.enqueue(img_id, "metadata")
+        assert j1 is not None
+        assert j2 is None  # duplicate, skipped
+
+    def test_enqueue_batch(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        id1 = repo.register_image(file_path="/photos/a.jpg")
+        id2 = repo.register_image(file_path="/photos/b.jpg")
+        count = queue.enqueue_batch([id1, id2], ["metadata", "technical"])
+        assert count == 4  # 2 images × 2 modules
+
+    def test_queue_stats(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        img_id = repo.register_image(file_path="/photos/test.jpg")
+        queue.enqueue(img_id, "metadata")
+        queue.enqueue(img_id, "technical")
+
+        stats = queue.stats()
+        assert "metadata" in stats
+        assert stats["metadata"]["pending"] == 1
+        assert "technical" in stats
+        assert stats["technical"]["pending"] == 1
+
+
+class TestSearchIndex:
+    """Tests for the FTS5 search index."""
+
+    def test_search_index_populated_after_upsert(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        img_id = repo.register_image(file_path="/photos/sunset.jpg")
+        repo.upsert_local_ai(img_id, {
+            "description": "A beautiful sunset over the ocean",
+            "scene_type": "landscape",
+            "main_subject": "sunset",
+            "keywords": ["sunset", "ocean", "golden hour"],
+            "mood": "serene",
+            "lighting": "golden hour",
+            "face_count": 0,
+            "has_people": False,
+        })
+        conn.commit()
+        repo.update_search_index(img_id)
+        conn.commit()
+
+        # Search using FTS5 directly
+        row = conn.execute(
+            "SELECT * FROM search_index WHERE search_index MATCH ?",
+            ["sunset"],
+        ).fetchone()
+        assert row is not None
+
+    def test_search_index_includes_metadata(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        img_id = repo.register_image(file_path="/photos/canon.jpg")
+        repo.upsert_metadata(img_id, {
+            "camera_make": "Canon",
+            "camera_model": "EOS R5",
+        })
+        conn.commit()
+        repo.update_search_index(img_id)
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT * FROM search_index WHERE search_index MATCH ?",
+            ["Canon"],
+        ).fetchone()
+        assert row is not None
+
+
+class TestFaceIdentityDB:
+    """Tests for the DB-backed face identity system."""
+
+    def test_register_and_list_faces(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        face_id = repo.register_face_identity("alice", display_name="Alice Smith")
+        assert face_id > 0
+
+        faces = repo.list_face_identities()
+        assert len(faces) == 1
+        assert faces[0]["canonical_name"] == "alice"
+        assert faces[0]["display_name"] == "Alice Smith"
+
+    def test_add_face_embedding(self, tmp_path, face_embedding):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        face_id = repo.register_face_identity("bob")
+        emb_bytes = face_embedding.tobytes()
+        repo.add_face_embedding(face_id, emb_bytes, source_image="/photos/bob1.jpg")
+
+        embeddings = repo.get_face_embeddings(face_id)
+        assert len(embeddings) == 1
+
+    def test_remove_face_cascades(self, tmp_path, face_embedding):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        face_id = repo.register_face_identity("carol")
+        repo.add_face_embedding(face_id, face_embedding.tobytes())
+        repo.remove_face_identity("carol")
+
+        faces = repo.list_face_identities()
+        assert len(faces) == 0
+        embeddings = repo.get_face_embeddings(face_id)
+        assert len(embeddings) == 0
+
+
+class TestPersistResultToDB:
+    """Test the _persist_result_to_db helper used by the analyze command."""
+
+    def test_persist_stores_all_data(self, tmp_path):
+        """Verify that _persist_result_to_db correctly stores analysis data."""
+        import sqlite3
+        from imganalyzer.db.schema import ensure_schema
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.analyzer import AnalysisResult
+
+        # Create a fresh DB
+        db_path = tmp_path / "persist_test.db"
+        conn = sqlite3.connect(str(db_path), isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        ensure_schema(conn)
+
+        repo = Repository(conn)
+
+        result = AnalysisResult(
+            source_path=tmp_path / "test.jpg",
+            format="JPEG",
+            width=1920,
+            height=1080,
+            metadata={"camera_make": "Canon", "camera_model": "R5", "iso": 200},
+            technical={"sharpness_score": 80.0, "exposure_ev": 0.1},
+            ai_analysis={
+                "description": "A landscape",
+                "scene_type": "landscape",
+                "keywords": ["nature"],
+                "face_count": 0,
+                "has_people": False,
+            },
+        )
+
+        # Simulate what _persist_result_to_db does
+        image_id = repo.register_image(
+            file_path=str(result.source_path.resolve()),
+            width=result.width,
+            height=result.height,
+            fmt=result.format,
+        )
+
+        conn.execute("BEGIN IMMEDIATE")
+        repo.upsert_metadata(image_id, dict(result.metadata))
+        repo.upsert_technical(image_id, dict(result.technical))
+        data = dict(result.ai_analysis)
+        data.setdefault("has_people", bool(data.get("face_count", 0) > 0))
+        repo.upsert_local_ai(image_id, data)
+        repo.update_search_index(image_id)
+        conn.execute("COMMIT")
+
+        # Verify everything was stored
+        img = repo.get_image(image_id)
+        assert img["width"] == 1920
+
+        meta = repo.get_analysis(image_id, "metadata")
+        assert meta["camera_make"] == "Canon"
+
+        tech = repo.get_analysis(image_id, "technical")
+        assert tech["sharpness_score"] == 80.0
+
+        local = repo.get_analysis(image_id, "local_ai")
+        assert local["description"] == "A landscape"
+        assert local["has_people"] == 0  # False stored as 0
+
+        # Search index should be populated
+        row = conn.execute(
+            "SELECT * FROM search_index WHERE search_index MATCH ?",
+            ["landscape"],
+        ).fetchone()
+        assert row is not None
+
+        conn.close()

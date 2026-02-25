@@ -113,14 +113,8 @@ class Analyzer:
                     detection_threshold=self.detection_threshold,
                     face_match_threshold=self.face_match_threshold,
                 )
-            elif self.ai_backend == "openai":
+            elif self.ai_backend in ("openai", "anthropic", "google", "copilot"):
                 from imganalyzer.analysis.ai.cloud import CloudAI
-                result.ai_analysis = CloudAI(backend="openai").analyze(path, image_data)
-            elif self.ai_backend == "anthropic":
-                from imganalyzer.analysis.ai.cloud import CloudAI
-                result.ai_analysis = CloudAI(backend="anthropic").analyze(path, image_data)
-            elif self.ai_backend == "google":
-                from imganalyzer.analysis.ai.cloud import CloudAI
-                result.ai_analysis = CloudAI(backend="google").analyze(path, image_data)
+                result.ai_analysis = CloudAI(backend=self.ai_backend).analyze(path, image_data)
 
         return result

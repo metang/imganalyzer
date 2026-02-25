@@ -1,11 +1,15 @@
-"""Cloud AI analysis: OpenAI GPT-4o Vision, Anthropic Claude, Google Vision."""
+"""Cloud AI analysis: OpenAI GPT-4o Vision, Anthropic Claude, Google Vision, GitHub Copilot."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import logging
+import tempfile
 from pathlib import Path
 from typing import Any
 
+log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are an expert photography analyst. Analyze the provided image and return a JSON object with the following fields:
 - description: (string) A detailed 2-3 sentence description of the image content
@@ -17,6 +21,27 @@ SYSTEM_PROMPT = """You are an expert photography analyst. Analyze the provided i
 - technical_notes: (string) Any notable photographic/technical observations
 
 Return ONLY valid JSON with no extra text."""
+
+# Extended prompt for backends that also produce aesthetic scoring.
+SYSTEM_PROMPT_WITH_AESTHETIC = """You are an expert photography analyst. Analyze the provided image and return a JSON object with exactly these fields:
+- description: (string) A detailed 2-3 sentence description of the image content
+- scene_type: (string) e.g. "landscape", "portrait", "street", "architecture", "macro", "wildlife", "abstract", "product"
+- main_subject: (string) Primary subject(s) in the image
+- lighting: (string) Lighting conditions e.g. "golden hour", "overcast", "harsh midday", "studio softbox"
+- mood: (string) Emotional tone e.g. "serene", "dramatic", "intimate", "moody"
+- keywords: (array of strings) 10-15 descriptive keywords suitable as photo tags
+- technical_notes: (string) Notable photographic or technical observations
+- aesthetic_score: (number) Overall aesthetic quality score from 0.0 to 10.0. Consider composition, lighting, subject interest, technical quality, and emotional impact. Be critical and realistic: 0-3 = poor, 4-5 = average, 6-7 = good, 8-9 = excellent, 10 = exceptional/masterpiece
+- aesthetic_label: (string) One-word label matching the score: "Poor" (0-3), "Average" (4-5), "Good" (6-7), "Excellent" (8-9), "Masterpiece" (10)
+
+Return ONLY valid JSON with no extra text, no markdown fences."""
+
+# RAW file extensions that need conversion to JPEG before cloud API submission.
+_RAW_EXTENSIONS = frozenset({
+    ".arw", ".cr2", ".cr3", ".crw", ".dng", ".nef", ".nrw", ".orf", ".pef",
+    ".raf", ".raw", ".rw2", ".rwl", ".sr2", ".srf", ".srw", ".x3f", ".iiq",
+    ".3fr", ".fff", ".mef", ".mos", ".mrw", ".rwz", ".erf",
+})
 
 
 def _encode_image(path: Path, max_size_kb: int = 1024) -> tuple[str, str]:
@@ -65,6 +90,8 @@ class CloudAI:
             return self._anthropic(path, image_data)
         elif self.backend == "google":
             return self._google(path, image_data)
+        elif self.backend == "copilot":
+            return self._copilot(path, image_data)
         raise ValueError(f"Unknown cloud AI backend: {self.backend}")
 
     def _openai(self, path: Path, image_data: dict[str, Any]) -> dict[str, Any]:
@@ -177,3 +204,88 @@ class CloudAI:
             result["landmark"] = landmarks[0]
 
         return result
+
+    def _copilot(self, path: Path, image_data: dict[str, Any]) -> dict[str, Any]:
+        """GitHub Copilot SDK backend — uses gpt-4.1 vision model.
+
+        The SDK is async; we run it synchronously via asyncio.run().
+        RAW files are converted to a temporary JPEG first (same approach
+        as the Electron copilot-analyzer.ts reference implementation).
+        Returns all standard cloud_ai fields PLUS aesthetic_score /
+        aesthetic_label so both modules are populated in one API call.
+        """
+        try:
+            from copilot import CopilotClient
+        except ImportError:
+            raise ImportError(
+                "GitHub Copilot SDK required: pip install github-copilot-sdk"
+            )
+
+        async def _run(analysis_path: str) -> dict[str, Any]:
+            client = CopilotClient()
+            try:
+                session = await client.create_session({"model": "gpt-4.1"})
+                try:
+                    event = await session.send_and_wait(
+                        {
+                            "prompt": "Analyze this image.\n\n" + SYSTEM_PROMPT_WITH_AESTHETIC,
+                            "attachments": [{"type": "file", "path": analysis_path}],
+                        },
+                        timeout=120.0,
+                    )
+                    if event is None:
+                        raise RuntimeError("Copilot returned no response")
+                    content: str = getattr(event.data, "content", "") or ""
+                    if not content:
+                        raise RuntimeError("Copilot returned an empty response")
+                    return _parse_json_response(content)
+                finally:
+                    await session.destroy()
+            finally:
+                await client.stop()
+
+        # RAW files must be converted to JPEG before submission.
+        temp_jpeg: Path | None = None
+        analysis_path = path
+        if path.suffix.lower() in _RAW_EXTENSIONS:
+            temp_jpeg = _convert_raw_to_jpeg(path)
+            analysis_path = temp_jpeg
+
+        try:
+            return asyncio.run(_run(str(analysis_path)))
+        finally:
+            if temp_jpeg is not None:
+                try:
+                    temp_jpeg.unlink()
+                except OSError:
+                    pass
+
+
+def _convert_raw_to_jpeg(raw_path: Path) -> Path:
+    """Decode a RAW file with rawpy, resize to ≤1568 px, return a temp JPEG path.
+
+    Mirrors the RAW_CONVERT_SCRIPT logic in copilot-analyzer.ts.
+    Caller is responsible for deleting the returned file.
+    """
+    from PIL import Image
+
+    try:
+        import rawpy
+    except ImportError:
+        raise ImportError("rawpy required for RAW conversion: pip install rawpy")
+
+    with rawpy.imread(str(raw_path)) as raw:
+        rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
+
+    img = Image.fromarray(rgb)
+    w, h = img.size
+    max_dim = 1568
+    if max(w, h) > max_dim:
+        ratio = max_dim / max(w, h)
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+    tmp.close()
+    img.save(tmp.name, format="JPEG", quality=85)
+    log.debug("RAW converted to temp JPEG: %s", tmp.name)
+    return Path(tmp.name)
