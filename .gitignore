@@ -27,6 +27,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+nul
 
 # Model cache
 .cache/
