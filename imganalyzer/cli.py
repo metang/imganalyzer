@@ -117,12 +117,19 @@ def analyze(
     )
 
     success = 0
+    skipped = 0
     for img_path in resolved:
         xmp_path = output if output else img_path.with_suffix(".xmp")
+
+        if not img_path.exists():
+            console.print(f"[yellow]Skip:[/yellow] {img_path.name} — file not found or inaccessible")
+            skipped += 1
+            continue
 
         if xmp_path.exists() and not overwrite:
             if not quiet:
                 console.print(f"[yellow]Skip:[/yellow] {xmp_path} already exists (use --overwrite)")
+            skipped += 1
             continue
 
         if not quiet:
@@ -142,7 +149,10 @@ def analyze(
                 traceback.print_exc()
 
     if not quiet:
-        console.print(f"\n[green]Done.[/green] {success}/{len(resolved)} file(s) processed.")
+        parts = [f"{success}/{len(resolved)} file(s) processed"]
+        if skipped:
+            parts.append(f"{skipped} skipped")
+        console.print(f"\n[green]Done.[/green] {', '.join(parts)}.")
 
 
 def _persist_result_to_db(result: "AnalysisResult", ai_backend: str) -> None:
