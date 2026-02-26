@@ -59,6 +59,8 @@ export interface UseBatchProcessReturn {
   resumePending(workers?: number, cloudProvider?: string): Promise<boolean>
   /** Re-enqueue all failed jobs for the given modules and re-run. */
   retryFailed(modules: string[]): Promise<void>
+  /** Wipe the entire job queue and reset to idle. Returns number of deleted jobs. */
+  clearQueue(): Promise<number>
   pause(): Promise<void>
   resume(): Promise<void>
   stop(folder: string): Promise<void>
@@ -204,6 +206,23 @@ export function useBatchProcess(): UseBatchProcessReturn {
     }
   }, [])
 
+  const clearQueue = useCallback(async (): Promise<number> => {
+    try {
+      const { deleted } = await window.api.batchQueueClearAll()
+      // Reset all local state
+      setStats(emptyStats())
+      setResults([])
+      setIngestLines([])
+      setIngestProgress(null)
+      setIngestSummary(null)
+      setError(null)
+      return deleted
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      return 0
+    }
+  }, [])
+
   return {
     stats,
     results,
@@ -214,6 +233,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
     startBatch,
     resumePending,
     retryFailed,
+    clearQueue,
     pause,
     resume,
     stop,

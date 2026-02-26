@@ -73,6 +73,9 @@ contextBridge.exposeInMainWorld('api', {
   batchRetryFailed: (modules: string[]): Promise<void> =>
     ipcRenderer.invoke('batch:retry-failed', modules),
 
+  batchQueueClearAll: (): Promise<{ deleted: number }> =>
+    ipcRenderer.invoke('batch:queue-clear-all'),
+
   onBatchTick: (cb: (stats: BatchStats) => void) => {
     const handler = (_evt: Electron.IpcRendererEvent, stats: BatchStats) => cb(stats)
     ipcRenderer.on('batch:tick', handler)

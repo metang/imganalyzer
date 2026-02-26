@@ -137,11 +137,19 @@ class BatchProcessor:
         module: str,
         image_path: str | None = None,
         force: bool = True,
+        failed_only: bool = False,
     ) -> int:
         """Re-enqueue a specific module for all (or one) image(s).
 
         Clears existing analysis data (except overridden fields) and
         re-enqueues the jobs.  Returns count of jobs enqueued.
+
+        Args:
+            failed_only: When True, only re-enqueue images that currently have
+                         a ``failed`` job for this module in the queue — rather
+                         than re-enqueuing every registered image.  Use this
+                         for the "Retry failed" button so that already-done
+                         jobs are not re-run.
         """
         if module not in ALL_MODULES:
             raise ValueError(
@@ -153,6 +161,12 @@ class BatchProcessor:
             if img is None:
                 raise ValueError(f"Image not found in database: {image_path}")
             image_ids = [img["id"]]
+        elif failed_only:
+            rows = self.conn.execute(
+                "SELECT DISTINCT image_id FROM job_queue WHERE module = ? AND status = 'failed'",
+                [module],
+            ).fetchall()
+            image_ids = [r[0] for r in rows]
         else:
             image_ids = self.repo.iter_image_ids()
 
@@ -164,8 +178,15 @@ class BatchProcessor:
             f"[cyan]Rebuilding '{module}' for {len(image_ids)} image(s)...[/cyan]"
         )
 
-        # Clear old jobs for this module
-        self.queue.clear_module(module)
+        # Clear only the failed jobs for this module (keep done/skipped intact)
+        if failed_only:
+            self.conn.execute(
+                "DELETE FROM job_queue WHERE module = ? AND status = 'failed'",
+                [module],
+            )
+            self.conn.commit()
+        else:
+            self.queue.clear_module(module)
 
         # Clear analysis data (not overrides) and re-enqueue
         count = 0

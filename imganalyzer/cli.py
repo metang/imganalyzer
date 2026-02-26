@@ -753,6 +753,9 @@ def rebuild(
         None, "--image", help="Rebuild for a single image (file path)"
     ),
     force: bool = typer.Option(True, "--force/--no-force", help="Force re-run (default: True)"),
+    failed_only: bool = typer.Option(
+        False, "--failed-only", help="Only re-enqueue images with a failed job (not all images)"
+    ),
 ) -> None:
     """Re-enqueue a specific analysis module for all (or one) image(s).
 
@@ -763,6 +766,7 @@ def rebuild(
 
         imganalyzer rebuild technical
         imganalyzer rebuild local_ai --image /photos/sunset.jpg
+        imganalyzer rebuild aesthetic --failed-only
     """
     from dotenv import load_dotenv
     load_dotenv()
@@ -774,12 +778,45 @@ def rebuild(
     processor = BatchProcessor(conn)
 
     try:
-        count = processor.rebuild_module(module=module, image_path=image, force=force)
+        count = processor.rebuild_module(module=module, image_path=image, force=force, failed_only=failed_only)
         if count:
             console.print(f"\nRun [bold]imganalyzer run[/bold] to process the queued jobs.")
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
+
+
+@app.command(name="purge-missing")
+def purge_missing() -> None:
+    """Remove DB entries and queue jobs for image files that no longer exist on disk.
+
+    Scans all registered images and deletes any whose file_path does not exist,
+    along with all their associated queue jobs and analysis data (via CASCADE).
+
+    Example::
+
+        imganalyzer purge-missing
+    """
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from imganalyzer.db.connection import get_db
+
+    conn = get_db()
+    rows = conn.execute("SELECT id, file_path FROM images").fetchall()
+
+    missing = [(r["id"], r["file_path"]) for r in rows if not Path(r["file_path"]).exists()]
+
+    if not missing:
+        console.print("[green]No missing files — database is clean.[/green]")
+        return
+
+    for image_id, file_path in missing:
+        conn.execute("DELETE FROM images WHERE id = ?", [image_id])
+        console.print(f"  [red]Removed[/red] {file_path}")
+
+    conn.commit()
+    console.print(f"\n[green]Purged {len(missing)} missing image(s) and their associated jobs/analysis data.[/green]")
 
 
 @app.command(name="override")

@@ -33,6 +33,12 @@ class JobQueue:
 
         With *force=True*, re-enqueue even if a ``done`` job exists (for
         rebuilds).  Returns the job_id or None if skipped.
+
+        When *force=False* a ``failed`` or ``skipped`` job row is also treated
+        as "already handled" — it is only re-enqueued when force is True.
+        This prevents normal ingest runs from re-queuing jobs that were
+        intentionally skipped (e.g. has_people) or failed but whose analysis
+        data was since populated by another means.
         """
         existing = self.conn.execute(
             "SELECT id, status FROM job_queue WHERE image_id = ? AND module = ?",
@@ -42,9 +48,10 @@ class JobQueue:
         if existing:
             if existing["status"] in ("pending", "running"):
                 return None  # already queued
-            if existing["status"] == "done" and not force:
-                return None  # already done, skip unless force
-            # Re-enqueue: reset the row
+            if not force:
+                # done / failed / skipped — don't re-enqueue without explicit force
+                return None
+            # force=True: reset the row back to pending
             self.conn.execute(
                 """UPDATE job_queue
                    SET status = 'pending', attempts = 0, error_message = NULL,

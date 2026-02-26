@@ -6,6 +6,7 @@ interface Props {
   onResume(): void
   onStop(): void
   onRetryFailed(modules: string[]): void
+  onClearQueue(): void
 }
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
@@ -66,7 +67,7 @@ function ModuleRow({ name, stats }: { name: string; stats: BatchModuleStats }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFailed }: Props) {
+export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFailed, onClearQueue }: Props) {
   const { status, totals, modules, imagesPerSec, avgMsPerImage, estimatedMs, elapsedMs } = stats
 
   const totalJobs  = totals.pending + totals.running + totals.done + totals.failed + totals.skipped
@@ -81,7 +82,8 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
     .filter(([, s]) => s && s.failed > 0)
     .map(([mod]) => mod)
 
-  const canRetry = failedModules.length > 0 && !isRunning
+  const canRetry      = failedModules.length > 0 && !isRunning
+  const canClearQueue = !isRunning && !isPaused && totalJobs > 0
 
   return (
     <div className="flex flex-col gap-4">
@@ -175,6 +177,19 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
             title={`Retry ${totals.failed} failed job${totals.failed !== 1 ? 's' : ''} across: ${failedModules.join(', ')}`}
           >
             Retry failed ({totals.failed})
+          </button>
+        )}
+        {canClearQueue && (
+          <button
+            onClick={onClearQueue}
+            className="
+              px-4 py-1.5 rounded-lg text-sm text-neutral-400
+              bg-neutral-800 border border-neutral-700
+              hover:bg-red-900/30 hover:border-red-800 hover:text-red-300 transition-colors
+            "
+            title="Delete all jobs from the queue and reset to idle"
+          >
+            Clear queue
           </button>
         )}
       </div>

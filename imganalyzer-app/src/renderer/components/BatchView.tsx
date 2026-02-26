@@ -197,6 +197,7 @@ interface ActivePanelProps {
   onResume(): void
   onRequestStop(): void
   onRetryFailed(modules: string[]): void
+  onClearQueue(): void
 }
 
 function ActivePanel({
@@ -209,6 +210,7 @@ function ActivePanel({
   onResume,
   onRequestStop,
   onRetryFailed,
+  onClearQueue,
 }: ActivePanelProps) {
   return (
     <div className="flex flex-col gap-4 h-full overflow-hidden px-4 py-4">
@@ -240,6 +242,7 @@ function ActivePanel({
         onResume={onResume}
         onStop={onRequestStop}
         onRetryFailed={onRetryFailed}
+        onClearQueue={onClearQueue}
       />
 
       <div className="flex-1 flex flex-col min-h-0 border-t border-neutral-800 pt-3">
@@ -304,6 +307,10 @@ export function BatchView({ initialFolder = '' }: BatchViewProps) {
     await batch.stop(folder)
   }, [batch, folder])
 
+  const handleClearQueue = useCallback(async () => {
+    await batch.clearQueue()
+  }, [batch])
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {phase === 'config' && (
@@ -338,6 +345,7 @@ export function BatchView({ initialFolder = '' }: BatchViewProps) {
             onResume={batch.resume}
             onRequestStop={handleRequestStop}
             onRetryFailed={batch.retryFailed}
+            onClearQueue={handleClearQueue}
           />
         </div>
       )}

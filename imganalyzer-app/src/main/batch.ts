@@ -570,7 +570,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   // (same session), or sensible defaults (workers=1, no cloud) otherwise.
   ipcMain.handle(
     'batch:resume-pending',
-    async (_evt, workers = 1, cloudProvider = 'openai'): Promise<void> => {
+    async (_evt, workers = 1, cloudProvider = 'copilot'): Promise<void> => {
       if (batchStatus === 'running') return  // already running
 
       killRunProcess()
@@ -635,10 +635,10 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       killRunProcess()
       stopPolling()
 
-      // Re-enqueue failed jobs for each affected module
+      // Re-enqueue only the failed jobs for each affected module
       for (const mod of modules) {
         try {
-          await condaExec(['rebuild', mod])
+          await condaExec(['rebuild', mod, '--failed-only'])
         } catch {
           // Best-effort: continue to next module even if one rebuild fails
         }
@@ -646,7 +646,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
       // Spawn the worker to process the newly-enqueued jobs
       const w     = sessionConfig?.workers ?? 1
-      const cloud = sessionConfig?.cloudProvider ?? 'openai'
+      const cloud = sessionConfig?.cloudProvider ?? 'copilot'
 
       sessionStartMs = Date.now()
       completionWindow.length = 0
@@ -692,6 +692,34 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       startPolling()
     }
   )
+
+  // ── batch:queue-clear-all ─────────────────────────────────────────────────
+  // Wipes every job in the queue regardless of status.  Refuses to run while
+  // a batch is in progress — the caller must stop first.
+  ipcMain.handle('batch:queue-clear-all', async (): Promise<{ deleted: number }> => {
+    if (batchStatus === 'running' || batchStatus === 'paused') {
+      throw new Error('Cannot clear queue while a batch is running. Stop the batch first.')
+    }
+
+    killRunProcess()
+    stopPolling()
+
+    const raw = await condaExec(['queue-clear', '--status', 'all'])
+    // Parse "Cleared N job(s)" from the CLI output
+    const match = raw.match(/Cleared (\d+) job/)
+    const deleted = match ? parseInt(match[1], 10) : 0
+
+    // Reset server-side state
+    sessionConfig = null
+    completionWindow.length = 0
+    sessionStartMs = 0
+    batchStatus = 'idle'
+
+    // Emit one final poll tick so the renderer resets its counters
+    void doPoll()
+
+    return { deleted }
+  })
 }
 
 // Keep a reference to the ingest process so future code can cancel it if needed
