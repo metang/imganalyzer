@@ -186,13 +186,14 @@ def _persist_result_to_db(result: "AnalysisResult", ai_backend: str) -> None:
                     # Strip aesthetic fields — they go to analysis_aesthetic, not analysis_cloud_ai
                     aesthetic_score = cloud_data.pop("aesthetic_score", None)
                     aesthetic_label = cloud_data.pop("aesthetic_label", None)
+                    aesthetic_reason = cloud_data.pop("aesthetic_reason", None)
                     repo.upsert_cloud_ai(image_id, ai_backend, cloud_data)
                     # Copilot also returns aesthetic fields — store them separately
                     if ai_backend == "copilot" and aesthetic_score is not None:
                         repo.upsert_aesthetic(image_id, {
                             "aesthetic_score": aesthetic_score,
                             "aesthetic_label": aesthetic_label or "",
-                            "aesthetic_reason": "",
+                            "aesthetic_reason": aesthetic_reason or "",
                             "provider": "copilot/gpt-4.1",
                         })
 

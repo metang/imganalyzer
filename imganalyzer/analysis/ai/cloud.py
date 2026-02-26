@@ -33,6 +33,7 @@ SYSTEM_PROMPT_WITH_AESTHETIC = """You are an expert photography analyst. Analyze
 - technical_notes: (string) Notable photographic or technical observations
 - aesthetic_score: (number) Overall aesthetic quality score from 0.0 to 10.0. Consider composition, lighting, subject interest, technical quality, and emotional impact. Be critical and realistic: 0-3 = poor, 4-5 = average, 6-7 = good, 8-9 = excellent, 10 = exceptional/masterpiece
 - aesthetic_label: (string) One-word label matching the score: "Poor" (0-3), "Average" (4-5), "Good" (6-7), "Excellent" (8-9), "Masterpiece" (10)
+- aesthetic_reason: (string) 1-2 sentence explanation of the score, referencing specific strengths and weaknesses in composition, lighting, subject, or technical quality
 
 Return ONLY valid JSON with no extra text, no markdown fences."""
 
