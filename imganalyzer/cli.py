@@ -62,6 +62,16 @@ def analyze(
              "has_people in the database.  Use before --ai copilot to ensure images "
              "with people are not sent to the cloud model.",
     ),
+    recursive: bool = typer.Option(
+        False,
+        "--recursive", "-r",
+        help="Scan directories recursively (includes subdirectories).",
+    ),
+    no_xmp: bool = typer.Option(
+        False,
+        "--no-xmp",
+        help="Do not write or update XMP sidecar files (DB-only mode).",
+    ),
 ) -> None:
     """Analyze one or more image files and generate XMP sidecar files."""
     from dotenv import load_dotenv
@@ -87,9 +97,9 @@ def analyze(
     resolved: list[Path] = []
     for img in images:
         if img.is_dir():
-            # Expand directory to all image files (non-recursive)
+            glob_pattern = "**/*" if recursive else "*"
             found = sorted(
-                p for p in img.iterdir()
+                p for p in img.glob(glob_pattern)
                 if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
             )
             if found:
@@ -134,8 +144,8 @@ def analyze(
             skipped += 1
             continue
 
-        # When only detecting people, skip the XMP-exists check — no XMP is written.
-        if not detect_people and xmp_path.exists() and not overwrite:
+        # When only detecting people or --no-xmp, skip the XMP-exists check — no XMP written.
+        if not detect_people and not no_xmp and xmp_path.exists() and not overwrite:
             if not quiet:
                 console.print(f"[yellow]Skip:[/yellow] {xmp_path} already exists (use --overwrite)")
             skipped += 1
@@ -147,11 +157,11 @@ def analyze(
 
         try:
             result = analyzer.analyze(img_path)
-            if not detect_people:
+            if not detect_people and not no_xmp:
                 result.write_xmp(xmp_path)
             _persist_result_to_db(result, ai_backend=ai, detect_people=detect_people)
             success += 1
-            if not quiet and not detect_people:
+            if not quiet and not detect_people and not no_xmp:
                 _print_summary(result, xmp_path, verbose)
             elif not quiet and detect_people:
                 has_p = result.ai_analysis.get("has_people", False)
