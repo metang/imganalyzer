@@ -114,7 +114,39 @@ class Analyzer:
                     face_match_threshold=self.face_match_threshold,
                 )
             elif self.ai_backend in ("openai", "anthropic", "google", "copilot"):
-                from imganalyzer.analysis.ai.cloud import CloudAI
-                result.ai_analysis = CloudAI(backend=self.ai_backend).analyze(path, image_data)
+                # People guard: do not send images containing recognisable faces to
+                # cloud AI.  Check the DB for a previously stored local_ai result; if
+                # has_people is set, skip the cloud call entirely.
+                has_people = self._db_has_people(path)
+                if has_people:
+                    console.print(
+                        f"  [yellow]Skip cloud AI:[/yellow] {path.name} — "
+                        "people detected, image will not be sent to cloud model"
+                    )
+                else:
+                    from imganalyzer.analysis.ai.cloud import CloudAI
+                    result.ai_analysis = CloudAI(backend=self.ai_backend).analyze(path, image_data)
 
         return result
+
+    def _db_has_people(self, path: Path) -> bool:
+        """Return True if the DB records has_people=1 for this image (local_ai row).
+
+        Best-effort: returns False on any error (missing DB, image not registered,
+        local_ai not yet run) so the cloud call proceeds in ambiguous cases.
+        """
+        try:
+            from imganalyzer.db.connection import get_db
+            from imganalyzer.db.repository import Repository
+            conn = get_db()
+            repo = Repository(conn)
+            img = repo.get_image_by_path(str(path.resolve()))
+            if img is None:
+                return False
+            local_data = repo.get_analysis(img["id"], "local_ai")
+            if local_data is None:
+                return False
+            return bool(local_data.get("has_people"))
+        except Exception:
+            return False
+

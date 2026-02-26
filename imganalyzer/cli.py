@@ -198,14 +198,18 @@ def _persist_result_to_db(result: "AnalysisResult", ai_backend: str) -> None:
                     aesthetic_label = cloud_data.pop("aesthetic_label", None)
                     aesthetic_reason = cloud_data.pop("aesthetic_reason", None)
                     repo.upsert_cloud_ai(image_id, ai_backend, cloud_data)
-                    # Copilot also returns aesthetic fields — store them separately
+                    # Copilot also returns aesthetic fields — store them separately.
+                    # People guard: do not store aesthetic scores for images with people.
                     if ai_backend == "copilot" and aesthetic_score is not None:
-                        repo.upsert_aesthetic(image_id, {
-                            "aesthetic_score": aesthetic_score,
-                            "aesthetic_label": aesthetic_label or "",
-                            "aesthetic_reason": aesthetic_reason or "",
-                            "provider": "copilot/gpt-4.1",
-                        })
+                        local_data = repo.get_analysis(image_id, "local_ai")
+                        has_people = bool(local_data and local_data.get("has_people"))
+                        if not has_people:
+                            repo.upsert_aesthetic(image_id, {
+                                "aesthetic_score": aesthetic_score,
+                                "aesthetic_label": aesthetic_label or "",
+                                "aesthetic_reason": aesthetic_reason or "",
+                                "provider": "copilot/gpt-4.1",
+                            })
 
             repo.update_search_index(image_id)
             conn.execute("COMMIT")
