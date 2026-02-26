@@ -55,6 +55,13 @@ def analyze(
         help="Face recognition cosine similarity threshold 0–1 (default: 0.40). "
              "Overrides IMGANALYZER_FACE_DB_THRESHOLD env var.",
     ),
+    detect_people: bool = typer.Option(
+        False,
+        "--detect-people",
+        help="Run object detection only (no BLIP-2 / OCR / cloud AI) to populate "
+             "has_people in the database.  Use before --ai copilot to ensure images "
+             "with people are not sent to the cloud model.",
+    ),
 ) -> None:
     """Analyze one or more image files and generate XMP sidecar files."""
     from dotenv import load_dotenv
@@ -114,6 +121,7 @@ def analyze(
         detection_prompt=detection_prompt,
         detection_threshold=detection_threshold,
         face_match_threshold=face_threshold,
+        detect_people=detect_people,
     )
 
     success = 0
@@ -126,22 +134,29 @@ def analyze(
             skipped += 1
             continue
 
-        if xmp_path.exists() and not overwrite:
+        # When only detecting people, skip the XMP-exists check — no XMP is written.
+        if not detect_people and xmp_path.exists() and not overwrite:
             if not quiet:
                 console.print(f"[yellow]Skip:[/yellow] {xmp_path} already exists (use --overwrite)")
             skipped += 1
             continue
 
         if not quiet:
-            console.print(f"[cyan]Analyzing:[/cyan] {img_path.name} ...")
+            label = "Detecting people:" if detect_people else "Analyzing:"
+            console.print(f"[cyan]{label}[/cyan] {img_path.name} ...")
 
         try:
             result = analyzer.analyze(img_path)
-            result.write_xmp(xmp_path)
-            _persist_result_to_db(result, ai_backend=ai)
+            if not detect_people:
+                result.write_xmp(xmp_path)
+            _persist_result_to_db(result, ai_backend=ai, detect_people=detect_people)
             success += 1
-            if not quiet:
+            if not quiet and not detect_people:
                 _print_summary(result, xmp_path, verbose)
+            elif not quiet and detect_people:
+                has_p = result.ai_analysis.get("has_people", False)
+                flag = "[red]people detected[/red]" if has_p else "[green]no people[/green]"
+                console.print(f"  {flag}")
         except Exception as exc:
             console.print(f"[red]Error processing {img_path.name}: {exc}[/red]")
             if verbose:
@@ -155,7 +170,11 @@ def analyze(
         console.print(f"\n[green]Done.[/green] {', '.join(parts)}.")
 
 
-def _persist_result_to_db(result: "AnalysisResult", ai_backend: str) -> None:
+def _persist_result_to_db(
+    result: "AnalysisResult",
+    ai_backend: str,
+    detect_people: bool = False,
+) -> None:
     """Store an AnalysisResult in the database for consistency with the batch pipeline.
 
     Best-effort: if the DB layer fails (e.g. missing deps), the XMP was already
@@ -186,9 +205,9 @@ def _persist_result_to_db(result: "AnalysisResult", ai_backend: str) -> None:
                 repo.upsert_technical(image_id, dict(result.technical))
 
             if result.ai_analysis:
-                if ai_backend == "local":
+                if detect_people or ai_backend == "local":
+                    # People detection pre-pass or full local AI — both go to local_ai table.
                     data = dict(result.ai_analysis)
-                    # Infer has_people from face_count if present
                     data.setdefault("has_people", bool(data.get("face_count", 0) > 0))
                     repo.upsert_local_ai(image_id, data)
                 elif ai_backend in ("openai", "anthropic", "google", "copilot"):

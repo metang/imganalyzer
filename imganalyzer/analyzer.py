@@ -56,6 +56,7 @@ class Analyzer:
         detection_prompt: str | None = None,
         detection_threshold: float | None = None,
         face_match_threshold: float | None = None,
+        detect_people: bool = False,
     ) -> None:
         self.ai_backend = ai_backend
         self.run_technical = run_technical
@@ -63,6 +64,7 @@ class Analyzer:
         self.detection_prompt = detection_prompt
         self.detection_threshold = detection_threshold
         self.face_match_threshold = face_match_threshold
+        self.detect_people = detect_people
 
     def analyze(self, path: Path) -> AnalysisResult:
         suffix = path.suffix.lower()
@@ -101,8 +103,14 @@ class Analyzer:
             from imganalyzer.analysis.technical import TechnicalAnalyzer
             result.technical = TechnicalAnalyzer(image_data).analyze()
 
+        # People detection only (fast pre-pass before cloud AI)
+        if self.detect_people:
+            if self.verbose:
+                console.print("  [dim]Running people detection...[/dim]")
+            result.ai_analysis = self._run_people_detection(image_data)
+
         # AI analysis
-        if self.ai_backend and self.ai_backend != "none":
+        elif self.ai_backend and self.ai_backend != "none":
             if self.verbose:
                 console.print(f"  [dim]Running AI analysis ({self.ai_backend})...[/dim]")
             if self.ai_backend == "local":
@@ -128,6 +136,26 @@ class Analyzer:
                     result.ai_analysis = CloudAI(backend=self.ai_backend).analyze(path, image_data)
 
         return result
+
+    def _run_people_detection(self, image_data: dict[str, Any]) -> dict[str, Any]:
+        """Run object detection only and return a minimal dict with has_people set.
+
+        This is a lightweight pre-pass: only GroundingDINO runs (no BLIP-2,
+        no OCR, no InsightFace).  The result is suitable for persisting to
+        analysis_local_ai so the cloud AI guard can use has_people on the
+        next run.
+        """
+        from imganalyzer.analysis.ai.objects import ObjectDetector
+        obj = ObjectDetector().analyze(
+            image_data,
+            prompt=self.detection_prompt,
+            threshold=self.detection_threshold,
+        )
+        has_people = bool(obj.get("has_person", False))
+        return {
+            "detected_objects": obj.get("detected_objects", []),
+            "has_people": has_people,
+        }
 
     def _db_has_people(self, path: Path) -> bool:
         """Return True if the DB records has_people=1 for this image (local_ai row).
