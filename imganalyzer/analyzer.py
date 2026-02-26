@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
 
 console = Console()
+_log = logging.getLogger(__name__)
 
 # All RAW extensions supported by LibRaw/rawpy
 RAW_EXTENSIONS = {
@@ -127,10 +129,7 @@ class Analyzer:
                 # has_people is set, skip the cloud call entirely.
                 has_people = self._db_has_people(path)
                 if has_people:
-                    console.print(
-                        f"  [yellow]Skip cloud AI:[/yellow] {path.name} — "
-                        "people detected, image will not be sent to cloud model"
-                    )
+                    _log.debug("Skip cloud AI: %s — people detected", path.name)
                 else:
                     from imganalyzer.analysis.ai.cloud import CloudAI
                     result.ai_analysis = CloudAI(backend=self.ai_backend).analyze(path, image_data)

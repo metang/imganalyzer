@@ -151,6 +151,23 @@ def analyze(
             skipped += 1
             continue
 
+        # For cloud AI with --no-xmp: skip images that already have an aesthetic row in the DB
+        # (avoids redundant cloud calls on re-runs).
+        if no_xmp and not detect_people and ai in ("openai", "anthropic", "google", "copilot") and not overwrite:
+            try:
+                from imganalyzer.db.connection import get_db as _get_db
+                from imganalyzer.db.repository import Repository as _Repo
+                _conn = _get_db()
+                _repo = _Repo(_conn)
+                _img = _repo.get_image_by_path(str(img_path.resolve()))
+                if _img is not None:
+                    _ae = _repo.get_analysis(_img["id"], "aesthetic")
+                    if _ae is not None:
+                        skipped += 1
+                        continue
+            except Exception:
+                pass  # best-effort — proceed with analysis if DB check fails
+
         if not quiet:
             label = "Detecting people:" if detect_people else "Analyzing:"
             console.print(f"[cyan]{label}[/cyan] {img_path.name} ...")
