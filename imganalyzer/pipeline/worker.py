@@ -2,9 +2,22 @@
 
 Supports multi-threaded processing with graceful shutdown on SIGINT (Ctrl+C).
 GPU-bound modules (local_ai, embedding) are serialized to avoid VRAM contention.
+
+Structured output
+-----------------
+Each completed job emits a ``[RESULT]`` line to stdout so that the Electron
+GUI can parse per-job progress without depending on Rich formatting:
+
+    [RESULT] {"path": "/a/b.jpg", "module": "technical", "status": "done", "ms": 45}
+    [RESULT] {"path": "/a/b.jpg", "module": "cloud_ai",  "status": "skipped", "ms": 0, "error": "prerequisite not met: local_ai"}
+    [RESULT] {"path": "/a/b.jpg", "module": "local_ai",  "status": "failed",  "ms": 812, "error": "CUDA OOM"}
+
+These lines are always emitted (regardless of --verbose) and are JSON-safe
+(the ``error`` field has inner quotes escaped).
 """
 from __future__ import annotations
 
+import json
 import signal
 import threading
 import time
@@ -15,6 +28,7 @@ import sqlite3
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskID
 
+from imganalyzer.db.connection import get_db_path
 from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository
 from imganalyzer.pipeline.modules import ModuleRunner, write_xmp_from_db
@@ -25,6 +39,34 @@ console = Console()
 GPU_MODULES = {"local_ai", "embedding"}
 # Modules that are I/O-bound — can run in parallel
 IO_MODULES = {"metadata", "technical", "cloud_ai", "aesthetic"}
+
+# Prerequisite map: a module may only run after its prerequisite has
+# completed successfully for the same image (checked via is_analyzed).
+# If the prerequisite has not run, the job is skipped with a log message.
+#
+# NOTE: "aesthetic" is intentionally NOT listed here.  The people-privacy
+# guard below (lines ~283-289) already skips aesthetic when local_ai has
+# been run and detected people (has_people=1).  When local_ai has NOT run,
+# get_analysis returns None → has_people is falsy → aesthetic proceeds.
+# Requiring local_ai as a hard prerequisite would force users to run the
+# full local_ai suite just to get aesthetic scores on images with no people.
+_PREREQUISITES: dict[str, str] = {
+    "cloud_ai": "local_ai",
+}
+
+
+def _emit_result(path: str, module: str, status: str, ms: int, error: str = "") -> None:
+    """Print a machine-readable [RESULT] line to stdout."""
+    payload: dict[str, Any] = {
+        "path":   path,
+        "module": module,
+        "status": status,
+        "ms":     ms,
+    }
+    if error:
+        payload["error"] = error
+    # Use json.dumps so all string values are correctly escaped
+    print(f"[RESULT] {json.dumps(payload)}", flush=True)
 
 
 class Worker:
@@ -43,19 +85,18 @@ class Worker:
         stale_timeout_minutes: int = 10,
         write_xmp: bool = True,
     ) -> None:
+        # Main-thread connection — used only for queue management (claim, recover, etc.)
         self.conn = conn
         self.repo = Repository(conn)
         self.queue = JobQueue(conn)
-        self.runner = ModuleRunner(
-            conn=conn,
-            repo=self.repo,
-            force=force,
-            cloud_provider=cloud_provider,
-            detection_prompt=detection_prompt,
-            detection_threshold=detection_threshold,
-            face_match_threshold=face_match_threshold,
-            verbose=verbose,
-        )
+
+        # Per-worker-thread config (no conn stored here — opened fresh per thread)
+        self.force = force
+        self.cloud_provider = cloud_provider
+        self.detection_prompt = detection_prompt
+        self.detection_threshold = detection_threshold
+        self.face_match_threshold = face_match_threshold
+
         self.workers = max(1, workers)
         self.verbose = verbose
         self.stale_timeout = stale_timeout_minutes
@@ -63,6 +104,47 @@ class Worker:
         self._shutdown = threading.Event()
         # Track images that had a job complete this run (for XMP generation)
         self._xmp_candidates: set[int] = set()
+        self._xmp_lock = threading.Lock()
+        # Thread-local storage for per-thread DB objects
+        self._local = threading.local()
+
+    def _get_thread_db(self) -> tuple[sqlite3.Connection, Repository, JobQueue, "ModuleRunner"]:
+        """Return (conn, repo, queue, runner) local to the current thread.
+
+        Opens a fresh SQLite connection the first time a thread calls this,
+        ensuring we never share a single connection across threads.
+        """
+        local = self._local
+        if not hasattr(local, "conn") or local.conn is None:
+            db_path = get_db_path()
+            conn = sqlite3.connect(
+                str(db_path),
+                timeout=30,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+            repo = Repository(conn)
+            queue = JobQueue(conn)
+            runner = ModuleRunner(
+                conn=conn,
+                repo=repo,
+                force=self.force,
+                cloud_provider=self.cloud_provider,
+                detection_prompt=self.detection_prompt,
+                detection_threshold=self.detection_threshold,
+                face_match_threshold=self.face_match_threshold,
+                verbose=self.verbose,
+            )
+            local.conn = conn
+            local.repo = repo
+            local.queue = queue
+            local.runner = runner
+        return local.conn, local.repo, local.queue, local.runner
 
     def run(self, batch_size: int = 10) -> dict[str, int]:
         """Main processing loop.  Blocks until queue is empty or Ctrl+C.
@@ -166,38 +248,72 @@ class Worker:
         return stats
 
     def _process_job(self, job: dict[str, Any]) -> str:
-        """Process a single job.  Returns 'done', 'failed', or 'skipped'."""
+        """Process a single job.  Returns 'done', 'failed', or 'skipped'.
+
+        Uses a per-thread SQLite connection (via _get_thread_db) so that
+        ThreadPoolExecutor workers never share a single connection.
+        """
         image_id = job["image_id"]
         module = job["module"]
         job_id = job["id"]
 
+        # Obtain thread-local DB objects (opens a fresh connection if needed)
+        _, repo, queue, runner = self._get_thread_db()
+
+        # Resolve image path for [RESULT] lines (best-effort)
+        image_row = repo.get_image(image_id)
+        path = image_row["file_path"] if image_row else f"id={image_id}"
+
+        start_ms = int(time.time() * 1000)
+
         try:
-            # Cache check
-            if not self.runner.should_run(image_id, module):
-                self.queue.mark_skipped(job_id, "already_analyzed")
+            # ── Cache check ──────────────────────────────────────────────────
+            if not runner.should_run(image_id, module):
+                queue.mark_skipped(job_id, "already_analyzed")
+                _emit_result(path, module, "skipped", 0, "already_analyzed")
                 return "skipped"
 
-            # People guard for cloud/aesthetic
+            # ── Prerequisite check (DB-driven) ───────────────────────────────
+            prereq = _PREREQUISITES.get(module)
+            if prereq and not repo.is_analyzed(image_id, prereq):
+                reason = f"prerequisite not met: {prereq} has not run for this image"
+                queue.mark_skipped(job_id, f"prerequisite_not_met:{prereq}")
+                _emit_result(path, module, "skipped", 0, reason)
+                if self.verbose:
+                    console.print(
+                        f"  [yellow]Skipped[/yellow] {path} "
+                        f"[dim]module={module} — {reason}[/dim]"
+                    )
+                return "skipped"
+
+            # ── People guard for cloud/aesthetic (privacy) ───────────────────
             if module in ("cloud_ai", "aesthetic"):
-                local_data = self.repo.get_analysis(image_id, "local_ai")
+                local_data = repo.get_analysis(image_id, "local_ai")
                 if local_data and local_data.get("has_people"):
-                    self.queue.mark_skipped(job_id, "has_people")
+                    queue.mark_skipped(job_id, "has_people")
+                    _emit_result(path, module, "skipped", 0, "has_people")
                     return "skipped"
 
-            self.runner.run(image_id, module)
-            self.queue.mark_done(job_id)
+            # ── Run the module ───────────────────────────────────────────────
+            runner.run(image_id, module)
+            elapsed = int(time.time() * 1000) - start_ms
+            queue.mark_done(job_id)
+            _emit_result(path, module, "done", elapsed)
 
             # Track image for XMP generation after all jobs finish
             if self.write_xmp:
-                self._xmp_candidates.add(image_id)
+                with self._xmp_lock:
+                    self._xmp_candidates.add(image_id)
 
             return "done"
 
         except Exception as exc:
+            elapsed = int(time.time() * 1000) - start_ms
             error_msg = f"{type(exc).__name__}: {exc}"
-            self.queue.mark_failed(job_id, error_msg)
+            queue.mark_failed(job_id, error_msg)
+            _emit_result(path, module, "failed", elapsed, error_msg)
             if self.verbose:
-                console.print(f"  [red]Failed: image={image_id} module={module}: {error_msg}[/red]")
+                console.print(f"  [red]Failed:[/red] {path} module={module}: {error_msg}")
             return "failed"
 
     def _write_pending_xmps(self) -> int:

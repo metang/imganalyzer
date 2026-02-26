@@ -224,3 +224,35 @@ class JobQueue:
         cur = self.conn.execute("DELETE FROM job_queue")
         self.conn.commit()
         return cur.rowcount
+
+    def clear_by_folder(
+        self,
+        folder_prefix: str,
+        statuses: list[str] | None = None,
+    ) -> int:
+        """Delete jobs for images whose file_path starts with *folder_prefix*.
+
+        If *statuses* is given, only jobs with those statuses are deleted
+        (e.g. ``['pending', 'running']``).  Defaults to all statuses.
+        """
+        prefix = folder_prefix.rstrip("/\\") + "%"
+        if statuses:
+            placeholders = ",".join("?" * len(statuses))
+            cur = self.conn.execute(
+                f"""DELETE FROM job_queue
+                    WHERE status IN ({placeholders})
+                    AND image_id IN (
+                        SELECT id FROM images WHERE file_path LIKE ?
+                    )""",
+                [*statuses, prefix],
+            )
+        else:
+            cur = self.conn.execute(
+                """DELETE FROM job_queue
+                   WHERE image_id IN (
+                       SELECT id FROM images WHERE file_path LIKE ?
+                   )""",
+                [prefix],
+            )
+        self.conn.commit()
+        return cur.rowcount

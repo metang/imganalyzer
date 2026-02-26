@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { XmpData } from '../main/xmp'
 import type { ImageFile } from '../main/images'
 import type { AnalysisProgress } from '../main/analyzer'
+import type { BatchStats, BatchResult, BatchIngestProgress } from '../main/batch'
 
 contextBridge.exposeInMainWorld('api', {
   openFolder: (): Promise<string | null> =>
@@ -32,5 +33,67 @@ contextBridge.exposeInMainWorld('api', {
     const handler = (_evt: Electron.IpcRendererEvent, p: AnalysisProgress) => cb(p)
     ipcRenderer.on('analyze:progress', handler)
     return () => ipcRenderer.removeListener('analyze:progress', handler)
-  }
+  },
+
+  // ── Batch processing ────────────────────────────────────────────────────────
+
+  batchIngest: (
+    folder: string,
+    modules: string[],
+    recursive: boolean,
+    noHash: boolean
+  ): Promise<{ registered: number; enqueued: number; skipped: number }> =>
+    ipcRenderer.invoke('batch:ingest', folder, modules, recursive, noHash),
+
+  batchStart: (
+    folder: string,
+    modules: string[],
+    workers: number,
+    cloudProvider: string,
+    recursive: boolean,
+    noHash: boolean
+  ): Promise<void> =>
+    ipcRenderer.invoke('batch:start', folder, modules, workers, cloudProvider, recursive, noHash),
+
+  batchPause: (): Promise<void> =>
+    ipcRenderer.invoke('batch:pause'),
+
+  batchResume: (): Promise<void> =>
+    ipcRenderer.invoke('batch:resume'),
+
+  batchStop: (folder: string): Promise<void> =>
+    ipcRenderer.invoke('batch:stop', folder),
+
+  batchCheckPending: (): Promise<{ pending: number; running: number }> =>
+    ipcRenderer.invoke('batch:check-pending'),
+
+  batchResumePending: (workers?: number, cloudProvider?: string): Promise<void> =>
+    ipcRenderer.invoke('batch:resume-pending', workers, cloudProvider),
+
+  batchRetryFailed: (modules: string[]): Promise<void> =>
+    ipcRenderer.invoke('batch:retry-failed', modules),
+
+  onBatchTick: (cb: (stats: BatchStats) => void) => {
+    const handler = (_evt: Electron.IpcRendererEvent, stats: BatchStats) => cb(stats)
+    ipcRenderer.on('batch:tick', handler)
+    return () => ipcRenderer.removeListener('batch:tick', handler)
+  },
+
+  onBatchResult: (cb: (result: BatchResult) => void) => {
+    const handler = (_evt: Electron.IpcRendererEvent, result: BatchResult) => cb(result)
+    ipcRenderer.on('batch:result', handler)
+    return () => ipcRenderer.removeListener('batch:result', handler)
+  },
+
+  onBatchIngestLine: (cb: (line: string) => void) => {
+    const handler = (_evt: Electron.IpcRendererEvent, line: string) => cb(line)
+    ipcRenderer.on('batch:ingest-line', handler)
+    return () => ipcRenderer.removeListener('batch:ingest-line', handler)
+  },
+
+  onBatchIngestProgress: (cb: (progress: BatchIngestProgress) => void) => {
+    const handler = (_evt: Electron.IpcRendererEvent, progress: BatchIngestProgress) => cb(progress)
+    ipcRenderer.on('batch:ingest-progress', handler)
+    return () => ipcRenderer.removeListener('batch:ingest-progress', handler)
+  },
 })

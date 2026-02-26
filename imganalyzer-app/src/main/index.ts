@@ -6,8 +6,9 @@ import { listImages, getThumbnail, getFullImage } from './images'
 import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
+import { registerBatchHandlers } from './batch'
 
-function createWindow(): void {
+function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -32,12 +33,18 @@ function createWindow(): void {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  return win
 }
 
 app.whenReady().then(() => {
-  createWindow()
+  const win = createWindow()
+  registerBatchHandlers(win)
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) {
+      const w = createWindow()
+      registerBatchHandlers(w)
+    }
   })
 })
 

@@ -601,8 +601,12 @@ def run_queue(
 
 
 @app.command()
-def status() -> None:
+def status(
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON instead of a table"),
+) -> None:
     """Show the current state of the processing queue."""
+    import json as _json
+
     from dotenv import load_dotenv
     load_dotenv()
 
@@ -615,9 +619,38 @@ def status() -> None:
     repo = Repository(conn)
 
     total_images = repo.count_images()
+    module_stats = queue.stats()
+    totals = queue.total_stats()
+
+    if json_output:
+        # Emit a single JSON line — consumed by the Electron GUI poller
+        all_modules = ("metadata", "technical", "local_ai", "cloud_ai", "aesthetic", "embedding")
+        modules_out: dict[str, dict[str, int]] = {}
+        for mod in all_modules:
+            s = module_stats.get(mod, {})
+            modules_out[mod] = {
+                "pending": s.get("pending", 0),
+                "running": s.get("running", 0),
+                "done":    s.get("done", 0),
+                "failed":  s.get("failed", 0),
+                "skipped": s.get("skipped", 0),
+            }
+        payload = {
+            "total_images": total_images,
+            "modules": modules_out,
+            "totals": {
+                "pending": totals.get("pending", 0),
+                "running": totals.get("running", 0),
+                "done":    totals.get("done", 0),
+                "failed":  totals.get("failed", 0),
+                "skipped": totals.get("skipped", 0),
+            },
+        }
+        print(_json.dumps(payload), flush=True)
+        return
+
     console.print(f"\n[bold]Database:[/bold] {total_images} images registered\n")
 
-    module_stats = queue.stats()
     if not module_stats:
         console.print("[yellow]No jobs in queue.[/yellow]")
         return
@@ -643,7 +676,6 @@ def status() -> None:
 
     console.print(table)
 
-    totals = queue.total_stats()
     console.print(
         f"\n[bold]Total:[/bold] "
         f"Pending: {totals.get('pending', 0)}  "
@@ -652,6 +684,63 @@ def status() -> None:
         f"Failed: {totals.get('failed', 0)}  "
         f"Skipped: {totals.get('skipped', 0)}"
     )
+
+
+@app.command(name="queue-clear")
+def queue_clear(
+    folder: Optional[str] = typer.Argument(
+        None,
+        help="Only clear jobs for images whose path starts with this folder. "
+             "Omit to clear all jobs.",
+    ),
+    status_filter: str = typer.Option(
+        "pending,running",
+        "--status",
+        help="Comma-separated statuses to delete (default: pending,running).",
+    ),
+) -> None:
+    """Delete queued jobs — used by the GUI after a Stop action.
+
+    By default removes only ``pending`` and ``running`` jobs so that
+    already-completed results are preserved.  Pass ``--status all`` to
+    wipe everything.
+
+    Examples::
+
+        imganalyzer queue-clear /photos/2024
+        imganalyzer queue-clear /photos/2024 --status pending,running,failed
+        imganalyzer queue-clear --status all
+    """
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from imganalyzer.db.connection import get_db
+    from imganalyzer.db.queue import JobQueue
+
+    conn = get_db()
+    queue = JobQueue(conn)
+
+    if status_filter.strip().lower() == "all":
+        statuses: list[str] | None = None
+    else:
+        statuses = [s.strip() for s in status_filter.split(",") if s.strip()]
+
+    if folder:
+        deleted = queue.clear_by_folder(folder, statuses)
+        scope = f"folder '{folder}'"
+    else:
+        if statuses:
+            placeholders = ",".join("?" * len(statuses))
+            cur = conn.execute(
+                f"DELETE FROM job_queue WHERE status IN ({placeholders})", statuses
+            )
+            conn.commit()
+            deleted = cur.rowcount
+        else:
+            deleted = queue.clear_all()
+        scope = "all images"
+
+    console.print(f"[green]Cleared {deleted} job(s) for {scope}.[/green]")
 
 
 @app.command()

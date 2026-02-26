@@ -1,6 +1,7 @@
 """Batch processor — scan folders, register images, enqueue jobs."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -72,9 +73,10 @@ class BatchProcessor:
             console.print("[yellow]No image files found.[/yellow]")
             return stats
 
-        console.print(f"[cyan]Found {len(all_files)} image file(s). Registering...[/cyan]")
+        total = len(all_files)
+        console.print(f"[cyan]Found {total} image file(s). Registering...[/cyan]")
 
-        for path in all_files:
+        for idx, path in enumerate(all_files, start=1):
             file_path_str = str(path.resolve())
 
             # Check if already registered
@@ -108,6 +110,19 @@ class BatchProcessor:
                     stats["enqueued"] += 1
                 else:
                     stats["skipped"] += 1
+
+            # Emit structured progress line for the Electron UI
+            print(
+                "[PROGRESS] " + json.dumps({
+                    "scanned": idx,
+                    "total": total,
+                    "registered": stats["registered"],
+                    "enqueued": stats["enqueued"],
+                    "skipped": stats["skipped"],
+                    "current": file_path_str,
+                }),
+                flush=True,
+            )
 
         console.print(
             f"[green]Ingest complete.[/green] "
