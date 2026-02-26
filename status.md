@@ -1,3 +1,23 @@
+# Project Status
+
+## Latest Changes (committed `c7d0895`)
+
+### Skip inaccessible images in `analyze` command
+- **File:** `cli.py`
+- Added `skipped = 0` counter and explicit `img_path.exists()` check before analysis loop body.
+- Files that don't exist on disk are logged (`Skip: <name> — file not found or inaccessible`) and counted as skipped (not errors).
+- XMP-exists skip also now increments `skipped`.
+- Final summary line updated: shows `N/M file(s) processed, K skipped` when skipped count > 0.
+
+## Previous Changes (committed `70cc815`)
+
+### Aesthetic reason persisted end-to-end
+- `SYSTEM_PROMPT_WITH_AESTHETIC` updated to request `aesthetic_reason` field from GPT-4.1.
+- `_persist_result_to_db` now pops `aesthetic_reason` from `cloud_data` and passes it to `upsert_aesthetic`.
+- All 17 DB rows have `aesthetic_score`, `aesthetic_label`, and `aesthetic_reason` populated.
+
+---
+
 # Phase 8 — Integration & Testing Status
 
 ## Completed Steps

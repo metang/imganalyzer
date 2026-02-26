@@ -1,19 +1,13 @@
-# Phase 8 — Integration & Testing TODO
+# Project TODO
 
-## ~~8.1 Fix sqlite3 autocommit/transaction issue in connection.py~~ DONE
+## ~~Phase 8 — Integration & Testing~~ COMPLETE
 
-## ~~8.2 Update old face CLI commands to use DB repository~~ DONE
+All 8 integration steps done. See `status.md` for details.
 
-## ~~8.3 Wire XMP output into batch pipeline~~ DONE
-
-## ~~8.4 Integrate Analyzer class — single-file `analyze` also writes to DB~~ DONE
-
-## ~~8.5 Update `__init__.py` exports~~ SKIPPED (low priority, leave as-is)
-
-## ~~8.6 End-to-end testing~~ DONE
-- 18 new tests added to `tests/test_imganalyzer.py`
-- All pass. Full suite: 50 pass, 9 fail (all pre-existing).
+## ~~Skip inaccessible images in `analyze` command~~ DONE (`c7d0895`)
 
 ---
 
-## Phase 8 COMPLETE. All integration steps done.
+## Open items (no priority assigned)
+
+- (none currently)
