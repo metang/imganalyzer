@@ -57,22 +57,22 @@ function XmpResults({ xmp }: { xmp: XmpData }) {
   return (
     <div className="overflow-y-auto">
       {/* AI Section */}
-      <Section title="AI Analysis">
-        {xmp.description && <Row label="Description" value={xmp.description} />}
-        {xmp.sceneType && <Row label="Scene" value={xmp.sceneType} />}
-        {xmp.mainSubject && <Row label="Subject" value={xmp.mainSubject} />}
-        {xmp.lighting && <Row label="Lighting" value={xmp.lighting} />}
-        {xmp.mood && <Row label="Mood" value={xmp.mood} />}
+      <Section title="AI Analysis · Local">
+        {xmp.description && <Row label="Local Description" value={xmp.description} />}
+        {xmp.sceneType && <Row label="Local Scene" value={xmp.sceneType} />}
+        {xmp.mainSubject && <Row label="Local Subject" value={xmp.mainSubject} />}
+        {xmp.lighting && <Row label="Local Lighting" value={xmp.lighting} />}
+        {xmp.mood && <Row label="Local Mood" value={xmp.mood} />}
         {xmp.ocrText && <Row label="OCR Text" value={xmp.ocrText} />}
         {xmp.detectedObjects && xmp.detectedObjects.length > 0 && (
           <div className="py-1 border-b border-neutral-800">
-            <span className="text-neutral-500 text-xs block mb-1">Objects</span>
+            <span className="text-neutral-500 text-xs block mb-1">Local Objects</span>
             <TagList items={xmp.detectedObjects} />
           </div>
         )}
         {xmp.keywords && xmp.keywords.length > 0 && (
           <div className="py-1 border-b border-neutral-800">
-            <span className="text-neutral-500 text-xs block mb-1">Keywords</span>
+            <span className="text-neutral-500 text-xs block mb-1">Local Keywords</span>
             <TagList items={xmp.keywords} />
           </div>
         )}

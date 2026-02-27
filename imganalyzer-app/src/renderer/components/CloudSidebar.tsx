@@ -73,7 +73,7 @@ function CloudIcon() {
 function CloudResults({ xmp }: { xmp: XmpData }) {
   return (
     <div className="overflow-y-auto">
-      <Section title="AI Analysis">
+      <Section title="AI Analysis · Cloud">
         {xmp.aestheticScore !== undefined && (
           <div className="py-1 border-b border-neutral-800">
             <div className="flex justify-between mb-1">
@@ -85,14 +85,14 @@ function CloudResults({ xmp }: { xmp: XmpData }) {
             <ScoreBar value={xmp.aestheticScore} />
           </div>
         )}
-        {xmp.description && <Row label="Description" value={xmp.description} />}
-        {xmp.sceneType   && <Row label="Scene"       value={xmp.sceneType} />}
-        {xmp.mainSubject && <Row label="Subject"     value={xmp.mainSubject} />}
-        {xmp.lighting    && <Row label="Lighting"    value={xmp.lighting} />}
-        {xmp.mood        && <Row label="Mood"        value={xmp.mood} />}
+        {xmp.description && <Row label="Cloud Description" value={xmp.description} />}
+        {xmp.sceneType   && <Row label="Cloud Scene"       value={xmp.sceneType} />}
+        {xmp.mainSubject && <Row label="Cloud Subject"     value={xmp.mainSubject} />}
+        {xmp.lighting    && <Row label="Cloud Lighting"    value={xmp.lighting} />}
+        {xmp.mood        && <Row label="Cloud Mood"        value={xmp.mood} />}
         {xmp.keywords && xmp.keywords.length > 0 && (
           <div className="py-1 border-b border-neutral-800">
-            <span className="text-neutral-500 text-xs block mb-1">Keywords</span>
+            <span className="text-neutral-500 text-xs block mb-1">Cloud Keywords</span>
             <TagList items={xmp.keywords} />
           </div>
         )}
