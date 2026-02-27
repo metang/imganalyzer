@@ -1,27 +1,21 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
-import { useBatchProcess } from '../hooks/useBatchProcess'
+import { useState, useCallback } from 'react'
 import { PassSelector, defaultPassSelectorValue, resolveModuleKeys } from './PassSelector'
 import type { PassSelectorValue } from './PassSelector'
 import { ProgressDashboard } from './ProgressDashboard'
 import { LiveResultsFeed } from './LiveResultsFeed'
 import { ConfirmStopDialog } from './ConfirmStopDialog'
+import type { UseBatchProcessReturn } from '../hooks/useBatchProcess'
 import type { BatchIngestProgress } from '../global'
 
-// ── Phase routing ─────────────────────────────────────────────────────────────
+// ── Shared props type ─────────────────────────────────────────────────────────
 
-type Phase = 'config' | 'ingesting' | 'active'
-
-function derivePhase(status: string): Phase {
-  switch (status) {
-    case 'ingesting': return 'ingesting'
-    case 'running':
-    case 'paused':
-    case 'done':
-    case 'error':
-      return 'active'
-    default:
-      return 'config'
-  }
+/** Props accepted by both BatchConfigView and BatchRunView. */
+export interface BatchViewProps {
+  batch: UseBatchProcessReturn
+  /** Pre-fill the folder path from the gallery tab. */
+  initialFolder?: string
+  /** Called when a batch starts so the parent can switch to the Running tab. */
+  onBatchStarted?(): void
 }
 
 // ── Config panel ──────────────────────────────────────────────────────────────
@@ -33,7 +27,6 @@ interface ConfigPanelProps {
   onPassSelChange(v: PassSelectorValue): void
   onStart(): void
   error: string | null
-  /** Set when a previous ingest returned 0 enqueued jobs (all already done). */
   nothingToRun: boolean
 }
 
@@ -118,16 +111,11 @@ function ConfigPanel({
 
 // ── Ingest panel ──────────────────────────────────────────────────────────────
 
-interface IngestPanelProps {
-  progress: BatchIngestProgress | null
-}
-
-function IngestPanel({ progress }: IngestPanelProps) {
+function IngestPanel({ progress }: { progress: BatchIngestProgress | null }) {
   const pct = progress && progress.total > 0
     ? Math.round((progress.scanned / progress.total) * 100)
     : 0
 
-  // Strip directory — show only the filename
   const currentName = progress?.current
     ? progress.current.replace(/^.*[\\/]/, '')
     : ''
@@ -136,7 +124,6 @@ function IngestPanel({ progress }: IngestPanelProps) {
     <div className="flex flex-col gap-4 max-w-2xl w-full mx-auto py-6 px-4">
       <h2 className="text-base font-semibold text-neutral-200">Scanning folder…</h2>
 
-      {/* Spinner + label */}
       <div className="flex items-center gap-2 text-sm text-neutral-400">
         <div className="w-3.5 h-3.5 border-2 border-neutral-600 border-t-blue-400 rounded-full animate-spin shrink-0" />
         {progress
@@ -145,7 +132,6 @@ function IngestPanel({ progress }: IngestPanelProps) {
         }
       </div>
 
-      {/* Progress bar */}
       <div className="w-full bg-neutral-800 rounded-full h-2 overflow-hidden">
         <div
           className="h-2 bg-blue-500 rounded-full transition-all duration-200"
@@ -153,7 +139,6 @@ function IngestPanel({ progress }: IngestPanelProps) {
         />
       </div>
 
-      {/* Stats row */}
       {progress && (
         <div className="grid grid-cols-4 gap-2 text-center">
           {(
@@ -174,7 +159,6 @@ function IngestPanel({ progress }: IngestPanelProps) {
         </div>
       )}
 
-      {/* Current file being processed */}
       {currentName && (
         <p className="text-xs text-neutral-500 truncate" title={progress?.current}>
           {currentName}
@@ -184,123 +168,86 @@ function IngestPanel({ progress }: IngestPanelProps) {
   )
 }
 
-// ── Active panel (running / paused / done / error) ────────────────────────────
+// ── BatchConfigView ───────────────────────────────────────────────────────────
 
-interface ActivePanelProps {
-  stats: ReturnType<typeof useBatchProcess>['stats']
-  results: ReturnType<typeof useBatchProcess>['results']
-  ingestSummary: ReturnType<typeof useBatchProcess>['ingestSummary']
-  /** Non-null when we auto-resumed a previous session on mount. */
-  resumeBanner: string | null
-  onDismissBanner(): void
-  onPause(): void
-  onResume(): void
-  onRequestStop(): void
-  onRetryFailed(modules: string[]): void
-  onClearQueue(): void
-}
+/**
+ * Renders the config + ingest phases.
+ * When the user starts a batch, calls onBatchStarted so the parent can
+ * navigate to the Running tab.
+ */
+export function BatchConfigView({ batch, initialFolder = '', onBatchStarted }: BatchViewProps) {
+  const { stats, ingestProgress, ingestSummary, error } = batch
 
-function ActivePanel({
-  stats,
-  results,
-  ingestSummary,
-  resumeBanner,
-  onDismissBanner,
-  onPause,
-  onResume,
-  onRequestStop,
-  onRetryFailed,
-  onClearQueue,
-}: ActivePanelProps) {
-  return (
-    <div className="flex flex-col gap-4 h-full overflow-hidden px-4 py-4">
-      {/* Auto-resume banner */}
-      {resumeBanner && (
-        <div className="flex items-center justify-between gap-2 text-sm text-blue-300 bg-blue-900/20 border border-blue-800 rounded-lg px-3 py-2">
-          <span>{resumeBanner}</span>
-          <button
-            onClick={onDismissBanner}
-            className="text-blue-400 hover:text-blue-200 transition-colors text-xs shrink-0"
-            aria-label="Dismiss"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
+  const [folder, setFolder] = useState(initialFolder)
+  const [passSel, setPassSel] = useState<PassSelectorValue>(defaultPassSelectorValue)
 
-      {ingestSummary && (
-        <p className="text-xs text-neutral-500">
-          Ingest: {ingestSummary.registered.toLocaleString()} registered,{' '}
-          {ingestSummary.enqueued.toLocaleString()} enqueued,{' '}
-          {ingestSummary.skipped.toLocaleString()} skipped
-        </p>
-      )}
+  const phase = stats.status === 'ingesting' ? 'ingesting' : 'config'
 
-      <ProgressDashboard
-        stats={stats}
-        onPause={onPause}
-        onResume={onResume}
-        onStop={onRequestStop}
-        onRetryFailed={onRetryFailed}
-        onClearQueue={onClearQueue}
-      />
+  const handleStart = useCallback(async () => {
+    const modules = resolveModuleKeys(passSel.selectedKeys)
+    // Kick off the batch — this transitions status to 'ingesting' then 'running'
+    batch.startBatch({
+      folder,
+      modules,
+      workers: passSel.workers,
+      cloudWorkers: passSel.cloudWorkers,
+      cloudProvider: passSel.cloudProvider,
+      recursive: passSel.recursive,
+      noHash: passSel.noHash,
+    }).then(() => {
+      // startBatch resolves after ingest; if something was enqueued the status
+      // will have moved to 'running' — let the parent switch tabs.
+    })
+    // Switch the parent to Running tab as soon as ingest begins
+    onBatchStarted?.()
+  }, [batch, folder, passSel, onBatchStarted])
 
-      <div className="flex-1 flex flex-col min-h-0 border-t border-neutral-800 pt-3">
-        <p className="text-xs text-neutral-500 mb-1.5">
-          Live results (last 200)
-        </p>
-        <LiveResultsFeed results={results} />
+  if (phase === 'ingesting') {
+    return (
+      <div className="flex-1 overflow-y-auto">
+        <IngestPanel progress={ingestProgress} />
       </div>
+    )
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto">
+      <ConfigPanel
+        folder={folder}
+        onFolderChange={setFolder}
+        passSel={passSel}
+        onPassSelChange={setPassSel}
+        onStart={handleStart}
+        error={error}
+        nothingToRun={ingestSummary !== null && ingestSummary.enqueued === 0}
+      />
     </div>
   )
 }
 
-// ── Root BatchView ────────────────────────────────────────────────────────────
+// ── BatchRunView ──────────────────────────────────────────────────────────────
 
-interface BatchViewProps {
-  initialFolder?: string
+interface BatchRunViewProps extends BatchViewProps {
+  /** Non-null when we auto-resumed a previous session on mount. */
+  resumeBanner: string | null
+  onDismissBanner(): void
 }
 
-export function BatchView({ initialFolder = '' }: BatchViewProps) {
-  const batch = useBatchProcess()
-  const { stats, results, ingestProgress, ingestSummary, error } = batch
+/**
+ * Renders the active/running phase: ProgressDashboard + LiveResultsFeed.
+ * Also handles the ConfirmStopDialog overlay.
+ */
+export function BatchRunView({
+  batch,
+  initialFolder = '',
+  resumeBanner,
+  onDismissBanner,
+}: BatchRunViewProps) {
+  const { stats, results, ingestSummary } = batch
 
-  const [folder, setFolder] = useState(initialFolder)
-  const [passSel, setPassSel] = useState<PassSelectorValue>(defaultPassSelectorValue)
   const [showStopDialog, setShowStopDialog] = useState(false)
-  const [resumeBanner, setResumeBanner] = useState<string | null>(null)
-
-  // Auto-resume any pending/running jobs from a previous session (runs once on mount)
-  const didCheckRef = useRef(false)
-  useEffect(() => {
-    if (didCheckRef.current) return
-    didCheckRef.current = true
-    ;(async () => {
-      const resumed = await batch.resumePending(passSel.workers, passSel.cloudProvider)
-      if (resumed) {
-        setResumeBanner('Resuming unfinished jobs from a previous session…')
-      }
-    })()
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const phase = derivePhase(stats.status)
-
-  const handleStart = useCallback(async () => {
-    // Resolve UI keys → deduplicated CLI module keys
-    const modules = resolveModuleKeys(passSel.selectedKeys)
-    await batch.startBatch({
-      folder,
-      modules,
-      workers: passSel.workers,
-      cloudProvider: passSel.cloudProvider,
-      recursive: passSel.recursive,
-      noHash: passSel.noHash,
-    })
-  }, [batch, folder, passSel])
-
-  const handleRequestStop = useCallback(() => {
-    setShowStopDialog(true)
-  }, [])
+  // Derive the folder from initialFolder (passed from App which tracks gallery folder)
+  const folder = initialFolder
 
   const handleConfirmStop = useCallback(async () => {
     setShowStopDialog(false)
@@ -313,42 +260,46 @@ export function BatchView({ initialFolder = '' }: BatchViewProps) {
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      {phase === 'config' && (
-        <div className="flex-1 overflow-y-auto">
-          <ConfigPanel
-            folder={folder}
-            onFolderChange={setFolder}
-            passSel={passSel}
-            onPassSelChange={setPassSel}
-            onStart={handleStart}
-            error={error}
-            nothingToRun={ingestSummary !== null && ingestSummary.enqueued === 0}
-          />
-        </div>
-      )}
+      <div className="flex flex-col gap-4 h-full overflow-hidden px-4 py-4">
 
-      {phase === 'ingesting' && (
-        <div className="flex-1 overflow-y-auto">
-          <IngestPanel progress={ingestProgress} />
-        </div>
-      )}
+        {/* Auto-resume banner */}
+        {resumeBanner && (
+          <div className="flex items-center justify-between gap-2 text-sm text-blue-300 bg-blue-900/20 border border-blue-800 rounded-lg px-3 py-2">
+            <span>{resumeBanner}</span>
+            <button
+              onClick={onDismissBanner}
+              className="text-blue-400 hover:text-blue-200 transition-colors text-xs shrink-0"
+              aria-label="Dismiss"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
-      {phase === 'active' && (
-        <div className="flex-1 flex flex-col min-h-0">
-          <ActivePanel
-            stats={stats}
-            results={results}
-            ingestSummary={ingestSummary}
-            resumeBanner={resumeBanner}
-            onDismissBanner={() => setResumeBanner(null)}
-            onPause={batch.pause}
-            onResume={batch.resume}
-            onRequestStop={handleRequestStop}
-            onRetryFailed={batch.retryFailed}
-            onClearQueue={handleClearQueue}
-          />
+        {ingestSummary && (
+          <p className="text-xs text-neutral-500">
+            Ingest: {ingestSummary.registered.toLocaleString()} registered,{' '}
+            {ingestSummary.enqueued.toLocaleString()} enqueued,{' '}
+            {ingestSummary.skipped.toLocaleString()} skipped
+          </p>
+        )}
+
+        <ProgressDashboard
+          stats={stats}
+          onPause={batch.pause}
+          onResume={batch.resume}
+          onStop={() => setShowStopDialog(true)}
+          onRetryFailed={batch.retryFailed}
+          onClearQueue={handleClearQueue}
+        />
+
+        <div className="flex-1 flex flex-col min-h-0 border-t border-neutral-800 pt-3">
+          <p className="text-xs text-neutral-500 mb-1.5">
+            Live results (last 200)
+          </p>
+          <LiveResultsFeed results={results} />
         </div>
-      )}
+      </div>
 
       {showStopDialog && (
         <ConfirmStopDialog

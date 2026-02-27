@@ -40,6 +40,7 @@ const CLOUD_PROVIDERS = [
 export interface PassSelectorValue {
   selectedKeys: Set<string>
   workers: number
+  cloudWorkers: number
   cloudProvider: string
   recursive: boolean
   noHash: boolean
@@ -68,7 +69,7 @@ interface Props {
 }
 
 export function PassSelector({ value, onChange, disabled }: Props) {
-  const { selectedKeys, workers, cloudProvider, recursive, noHash } = value
+  const { selectedKeys, workers, cloudWorkers, cloudProvider, recursive, noHash } = value
 
   const toggleKey = (uiKey: string) => {
     const next = new Set(selectedKeys)
@@ -116,9 +117,12 @@ export function PassSelector({ value, onChange, disabled }: Props) {
       <div className="flex flex-col gap-3">
         <p className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">Options</p>
 
-        {/* Workers slider */}
+        {/* Local workers slider — metadata & technical */}
         <div className="flex items-center gap-3">
-          <label className="text-sm text-neutral-300 w-28 shrink-0">Workers</label>
+          <label className="text-sm text-neutral-300 w-36 shrink-0">
+            Local workers
+            <span className="block text-xs text-neutral-600 font-normal">metadata, technical</span>
+          </label>
           <input
             type="range"
             min={1}
@@ -132,9 +136,28 @@ export function PassSelector({ value, onChange, disabled }: Props) {
           <span className="text-sm text-neutral-300 w-5 text-right">{workers}</span>
         </div>
 
+        {/* Cloud workers slider — cloud_ai & aesthetic */}
+        <div className="flex items-center gap-3">
+          <label className="text-sm text-neutral-300 w-36 shrink-0">
+            Cloud workers
+            <span className="block text-xs text-neutral-600 font-normal">cloud_ai, aesthetic</span>
+          </label>
+          <input
+            type="range"
+            min={1}
+            max={16}
+            step={1}
+            value={cloudWorkers}
+            disabled={disabled}
+            onChange={(e) => onChange({ ...value, cloudWorkers: Number(e.target.value) })}
+            className="flex-1 accent-blue-500 disabled:opacity-50"
+          />
+          <span className="text-sm text-neutral-300 w-5 text-right">{cloudWorkers}</span>
+        </div>
+
         {/* Cloud provider dropdown */}
         <div className="flex items-center gap-3">
-          <label className="text-sm text-neutral-300 w-28 shrink-0">Cloud provider</label>
+          <label className="text-sm text-neutral-300 w-36 shrink-0">Cloud provider</label>
           <select
             value={cloudProvider}
             disabled={disabled}
@@ -179,14 +202,15 @@ export function PassSelector({ value, onChange, disabled }: Props) {
   )
 }
 
-/** Default value — all passes enabled, 4 workers. */
+/** Default value — all passes enabled, 2 local workers, 4 cloud workers. */
 export function defaultPassSelectorValue(): PassSelectorValue {
   return {
     selectedKeys: new Set<string>([
       'metadata', 'technical', 'caption', 'objects', 'ocr', 'faces',
       'cloud_ai', 'aesthetic', 'embedding',
     ]),
-    workers: 4,
+    workers: 2,
+    cloudWorkers: 4,
     cloudProvider: 'copilot',
     recursive: true,
     noHash: false,

@@ -41,6 +41,7 @@ export interface SessionConfig {
   folder: string
   modules: string[]
   workers: number
+  cloudWorkers: number
   cloudProvider: string
   recursive: boolean
   noHash: boolean
@@ -202,7 +203,8 @@ function recordCompletion(durationMs: number): void {
 /** Compute derived metrics from the completion window. */
 function computeMetrics(
   pending: number,
-  workers: number
+  workers: number,
+  cloudWorkers: number
 ): { imagesPerSec: number; avgMsPerImage: number; estimatedMs: number } {
   const now = Date.now()
   const cutoff = now - RATE_WINDOW_MS
@@ -216,7 +218,7 @@ function computeMetrics(
       ? lastN.reduce((sum, e) => sum + e.durationMs, 0) / lastN.length
       : 0
 
-  const effectiveWorkers = Math.max(1, workers)
+  const effectiveWorkers = Math.max(1, workers + cloudWorkers)
   const estimatedMs =
     avgMsPerImage > 0 && pending > 0
       ? (pending * avgMsPerImage) / effectiveWorkers
@@ -239,8 +241,9 @@ async function doPoll(): Promise<void> {
     }
 
     const workers = sessionConfig?.workers ?? 1
+    const cloudWorkers = sessionConfig?.cloudWorkers ?? 4
     const pending = data.totals.pending ?? 0
-    const metrics = computeMetrics(pending, workers)
+    const metrics = computeMetrics(pending, workers, cloudWorkers)
 
     const stats: BatchStats = {
       status: batchStatus,
@@ -413,19 +416,21 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       workers: number,
       cloudProvider = 'copilot',
       recursive = true,
-      noHash = false
+      noHash = false,
+      cloudWorkers = 4
     ): Promise<void> => {
       killRunProcess()
 
-      sessionConfig = { folder, modules, workers, cloudProvider, recursive, noHash }
+      sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash }
       sessionStartMs = Date.now()
       completionWindow.length = 0
       batchStatus = 'running'
 
       const args: string[] = [
         'run',
-        '--workers', String(workers),
-        '--cloud',   cloudProvider,
+        '--workers',       String(workers),
+        '--cloud-workers', String(cloudWorkers),
+        '--cloud',         cloudProvider,
         '--no-xmp',
         '--verbose',
       ]
@@ -478,12 +483,13 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   // ── batch:resume ──────────────────────────────────────────────────────────
   ipcMain.handle('batch:resume', async (): Promise<void> => {
     if (!sessionConfig) return
-    const { workers, cloudProvider } = sessionConfig
+    const { workers, cloudWorkers, cloudProvider } = sessionConfig
 
     const args: string[] = [
       'run',
-      '--workers', String(workers),
-      '--cloud',   cloudProvider,
+      '--workers',       String(workers),
+      '--cloud-workers', String(cloudWorkers),
+      '--cloud',         cloudProvider,
       '--no-xmp',
       '--verbose',
     ]
@@ -570,12 +576,13 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   // (same session), or sensible defaults (workers=1, no cloud) otherwise.
   ipcMain.handle(
     'batch:resume-pending',
-    async (_evt, workers = 1, cloudProvider = 'copilot'): Promise<void> => {
+    async (_evt, workers = 1, cloudProvider = 'copilot', cloudWorkers = 4): Promise<void> => {
       if (batchStatus === 'running') return  // already running
 
       killRunProcess()
 
-      const w = sessionConfig?.workers ?? workers
+      const w  = sessionConfig?.workers      ?? workers
+      const cw = sessionConfig?.cloudWorkers ?? cloudWorkers
       const cloud = sessionConfig?.cloudProvider ?? cloudProvider
 
       sessionStartMs = Date.now()
@@ -584,8 +591,9 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
       const args: string[] = [
         'run',
-        '--workers', String(w),
-        '--cloud',   cloud,
+        '--workers',       String(w),
+        '--cloud-workers', String(cw),
+        '--cloud',         cloud,
         '--no-xmp',
         '--verbose',
       ]
@@ -645,7 +653,8 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       }
 
       // Spawn the worker to process the newly-enqueued jobs
-      const w     = sessionConfig?.workers ?? 1
+      const w  = sessionConfig?.workers      ?? 1
+      const cw = sessionConfig?.cloudWorkers ?? 4
       const cloud = sessionConfig?.cloudProvider ?? 'copilot'
 
       sessionStartMs = Date.now()
@@ -654,8 +663,9 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
       const args: string[] = [
         'run',
-        '--workers', String(w),
-        '--cloud',   cloud,
+        '--workers',       String(w),
+        '--cloud-workers', String(cw),
+        '--cloud',         cloud,
         '--no-xmp',
         '--verbose',
       ]

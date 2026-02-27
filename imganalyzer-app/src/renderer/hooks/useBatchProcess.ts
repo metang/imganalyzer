@@ -35,6 +35,7 @@ export interface BatchConfig {
   folder: string
   modules: ModuleKey[]
   workers: number
+  cloudWorkers: number
   cloudProvider: string
   recursive: boolean
   noHash: boolean
@@ -56,7 +57,7 @@ export interface UseBatchProcessReturn {
 
   startBatch(config: BatchConfig): Promise<void>
   /** Resume any pending/running jobs left over from a previous session. */
-  resumePending(workers?: number, cloudProvider?: string): Promise<boolean>
+  resumePending(workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<boolean>
   /** Re-enqueue all failed jobs for the given modules and re-run. */
   retryFailed(modules: string[]): Promise<void>
   /** Wipe the entire job queue and reset to idle. Returns number of deleted jobs. */
@@ -141,7 +142,8 @@ export function useBatchProcess(): UseBatchProcessReturn {
         config.workers,
         config.cloudProvider,
         config.recursive,
-        config.noHash
+        config.noHash,
+        config.cloudWorkers
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -178,7 +180,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
    * any exist, re-spawn the worker process.  Returns true if jobs were found
    * and the worker was resumed, false otherwise.
    */
-  const resumePending = useCallback(async (workers?: number, cloudProvider?: string): Promise<boolean> => {
+  const resumePending = useCallback(async (workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<boolean> => {
     try {
       const { pending, running } = await window.api.batchCheckPending()
       if (pending + running === 0) return false
@@ -187,7 +189,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
       // The 1-second poll tick will overwrite with real stats.
       setStats((prev) => ({ ...prev, status: 'running' as BatchStatus }))
 
-      await window.api.batchResumePending(workers, cloudProvider)
+      await window.api.batchResumePending(workers, cloudProvider, cloudWorkers)
       return true
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))

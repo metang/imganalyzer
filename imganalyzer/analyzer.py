@@ -11,14 +11,17 @@ from rich.console import Console
 console = Console()
 _log = logging.getLogger(__name__)
 
-# All RAW extensions supported by LibRaw/rawpy
+# All RAW extensions supported by LibRaw/rawpy.
+# NOTE: .tif / .tiff are standard TIFF files — Pillow handles them directly.
+# They must NOT be listed here or they will be routed through rawpy (LibRaw),
+# which does not support TIFF and raises LibRawFileUnsupportedError.
 RAW_EXTENSIONS = {
     ".3fr", ".ari", ".arw", ".bay", ".braw", ".crw", ".cr2", ".cr3",
     ".cap", ".data", ".dcs", ".dcr", ".dng", ".drf", ".eip", ".erf",
     ".fff", ".gpr", ".iiq", ".k25", ".kdc", ".mdc", ".mef", ".mos",
     ".mrw", ".nef", ".nrw", ".obm", ".orf", ".pef", ".ptx", ".pxn",
     ".r3d", ".raf", ".raw", ".rwl", ".rw2", ".rwz", ".sr2", ".srf",
-    ".srw", ".tif", ".x3f",
+    ".srw", ".x3f",
 }
 
 

@@ -226,13 +226,14 @@ declare global {
         workers: number,
         cloudProvider: string,
         recursive: boolean,
-        noHash: boolean
+        noHash: boolean,
+        cloudWorkers: number
       ): Promise<void>
       batchPause(): Promise<void>
       batchResume(): Promise<void>
       batchStop(folder: string): Promise<void>
       batchCheckPending(): Promise<{ pending: number; running: number }>
-      batchResumePending(workers?: number, cloudProvider?: string): Promise<void>
+      batchResumePending(workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<void>
       batchRetryFailed(modules: string[]): Promise<void>
       batchQueueClearAll(): Promise<{ deleted: number }>
       onBatchTick(cb: (stats: BatchStats) => void): () => void

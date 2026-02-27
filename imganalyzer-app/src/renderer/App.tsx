@@ -1,12 +1,13 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import type { ImageFile } from './global'
 import { FolderPicker } from './components/FolderPicker'
 import { Gallery } from './components/Gallery'
 import { Lightbox } from './components/Lightbox'
-import { BatchView } from './components/BatchView'
+import { BatchConfigView, BatchRunView } from './components/BatchView'
 import { SearchView } from './components/SearchView'
+import { useBatchProcess } from './hooks/useBatchProcess'
 
-type Tab = 'gallery' | 'batch' | 'search'
+type Tab = 'gallery' | 'batch' | 'running' | 'search'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('gallery')
@@ -16,6 +17,35 @@ export default function App() {
   const [images, setImages] = useState<ImageFile[]>([])
   const [lightboxImage, setLightboxImage] = useState<ImageFile | null>(null)
   const [loading, setLoading] = useState(false)
+
+  // Batch state — lifted here so it stays mounted across tab switches
+  const batch = useBatchProcess()
+  const [resumeBanner, setResumeBanner] = useState<string | null>(null)
+
+  // Auto-resume any pending/running jobs from a previous session (runs once on mount)
+  const didCheckRef = useRef(false)
+  useEffect(() => {
+    if (didCheckRef.current) return
+    didCheckRef.current = true
+    ;(async () => {
+      const resumed = await batch.resumePending()
+      if (resumed) {
+        setResumeBanner('Resuming unfinished jobs from a previous session…')
+        setTab('running')
+      }
+    })()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-switch to Running tab whenever the batch transitions to running/paused/done/error
+  const prevStatusRef = useRef(batch.stats.status)
+  useEffect(() => {
+    const prev = prevStatusRef.current
+    const curr = batch.stats.status
+    prevStatusRef.current = curr
+    if (prev !== curr && (curr === 'running' || curr === 'paused' || curr === 'done' || curr === 'error')) {
+      setTab('running')
+    }
+  }, [batch.stats.status])
 
   const handleFolderChange = useCallback(async (path: string) => {
     setFolderPath(path)
@@ -32,25 +62,50 @@ export default function App() {
     }
   }, [])
 
+  // Whether there is an active / paused / errored batch in progress
+  const batchIsActive =
+    batch.stats.status === 'running' ||
+    batch.stats.status === 'paused' ||
+    batch.stats.status === 'ingesting' ||
+    batch.stats.status === 'error'
+
   return (
     <div className="h-full flex flex-col">
 
       {/* ── Tab bar ──────────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-1 px-3 pt-2 pb-0 border-b border-neutral-800 shrink-0">
-        {(['gallery', 'batch', 'search'] as Tab[]).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`
-              px-4 py-1.5 text-sm rounded-t-md transition-colors capitalize
-              ${tab === t
-                ? 'bg-neutral-800 text-neutral-100 border border-b-transparent border-neutral-700'
-                : 'text-neutral-500 hover:text-neutral-300'}
-            `}
-          >
-            {t === 'gallery' ? 'Gallery' : t === 'batch' ? 'Batch' : 'Search'}
-          </button>
-        ))}
+
+        {/* Gallery */}
+        <TabButton active={tab === 'gallery'} onClick={() => setTab('gallery')}>
+          Gallery
+        </TabButton>
+
+        {/* Batch */}
+        <TabButton active={tab === 'batch'} onClick={() => setTab('batch')}>
+          Batch
+        </TabButton>
+
+        {/* Running — shows an animated dot when a batch is in progress */}
+        <TabButton active={tab === 'running'} onClick={() => setTab('running')}>
+          <span className="flex items-center gap-1.5">
+            Running
+            {batchIsActive && (
+              <span className={`
+                inline-block w-2 h-2 rounded-full shrink-0
+                ${batch.stats.status === 'error'
+                  ? 'bg-red-500'
+                  : batch.stats.status === 'paused'
+                  ? 'bg-yellow-500'
+                  : 'bg-emerald-500 animate-pulse'}
+              `} />
+            )}
+          </span>
+        </TabButton>
+
+        {/* Search */}
+        <TabButton active={tab === 'search'} onClick={() => setTab('search')}>
+          Search
+        </TabButton>
       </div>
 
       {/* ── Gallery tab ───────────────────────────────────────────────────────── */}
@@ -94,10 +149,26 @@ export default function App() {
         </>
       )}
 
-      {/* ── Batch tab ─────────────────────────────────────────────────────────── */}
+      {/* ── Batch tab (config + ingest phases) ───────────────────────────────── */}
       {tab === 'batch' && (
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          <BatchConfigView
+            batch={batch}
+            initialFolder={folderPath ?? ''}
+            onBatchStarted={() => setTab('running')}
+          />
+        </div>
+      )}
+
+      {/* ── Running tab (active/paused/done/error phases) ─────────────────────── */}
+      {tab === 'running' && (
         <div className="flex-1 min-h-0 overflow-hidden">
-          <BatchView initialFolder={folderPath ?? ''} />
+          <BatchRunView
+            batch={batch}
+            initialFolder={folderPath ?? ''}
+            resumeBanner={resumeBanner}
+            onDismissBanner={() => setResumeBanner(null)}
+          />
         </div>
       )}
 
@@ -108,5 +179,31 @@ export default function App() {
         </div>
       )}
     </div>
+  )
+}
+
+// ── TabButton ─────────────────────────────────────────────────────────────────
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick(): void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`
+        px-4 py-1.5 text-sm rounded-t-md transition-colors
+        ${active
+          ? 'bg-neutral-800 text-neutral-100 border border-b-transparent border-neutral-700'
+          : 'text-neutral-500 hover:text-neutral-300'}
+      `}
+    >
+      {children}
+    </button>
   )
 }

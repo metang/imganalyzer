@@ -555,7 +555,8 @@ def ingest(
 
 @app.command(name="run")
 def run_queue(
-    workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel workers (IO-bound modules only)"),
+    workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel workers (metadata/technical modules)"),
+    cloud_workers: int = typer.Option(4, "--cloud-workers", help="Number of parallel workers for cloud AI modules (cloud_ai, aesthetic)"),
     force: bool = typer.Option(False, "--force", help="Ignore cache, re-run everything"),
     cloud_provider: str = typer.Option("openai", "--cloud", help="Cloud AI provider for cloud_ai/aesthetic modules"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -589,6 +590,7 @@ def run_queue(
     worker = Worker(
         conn=conn,
         workers=workers,
+        cloud_workers=cloud_workers,
         force=force,
         cloud_provider=cloud_provider,
         detection_prompt=detection_prompt,

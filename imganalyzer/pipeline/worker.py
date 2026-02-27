@@ -37,8 +37,12 @@ console = Console()
 
 # Modules that use GPU — must run single-threaded
 GPU_MODULES = {"local_ai", "embedding"}
-# Modules that are I/O-bound — can run in parallel
-IO_MODULES = {"metadata", "technical", "cloud_ai", "aesthetic"}
+# Local I/O-bound modules — parallel, governed by `workers`
+LOCAL_IO_MODULES = {"metadata", "technical"}
+# Cloud API modules — parallel, governed by `cloud_workers`
+CLOUD_MODULES = {"cloud_ai", "aesthetic"}
+# Combined set (kept for backwards-compat references)
+IO_MODULES = LOCAL_IO_MODULES | CLOUD_MODULES
 
 # Prerequisite map: a module may only run after its prerequisite has
 # completed successfully for the same image (checked via is_analyzed).
@@ -76,6 +80,7 @@ class Worker:
         self,
         conn: sqlite3.Connection,
         workers: int = 1,
+        cloud_workers: int = 4,
         force: bool = False,
         cloud_provider: str = "openai",
         detection_prompt: str | None = None,
@@ -98,6 +103,7 @@ class Worker:
         self.face_match_threshold = face_match_threshold
 
         self.workers = max(1, workers)
+        self.cloud_workers = max(1, cloud_workers)
         self.verbose = verbose
         self.stale_timeout = stale_timeout_minutes
         self.write_xmp = write_xmp
@@ -196,9 +202,10 @@ class Worker:
                 if not jobs:
                     break
 
-                # Split into GPU and IO jobs
-                gpu_jobs = [j for j in jobs if j["module"] in GPU_MODULES]
-                io_jobs = [j for j in jobs if j["module"] in IO_MODULES]
+                # Split into GPU, local-IO, and cloud jobs
+                gpu_jobs       = [j for j in jobs if j["module"] in GPU_MODULES]
+                local_io_jobs  = [j for j in jobs if j["module"] in LOCAL_IO_MODULES]
+                cloud_jobs     = [j for j in jobs if j["module"] in CLOUD_MODULES]
 
                 # Process GPU jobs serially
                 for job in gpu_jobs:
@@ -208,27 +215,34 @@ class Worker:
                     stats[result_status] += 1
                     progress.advance(task)
 
-                # Process IO jobs in parallel
-                if io_jobs and not self._shutdown.is_set():
-                    with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                        futures: dict[Future, dict[str, Any]] = {}
-                        for job in io_jobs:
+                # Process local-IO and cloud jobs concurrently in separate pools
+                if (local_io_jobs or cloud_jobs) and not self._shutdown.is_set():
+                    futures: dict[Future, dict[str, Any]] = {}
+                    with (
+                        ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
+                        ThreadPoolExecutor(max_workers=self.cloud_workers) as cloud_pool,
+                    ):
+                        for job in local_io_jobs:
                             if self._shutdown.is_set():
                                 break
-                            fut = pool.submit(self._process_job, job)
+                            fut = local_pool.submit(self._process_job, job)
+                            futures[fut] = job
+                        for job in cloud_jobs:
+                            if self._shutdown.is_set():
+                                break
+                            fut = cloud_pool.submit(self._process_job, job)
                             futures[fut] = job
 
-                        for fut in futures:
-                            if self._shutdown.is_set():
-                                break
-                            try:
-                                result_status = fut.result(timeout=300)
-                                stats[result_status] = stats.get(result_status, 0) + 1
-                            except Exception as exc:
-                                job = futures[fut]
-                                self.queue.mark_failed(job["id"], str(exc))
-                                stats["failed"] += 1
-                            progress.advance(task)
+                    for fut, job in futures.items():
+                        if self._shutdown.is_set():
+                            break
+                        try:
+                            result_status = fut.result(timeout=300)
+                            stats[result_status] = stats.get(result_status, 0) + 1
+                        except Exception as exc:
+                            self.queue.mark_failed(job["id"], str(exc))
+                            stats["failed"] += 1
+                        progress.advance(task)
 
         if self._shutdown.is_set():
             console.print("\n[yellow]Paused.[/yellow] Run `imganalyzer run` to resume.")
