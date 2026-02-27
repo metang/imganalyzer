@@ -3,6 +3,7 @@ import type { XmpData } from '../main/xmp'
 import type { ImageFile } from '../main/images'
 import type { AnalysisProgress } from '../main/analyzer'
 import type { BatchStats, BatchResult, BatchIngestProgress } from '../main/batch'
+import type { SearchFilters, SearchResponse } from '../main/search'
 
 contextBridge.exposeInMainWorld('api', {
   openFolder: (): Promise<string | null> =>
@@ -99,4 +100,9 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('batch:ingest-progress', handler)
     return () => ipcRenderer.removeListener('batch:ingest-progress', handler)
   },
+
+  // ── Search ──────────────────────────────────────────────────────────────────
+
+  searchImages: (filters: SearchFilters): Promise<SearchResponse> =>
+    ipcRenderer.invoke('search:run', filters),
 })

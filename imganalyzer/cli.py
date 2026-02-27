@@ -1054,6 +1054,293 @@ def search_cmd(
     console.print(f"\n{len(results)} result(s)")
 
 
+@app.command(name="search-json")
+def search_json_cmd(
+    query: str = typer.Argument(default="", help="Semantic/keyword search query (empty = browse all)"),
+    mode: str = typer.Option(
+        "hybrid", "--mode",
+        help="Search mode: text (FTS5), semantic (CLIP), hybrid (both), browse (no text filter)",
+    ),
+    # ── Text-based filters ──────────────────────────────────────────────
+    face: Optional[str] = typer.Option(None, "--face", help="Filter by face identity name/alias"),
+    camera: Optional[str] = typer.Option(None, "--camera", help="Filter by camera make/model"),
+    lens: Optional[str] = typer.Option(None, "--lens", help="Filter by lens model"),
+    location: Optional[str] = typer.Option(None, "--location", help="Filter by location"),
+    # ── Numeric range filters ──────────────────────────────────────────
+    aesthetic_min: Optional[float] = typer.Option(None, "--aesthetic-min", help="Min aesthetic score (0-10)"),
+    aesthetic_max: Optional[float] = typer.Option(None, "--aesthetic-max", help="Max aesthetic score (0-10)"),
+    sharpness_min: Optional[float] = typer.Option(None, "--sharpness-min", help="Min sharpness (0-100)"),
+    sharpness_max: Optional[float] = typer.Option(None, "--sharpness-max", help="Max sharpness (0-100)"),
+    noise_max: Optional[float] = typer.Option(None, "--noise-max", help="Max noise level"),
+    iso_min: Optional[int] = typer.Option(None, "--iso-min", help="Min ISO"),
+    iso_max: Optional[int] = typer.Option(None, "--iso-max", help="Max ISO"),
+    faces_min: Optional[int] = typer.Option(None, "--faces-min", help="Min face count"),
+    faces_max: Optional[int] = typer.Option(None, "--faces-max", help="Max face count"),
+    date_from: Optional[str] = typer.Option(None, "--date-from", help="Date from (YYYY-MM-DD)"),
+    date_to: Optional[str] = typer.Option(None, "--date-to", help="Date to (YYYY-MM-DD)"),
+    has_people: Optional[bool] = typer.Option(None, "--has-people/--no-people", help="Filter by people presence"),
+    # ── Pagination ─────────────────────────────────────────────────────
+    limit: int = typer.Option(200, "--limit", "-n", help="Maximum results"),
+    offset: int = typer.Option(0, "--offset", help="Result offset (for pagination)"),
+    semantic_weight: float = typer.Option(0.5, "--semantic-weight", min=0.0, max=1.0),
+) -> None:
+    """Search the image database and output JSON for GUI consumption.
+
+    Supports semantic/keyword query combined with metric-based filters.
+    Returns a JSON array of image records with all analysis data merged.
+    """
+    import json as _json
+
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from imganalyzer.db.connection import get_db
+    from imganalyzer.db.search import SearchEngine
+
+    conn = get_db()
+    engine = SearchEngine(conn)
+
+    # ── Step 1: Get candidate set from text/semantic/browse search ──────────
+    has_text_query = bool(query and query.strip())
+    has_text_filters = bool(face or camera or lens or location)  # noqa: F841
+
+    candidate_ids: list[int] | None = None  # None = no restriction yet
+    score_map: dict[int, float] = {}
+
+    if face:
+        text_results = engine.search_face(face, limit=limit * 4)
+        candidate_ids = [r["image_id"] for r in text_results]
+        score_map = {r["image_id"]: r["score"] for r in text_results}
+    elif has_text_query and mode != "browse":
+        text_results = engine.search(
+            query, limit=limit * 4, semantic_weight=semantic_weight, mode=mode,
+        )
+        candidate_ids = [r["image_id"] for r in text_results]
+        score_map = {r["image_id"]: r["score"] for r in text_results}
+    else:
+        score_map = {}
+
+    # ── Step 2: Build rich SQL query joining all analysis tables ────────────
+    # We join all analysis tables so metric filters and rich data can be fetched
+    # in one pass.
+    conditions: list[str] = []
+    params: list = []
+
+    if candidate_ids is not None:
+        # Preserve ordering: use a CASE expression or filter by id set
+        id_placeholders = ",".join("?" * len(candidate_ids))
+        if id_placeholders:
+            conditions.append(f"i.id IN ({id_placeholders})")
+            params.extend(candidate_ids)
+        else:
+            # Empty result from text search — return nothing
+            sys.stdout.write(_json.dumps({"results": [], "total": 0}) + "\n")
+            sys.stdout.flush()
+            return
+
+    # Camera / lens / location filters
+    if camera:
+        conditions.append("(m.camera_make LIKE ? OR m.camera_model LIKE ?)")
+        params.extend([f"%{camera}%", f"%{camera}%"])
+    if lens:
+        conditions.append("m.lens_model LIKE ?")
+        params.append(f"%{lens}%")
+    if location:
+        conditions.append(
+            "(m.location_city LIKE ? OR m.location_state LIKE ? OR m.location_country LIKE ?)"
+        )
+        params.extend([f"%{location}%", f"%{location}%", f"%{location}%"])
+
+    # Date range
+    if date_from:
+        conditions.append("m.date_time_original >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("m.date_time_original <= ?")
+        params.append(date_to + "T23:59:59")
+
+    # ISO range
+    if iso_min is not None:
+        conditions.append("CAST(m.iso AS REAL) >= ?")
+        params.append(iso_min)
+    if iso_max is not None:
+        conditions.append("CAST(m.iso AS REAL) <= ?")
+        params.append(iso_max)
+
+    # Aesthetic score
+    if aesthetic_min is not None:
+        conditions.append("ae.aesthetic_score >= ?")
+        params.append(aesthetic_min)
+    if aesthetic_max is not None:
+        conditions.append("ae.aesthetic_score <= ?")
+        params.append(aesthetic_max)
+
+    # Sharpness
+    if sharpness_min is not None:
+        conditions.append("t.sharpness_score >= ?")
+        params.append(sharpness_min)
+    if sharpness_max is not None:
+        conditions.append("t.sharpness_score <= ?")
+        params.append(sharpness_max)
+
+    # Noise
+    if noise_max is not None:
+        conditions.append("t.noise_level <= ?")
+        params.append(noise_max)
+
+    # Face count
+    if faces_min is not None:
+        conditions.append("la.face_count >= ?")
+        params.append(faces_min)
+    if faces_max is not None:
+        conditions.append("la.face_count <= ?")
+        params.append(faces_max)
+
+    # Has people
+    if has_people is True:
+        conditions.append("la.has_people = 1")
+    elif has_people is False:
+        conditions.append("(la.has_people = 0 OR la.has_people IS NULL)")
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    sql = f"""
+        SELECT
+            i.id           AS image_id,
+            i.file_path,
+            i.width,
+            i.height,
+            i.file_size,
+            -- metadata
+            m.camera_make,
+            m.camera_model,
+            m.lens_model,
+            m.focal_length,
+            m.f_number,
+            m.exposure_time,
+            m.iso,
+            m.date_time_original,
+            m.gps_latitude,
+            m.gps_longitude,
+            m.location_city,
+            m.location_state,
+            m.location_country,
+            -- technical
+            t.sharpness_score,
+            t.sharpness_label,
+            t.exposure_ev,
+            t.exposure_label,
+            t.noise_level,
+            t.noise_label,
+            t.snr_db,
+            t.dynamic_range_stops,
+            t.highlight_clipping_pct,
+            t.shadow_clipping_pct,
+            t.avg_saturation,
+            t.dominant_colors,
+            -- local AI
+            la.description,
+            la.scene_type,
+            la.main_subject,
+            la.lighting,
+            la.mood,
+            la.keywords,
+            la.detected_objects,
+            la.face_count,
+            la.face_identities,
+            la.has_people,
+            la.ocr_text,
+            -- aesthetic
+            ae.aesthetic_score,
+            ae.aesthetic_label,
+            ae.aesthetic_reason
+        FROM images i
+        LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
+        LEFT JOIN analysis_technical t  ON t.image_id  = i.id
+        LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
+        LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
+        {where_clause}
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit, offset])
+
+    rows = conn.execute(sql, params).fetchall()
+
+    # Build results, preserving text-search score ordering
+    records = []
+    for row in rows:
+        iid = row["image_id"]
+        score = score_map.get(iid, 0.0) if score_map else None
+
+        def _json_field(val: str | None) -> list | None:
+            if val is None:
+                return None
+            try:
+                return _json.loads(val)
+            except Exception:
+                return val  # type: ignore[return-value]
+
+        records.append({
+            "image_id": iid,
+            "file_path": row["file_path"],
+            "score": score,
+            "width": row["width"],
+            "height": row["height"],
+            "file_size": row["file_size"],
+            # metadata
+            "camera_make": row["camera_make"],
+            "camera_model": row["camera_model"],
+            "lens_model": row["lens_model"],
+            "focal_length": row["focal_length"],
+            "f_number": row["f_number"],
+            "exposure_time": row["exposure_time"],
+            "iso": row["iso"],
+            "date_time_original": row["date_time_original"],
+            "gps_latitude": row["gps_latitude"],
+            "gps_longitude": row["gps_longitude"],
+            "location_city": row["location_city"],
+            "location_state": row["location_state"],
+            "location_country": row["location_country"],
+            # technical
+            "sharpness_score": row["sharpness_score"],
+            "sharpness_label": row["sharpness_label"],
+            "exposure_ev": row["exposure_ev"],
+            "exposure_label": row["exposure_label"],
+            "noise_level": row["noise_level"],
+            "noise_label": row["noise_label"],
+            "snr_db": row["snr_db"],
+            "dynamic_range_stops": row["dynamic_range_stops"],
+            "highlight_clipping_pct": row["highlight_clipping_pct"],
+            "shadow_clipping_pct": row["shadow_clipping_pct"],
+            "avg_saturation": row["avg_saturation"],
+            "dominant_colors": _json_field(row["dominant_colors"]),
+            # local AI
+            "description": row["description"],
+            "scene_type": row["scene_type"],
+            "main_subject": row["main_subject"],
+            "lighting": row["lighting"],
+            "mood": row["mood"],
+            "keywords": _json_field(row["keywords"]),
+            "detected_objects": _json_field(row["detected_objects"]),
+            "face_count": row["face_count"],
+            "face_identities": _json_field(row["face_identities"]),
+            "has_people": bool(row["has_people"]) if row["has_people"] is not None else None,
+            "ocr_text": row["ocr_text"],
+            # aesthetic
+            "aesthetic_score": row["aesthetic_score"],
+            "aesthetic_label": row["aesthetic_label"],
+            "aesthetic_reason": row["aesthetic_reason"],
+        })
+
+    # If we had a score_map, re-sort records by score descending
+    if score_map:
+        records.sort(key=lambda r: -(r["score"] or 0.0))
+
+    output = {"results": records, "total": len(records)}
+    sys.stdout.write(_json.dumps(output) + "\n")
+    sys.stdout.flush()
+
+
 # ── Helper functions ──────────────────────────────────────────────────────────
 
 _FIELD_TABLE_MAP: dict[str, str] = {

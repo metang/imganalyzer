@@ -4,8 +4,9 @@ import { FolderPicker } from './components/FolderPicker'
 import { Gallery } from './components/Gallery'
 import { Lightbox } from './components/Lightbox'
 import { BatchView } from './components/BatchView'
+import { SearchView } from './components/SearchView'
 
-type Tab = 'gallery' | 'batch'
+type Tab = 'gallery' | 'batch' | 'search'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('gallery')
@@ -36,7 +37,7 @@ export default function App() {
 
       {/* ── Tab bar ──────────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-1 px-3 pt-2 pb-0 border-b border-neutral-800 shrink-0">
-        {(['gallery', 'batch'] as Tab[]).map((t) => (
+        {(['gallery', 'batch', 'search'] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -47,7 +48,7 @@ export default function App() {
                 : 'text-neutral-500 hover:text-neutral-300'}
             `}
           >
-            {t === 'gallery' ? 'Gallery' : 'Batch'}
+            {t === 'gallery' ? 'Gallery' : t === 'batch' ? 'Batch' : 'Search'}
           </button>
         ))}
       </div>
@@ -97,6 +98,13 @@ export default function App() {
       {tab === 'batch' && (
         <div className="flex-1 min-h-0 overflow-hidden">
           <BatchView initialFolder={folderPath ?? ''} />
+        </div>
+      )}
+
+      {/* ── Search tab ────────────────────────────────────────────────────────── */}
+      {tab === 'search' && (
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          <SearchView />
         </div>
       )}
     </div>

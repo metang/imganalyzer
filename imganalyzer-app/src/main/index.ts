@@ -7,6 +7,7 @@ import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
 import { registerBatchHandlers } from './batch'
+import { registerSearchHandlers } from './search'
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -40,10 +41,12 @@ function createWindow(): BrowserWindow {
 app.whenReady().then(() => {
   const win = createWindow()
   registerBatchHandlers(win)
+  registerSearchHandlers()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       const w = createWindow()
       registerBatchHandlers(w)
+      registerSearchHandlers()
     }
   })
 })

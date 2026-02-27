@@ -62,6 +62,86 @@ export interface AnalysisProgress {
   pct: number
 }
 
+// ── Search types ──────────────────────────────────────────────────────────────
+
+export interface SearchFilters {
+  query?: string
+  mode?: 'text' | 'semantic' | 'hybrid' | 'browse'
+  semanticWeight?: number
+  face?: string
+  camera?: string
+  lens?: string
+  location?: string
+  aestheticMin?: number
+  aestheticMax?: number
+  sharpnessMin?: number
+  sharpnessMax?: number
+  noiseMax?: number
+  isoMin?: number
+  isoMax?: number
+  facesMin?: number
+  facesMax?: number
+  dateFrom?: string
+  dateTo?: string
+  hasPeople?: boolean
+  limit?: number
+  offset?: number
+}
+
+export interface SearchResult {
+  image_id: number
+  file_path: string
+  score: number | null
+  width: number | null
+  height: number | null
+  file_size: number | null
+  camera_make: string | null
+  camera_model: string | null
+  lens_model: string | null
+  focal_length: string | null
+  f_number: string | null
+  exposure_time: string | null
+  iso: string | null
+  date_time_original: string | null
+  gps_latitude: string | null
+  gps_longitude: string | null
+  location_city: string | null
+  location_state: string | null
+  location_country: string | null
+  sharpness_score: number | null
+  sharpness_label: string | null
+  exposure_ev: number | null
+  exposure_label: string | null
+  noise_level: number | null
+  noise_label: string | null
+  snr_db: number | null
+  dynamic_range_stops: number | null
+  highlight_clipping_pct: number | null
+  shadow_clipping_pct: number | null
+  avg_saturation: number | null
+  dominant_colors: string[] | null
+  description: string | null
+  scene_type: string | null
+  main_subject: string | null
+  lighting: string | null
+  mood: string | null
+  keywords: string[] | null
+  detected_objects: string[] | null
+  face_count: number | null
+  face_identities: string[] | null
+  has_people: boolean | null
+  ocr_text: string | null
+  aesthetic_score: number | null
+  aesthetic_label: string | null
+  aesthetic_reason: string | null
+}
+
+export interface SearchResponse {
+  results: SearchResult[]
+  total: number
+  error?: string
+}
+
 // ── Batch processing types ────────────────────────────────────────────────────
 
 export type BatchModuleKey =
@@ -130,6 +210,9 @@ declare global {
       runCopilotAnalysis(imagePath: string): Promise<{ xmp: XmpData | null; error?: string }>
       onAnalysisProgress(cb: (p: AnalysisProgress) => void): () => void
 
+      // Search
+      searchImages(filters: SearchFilters): Promise<SearchResponse>
+
       // Batch processing
       batchIngest(
         folder: string,
@@ -159,3 +242,4 @@ declare global {
     }
   }
 }
+
