@@ -66,6 +66,16 @@ class CLIPEmbedder:
                 rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=False, output_bps=8)
             img = Image.fromarray(rgb).convert("RGB")
         else:
+            # Register HEIC/HEIF support before opening — Pillow cannot decode
+            # these formats without the pillow-heif plugin.
+            if suffix in (".heic", ".heif"):
+                try:
+                    from pillow_heif import register_heif_opener
+                    register_heif_opener()
+                except ImportError:
+                    raise ImportError(
+                        "pillow-heif is required for HEIC/HEIF files: pip install pillow-heif"
+                    )
             img = Image.open(str(path)).convert("RGB")
 
         # Downsize to EMBED_MAX_LONG_EDGE on the long edge before CLIP pre-processing.
