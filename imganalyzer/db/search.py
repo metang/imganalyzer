@@ -460,6 +460,16 @@ class SearchEngine:
         completely different numerical ranges) are made commensurable.
         ``semantic_weight`` controls the relative contribution:
         0.0 = text only, 1.0 = semantic only, 0.5 = equal weight.
+
+        Candidate-set strategy:
+        - When ``semantic_weight >= 0.5`` (CLIP is primary), the final
+          candidate union is restricted to images that appear in the CLIP
+          pool.  FTS can only *boost* a CLIP candidate; it cannot introduce
+          a new candidate.  This prevents FTS false-positives (e.g. images
+          whose description mentions "bird of paradise" or "bird's eye view")
+          from displacing genuinely bird-like images ranked highly by CLIP.
+        - When ``semantic_weight < 0.5`` (text is primary), FTS candidates
+          are included unrestricted (original union behaviour).
         """
         pool = limit * _POOL_FACTOR
         text_results     = self._fts_search(query, pool)
@@ -475,8 +485,16 @@ class SearchEngine:
             for rank, r in enumerate(semantic_results)
         }
 
-        # Weighted combination of RRF scores
-        all_ids = set(text_rrf.keys()) | set(sem_rrf.keys())
+        # Candidate set: when CLIP is primary (semantic_weight >= 0.5), only
+        # keep candidates that CLIP found.  FTS results that aren't in the
+        # CLIP pool are silently dropped so they can't introduce false
+        # positives.  When text is primary (semantic_weight < 0.5), use the
+        # full union so FTS-only results are still reachable.
+        if semantic_weight >= 0.5:
+            all_ids = set(sem_rrf.keys())
+        else:
+            all_ids = set(text_rrf.keys()) | set(sem_rrf.keys())
+
         combined: list[tuple[int, float]] = []
         for iid in all_ids:
             t = text_rrf.get(iid, 0.0)
