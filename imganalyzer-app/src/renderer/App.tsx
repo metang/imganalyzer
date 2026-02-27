@@ -172,12 +172,10 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Search tab ────────────────────────────────────────────────────────── */}
-      {tab === 'search' && (
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-          <SearchView />
-        </div>
-      )}
+      {/* ── Search tab — always mounted so search state survives tab switches ── */}
+      <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'search' ? '' : ' hidden'}`}>
+        <SearchView />
+      </div>
     </div>
   )
 }
