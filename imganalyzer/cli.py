@@ -1414,6 +1414,23 @@ def search_json_cmd(
     sys.stdout.write(_json.dumps(output) + "\n")
     sys.stdout.flush()
 
+    # Release GPU memory before the process exits.  search-json is spawned
+    # fresh for every search, so the CLIP model is loaded once per call.
+    # Explicitly deleting it and calling empty_cache ensures CUDA returns the
+    # memory to the OS promptly instead of waiting for garbage collection.
+    try:
+        import torch
+        from imganalyzer.embeddings.clip_embedder import CLIPEmbedder
+        if CLIPEmbedder._model is not None:
+            del CLIPEmbedder._model
+            CLIPEmbedder._model = None
+            CLIPEmbedder._preprocess = None
+            CLIPEmbedder._tokenizer = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 

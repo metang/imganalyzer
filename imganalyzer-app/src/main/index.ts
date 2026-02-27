@@ -6,7 +6,7 @@ import { listImages, getThumbnail, getFullImage } from './images'
 import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
-import { registerBatchHandlers } from './batch'
+import { registerBatchHandlers, killAllBatchProcesses } from './batch'
 import { registerSearchHandlers } from './search'
 
 function createWindow(): BrowserWindow {
@@ -53,6 +53,11 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => {
+  // Kill any running batch/ingest Python processes so they release GPU memory
+  killAllBatchProcesses()
 })
 
 // ─── IPC: Folder dialog ──────────────────────────────────────────────────────

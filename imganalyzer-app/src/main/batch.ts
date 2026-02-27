@@ -327,6 +327,16 @@ function killRunProcess(): void {
   }
 }
 
+/** Kill all background Python processes and stop polling. Called on app quit. */
+export function killAllBatchProcesses(): void {
+  stopPolling()
+  killRunProcess()
+  if (ingestProcess) {
+    try { ingestProcess.kill('SIGTERM') } catch { /* ignore */ }
+    ingestProcess = null
+  }
+}
+
 // ── IPC Handlers ──────────────────────────────────────────────────────────────
 
 export function registerBatchHandlers(win: BrowserWindow): void {
