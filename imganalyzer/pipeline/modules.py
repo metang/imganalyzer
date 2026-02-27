@@ -89,6 +89,13 @@ class ModuleRunner:
             raise ValueError(f"Image id={image_id} not found in database")
 
         path = Path(image["file_path"])
+
+        # For the embedding module, skip the file-existence check when the image
+        # already has a description in the DB — the text embedding can be computed
+        # entirely from stored data without touching the original file.
+        if module == "embedding":
+            return self._run_embedding(image_id, path)
+
         if not path.exists():
             raise FileNotFoundError(f"Image file not found: {path}")
 
@@ -103,8 +110,6 @@ class ModuleRunner:
             return self._run_cloud_ai(image_id, path)
         elif module == "aesthetic":
             return self._run_aesthetic(image_id, path)
-        elif module == "embedding":
-            return self._run_embedding(image_id, path)
         else:
             raise ValueError(f"Unknown module: {module}")
 
@@ -236,38 +241,60 @@ class ModuleRunner:
 
         embedder = CLIPEmbedder()
 
-        # Image embedding
-        image_vector = embedder.embed_image(path)
-
-        # Text embedding from description
-        desc_text = ""
+        # Text embedding: combine description, scene, and subject from local AI
+        # and all cloud providers so the vector reflects rich semantic content.
+        text_parts: list[str] = []
         local_data = self.repo.get_analysis(image_id, "local_ai")
-        if local_data and local_data.get("description"):
-            desc_text = local_data["description"]
-        if not desc_text:
-            # Try cloud descriptions
-            cloud_data = self.repo.get_analysis(image_id, "cloud_ai")
-            if cloud_data:
-                for prov in cloud_data.get("providers", []):
-                    if prov.get("description"):
-                        desc_text = prov["description"]
-                        break
+        if local_data:
+            for field in ("description", "scene_type", "main_subject"):
+                val = local_data.get(field)
+                if val:
+                    text_parts.append(val)
 
-        with _transaction(self.conn):
-            self.repo.upsert_embedding(
-                image_id, "image_clip",
-                image_vector, embedder.model_version,
-            )
-            if desc_text:
-                text_vector = embedder.embed_text(desc_text)
+        cloud_data = self.repo.get_analysis(image_id, "cloud_ai")
+        if cloud_data:
+            for prov in cloud_data.get("providers", []):
+                for field in ("description", "scene_type", "main_subject"):
+                    val = prov.get(field)
+                    if val and val not in text_parts:
+                        text_parts.append(val)
+
+        desc_text = " ".join(text_parts)
+
+        # Always compute image_clip from the visual file when available.
+        # image_clip (text→image cosine) is the most reliable signal for
+        # semantic search because it directly encodes visual content.
+        # description_clip supplements it for images with rich AI descriptions,
+        # but should never be the *only* embedding — short local-AI captions
+        # produce centroid-clustered embeddings that poison search ranking.
+        has_image_clip = False
+        if path.exists():
+            image_vector = embedder.embed_image(path)
+            with _transaction(self.conn):
+                self.repo.upsert_embedding(
+                    image_id, "image_clip",
+                    image_vector, embedder.model_version,
+                )
+            has_image_clip = True
+
+        has_desc_clip = False
+        if desc_text:
+            text_vector = embedder.embed_text(desc_text)
+            with _transaction(self.conn):
                 self.repo.upsert_embedding(
                     image_id, "description_clip",
                     text_vector, embedder.model_version,
                 )
+            has_desc_clip = True
+
+        if not has_image_clip and not has_desc_clip:
+            raise FileNotFoundError(
+                f"Image file not found and no description available for image {image_id}: {path}"
+            )
 
         if self.verbose:
             console.print(f"  [dim]CLIP embeddings computed for image {image_id}[/dim]")
-        return {"image_clip": True, "description_clip": bool(desc_text)}
+        return {"image_clip": has_image_clip, "description_clip": has_desc_clip}
 
 
 class _transaction:

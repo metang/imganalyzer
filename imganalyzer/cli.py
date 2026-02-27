@@ -1206,65 +1206,132 @@ def search_json_cmd(
 
     where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    sql = f"""
-        SELECT
-            i.id           AS image_id,
-            i.file_path,
-            i.width,
-            i.height,
-            i.file_size,
-            -- metadata
-            m.camera_make,
-            m.camera_model,
-            m.lens_model,
-            m.focal_length,
-            m.f_number,
-            m.exposure_time,
-            m.iso,
-            m.date_time_original,
-            m.gps_latitude,
-            m.gps_longitude,
-            m.location_city,
-            m.location_state,
-            m.location_country,
-            -- technical
-            t.sharpness_score,
-            t.sharpness_label,
-            t.exposure_ev,
-            t.exposure_label,
-            t.noise_level,
-            t.noise_label,
-            t.snr_db,
-            t.dynamic_range_stops,
-            t.highlight_clipping_pct,
-            t.shadow_clipping_pct,
-            t.avg_saturation,
-            t.dominant_colors,
-            -- local AI
-            la.description,
-            la.scene_type,
-            la.main_subject,
-            la.lighting,
-            la.mood,
-            la.keywords,
-            la.detected_objects,
-            la.face_count,
-            la.face_identities,
-            la.has_people,
-            la.ocr_text,
-            -- aesthetic
-            ae.aesthetic_score,
-            ae.aesthetic_label,
-            ae.aesthetic_reason
-        FROM images i
-        LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
-        LEFT JOIN analysis_technical t  ON t.image_id  = i.id
-        LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
-        LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
-        {where_clause}
-        LIMIT ? OFFSET ?
-    """
-    params.extend([limit, offset])
+    # When we have a score_map from semantic/text search, we must NOT apply
+    # SQL LIMIT before Python re-sorting: SQLite returns rows in arbitrary
+    # order from the IN(...) clause, so a LIMIT here would silently discard
+    # high-scoring candidates that happen to fall outside the first N rows.
+    # Instead, fetch ALL matching rows for the candidate set and slice in
+    # Python after sorting.  For browse/filter-only queries (no score_map)
+    # we apply LIMIT/OFFSET directly in SQL for efficiency.
+    if score_map:
+        sql = f"""
+            SELECT
+                i.id           AS image_id,
+                i.file_path,
+                i.width,
+                i.height,
+                i.file_size,
+                -- metadata
+                m.camera_make,
+                m.camera_model,
+                m.lens_model,
+                m.focal_length,
+                m.f_number,
+                m.exposure_time,
+                m.iso,
+                m.date_time_original,
+                m.gps_latitude,
+                m.gps_longitude,
+                m.location_city,
+                m.location_state,
+                m.location_country,
+                -- technical
+                t.sharpness_score,
+                t.sharpness_label,
+                t.exposure_ev,
+                t.exposure_label,
+                t.noise_level,
+                t.noise_label,
+                t.snr_db,
+                t.dynamic_range_stops,
+                t.highlight_clipping_pct,
+                t.shadow_clipping_pct,
+                t.avg_saturation,
+                t.dominant_colors,
+                -- local AI
+                la.description,
+                la.scene_type,
+                la.main_subject,
+                la.lighting,
+                la.mood,
+                la.keywords,
+                la.detected_objects,
+                la.face_count,
+                la.face_identities,
+                la.has_people,
+                la.ocr_text,
+                -- aesthetic
+                ae.aesthetic_score,
+                ae.aesthetic_label,
+                ae.aesthetic_reason
+            FROM images i
+            LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
+            LEFT JOIN analysis_technical t  ON t.image_id  = i.id
+            LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
+            LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
+            {where_clause}
+        """
+        # No LIMIT/OFFSET — will slice after Python sort
+    else:
+        sql = f"""
+            SELECT
+                i.id           AS image_id,
+                i.file_path,
+                i.width,
+                i.height,
+                i.file_size,
+                -- metadata
+                m.camera_make,
+                m.camera_model,
+                m.lens_model,
+                m.focal_length,
+                m.f_number,
+                m.exposure_time,
+                m.iso,
+                m.date_time_original,
+                m.gps_latitude,
+                m.gps_longitude,
+                m.location_city,
+                m.location_state,
+                m.location_country,
+                -- technical
+                t.sharpness_score,
+                t.sharpness_label,
+                t.exposure_ev,
+                t.exposure_label,
+                t.noise_level,
+                t.noise_label,
+                t.snr_db,
+                t.dynamic_range_stops,
+                t.highlight_clipping_pct,
+                t.shadow_clipping_pct,
+                t.avg_saturation,
+                t.dominant_colors,
+                -- local AI
+                la.description,
+                la.scene_type,
+                la.main_subject,
+                la.lighting,
+                la.mood,
+                la.keywords,
+                la.detected_objects,
+                la.face_count,
+                la.face_identities,
+                la.has_people,
+                la.ocr_text,
+                -- aesthetic
+                ae.aesthetic_score,
+                ae.aesthetic_label,
+                ae.aesthetic_reason
+            FROM images i
+            LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
+            LEFT JOIN analysis_technical t  ON t.image_id  = i.id
+            LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
+            LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
+            {where_clause}
+            LIMIT ? OFFSET ?
+        """
+        params.extend([limit, offset])
 
     rows = conn.execute(sql, params).fetchall()
 
@@ -1334,11 +1401,16 @@ def search_json_cmd(
             "aesthetic_reason": row["aesthetic_reason"],
         })
 
-    # If we had a score_map, re-sort records by score descending
+    # If we had a score_map, re-sort records by score descending then apply
+    # offset/limit in Python (correct order; SQL LIMIT was not applied above).
     if score_map:
         records.sort(key=lambda r: -(r["score"] or 0.0))
+        total = len(records)
+        records = records[offset: offset + limit]
+    else:
+        total = len(records)  # SQL already applied LIMIT/OFFSET
 
-    output = {"results": records, "total": len(records)}
+    output = {"results": records, "total": total}
     sys.stdout.write(_json.dumps(output) + "\n")
     sys.stdout.flush()
 
