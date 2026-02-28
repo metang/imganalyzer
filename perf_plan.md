@@ -316,15 +316,37 @@ Combining all three analyses into a single prioritized plan:
 
 ### Phase 4 — GPU & Architecture (5–7 days, high risk)
 
-| # | Item | Source | Effort |
-|---|------|--------|--------|
-| 20 | GPU batch inference (CLIP, GroundingDINO) | All three | Medium-High |
-| 21 | GPU inference pipelining (3-stage) | Codex OPP-4 | High |
-| 22 | Persistent Python process for Electron | Opus #13 | High |
-| 23 | Batch thumbnail IPC | Opus #19 | Medium |
-| 24 | Status polling optimization | Opus #20 | Low |
-| 25 | GroundingDINO bfloat16/quantization | Codex OPP-10 | Medium |
-| 26 | Multi-GPU architecture | Sonnet #16 | High |
+#### Sub-phase 4A: GPU Memory Management Foundation
+
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| A1 | Model unloading infrastructure — `_unload()` on all 5 GPU singletons, called between passes | Design | Low | ✅ DONE |
+| A2 | GroundingDINO selective fp16 (Item 25) — visual backbone fp16, text encoder fp32 | Codex OPP-10 | Medium | ✅ DONE |
+| A3 | ONNX Runtime memory limit for InsightFace | Design | Low | ✅ DONE |
+
+#### Sub-phase 4B: Batch GPU Inference (Item 20)
+
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| B1 | CLIP batch inference (batch_size=32) | All three | Low-Medium | ✅ DONE |
+| B2 | GroundingDINO batch inference (batch_size=8) | All three | Medium | ✅ DONE |
+| B3 | BLIP-2 inter-image batching (batch_size=2, OOM fallback) | All three | Medium-High | ✅ DONE |
+| B4 | Worker batch dispatch refactor — `_process_job_batch()` + `run_batch()` | Design | Medium | ✅ DONE |
+
+#### Sub-phase 4C: Persistent Python Process (Item 22, subsumes Items 23+24)
+
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| C1 | Python JSON-RPC stdio server (`imganalyzer/server.py`) | Opus #13 | High | DONE |
+| C2 | Electron TypeScript integration — replace subprocess spawning | Opus #13 | High | DONE |
+| C3 | Fix duplicate IPC handler bug in `index.ts` | Opus Bug #1 | Low | DONE |
+
+#### Dropped / Deferred
+
+| # | Item | Reason |
+|---|------|--------|
+| 21 | GPU inference pipelining (3-stage) | Deferred to Phase 5 — batching alone is sufficient |
+| 26 | Multi-GPU architecture | N/A — single GPU system |
 
 ### Estimated Cumulative Impact
 

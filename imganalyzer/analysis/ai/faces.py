@@ -27,6 +27,23 @@ class FaceAnalyzer:
 
     _app = None
 
+    @classmethod
+    def _unload(cls) -> None:
+        """Unload InsightFace models from GPU to free VRAM.
+
+        InsightFace uses ONNX Runtime which manages GPU memory through
+        its own allocator.  Deleting the FaceAnalysis app releases the
+        underlying ONNX InferenceSession objects and their GPU buffers.
+        """
+        if cls._app is not None:
+            del cls._app
+            cls._app = None
+        # ONNX RT does not use the PyTorch CUDA allocator, so
+        # empty_cache() won't help here — but gc.collect() ensures
+        # the ONNX sessions are actually freed.
+        import gc
+        gc.collect()
+
     def analyze(
         self,
         image_data: dict[str, Any],
@@ -114,18 +131,44 @@ class FaceAnalyzer:
             providers=providers,
         )
         # ctx_id=0 → GPU 0; ctx_id=-1 → CPU
-        ctx_id = 0 if any("CUDA" in p or "GPU" in p for p in providers) else -1
+        # providers may be strings or (name, opts) tuples
+        def _has_gpu(prov_list: list) -> bool:
+            for p in prov_list:
+                name = p[0] if isinstance(p, tuple) else p
+                if "CUDA" in name or "GPU" in name:
+                    return True
+            return False
+        ctx_id = 0 if _has_gpu(providers) else -1
         app.prepare(ctx_id=ctx_id, det_size=(640, 640))
         cls._app = app
 
 
-def _get_providers() -> list[str]:
-    """Return ONNX Runtime execution providers, preferring CUDA."""
+def _get_providers() -> list:
+    """Return ONNX Runtime execution providers, preferring CUDA.
+
+    When CUDA is available, applies a GPU memory limit (512 MB) and
+    conservative arena strategy to prevent ONNX RT from over-allocating
+    VRAM.  InsightFace buffalo_l weights total ~400 MB, so 512 MB
+    provides sufficient headroom without wasting GPU memory that other
+    models (BLIP-2, CLIP, etc.) need.
+    """
     try:
         import onnxruntime as ort
         available = ort.get_available_providers()
         if "CUDAExecutionProvider" in available:
-            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            cuda_opts = {
+                # Cap the ONNX arena allocator at 512 MB.  Without this,
+                # ONNX RT may speculatively allocate up to 2 GB via its
+                # default doubling strategy.
+                "gpu_mem_limit": str(512 * 1024 * 1024),
+                # Prevent arena from doubling on every extension — allocate
+                # only what is actually needed.  Reduces peak VRAM waste.
+                "arena_extend_strategy": "kSameAsRequested",
+            }
+            return [
+                ("CUDAExecutionProvider", cuda_opts),
+                "CPUExecutionProvider",
+            ]
     except Exception:
         pass
     return ["CPUExecutionProvider"]

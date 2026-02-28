@@ -1,20 +1,19 @@
 /**
  * batch.ts — IPC handlers for the batch processing pipeline.
  *
- * All analysis work is delegated to the Python `imganalyzer` CLI via
- * `conda run -n imganalyzer python -m imganalyzer.cli <cmd>`.  This module
- * manages subprocess lifecycle, progress polling, and event forwarding to
- * the renderer.
+ * Delegates to the persistent Python JSON-RPC server via `python-rpc.ts`.
+ * This eliminates the 1-3s conda subprocess overhead per operation and
+ * removes the need for status polling via subprocess.
  *
- * IPC channels (main ↔ renderer):
- *   Invoke (renderer → main):
+ * IPC channels (main <-> renderer):
+ *   Invoke (renderer -> main):
  *     batch:ingest    — scan folder, register images, enqueue jobs
  *     batch:start     — start `imganalyzer run`
- *     batch:pause     — kill run process (queue preserved in DB)
- *     batch:resume    — re-spawn run with saved config
- *     batch:stop      — kill run + clear pending/running jobs from DB
+ *     batch:pause     — cancel run (queue preserved in DB)
+ *     batch:resume    — re-start run with saved config
+ *     batch:stop      — cancel run + clear pending/running jobs from DB
  *
- *   Events (main → renderer):
+ *   Events (main -> renderer):
  *     batch:tick             — polled stats every 1 s (BatchStats)
  *     batch:result           — per-job completion (BatchResult)
  *     batch:ingest-line      — raw ingest stdout lines
@@ -22,13 +21,10 @@
  */
 
 import { ipcMain, BrowserWindow } from 'electron'
-import { spawn, ChildProcess } from 'child_process'
-import { join } from 'path'
+import { rpc, ensureServerRunning, setNotificationListener, shutdownServer } from './python-rpc'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const PKG_ROOT = process.env.IMGANALYZER_PKG_ROOT || 'D:\\Code\\imganalyzer'
-const CONDA_ENV = 'imganalyzer'
 const POLL_INTERVAL_MS = 1000
 // Sliding window for images/sec computation (ms)
 const RATE_WINDOW_MS = 10_000
@@ -95,80 +91,16 @@ export interface BatchIngestProgress {
 // ── Module-scope state ────────────────────────────────────────────────────────
 
 let mainWin: BrowserWindow | null = null
-let runProcess: ChildProcess | null = null
 let pollTimer: NodeJS.Timeout | null = null
 let sessionConfig: SessionConfig | null = null
 let batchStatus: BatchStatus = 'idle'
 let sessionStartMs = 0
+let isRunActive = false
 
 // Sliding window of { timestamp, durationMs } for rate + avg computation
 const completionWindow: Array<{ ts: number; durationMs: number }> = []
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-/** Spawn a conda CLI command, returning the child process. */
-function condaSpawn(cliArgs: string[], opts: { cwd?: string } = {}): ChildProcess {
-  return spawn(
-    'conda',
-    [
-      'run', '-n', CONDA_ENV, '--no-capture-output',
-      'python', '-m', 'imganalyzer.cli',
-      ...cliArgs,
-    ],
-    {
-      cwd: opts.cwd ?? PKG_ROOT,
-      env: {
-        ...process.env,
-        HF_HUB_DISABLE_SYMLINKS_WARNING: '1',
-        PYTHONIOENCODING: 'utf-8',
-        PYTHONUTF8: '1',
-      },
-      // Pipe all streams so we can read stdout/stderr
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }
-  )
-}
-
-/** Run a CLI command to completion and return stdout. */
-function condaExec(cliArgs: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(
-      'conda',
-      [
-        'run', '-n', CONDA_ENV, '--no-capture-output',
-        'python', '-m', 'imganalyzer.cli',
-        ...cliArgs,
-      ],
-      {
-        cwd: PKG_ROOT,
-        env: {
-          ...process.env,
-          HF_HUB_DISABLE_SYMLINKS_WARNING: '1',
-          PYTHONIOENCODING: 'utf-8',
-          PYTHONUTF8: '1',
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
-    )
-
-    let stdout = ''
-    proc.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8') })
-    proc.stderr?.on('data', () => { /* swallow stderr */ })
-
-    proc.on('close', (code) => {
-      if (code !== 0) reject(new Error(`CLI exited with code ${code}`))
-      else resolve(stdout)
-    })
-    proc.on('error', reject)
-
-    // Safety timeout
-    const timer = setTimeout(() => {
-      try { proc.kill() } catch { /* ignore */ }
-      reject(new Error('condaExec timed out'))
-    }, 30_000)
-    proc.on('close', () => clearTimeout(timer))
-  })
-}
 
 /** Emit a batch:tick event to the renderer with current stats. */
 function emitTick(stats: BatchStats): void {
@@ -227,14 +159,10 @@ function computeMetrics(
   return { imagesPerSec, avgMsPerImage, estimatedMs }
 }
 
-/** Poll `imganalyzer status --json` and emit a batch:tick. */
+/** Poll status via RPC (no subprocess) and emit a batch:tick. */
 async function doPoll(): Promise<void> {
   try {
-    const raw = await condaExec(['status', '--json'])
-    // The JSON is the first line that parses successfully
-    const line = raw.split('\n').find((l) => l.trim().startsWith('{'))
-    if (!line) return
-    const data = JSON.parse(line) as {
+    const data = await rpc.call('status', {}) as {
       total_images: number
       modules: Record<string, Record<string, number>>
       totals: Record<string, number>
@@ -282,65 +210,82 @@ function stopPolling(): void {
   }
 }
 
-/** Attach [RESULT] line parser to a run process stdout. */
-function attachResultParser(proc: ChildProcess): void {
-  let buf = ''
-  proc.stdout?.on('data', (chunk: Buffer) => {
-    buf += chunk.toString()
-    const lines = buf.split('\n')
-    buf = lines.pop() ?? ''
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (trimmed.startsWith('[RESULT] ')) {
-        try {
-          const payload = JSON.parse(trimmed.slice('[RESULT] '.length)) as {
-            path: string
-            module: string
-            status: 'done' | 'failed' | 'skipped'
-            ms: number
-            error?: string
-          }
-          const result: BatchResult = {
-            path:       payload.path,
-            module:     payload.module,
-            status:     payload.status,
-            durationMs: payload.ms,
-            error:      payload.error,
-          }
-          emitResult(result)
-          if (payload.status === 'done') {
-            recordCompletion(payload.ms)
-          }
-        } catch {
-          // Malformed [RESULT] line — ignore
+/** Set up the notification listener for streaming run/ingest results. */
+function setupNotificationListener(): void {
+  setNotificationListener((notif) => {
+    const { method, params } = notif
+    const p = params as Record<string, unknown>
+
+    switch (method) {
+      case 'ingest/progress':
+        emitIngestProgress(p as unknown as BatchIngestProgress)
+        mainWin?.webContents?.send('batch:ingest-line', JSON.stringify(p))
+        break
+
+      case 'run/result': {
+        const result: BatchResult = {
+          path:       p.path as string,
+          module:     p.module as string,
+          status:     p.status as 'done' | 'failed' | 'skipped',
+          durationMs: p.ms as number,
+          error:      p.error as string | undefined,
         }
+        emitResult(result)
+        if (result.status === 'done') {
+          recordCompletion(result.durationMs)
+        }
+        break
       }
+
+      case 'run/done':
+        // Run completed successfully
+        if (batchStatus === 'running') {
+          batchStatus = 'done'
+          isRunActive = false
+          void doPoll().then(() => {
+            setTimeout(() => { batchStatus = 'idle' }, 3000)
+          })
+          stopPolling()
+        }
+        break
+
+      case 'run/error':
+        // Run encountered an error
+        if (batchStatus === 'running') {
+          batchStatus = 'error'
+          isRunActive = false
+          void doPoll().then(() => {
+            setTimeout(() => { batchStatus = 'idle' }, 3000)
+          })
+          stopPolling()
+        }
+        break
     }
   })
 }
 
-/** Kill the run process if alive. */
-function killRunProcess(): void {
-  if (runProcess) {
-    try { runProcess.kill('SIGTERM') } catch { /* ignore */ }
-    runProcess = null
-  }
-}
-
-/** Kill all background Python processes and stop polling. Called on app quit. */
-export function killAllBatchProcesses(): void {
+/** Kill all background work and stop polling. Called on app quit. */
+export async function killAllBatchProcesses(): Promise<void> {
   stopPolling()
-  killRunProcess()
-  if (ingestProcess) {
-    try { ingestProcess.kill('SIGTERM') } catch { /* ignore */ }
-    ingestProcess = null
+  if (isRunActive) {
+    try {
+      await rpc.call('cancel_run', {})
+    } catch { /* ignore */ }
+    isRunActive = false
   }
+  await shutdownServer()
 }
 
 // ── IPC Handlers ──────────────────────────────────────────────────────────────
 
 export function registerBatchHandlers(win: BrowserWindow): void {
   mainWin = win
+  setupNotificationListener()
+
+  // Ensure the server is started as soon as the app opens
+  void ensureServerRunning().catch((err) => {
+    console.error('Failed to start Python server:', err)
+  })
 
   // ── batch:ingest ──────────────────────────────────────────────────────────
   ipcMain.handle(
@@ -357,62 +302,20 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       completionWindow.length = 0
       sessionStartMs = 0
 
-      const args: string[] = ['ingest', folder, '--modules', modules.join(',')]
-      if (!recursive) args.push('--no-recursive')
-      if (noHash)     args.push('--no-hash')
-
-      return new Promise((resolve, reject) => {
-        const proc = condaSpawn(args)
-        ingestProcess = proc
-
-        let combined = ''
-        let stdoutBuf = ''
-
-        const processLines = (chunk: Buffer) => {
-          const text = chunk.toString()
-          combined += text
-          stdoutBuf += text
-          const lines = stdoutBuf.split('\n')
-          stdoutBuf = lines.pop() ?? ''
-          for (const line of lines) {
-            const trimmed = line.trim()
-            if (!trimmed) continue
-            // Parse structured [PROGRESS] lines and emit as ingest-progress events
-            if (trimmed.startsWith('[PROGRESS] ')) {
-              try {
-                const payload = JSON.parse(trimmed.slice('[PROGRESS] '.length)) as BatchIngestProgress
-                emitIngestProgress(payload)
-              } catch {
-                // Malformed [PROGRESS] line — fall through to forward as raw line
-              }
-            }
-            // Always forward as a raw ingest line too (for debug / fallback log)
-            mainWin?.webContents?.send('batch:ingest-line', line)
-          }
-        }
-
-        proc.stdout?.on('data', processLines)
-        proc.stderr?.on('data', processLines)
-
-        proc.on('close', (code) => {
-          ingestProcess = null
-          if (code !== 0) {
-            reject(new Error(`ingest exited with code ${code}`))
-            return
-          }
-          // Parse "Ingest complete. Registered: N  Enqueued: N  Skipped: N"
-          const m = combined.match(
-            /Registered:\s*(\d+)\s+Enqueued:\s*(\d+)\s+Skipped:\s*(\d+)/i
-          )
-          resolve({
-            registered: m ? parseInt(m[1]) : 0,
-            enqueued:   m ? parseInt(m[2]) : 0,
-            skipped:    m ? parseInt(m[3]) : 0,
-          })
+      try {
+        await ensureServerRunning()
+        await rpc.call('ingest', {
+          folders: [folder],
+          modules: modules.join(','),
+          recursive,
+          computeHash: !noHash,
         })
-
-        proc.on('error', reject)
-      })
+        // The ingest result is forwarded via notifications (ingest/progress)
+        // Return a summary — the UI already has per-file progress
+        return { registered: 0, enqueued: 0, skipped: 0 }
+      } catch (err) {
+        throw new Error(`Ingest failed: ${err}`)
+      }
     }
   )
 
@@ -429,53 +332,25 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       noHash = false,
       cloudWorkers = 4
     ): Promise<void> => {
-      killRunProcess()
-
       sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash }
       sessionStartMs = Date.now()
       completionWindow.length = 0
       batchStatus = 'running'
+      isRunActive = true
 
-      const args: string[] = [
-        'run',
-        '--workers',       String(workers),
-        '--cloud-workers', String(cloudWorkers),
-        '--cloud',         cloudProvider,
-        '--no-xmp',
-        '--verbose',
-      ]
-
-      const proc = condaSpawn(args)
-      runProcess = proc
-      attachResultParser(proc)
-
-      proc.stderr?.on('data', () => { /* swallow — Rich output goes to stderr */ })
-
-      proc.on('close', (code) => {
-        runProcess = null
-        if (batchStatus === 'running') {
-          // Emit one final tick with done/error status so UI can show completion,
-          // then reset to idle so a fresh session is possible without stale state.
-          const finalStatus: BatchStatus = code === 0 ? 'done' : 'error'
-          batchStatus = finalStatus
-          void doPoll().then(() => {
-            // Small delay so the renderer can render the final tick before we reset
-            setTimeout(() => { batchStatus = 'idle' }, 3000)
-          })
-        }
-        stopPolling()
-      })
-
-      proc.on('error', () => {
-        runProcess = null
-        if (batchStatus === 'running') {
-          batchStatus = 'error'
-          void doPoll().then(() => {
-            setTimeout(() => { batchStatus = 'idle' }, 3000)
-          })
-        }
-        stopPolling()
-      })
+      try {
+        await ensureServerRunning()
+        await rpc.call('run', {
+          workers,
+          cloudWorkers,
+          cloudProvider,
+          noXmp: true,
+          verbose: true,
+        })
+      } catch {
+        // The 'run' RPC returns immediately after starting the worker thread.
+        // Errors during actual processing are reported via run/error notification.
+      }
 
       startPolling()
     }
@@ -483,7 +358,10 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
   // ── batch:pause ───────────────────────────────────────────────────────────
   ipcMain.handle('batch:pause', async (): Promise<void> => {
-    killRunProcess()
+    try {
+      await rpc.call('cancel_run', {})
+    } catch { /* ignore */ }
+    isRunActive = false
     stopPolling()
     batchStatus = 'paused'
     // Emit one tick so the UI updates immediately
@@ -495,62 +373,40 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     if (!sessionConfig) return
     const { workers, cloudWorkers, cloudProvider } = sessionConfig
 
-    const args: string[] = [
-      'run',
-      '--workers',       String(workers),
-      '--cloud-workers', String(cloudWorkers),
-      '--cloud',         cloudProvider,
-      '--no-xmp',
-      '--verbose',
-    ]
-
-    const proc = condaSpawn(args)
-    runProcess = proc
     batchStatus = 'running'
-    attachResultParser(proc)
+    isRunActive = true
 
-    proc.stderr?.on('data', () => { /* swallow */ })
-
-    proc.on('close', (code) => {
-      runProcess = null
-      if (batchStatus === 'running') {
-        batchStatus = code === 0 ? 'done' : 'error'
-        void doPoll().then(() => {
-          setTimeout(() => { batchStatus = 'idle' }, 3000)
-        })
-      }
-      stopPolling()
-    })
-
-    proc.on('error', () => {
-      runProcess = null
-      if (batchStatus === 'running') {
-        batchStatus = 'error'
-        void doPoll().then(() => {
-          setTimeout(() => { batchStatus = 'idle' }, 3000)
-        })
-      }
-      stopPolling()
-    })
+    try {
+      await ensureServerRunning()
+      await rpc.call('run', {
+        workers,
+        cloudWorkers,
+        cloudProvider,
+        noXmp: true,
+        verbose: true,
+      })
+    } catch { /* ignore */ }
 
     startPolling()
   })
 
   // ── batch:stop ────────────────────────────────────────────────────────────
   ipcMain.handle('batch:stop', async (_evt, folder: string): Promise<void> => {
-    killRunProcess()
+    // Cancel the active run
+    try {
+      await rpc.call('cancel_run', {})
+    } catch { /* ignore */ }
+    isRunActive = false
     stopPolling()
     batchStatus = 'stopped'
 
     // Clear pending + running jobs for this folder from the DB
     try {
-      await condaExec([
-        'queue-clear', folder,
-        '--status', 'pending,running',
-      ])
-    } catch {
-      // Best-effort — log but don't throw
-    }
+      await rpc.call('queue_clear', {
+        folder,
+        status: 'pending,running',
+      })
+    } catch { /* ignore */ }
 
     // Emit a final stopped tick
     void doPoll()
@@ -563,14 +419,12 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   })
 
   // ── batch:check-pending ───────────────────────────────────────────────────
-  // Returns the number of pending + running jobs in the DB so the renderer
-  // can decide whether to auto-resume on startup.
   ipcMain.handle('batch:check-pending', async (): Promise<{ pending: number; running: number }> => {
     try {
-      const raw = await condaExec(['status', '--json'])
-      const line = raw.split('\n').find((l) => l.trim().startsWith('{'))
-      if (!line) return { pending: 0, running: 0 }
-      const data = JSON.parse(line) as { totals: Record<string, number> }
+      await ensureServerRunning()
+      const data = await rpc.call('status', {}) as {
+        totals: Record<string, number>
+      }
       return {
         pending: data.totals.pending ?? 0,
         running: data.totals.running ?? 0,
@@ -581,15 +435,10 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   })
 
   // ── batch:resume-pending ──────────────────────────────────────────────────
-  // Spawns `imganalyzer run` to drain whatever is already in the queue,
-  // without needing a prior ingest.  Uses sessionConfig if available
-  // (same session), or sensible defaults (workers=1, no cloud) otherwise.
   ipcMain.handle(
     'batch:resume-pending',
     async (_evt, workers = 1, cloudProvider = 'copilot', cloudWorkers = 4): Promise<void> => {
-      if (batchStatus === 'running') return  // already running
-
-      killRunProcess()
+      if (batchStatus === 'running') return
 
       const w  = sessionConfig?.workers      ?? workers
       const cw = sessionConfig?.cloudWorkers ?? cloudWorkers
@@ -598,68 +447,34 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       sessionStartMs = Date.now()
       completionWindow.length = 0
       batchStatus = 'running'
+      isRunActive = true
 
-      const args: string[] = [
-        'run',
-        '--workers',       String(w),
-        '--cloud-workers', String(cw),
-        '--cloud',         cloud,
-        '--no-xmp',
-        '--verbose',
-      ]
-
-      const proc = condaSpawn(args)
-      runProcess = proc
-      attachResultParser(proc)
-
-      proc.stderr?.on('data', () => { /* swallow */ })
-
-      proc.on('close', (code) => {
-        runProcess = null
-        if (batchStatus === 'running') {
-          const finalStatus: BatchStatus = code === 0 ? 'done' : 'error'
-          batchStatus = finalStatus
-          void doPoll().then(() => {
-            setTimeout(() => { batchStatus = 'idle' }, 3000)
-          })
-        }
-        stopPolling()
-      })
-
-      proc.on('error', () => {
-        runProcess = null
-        if (batchStatus === 'running') {
-          batchStatus = 'error'
-          void doPoll().then(() => {
-            setTimeout(() => { batchStatus = 'idle' }, 3000)
-          })
-        }
-        stopPolling()
-      })
+      try {
+        await ensureServerRunning()
+        await rpc.call('run', {
+          workers: w,
+          cloudWorkers: cw,
+          cloudProvider: cloud,
+          noXmp: true,
+          verbose: true,
+        })
+      } catch { /* ignore */ }
 
       startPolling()
     }
   )
 
   // ── batch:retry-failed ────────────────────────────────────────────────────
-  // Re-enqueues all failed jobs (across the modules that have failures) then
-  // re-spawns the worker.  The renderer passes the list of module keys that
-  // currently have failures so we only call `rebuild` for those modules.
   ipcMain.handle(
     'batch:retry-failed',
     async (_evt, modules: string[]): Promise<void> => {
-      if (batchStatus === 'running') return  // don't interfere with an active run
-
-      killRunProcess()
-      stopPolling()
+      if (batchStatus === 'running') return
 
       // Re-enqueue only the failed jobs for each affected module
       for (const mod of modules) {
         try {
-          await condaExec(['rebuild', mod, '--failed-only'])
-        } catch {
-          // Best-effort: continue to next module even if one rebuild fails
-        }
+          await rpc.call('rebuild', { module: mod, failedOnly: true })
+        } catch { /* ignore */ }
       }
 
       // Spawn the worker to process the newly-enqueued jobs
@@ -670,64 +485,32 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       sessionStartMs = Date.now()
       completionWindow.length = 0
       batchStatus = 'running'
+      isRunActive = true
 
-      const args: string[] = [
-        'run',
-        '--workers',       String(w),
-        '--cloud-workers', String(cw),
-        '--cloud',         cloud,
-        '--no-xmp',
-        '--verbose',
-      ]
-
-      const proc = condaSpawn(args)
-      runProcess = proc
-      attachResultParser(proc)
-
-      proc.stderr?.on('data', () => { /* swallow */ })
-
-      proc.on('close', (code) => {
-        runProcess = null
-        if (batchStatus === 'running') {
-          const finalStatus: BatchStatus = code === 0 ? 'done' : 'error'
-          batchStatus = finalStatus
-          void doPoll().then(() => {
-            setTimeout(() => { batchStatus = 'idle' }, 3000)
-          })
-        }
-        stopPolling()
-      })
-
-      proc.on('error', () => {
-        runProcess = null
-        if (batchStatus === 'running') {
-          batchStatus = 'error'
-          void doPoll().then(() => {
-            setTimeout(() => { batchStatus = 'idle' }, 3000)
-          })
-        }
-        stopPolling()
-      })
+      try {
+        await ensureServerRunning()
+        await rpc.call('run', {
+          workers: w,
+          cloudWorkers: cw,
+          cloudProvider: cloud,
+          noXmp: true,
+          verbose: true,
+        })
+      } catch { /* ignore */ }
 
       startPolling()
     }
   )
 
   // ── batch:queue-clear-all ─────────────────────────────────────────────────
-  // Wipes every job in the queue regardless of status.  Refuses to run while
-  // a batch is in progress — the caller must stop first.
   ipcMain.handle('batch:queue-clear-all', async (): Promise<{ deleted: number }> => {
     if (batchStatus === 'running' || batchStatus === 'paused') {
       throw new Error('Cannot clear queue while a batch is running. Stop the batch first.')
     }
 
-    killRunProcess()
     stopPolling()
 
-    const raw = await condaExec(['queue-clear', '--status', 'all'])
-    // Parse "Cleared N job(s)" from the CLI output
-    const match = raw.match(/Cleared (\d+) job/)
-    const deleted = match ? parseInt(match[1], 10) : 0
+    const result = await rpc.call('queue_clear', { status: 'all' }) as { deleted: number }
 
     // Reset server-side state
     sessionConfig = null
@@ -738,9 +521,6 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     // Emit one final poll tick so the renderer resets its counters
     void doPoll()
 
-    return { deleted }
+    return result
   })
 }
-
-// Keep a reference to the ingest process so future code can cancel it if needed
-let ingestProcess: ChildProcess | null = null

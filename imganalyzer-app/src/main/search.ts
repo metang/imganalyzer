@@ -1,15 +1,13 @@
 /**
  * search.ts — IPC handler for the search-json CLI command.
  *
- * Delegates to `imganalyzer search-json` via conda subprocess and parses
- * the JSON response into typed SearchResult records for the renderer.
+ * Delegates to the persistent Python JSON-RPC server for search queries.
+ * This eliminates the 1-3s conda subprocess overhead + CLIP model load
+ * per search (the CLIP model stays loaded in the persistent process).
  */
 
 import { ipcMain } from 'electron'
-import { spawn } from 'child_process'
-
-const PKG_ROOT = process.env.IMGANALYZER_PKG_ROOT || 'D:\\Code\\imganalyzer'
-const CONDA_ENV = 'imganalyzer'
+import { rpc, ensureServerRunning } from './python-rpc'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -98,102 +96,41 @@ export interface SearchResponse {
   error?: string
 }
 
-// ── CLI execution ─────────────────────────────────────────────────────────────
-
-function buildArgs(filters: SearchFilters): string[] {
-  const args: string[] = ['search-json']
-
-  // Query (positional argument)
-  args.push(filters.query?.trim() || '')
-
-  if (filters.mode)           args.push('--mode', filters.mode)
-  if (filters.semanticWeight !== undefined) args.push('--semantic-weight', String(filters.semanticWeight))
-  if (filters.face)           args.push('--face', filters.face)
-  if (filters.camera)         args.push('--camera', filters.camera)
-  if (filters.lens)           args.push('--lens', filters.lens)
-  if (filters.location)       args.push('--location', filters.location)
-  if (filters.aestheticMin !== undefined) args.push('--aesthetic-min', String(filters.aestheticMin))
-  if (filters.aestheticMax !== undefined) args.push('--aesthetic-max', String(filters.aestheticMax))
-  if (filters.sharpnessMin !== undefined) args.push('--sharpness-min', String(filters.sharpnessMin))
-  if (filters.sharpnessMax !== undefined) args.push('--sharpness-max', String(filters.sharpnessMax))
-  if (filters.noiseMax !== undefined)     args.push('--noise-max', String(filters.noiseMax))
-  if (filters.isoMin !== undefined)       args.push('--iso-min', String(filters.isoMin))
-  if (filters.isoMax !== undefined)       args.push('--iso-max', String(filters.isoMax))
-  if (filters.facesMin !== undefined)     args.push('--faces-min', String(filters.facesMin))
-  if (filters.facesMax !== undefined)     args.push('--faces-max', String(filters.facesMax))
-  if (filters.dateFrom)       args.push('--date-from', filters.dateFrom)
-  if (filters.dateTo)         args.push('--date-to', filters.dateTo)
-  if (filters.hasPeople === true)  args.push('--has-people')
-  if (filters.hasPeople === false) args.push('--no-people')
-  if (filters.limit !== undefined) args.push('--limit', String(filters.limit))
-  if (filters.offset !== undefined) args.push('--offset', String(filters.offset))
-
-  return args
-}
-
-function runSearchCli(filters: SearchFilters): Promise<SearchResponse> {
-  return new Promise((resolve) => {
-    const args = buildArgs(filters)
-
-    const proc = spawn(
-      'conda',
-      [
-        'run', '-n', CONDA_ENV, '--no-capture-output',
-        'python', '-m', 'imganalyzer.cli',
-        ...args,
-      ],
-      {
-        cwd: PKG_ROOT,
-        env: {
-          ...process.env,
-          HF_HUB_DISABLE_SYMLINKS_WARNING: '1',
-          PYTHONIOENCODING: 'utf-8',
-          PYTHONUTF8: '1',
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
-    )
-
-    let stdout = ''
-    let stderr = ''
-    proc.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8') })
-    proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8') })
-
-    const timer = setTimeout(() => {
-      try { proc.kill() } catch { /* ignore */ }
-      resolve({ results: [], total: 0, error: 'Search timed out after 60 s' })
-    }, 60_000)
-
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      // Find the JSON line in stdout
-      const jsonLine = stdout.split('\n').find((l) => l.trim().startsWith('{'))
-      if (!jsonLine) {
-        const msg = code !== 0
-          ? `CLI exited with code ${code}: ${stderr.slice(0, 500)}`
-          : 'No JSON output from search command'
-        resolve({ results: [], total: 0, error: msg })
-        return
-      }
-      try {
-        const data = JSON.parse(jsonLine) as { results: SearchResult[]; total: number }
-        resolve({ results: data.results, total: data.total })
-      } catch (e) {
-        resolve({ results: [], total: 0, error: `JSON parse error: ${String(e)}` })
-      }
-    })
-
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      resolve({ results: [], total: 0, error: String(err) })
-    })
-  })
-}
-
 // ── IPC Registration ──────────────────────────────────────────────────────────
 
 export function registerSearchHandlers(): void {
   ipcMain.handle('search:run', async (_evt, filters: SearchFilters): Promise<SearchResponse> => {
-    return runSearchCli(filters)
+    try {
+      await ensureServerRunning()
+
+      // Map the SearchFilters to the RPC params (camelCase keys)
+      const result = await rpc.call('search', {
+        query: filters.query?.trim() || '',
+        mode: filters.mode,
+        semanticWeight: filters.semanticWeight,
+        face: filters.face,
+        camera: filters.camera,
+        lens: filters.lens,
+        location: filters.location,
+        aestheticMin: filters.aestheticMin,
+        aestheticMax: filters.aestheticMax,
+        sharpnessMin: filters.sharpnessMin,
+        sharpnessMax: filters.sharpnessMax,
+        noiseMax: filters.noiseMax,
+        isoMin: filters.isoMin,
+        isoMax: filters.isoMax,
+        facesMin: filters.facesMin,
+        facesMax: filters.facesMax,
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo,
+        hasPeople: filters.hasPeople,
+        limit: filters.limit,
+        offset: filters.offset,
+      }) as { results: SearchResult[]; total: number }
+
+      return { results: result.results, total: result.total }
+    } catch (err) {
+      return { results: [], total: 0, error: String(err) }
+    }
   })
 }

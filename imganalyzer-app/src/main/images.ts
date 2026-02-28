@@ -1,11 +1,6 @@
 import { readdir, readFile, stat, access } from 'fs/promises'
 import { join, extname, basename } from 'path'
-import { writeFileSync, existsSync } from 'fs'
-import { execFile } from 'child_process'
-import { promisify } from 'util'
-import { tmpdir } from 'os'
-
-const execFileAsync = promisify(execFile)
+import { rpc } from './python-rpc'
 
 export const IMAGE_EXTENSIONS = new Set([
   '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp', '.bmp',
@@ -102,7 +97,7 @@ function thumbCacheSet(key: string, value: string): void {
 }
 // In-flight promises to deduplicate concurrent requests for the same image
 const inFlight = new Map<string, Promise<string>>()
-// Limit concurrent thumbnail processes to avoid overwhelming the system
+// Limit concurrent thumbnail RPC calls to avoid overwhelming the server
 const MAX_CONCURRENT = 4
 let activeCount = 0
 const queue: Array<() => void> = []
@@ -131,8 +126,8 @@ export async function getThumbnail(imagePath: string): Promise<string> {
   const promise = (async () => {
     await acquireSlot()
     try {
-      const jpegBuffer = await pythonThumbnail(imagePath)
-      const dataUrl = `data:image/jpeg;base64,${jpegBuffer.toString('base64')}`
+      const result = await rpc.call('thumbnail', { imagePath }) as { data: string }
+      const dataUrl = `data:image/jpeg;base64,${result.data}`
       thumbCacheSet(imagePath, dataUrl)
       return dataUrl
     } catch (err) {
@@ -146,60 +141,6 @@ export async function getThumbnail(imagePath: string): Promise<string> {
 
   inFlight.set(imagePath, promise)
   return promise
-}
-
-// Write the thumbnail script to a temp file once, reuse it for all calls.
-// conda run rejects multiline -c arguments, so we must use a file.
-let THUMB_SCRIPT_PATH: string | null = null
-
-function getThumbnailScriptPath(): string {
-  if (THUMB_SCRIPT_PATH && existsSync(THUMB_SCRIPT_PATH)) return THUMB_SCRIPT_PATH
-
-  const script = [
-    'import sys, io',
-    'from pathlib import Path',
-    '',
-    'path = Path(sys.argv[1])',
-    'ext = path.suffix.lower()',
-    '',
-    "if ext in ('.heic', '.heif'):",
-    '    from pillow_heif import register_heif_opener',
-    '    register_heif_opener()',
-    '',
-    'from PIL import Image',
-    '',
-    "if ext in ('.arw','.cr2','.cr3','.nef','.nrw','.orf','.raf','.rw2',",
-    "           '.dng','.pef','.srw','.erf','.kdc','.mrw','.3fr','.fff',",
-    "           '.sr2','.srf','.x3f','.iiq','.mos','.raw'):",
-    '    import rawpy',
-    '    with rawpy.imread(str(path)) as raw:',
-    '        rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)',
-    '    import numpy as np',
-    '    img = Image.fromarray(rgb)',
-    'else:',
-    '    img = Image.open(path)',
-    "    img = img.convert('RGB')",
-    '',
-    'img.thumbnail((400, 300), Image.LANCZOS)',
-    'buf = io.BytesIO()',
-    "img.save(buf, format='JPEG', quality=80)",
-    'sys.stdout.buffer.write(buf.getvalue())',
-  ].join('\n')
-
-  const p = join(tmpdir(), 'imganalyzer_thumb.py')
-  writeFileSync(p, script, 'utf-8')
-  THUMB_SCRIPT_PATH = p
-  return p
-}
-
-async function pythonThumbnail(imagePath: string): Promise<Buffer> {
-  const scriptPath = getThumbnailScriptPath()
-  const { stdout } = await execFileAsync(
-    'conda',
-    ['run', '-n', 'imganalyzer', '--no-capture-output', 'python', scriptPath, imagePath],
-    { encoding: 'buffer', maxBuffer: 10 * 1024 * 1024, timeout: 30000 }
-  )
-  return stdout as unknown as Buffer
 }
 
 // ── Full-resolution image for lightbox ───────────────────────────────────────
@@ -220,53 +161,6 @@ const NATIVE_MIME: Record<string, string> = {
 const fullResCache = new Map<string, string>()
 const fullResInFlight = new Map<string, Promise<string>>()
 
-let FULL_SCRIPT_PATH: string | null = null
-
-function getFullScriptPath(): string {
-  if (FULL_SCRIPT_PATH && existsSync(FULL_SCRIPT_PATH)) return FULL_SCRIPT_PATH
-
-  // Full-res version: no thumbnail, high quality JPEG output
-  const script = [
-    'import sys, io',
-    'from pathlib import Path',
-    '',
-    'path = Path(sys.argv[1])',
-    'ext = path.suffix.lower()',
-    '',
-    "if ext in ('.heic', '.heif'):",
-    '    from pillow_heif import register_heif_opener',
-    '    register_heif_opener()',
-    '',
-    'from PIL import Image',
-    '',
-    "if ext in ('.arw','.cr2','.cr3','.nef','.nrw','.orf','.raf','.rw2',",
-    "           '.dng','.pef','.srw','.erf','.kdc','.mrw','.3fr','.fff',",
-    "           '.sr2','.srf','.x3f','.iiq','.mos','.raw'):",
-    '    import rawpy',
-    '    with rawpy.imread(str(path)) as raw:',
-    '        rgb = raw.postprocess(use_camera_wb=True, output_bps=8)',
-    '    import numpy as np',
-    '    img = Image.fromarray(rgb)',
-    'else:',
-    '    img = Image.open(path)',
-    "    img = img.convert('RGB')",
-    '',
-    '# Limit to a sensible display size (4K) to keep the data URL manageable',
-    'MAX_DIM = 3840',
-    'if img.width > MAX_DIM or img.height > MAX_DIM:',
-    '    img.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)',
-    '',
-    'buf = io.BytesIO()',
-    "img.save(buf, format='JPEG', quality=92)",
-    'sys.stdout.buffer.write(buf.getvalue())',
-  ].join('\n')
-
-  const p = join(tmpdir(), 'imganalyzer_fullres.py')
-  writeFileSync(p, script, 'utf-8')
-  FULL_SCRIPT_PATH = p
-  return p
-}
-
 export async function getFullImage(imagePath: string): Promise<string> {
   if (fullResCache.has(imagePath)) return fullResCache.get(imagePath)!
   if (fullResInFlight.has(imagePath)) return fullResInFlight.get(imagePath)!
@@ -281,15 +175,19 @@ export async function getFullImage(imagePath: string): Promise<string> {
         const buf = await readFile(imagePath)
         dataUrl = `data:${NATIVE_MIME[ext]};base64,${buf.toString('base64')}`
       } else {
-        // RAW / HEIC — decode via Python at full resolution
-        const scriptPath = getFullScriptPath()
-        const { stdout } = await execFileAsync(
-          'conda',
-          ['run', '-n', 'imganalyzer', '--no-capture-output', 'python', scriptPath, imagePath],
-          { encoding: 'buffer', maxBuffer: 200 * 1024 * 1024, timeout: 120000 }
-        )
-        const buf = stdout as unknown as Buffer
-        dataUrl = `data:image/jpeg;base64,${buf.toString('base64')}`
+        // RAW / HEIC — decode via Python RPC at full resolution
+        const result = await rpc.call('fullimage', { imagePath }) as
+          { native: true; path: string } | { native: false; data: string }
+
+        if (result.native) {
+          // Server said it's native — read directly (shouldn't happen since
+          // we already check NATIVE_MIME, but handle it gracefully)
+          const buf = await readFile(result.path)
+          const mime = NATIVE_MIME[ext] || 'image/jpeg'
+          dataUrl = `data:${mime};base64,${buf.toString('base64')}`
+        } else {
+          dataUrl = `data:image/jpeg;base64,${result.data}`
+        }
       }
 
       // Keep only the last 2 full-res images to cap memory

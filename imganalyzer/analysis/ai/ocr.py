@@ -88,6 +88,27 @@ class OCRAnalyzer:
     _processor = None
     _model = None
 
+    @classmethod
+    def _unload(cls) -> None:
+        """Unload TrOCR model from GPU to free VRAM.
+
+        Called by the worker between GPU passes so that only the model
+        needed for the current pass is resident.  The model will be
+        lazily reloaded on the next ``analyze()`` call if needed.
+        """
+        if cls._model is not None:
+            del cls._model
+            cls._model = None
+        if cls._processor is not None:
+            del cls._processor
+            cls._processor = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def analyze(
         self,
         image_data: dict[str, Any],

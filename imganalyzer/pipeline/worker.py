@@ -51,7 +51,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from imganalyzer.db.connection import get_db_path
 from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository
-from imganalyzer.pipeline.modules import ModuleRunner, write_xmp_from_db
+from imganalyzer.pipeline.modules import ModuleRunner, write_xmp_from_db, unload_gpu_model
 
 console = Console()
 
@@ -283,6 +283,8 @@ class Worker:
             if self.queue.pending_count(module="objects") > 0 and not self._shutdown.is_set():
                 console.print("[dim]Phase 1 — object detection (people flag)[/dim]")
 
+            objects_batch_size = self._GPU_BATCH_SIZES["objects"]
+
             with (
                 ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
                 ThreadPoolExecutor(max_workers=self.cloud_workers) as cloud_pool,
@@ -290,21 +292,25 @@ class Worker:
                 pending_futures: dict[Future, dict[str, Any]] = {}
 
                 while not self._shutdown.is_set():
-                    # Serial: one objects job at a time
-                    obj_jobs = self.queue.claim(batch_size=1, module="objects")
+                    # Batch: claim up to objects_batch_size jobs at once
+                    obj_jobs = self.queue.claim(batch_size=objects_batch_size, module="objects")
                     if not obj_jobs:
                         # No more objects jobs — collect any remaining IO futures
                         # then break out of phase 1
                         _collect_futures(pending_futures)
                         pending_futures = {}
+                        # Unload GroundingDINO to free ~0.9 GB VRAM before
+                        # Phase 2 loads different models.
+                        unload_gpu_model("objects")
                         break
 
-                    # Process the single objects job on the main thread
-                    result_status = self._process_job(obj_jobs[0])
-                    stats[result_status] += 1
-                    progress.advance(task)
+                    # Process the batch on the main thread (single GPU forward pass)
+                    batch_result = self._process_job_batch(obj_jobs, "objects")
+                    for k in ("done", "failed", "skipped"):
+                        stats[k] += batch_result[k]
+                    progress.advance(task, advance=len(obj_jobs))
 
-                    # After each objects job, fire a fresh batch of IO jobs
+                    # After each batch, fire a fresh batch of IO jobs
                     # (metadata/technical/cloud_ai/aesthetic)
                     new_io = _submit_io_jobs(local_pool, cloud_pool)
                     pending_futures.update(new_io)
@@ -323,12 +329,13 @@ class Worker:
                         progress.advance(task)
 
             # ════════════════════════════════════════════════════════════════
-            # Phase 2: Remaining GPU passes (serial) + cloud passes (parallel)
+            # Phase 2: Remaining GPU passes (batched where supported) +
+            #          cloud passes (parallel)
             #
-            # blip2 / ocr / faces / local_ai / embedding run one at a time on
-            # the main thread.  cloud_ai / aesthetic are now unblocked and run
-            # concurrently in the cloud thread pool, overlapping freely with
-            # the GPU work.  metadata / technical also continue in parallel.
+            # blip2 / embedding use batched GPU forward passes via
+            # ``_process_job_batch()``.  ocr / faces / local_ai remain
+            # serial (ONNX can't batch; local_ai is legacy).  cloud_ai /
+            # aesthetic run concurrently in the cloud thread pool.
             # ════════════════════════════════════════════════════════════════
             if not self._shutdown.is_set():
                 # GPU pass order: blip2 first (captioning, no prereqs),
@@ -348,33 +355,46 @@ class Worker:
                         if self._shutdown.is_set():
                             break
 
+                        # Use the tuned batch size if this module supports
+                        # batching, otherwise fall back to the queue claim
+                        # batch_size (which _process_job_batch will handle
+                        # with serial _process_job calls).
+                        gpu_batch_sz = self._GPU_BATCH_SIZES.get(gpu_module, batch_size)
+
                         while not self._shutdown.is_set():
-                            gpu_jobs = self.queue.claim(batch_size=batch_size, module=gpu_module)
+                            gpu_jobs = self.queue.claim(batch_size=gpu_batch_sz, module=gpu_module)
                             if not gpu_jobs:
                                 break
-                            for job in gpu_jobs:
-                                if self._shutdown.is_set():
-                                    break
-                                result_status = self._process_job(job)
-                                stats[result_status] += 1
+
+                            # Dispatch: batch-capable modules use a single
+                            # GPU forward pass; others fall through to serial
+                            batch_result = self._process_job_batch(gpu_jobs, gpu_module)
+                            for k in ("done", "failed", "skipped"):
+                                stats[k] += batch_result[k]
+                            progress.advance(task, advance=len(gpu_jobs))
+
+                            # After each GPU batch, sweep for newly available
+                            # cloud/IO work and submit it
+                            new_io = _submit_io_jobs(local_pool, cloud_pool)
+                            pending_futures.update(new_io)
+
+                            # Reap completed futures
+                            done_futs = [f for f in pending_futures if f.done()]
+                            for fut in done_futs:
+                                job2 = pending_futures.pop(fut)
+                                try:
+                                    result_status = fut.result()
+                                    stats[result_status] = stats.get(result_status, 0) + 1
+                                except Exception as exc:
+                                    self.queue.mark_failed(job2["id"], str(exc))
+                                    stats["failed"] += 1
                                 progress.advance(task)
 
-                                # After each GPU job, sweep for newly available
-                                # cloud/IO work and submit it
-                                new_io = _submit_io_jobs(local_pool, cloud_pool)
-                                pending_futures.update(new_io)
-
-                                # Reap completed futures
-                                done_futs = [f for f in pending_futures if f.done()]
-                                for fut in done_futs:
-                                    job2 = pending_futures.pop(fut)
-                                    try:
-                                        result_status = fut.result()
-                                        stats[result_status] = stats.get(result_status, 0) + 1
-                                    except Exception as exc:
-                                        self.queue.mark_failed(job2["id"], str(exc))
-                                        stats["failed"] += 1
-                                    progress.advance(task)
+                        # All jobs for this GPU module are done — unload its
+                        # model to free VRAM before the next module loads.
+                        # Peak VRAM drops from ~9.5 GB (all co-resident) to
+                        # ~4.7 GB (single largest model = BLIP-2).
+                        unload_gpu_model(gpu_module)
 
                     # All GPU passes done — collect remaining IO futures
                     _collect_futures(pending_futures)
@@ -402,6 +422,166 @@ class Worker:
             f"Skipped: {stats['skipped']}"
         )
         return stats
+
+    # ── GPU batch sizes per module ──────────────────────────────────────
+    # Tuned to stay within the 14 GB VRAM ceiling with model unloading.
+    _GPU_BATCH_SIZES: dict[str, int] = {
+        "objects":   8,   # GroundingDINO mixed fp16/fp32, ~1.1 GB model
+        "blip2":     2,   # BLIP-2 fp16, beam search is memory-hungry
+        "embedding": 32,  # CLIP ViT-L/14 fp16, ~0.95 GB model
+    }
+
+    def _process_job_batch(
+        self,
+        jobs: list[dict[str, Any]],
+        module: str,
+    ) -> dict[str, int]:
+        """Process a batch of GPU jobs using a single batched forward pass.
+
+        Returns a stats dict: ``{done: N, failed: N, skipped: N}``.
+
+        For modules with batch support (objects, blip2, embedding) this
+        method reads all images, runs a single batched GPU call, and
+        writes all results atomically.  If batching fails (OOM etc.) the
+        batch method's internal fallback handles per-image sequential
+        processing.  Modules without batch support fall through to
+        serial ``_process_job`` calls.
+        """
+        batch_stats: dict[str, int] = {"done": 0, "failed": 0, "skipped": 0}
+
+        if not jobs:
+            return batch_stats
+
+        # Modules that support batched GPU inference
+        BATCH_MODULES = {"objects", "blip2", "embedding"}
+        if module not in BATCH_MODULES:
+            # Fallback: process each job individually
+            for job in jobs:
+                if self._shutdown.is_set():
+                    break
+                status = self._process_job(job)
+                batch_stats[status] += 1
+            return batch_stats
+
+        _, repo, queue, runner = self._get_thread_db()
+
+        # ── Pre-flight: check cache, prereqs, read images ────────────
+        valid_jobs: list[dict[str, Any]] = []
+        valid_image_data: list[dict[str, Any]] = []
+        valid_image_ids: list[int] = []
+
+        from imganalyzer.pipeline.modules import _read_image, _pre_resize
+
+        for job in jobs:
+            image_id = job["image_id"]
+            job_id = job["id"]
+
+            image_row = repo.get_image(image_id)
+            path_str = image_row["file_path"] if image_row else f"id={image_id}"
+
+            # Cache check
+            if not runner.should_run(image_id, module):
+                queue.mark_skipped(job_id, "already_analyzed")
+                _emit_result(path_str, module, "skipped", 0, "already_analyzed")
+                batch_stats["skipped"] += 1
+                continue
+
+            # Prerequisite check
+            prereq = _PREREQUISITES.get(module)
+            if prereq and not repo.is_analyzed(image_id, prereq):
+                reason = f"prerequisite not met: {prereq}"
+                queue.mark_skipped(job_id, f"prerequisite_not_met:{prereq}")
+                _emit_result(path_str, module, "skipped", 0, reason)
+                batch_stats["skipped"] += 1
+                continue
+
+            # For embedding, image_data reading is handled inside
+            # run_embedding_batch, so we just need to validate the job
+            if module == "embedding":
+                valid_jobs.append(job)
+                valid_image_ids.append(image_id)
+                continue
+
+            # Read image for objects/blip2
+            from pathlib import Path
+            path = Path(path_str)
+            if not path.exists():
+                error_msg = f"FileNotFoundError: Image file not found: {path}"
+                queue.mark_failed(job_id, error_msg)
+                _emit_result(path_str, module, "failed", 0, error_msg)
+                batch_stats["failed"] += 1
+                continue
+
+            try:
+                image_data = _read_image(path)
+                image_data = _pre_resize(image_data)
+            except Exception as exc:
+                error_msg = f"{type(exc).__name__}: {exc}"
+                queue.mark_failed(job_id, error_msg)
+                _emit_result(path_str, module, "failed", 0, error_msg)
+                batch_stats["failed"] += 1
+                continue
+
+            valid_jobs.append(job)
+            valid_image_data.append(image_data)
+            valid_image_ids.append(image_id)
+
+        if not valid_jobs:
+            return batch_stats
+
+        # ── Batched GPU forward pass + DB write ──────────────────────
+        start_ms = int(time.time() * 1000)
+
+        try:
+            if module == "objects":
+                from imganalyzer.pipeline.passes.objects import run_objects_batch
+                run_objects_batch(
+                    valid_image_data, repo, valid_image_ids, runner.conn,
+                    prompt=self.detection_prompt,
+                    threshold=self.detection_threshold,
+                )
+            elif module == "blip2":
+                from imganalyzer.pipeline.passes.blip2 import run_blip2_batch
+                run_blip2_batch(
+                    valid_image_data, repo, valid_image_ids, runner.conn,
+                )
+            elif module == "embedding":
+                runner.run_embedding_batch(valid_jobs)
+
+            elapsed = int(time.time() * 1000) - start_ms
+            per_image_ms = elapsed // max(len(valid_jobs), 1)
+
+            # Mark all as done
+            for job in valid_jobs:
+                image_id = job["image_id"]
+                image_row = repo.get_image(image_id)
+                path_str = image_row["file_path"] if image_row else f"id={image_id}"
+                queue.mark_done(job["id"])
+                _emit_result(path_str, module, "done", per_image_ms)
+                batch_stats["done"] += 1
+
+                if self.write_xmp:
+                    with self._xmp_lock:
+                        self._xmp_candidates.add(image_id)
+                if module in _FTS_MODULES:
+                    with self._fts_lock:
+                        self._fts_dirty.add(image_id)
+
+        except Exception as exc:
+            # Batch failed entirely — fall back to per-image processing
+            elapsed = int(time.time() * 1000) - start_ms
+            if self.verbose:
+                console.print(
+                    f"  [yellow]Batch {module} failed ({type(exc).__name__}), "
+                    f"falling back to per-image processing[/yellow]"
+                )
+            for job in valid_jobs:
+                if self._shutdown.is_set():
+                    break
+                status = self._process_job(job)
+                batch_stats[status] += 1
+
+        return batch_stats
 
     def _process_job(self, job: dict[str, Any]) -> str:
         """Process a single job.  Returns 'done', 'failed', or 'skipped'.

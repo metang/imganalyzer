@@ -542,6 +542,131 @@ class ModuleRunner:
             console.print(f"  [dim]CLIP embeddings computed for image {image_id}[/dim]")
         return {"image_clip": has_image_clip, "description_clip": has_desc_clip}
 
+    def run_embedding_batch(
+        self,
+        jobs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Batch CLIP image embedding for multiple images in a single GPU forward pass.
+
+        Text (description_clip) embeddings are computed sequentially — they are
+        cheap CPU-side tokeniser + tiny GPU forward passes.  The image_clip
+        computation is the expensive part and benefits enormously from batching
+        (batch 32 → ~32x fewer CUDA kernel launches).
+
+        Returns a list of result dicts, one per job.
+        """
+        from imganalyzer.embeddings.clip_embedder import CLIPEmbedder
+        from PIL import Image as _PILImage
+
+        embedder = CLIPEmbedder()
+        results: list[dict[str, Any]] = []
+
+        # ── Collect PIL images for batch visual encoding ──────────────
+        batch_pil_images: list[_PILImage.Image] = []
+        batch_indices: list[int] = []  # index into jobs list
+
+        for idx, job in enumerate(jobs):
+            image_id = job["image_id"]
+            path = Path(self.repo.get_image(image_id)["file_path"])
+
+            if not path.exists():
+                continue
+
+            # Use cached decoded image if available
+            cached = self._image_cache_data if self._image_cache_path == path else None
+            if cached is not None:
+                pil_img = _PILImage.fromarray(cached["rgb_array"]).convert("RGB")
+            else:
+                try:
+                    image_data = _read_image(path)
+                    image_data = _pre_resize(image_data)
+                    pil_img = _PILImage.fromarray(image_data["rgb_array"]).convert("RGB")
+                except Exception:
+                    continue
+
+            batch_pil_images.append(pil_img)
+            batch_indices.append(idx)
+
+        # ── Batched image CLIP forward pass ───────────────────────────
+        image_vectors: list[bytes] = []
+        if batch_pil_images:
+            try:
+                image_vectors = embedder.embed_images_batch(batch_pil_images)
+            except Exception:
+                # Fallback to sequential on OOM or error
+                image_vectors = []
+                for img in batch_pil_images:
+                    try:
+                        image_vectors.append(embedder.embed_image_pil(img))
+                    except Exception:
+                        image_vectors.append(b"")
+
+        # Map batch results back to job indices
+        image_vector_map: dict[int, bytes] = {}
+        for i, job_idx in enumerate(batch_indices):
+            if i < len(image_vectors) and image_vectors[i]:
+                image_vector_map[job_idx] = image_vectors[i]
+
+        # ── Per-image: write image_clip + compute/write description_clip ──
+        for idx, job in enumerate(jobs):
+            image_id = job["image_id"]
+            path = Path(self.repo.get_image(image_id)["file_path"])
+            result: dict[str, Any] = {"image_clip": False, "description_clip": False}
+
+            # Write image_clip if we got a vector
+            if idx in image_vector_map:
+                with _transaction(self.conn):
+                    self.repo.upsert_embedding(
+                        image_id, "image_clip",
+                        image_vector_map[idx], embedder.model_version,
+                    )
+                result["image_clip"] = True
+
+            # Text embedding (cheap, sequential)
+            text_parts: list[str] = []
+            local_data = self.repo.get_analysis(image_id, "local_ai")
+            if local_data:
+                for field in ("description", "scene_type", "main_subject"):
+                    val = local_data.get(field)
+                    if val:
+                        text_parts.append(val)
+
+            cloud_data = self.repo.get_analysis(image_id, "cloud_ai")
+            if cloud_data:
+                for prov in cloud_data.get("providers", []):
+                    for field in ("description", "scene_type", "main_subject"):
+                        val = prov.get(field)
+                        if val and val not in text_parts:
+                            text_parts.append(val)
+
+            desc_text = " ".join(text_parts)
+            if desc_text:
+                text_vector = embedder.embed_text(desc_text)
+                with _transaction(self.conn):
+                    self.repo.upsert_embedding(
+                        image_id, "description_clip",
+                        text_vector, embedder.model_version,
+                    )
+                result["description_clip"] = True
+
+            if not result["image_clip"] and not result["description_clip"]:
+                # Neither embedding could be computed — will be treated as failure
+                pass
+
+            results.append(result)
+
+            if self.verbose:
+                console.print(f"  [dim]CLIP embeddings computed for image {image_id}[/dim]")
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        return results
+
 
 class _transaction:
     """Context manager for SQLite transactions (BEGIN IMMEDIATE ... COMMIT)."""
@@ -557,6 +682,35 @@ class _transaction:
             self.conn.commit()
         else:
             self.conn.rollback()
+
+
+def unload_gpu_model(module: str) -> None:
+    """Unload the GPU model(s) used by *module* to free VRAM.
+
+    Called by the worker between GPU passes so that at most one large
+    model is resident in VRAM at any time.  Each model will be lazily
+    reloaded if a later pass needs it again (negligible cost — loading
+    happens once per 500K-image run, not once per image).
+
+    With model unloading, peak VRAM drops from ~9.5 GB (all 5 models
+    co-resident) to ~4.7 GB (largest single model = BLIP-2), leaving
+    ample headroom for batch inference within the 14 GB ceiling.
+    """
+    if module in ("blip2", "local_ai"):
+        from imganalyzer.analysis.ai.local import LocalAI
+        LocalAI._unload()
+    if module in ("objects", "local_ai"):
+        from imganalyzer.analysis.ai.objects import ObjectDetector
+        ObjectDetector._unload()
+    if module in ("ocr", "local_ai"):
+        from imganalyzer.analysis.ai.ocr import OCRAnalyzer
+        OCRAnalyzer._unload()
+    if module in ("faces", "local_ai"):
+        from imganalyzer.analysis.ai.faces import FaceAnalyzer
+        FaceAnalyzer._unload()
+    if module == "embedding":
+        from imganalyzer.embeddings.clip_embedder import CLIPEmbedder
+        CLIPEmbedder._unload()
 
 
 # ── XMP generation from DB data ───────────────────────────────────────────────

@@ -24,6 +24,27 @@ class LocalAI:
     _processor = None
     _model = None
 
+    @classmethod
+    def _unload(cls) -> None:
+        """Unload BLIP-2 model from GPU to free VRAM.
+
+        Called by the worker between GPU passes so that only the model
+        needed for the current pass is resident.  The model will be
+        lazily reloaded on the next ``analyze()`` call if needed.
+        """
+        if cls._model is not None:
+            del cls._model
+            cls._model = None
+        if cls._processor is not None:
+            del cls._processor
+            cls._processor = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def analyze(self, image_data: dict[str, Any]) -> dict[str, Any]:
         try:
             from PIL import Image
@@ -114,6 +135,106 @@ class LocalAI:
         results["keywords"] = _extract_keywords(caption)
 
         return results
+
+    def analyze_batch(self, image_data_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Run BLIP-2 captioning + VQA on multiple images in batched forward passes.
+
+        Batch_size=2 is the safe maximum for BLIP-2 with beam search —
+        memory scales roughly linearly with batch size, and beam search
+        already uses ~2 GB for a single image.  At batch=2 the peak is
+        ~5-6 GB total (weights + activations), well within the 14 GB
+        VRAM ceiling with model unloading active.
+
+        Falls back to per-image ``analyze()`` on OOM or other errors.
+        """
+        if not image_data_list:
+            return []
+        if len(image_data_list) == 1:
+            return [self.analyze(image_data_list[0])]
+
+        try:
+            from PIL import Image
+            from transformers import Blip2Processor, Blip2ForConditionalGeneration
+            import torch
+        except ImportError:
+            raise ImportError(
+                "Local AI requires transformers and torch:\n"
+                "  pip install 'imganalyzer[local-ai]'"
+            )
+
+        # Ensure model is loaded
+        if LocalAI._processor is None:
+            from rich.console import Console
+            Console().print(f"[dim]Loading BLIP-2 model {_MODEL_ID} (first run downloads ~8 GB)...[/dim]")
+            LocalAI._processor = Blip2Processor.from_pretrained(
+                _MODEL_ID, cache_dir=CACHE_DIR
+            )
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            LocalAI._model = Blip2ForConditionalGeneration.from_pretrained(
+                _MODEL_ID,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                low_cpu_mem_usage=True,
+                cache_dir=CACHE_DIR,
+            ).to(device)
+
+        processor = LocalAI._processor
+        model = LocalAI._model
+        device = next(model.parameters()).device
+
+        pil_images = [Image.fromarray(d["rgb_array"]) for d in image_data_list]
+        n = len(pil_images)
+
+        vqa_questions = [
+            ("What type of scene is this? Answer in 1-3 words.", "scene_type"),
+            ("What is the main subject of this image? Answer in 1-5 words.", "main_subject"),
+            ("What is the lighting condition or time of day? Answer in 1-3 words.", "lighting"),
+            ("What is the mood or aesthetic of this image? Answer in 1-3 words.", "mood"),
+        ]
+
+        try:
+            # 1. Batched captioning — N images, no text prompt
+            with torch.inference_mode():
+                inputs = processor(pil_images, return_tensors="pt", padding=True).to(device)
+                out = model.generate(**inputs, max_new_tokens=100)
+                captions = [processor.decode(out[i], skip_special_tokens=True).strip() for i in range(n)]
+
+            # 2. Batched VQA — N images × 4 questions = N*4 items
+            # Replicate each image 4 times (one per question) and interleave
+            vqa_images = []
+            vqa_texts = []
+            for img in pil_images:
+                for q, _ in vqa_questions:
+                    vqa_images.append(img)
+                    vqa_texts.append(q)
+
+            vqa_answers: list[str] = []
+            with torch.inference_mode():
+                inputs = processor(vqa_images, vqa_texts, return_tensors="pt", padding=True).to(device)
+                out = model.generate(**inputs, max_new_tokens=30)
+                vqa_answers = [processor.decode(out[i], skip_special_tokens=True).strip() for i in range(len(vqa_images))]
+
+            # Free activation tensors
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # 3. Assemble per-image results
+            all_results: list[dict[str, Any]] = []
+            for img_idx in range(n):
+                results: dict[str, Any] = {"description": captions[img_idx]}
+                for q_idx, (_, key) in enumerate(vqa_questions):
+                    answer = vqa_answers[img_idx * len(vqa_questions) + q_idx]
+                    if answer:
+                        results[key] = answer
+                results["keywords"] = _extract_keywords(captions[img_idx])
+                all_results.append(results)
+
+            return all_results
+
+        except Exception:
+            # OOM or batching failure — fall back to sequential processing
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return [self.analyze(d) for d in image_data_list]
 
 
 def _extract_keywords(text: str) -> list[str]:

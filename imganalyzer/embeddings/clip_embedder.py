@@ -39,6 +39,27 @@ class CLIPEmbedder:
     _device = None
     model_version: str = "ViT-L-14/openai"
 
+    @classmethod
+    def _unload(cls) -> None:
+        """Unload CLIP model from GPU to free VRAM.
+
+        Called by the worker between GPU passes so that only the model
+        needed for the current pass is resident.  The model will be
+        lazily reloaded on the next ``embed_*()`` call if needed.
+        """
+        if cls._model is not None:
+            del cls._model
+            cls._model = None
+        cls._preprocess = None
+        cls._tokenizer = None
+        cls._device = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def embed_image(self, path: Path | str) -> bytes:
         """Encode an image file → float32 bytes (768-d).
 
@@ -115,6 +136,41 @@ class CLIPEmbedder:
 
         vec = features.cpu().numpy().flatten().astype(np.float32)
         return vec.tobytes()
+
+    def embed_images_batch(self, images: "list[Image.Image]") -> list[bytes]:
+        """Encode a batch of pre-loaded PIL Images → list of float32 bytes (768-d each).
+
+        Processes up to ``batch_size`` images in a single GPU forward pass,
+        dramatically improving throughput by amortising CUDA launch overhead
+        and saturating the GPU's tensor cores.
+
+        At batch_size=32 with ViT-L/14, activation memory is ~450 MB —
+        safe within the 14 GB VRAM ceiling even with model weights (~0.45 GB).
+        """
+        if not images:
+            return []
+
+        self._load_model()
+        import torch
+        from PIL import Image
+
+        # Pre-process all images: resize + CLIP transforms → stacked tensor
+        tensors = []
+        for img in images:
+            img = img.convert("RGB")
+            img.thumbnail((EMBED_MAX_LONG_EDGE, EMBED_MAX_LONG_EDGE), Image.LANCZOS)
+            tensors.append(CLIPEmbedder._preprocess(img))
+
+        # Stack into (N, C, H, W) batch tensor
+        batch_input = torch.stack(tensors).to(CLIPEmbedder._device)
+
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=(CLIPEmbedder._device != "cpu")):
+            features = CLIPEmbedder._model.encode_image(batch_input)
+            features = features / features.norm(dim=-1, keepdim=True)
+
+        # Split back into per-image embedding bytes
+        vecs = features.cpu().numpy().astype(np.float32)
+        return [vecs[i].tobytes() for i in range(vecs.shape[0])]
 
     def embed_text(self, text: str) -> bytes:
         """Encode a text query → float32 bytes (768-d)."""

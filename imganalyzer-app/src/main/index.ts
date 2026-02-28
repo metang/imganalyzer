@@ -45,8 +45,10 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       const w = createWindow()
+      // Only re-register batch handlers (they update the mainWin reference).
+      // Do NOT re-register search handlers — ipcMain.handle() throws on
+      // duplicate registration, crashing the app (Opus Bug #1).
       registerBatchHandlers(w)
-      registerSearchHandlers()
     }
   })
 })
@@ -55,9 +57,16 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
-  // Kill any running batch/ingest Python processes so they release GPU memory
-  killAllBatchProcesses()
+app.on('before-quit', (e) => {
+  // Kill any running batch/ingest Python processes so they release GPU memory.
+  // killAllBatchProcesses is async (shuts down the persistent RPC server), so
+  // we prevent the default quit, run cleanup, then quit again.
+  e.preventDefault()
+  killAllBatchProcesses().finally(() => {
+    // Remove this handler to avoid infinite loop, then quit
+    app.removeAllListeners('before-quit')
+    app.quit()
+  })
 })
 
 // ─── IPC: Folder dialog ──────────────────────────────────────────────────────

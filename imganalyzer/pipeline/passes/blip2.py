@@ -33,3 +33,33 @@ def run_blip2(
         repo.update_search_index(image_id)
 
     return result
+
+
+def run_blip2_batch(
+    image_data_list: list[dict[str, Any]],
+    repo: Repository,
+    image_ids: list[int],
+    conn: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    """Run BLIP-2 captioning + VQA on a batch of images and write results atomically.
+
+    Uses ``LocalAI.analyze_batch()`` for batched forward passes across
+    all images, then writes each result in a single transaction.
+    """
+    from imganalyzer.analysis.ai.local import LocalAI
+    results = LocalAI().analyze_batch(image_data_list)
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    from imganalyzer.pipeline.modules import _transaction
+    with _transaction(conn):
+        for image_id, result in zip(image_ids, results):
+            repo.upsert_blip2(image_id, result)
+            repo.update_search_index(image_id)
+
+    return results
