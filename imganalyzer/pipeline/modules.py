@@ -463,6 +463,23 @@ class ModuleRunner:
                 )
             return {}
 
+        # If cloud_ai has a pending or running job for this image, it will
+        # write aesthetic data as part of its combined LLM response — skip
+        # to avoid a redundant (and racy) parallel API call.
+        cloud_ai_active = self.conn.execute(
+            """SELECT 1 FROM job_queue
+               WHERE image_id = ? AND module = 'cloud_ai'
+                 AND status IN ('pending', 'running')
+               LIMIT 1""",
+            (image_id,),
+        ).fetchone()
+        if cloud_ai_active:
+            if self.verbose:
+                console.print(
+                    f"  [dim]Deferring aesthetic to cloud_ai for image {image_id}[/dim]"
+                )
+            return {}
+
         # If cloud_ai already wrote aesthetic data for this image, skip the
         # redundant API call.  This is the common case when both cloud_ai and
         # aesthetic modules are enabled — cloud_ai now extracts aesthetic

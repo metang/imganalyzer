@@ -26,8 +26,8 @@ import { rpc, ensureServerRunning, setNotificationListener, shutdownServer } fro
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 1000
-// Sliding window for images/sec computation (ms)
-const RATE_WINDOW_MS = 10_000
+// Max age for completion-window entries used by avgMsPerImage (ms)
+const COMPLETION_WINDOW_MS = 10_000
 // How many recent completion durations to average for avgMs
 const AVG_WINDOW = 100
 
@@ -98,10 +98,23 @@ let batchStatus: BatchStatus = 'idle'
 let sessionStartMs = 0
 let isRunActive = false
 
-// Sliding window of { timestamp, durationMs, module } for rate + avg computation
+// Sliding window of { timestamp, durationMs, module } for avg-per-image computation
 const completionWindow: Array<{ ts: number; durationMs: number; module: string }> = []
 
+// Session-lifetime counters for average img/s (total done / elapsed).
+let sessionCompletions = 0
+const moduleCompletions: Record<string, number> = {}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Reset all completion counters for a fresh session. */
+function resetSessionCounters(): void {
+  completionWindow.length = 0
+  sessionCompletions = 0
+  for (const key of Object.keys(moduleCompletions)) {
+    delete moduleCompletions[key]
+  }
+}
 
 /** Emit a batch:tick event to the renderer with current stats. */
 function emitTick(stats: BatchStats): void {
@@ -118,12 +131,12 @@ function emitIngestProgress(progress: BatchIngestProgress): void {
   mainWin?.webContents?.send('batch:ingest-progress', progress)
 }
 
-/** Record a completion and maintain the sliding window. */
+/** Record a completion and maintain the sliding window + session counters. */
 function recordCompletion(durationMs: number, module: string): void {
   const now = Date.now()
   completionWindow.push({ ts: now, durationMs, module })
-  // Evict entries older than RATE_WINDOW_MS
-  const cutoff = now - RATE_WINDOW_MS
+  // Evict entries older than COMPLETION_WINDOW_MS
+  const cutoff = now - COMPLETION_WINDOW_MS
   while (completionWindow.length > 0 && completionWindow[0].ts < cutoff) {
     completionWindow.shift()
   }
@@ -131,19 +144,22 @@ function recordCompletion(durationMs: number, module: string): void {
   if (completionWindow.length > AVG_WINDOW * 2) {
     completionWindow.splice(0, completionWindow.length - AVG_WINDOW * 2)
   }
+  // Session-lifetime counters for average speed
+  sessionCompletions++
+  moduleCompletions[module] = (moduleCompletions[module] ?? 0) + 1
 }
 
-/** Compute derived metrics from the completion window. */
+/** Compute derived metrics using session-average speed. */
 function computeMetrics(
   pending: number,
   workers: number,
   cloudWorkers: number
 ): { imagesPerSec: number; avgMsPerImage: number; estimatedMs: number } {
-  const now = Date.now()
-  const cutoff = now - RATE_WINDOW_MS
-  const recent = completionWindow.filter((e) => e.ts >= cutoff)
-
-  const imagesPerSec = recent.length > 0 ? recent.length / (RATE_WINDOW_MS / 1000) : 0
+  // Average img/s over the entire run (survives pauses / completion)
+  const elapsedSec = sessionStartMs > 0 ? (Date.now() - sessionStartMs) / 1000 : 0
+  const imagesPerSec = elapsedSec > 0 && sessionCompletions > 0
+    ? sessionCompletions / elapsedSec
+    : 0
 
   const lastN = completionWindow.slice(-AVG_WINDOW)
   const avgMsPerImage =
@@ -160,20 +176,14 @@ function computeMetrics(
   return { imagesPerSec, avgMsPerImage, estimatedMs }
 }
 
-/** Compute per-module images/sec from the completion window. */
+/** Compute per-module images/sec as session-average (total done / elapsed). */
 function computeModuleSpeeds(): Record<string, number> {
-  const now = Date.now()
-  const cutoff = now - RATE_WINDOW_MS
-  const recent = completionWindow.filter((e) => e.ts >= cutoff)
-
-  const counts: Record<string, number> = {}
-  for (const e of recent) {
-    counts[e.module] = (counts[e.module] ?? 0) + 1
-  }
+  const elapsedSec = sessionStartMs > 0 ? (Date.now() - sessionStartMs) / 1000 : 0
+  if (elapsedSec <= 0) return {}
 
   const speeds: Record<string, number> = {}
-  for (const [mod, count] of Object.entries(counts)) {
-    speeds[mod] = count / (RATE_WINDOW_MS / 1000)
+  for (const [mod, count] of Object.entries(moduleCompletions)) {
+    speeds[mod] = count / elapsedSec
   }
   return speeds
 }
@@ -352,8 +362,8 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       noHash: boolean
     ): Promise<{ registered: number; enqueued: number; skipped: number }> => {
       batchStatus = 'ingesting'
-      // Reset sliding window for a fresh session
-      completionWindow.length = 0
+      // Reset counters for a fresh session
+      resetSessionCounters()
       sessionStartMs = 0
 
       try {
@@ -390,7 +400,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     ): Promise<void> => {
       sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash }
       sessionStartMs = Date.now()
-      completionWindow.length = 0
+      resetSessionCounters()
       batchStatus = 'running'
       isRunActive = true
 
@@ -480,7 +490,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
     // Reset session so a fresh start is possible
     sessionConfig = null
-    completionWindow.length = 0
+    resetSessionCounters()
     sessionStartMs = 0
     batchStatus = 'idle'
   })
@@ -526,7 +536,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       }
 
       sessionStartMs = Date.now()
-      completionWindow.length = 0
+      resetSessionCounters()
       batchStatus = 'running'
       isRunActive = true
 
@@ -567,7 +577,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       const cloud = sessionConfig?.cloudProvider ?? 'copilot'
 
       sessionStartMs = Date.now()
-      completionWindow.length = 0
+      resetSessionCounters()
       batchStatus = 'running'
       isRunActive = true
 
@@ -604,7 +614,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
     // Reset server-side state
     sessionConfig = null
-    completionWindow.length = 0
+    resetSessionCounters()
     sessionStartMs = 0
     batchStatus = 'idle'
 
