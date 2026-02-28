@@ -14,15 +14,27 @@ def read(path: Path) -> dict[str, Any]:
     except ImportError:
         raise ImportError("rawpy is required for RAW files: pip install rawpy")
 
-    with rawpy.imread(str(path)) as raw:  # rawpy requires str path (cross-platform str() is safe)
+    try:
+        raw_ctx = rawpy.imread(str(path))
+    except Exception as exc:
+        raise ValueError(
+            f"LibRaw cannot decode {path.name}: {exc}"
+        ) from exc
+
+    with raw_ctx as raw:
         # Get raw dimensions first to check size
         raw_h, raw_w = raw.raw_image.shape[:2]
-        rgb = raw.postprocess(
-            use_camera_wb=True,
-            no_auto_bright=False,
-            output_bps=8,
-            half_size=False,
-        )
+        try:
+            rgb = raw.postprocess(
+                use_camera_wb=True,
+                no_auto_bright=False,
+                output_bps=8,
+                half_size=False,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"LibRaw postprocess failed for {path.name}: {exc}"
+            ) from exc
 
         # Also expose the raw Bayer data for technical analysis
         try:

@@ -4,7 +4,7 @@ import type { ModuleKey } from '../hooks/useBatchProcess'
 
 /**
  * A UI pass row.  `uiKey` is unique per row and used for checkbox state.
- * `moduleKey` is the CLI key it maps to (multiple rows may share one moduleKey).
+ * `moduleKey` is the CLI key sent to the backend (one-to-one since the refactor).
  */
 interface PassDef {
   label: string
@@ -16,12 +16,12 @@ interface PassDef {
 const PASSES: PassDef[] = [
   { label: 'Metadata (EXIF / GPS / IPTC)',           uiKey: 'metadata',   moduleKey: 'metadata'  },
   { label: 'Technical (sharpness, exposure, noise)',  uiKey: 'technical',  moduleKey: 'technical' },
-  { label: 'Caption & Scene (BLIP-2)',                uiKey: 'caption',    moduleKey: 'local_ai'  },
-  { label: 'Object Detection (GroundingDINO)',        uiKey: 'objects',    moduleKey: 'local_ai'  },
-  { label: 'OCR / Text (TrOCR)',                      uiKey: 'ocr',        moduleKey: 'local_ai'  },
-  { label: 'Face Recognition (InsightFace)',          uiKey: 'faces',      moduleKey: 'local_ai'  },
-  { label: 'Cloud AI',                                uiKey: 'cloud_ai',   moduleKey: 'cloud_ai',  note: 'requires local_ai' },
-  { label: 'Aesthetic Score',                         uiKey: 'aesthetic',  moduleKey: 'aesthetic', note: 'requires local_ai' },
+  { label: 'Caption & Scene (BLIP-2)',                uiKey: 'caption',    moduleKey: 'blip2'     },
+  { label: 'Object Detection (GroundingDINO)',        uiKey: 'objects',    moduleKey: 'objects'   },
+  { label: 'OCR / Text (TrOCR)',                      uiKey: 'ocr',        moduleKey: 'ocr',       note: 'requires objects' },
+  { label: 'Face Recognition (InsightFace)',          uiKey: 'faces',      moduleKey: 'faces',     note: 'requires objects' },
+  { label: 'Cloud AI',                                uiKey: 'cloud_ai',   moduleKey: 'cloud_ai',  note: 'requires objects' },
+  { label: 'Aesthetic Score',                         uiKey: 'aesthetic',  moduleKey: 'aesthetic', note: 'requires objects' },
   { label: 'Embeddings',                              uiKey: 'embedding',  moduleKey: 'embedding' },
 ]
 
@@ -35,7 +35,7 @@ const CLOUD_PROVIDERS = [
 
 /**
  * selectedKeys holds unique UI keys (one per row).
- * Call `resolveModuleKeys(selectedKeys)` to get the deduplicated CLI module keys.
+ * Call `resolveModuleKeys(selectedKeys)` to get the CLI module keys.
  */
 export interface PassSelectorValue {
   selectedKeys: Set<string>
@@ -47,8 +47,8 @@ export interface PassSelectorValue {
 }
 
 /**
- * Convert the UI-level selectedKeys set to the deduplicated CLI module key array.
- * e.g. if any of caption/objects/ocr/faces is selected, 'local_ai' is included once.
+ * Convert the UI-level selectedKeys set to the CLI module key array.
+ * Each UI pass maps to a distinct module key since the split-pass refactor.
  */
 export function resolveModuleKeys(selectedKeys: Set<string>): ModuleKey[] {
   const result = new Set<ModuleKey>()
