@@ -66,6 +66,7 @@ let stdoutBuf = ''
 let isReady = false
 let readyResolve: (() => void) | null = null
 let readyReject: ((err: Error) => void) | null = null
+let notifResultCount = 0
 
 function handleLine(line: string): void {
   const trimmed = line.trim()
@@ -86,6 +87,14 @@ function handleLine(line: string): void {
       isReady = true
       readyResolve?.()
       return
+    }
+
+    // DEBUG: log notification arrival
+    if (msg.method === 'run/result') {
+      notifResultCount++
+      if (notifResultCount <= 5 || notifResultCount % 50 === 0) {
+        console.error(`[DEBUG handleLine] run/result notification #${notifResultCount}, globalCb=${!!globalNotificationCb}`)
+      }
     }
 
     // Route to global notification listener

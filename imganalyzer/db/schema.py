@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -29,6 +29,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         3: _migrate_v3,
         4: _migrate_v4,
         5: _migrate_v5,
+        6: _migrate_v6,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -213,7 +214,8 @@ def _migrate_v1(conn: sqlite3.Connection) -> None:
             queued_at       TEXT    NOT NULL DEFAULT (datetime('now')),
             started_at      TEXT,
             completed_at    TEXT,
-            skip_reason     TEXT
+            skip_reason     TEXT,
+            UNIQUE(image_id, module)
         );
         CREATE INDEX IF NOT EXISTS idx_job_queue_status ON job_queue(status, priority DESC);
         CREATE INDEX IF NOT EXISTS idx_job_queue_image_module
@@ -365,4 +367,50 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
                     "INSERT INTO face_aliases (identity_id, alias) VALUES (?, ?)",
                     [row["id"], alias],
                 )
+
+
+# ── Migration v6: UNIQUE constraint on job_queue(image_id, module) ───────────
+
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """Add UNIQUE(image_id, module) to job_queue to prevent duplicate jobs.
+
+    SQLite cannot ALTER TABLE to add a constraint, so we recreate the table.
+    Duplicate rows (same image_id + module) are deduplicated by keeping the
+    row with the highest id (most recent).
+    """
+    conn.executescript("""
+        -- Deduplicate: keep only the latest row per (image_id, module)
+        DELETE FROM job_queue
+        WHERE id NOT IN (
+            SELECT MAX(id) FROM job_queue GROUP BY image_id, module
+        );
+
+        -- Recreate with UNIQUE constraint
+        CREATE TABLE job_queue_new (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            image_id        INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+            module          TEXT    NOT NULL,
+            priority        INTEGER DEFAULT 0,
+            status          TEXT    NOT NULL DEFAULT 'pending',
+            attempts        INTEGER DEFAULT 0,
+            max_attempts    INTEGER DEFAULT 3,
+            error_message   TEXT,
+            queued_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+            started_at      TEXT,
+            completed_at    TEXT,
+            skip_reason     TEXT,
+            UNIQUE(image_id, module)
+        );
+
+        INSERT INTO job_queue_new
+            SELECT * FROM job_queue;
+
+        DROP TABLE job_queue;
+        ALTER TABLE job_queue_new RENAME TO job_queue;
+
+        CREATE INDEX IF NOT EXISTS idx_job_queue_status
+            ON job_queue(status, priority DESC);
+        CREATE INDEX IF NOT EXISTS idx_job_queue_image_module
+            ON job_queue(image_id, module);
+    """)
 

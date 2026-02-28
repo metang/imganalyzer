@@ -42,6 +42,7 @@ import io
 import json
 import os
 import signal
+import sqlite3
 import sys
 import threading
 import traceback
@@ -52,12 +53,18 @@ from typing import Any
 _real_stdout = sys.stdout
 sys.stdout = sys.stderr
 
+# Lock protecting writes to _real_stdout so concurrent threads
+# (ThreadPoolExecutor workers emitting [RESULT] lines) cannot
+# interleave partial JSON lines.
+_send_lock = threading.Lock()
+
 
 def _send(obj: dict[str, Any]) -> None:
-    """Write a JSON-RPC message to the real stdout (one line)."""
+    """Write a JSON-RPC message to the real stdout (one line, thread-safe)."""
     line = json.dumps(obj, default=str, separators=(",", ":"))
-    _real_stdout.write(line + "\n")
-    _real_stdout.flush()
+    with _send_lock:
+        _real_stdout.write(line + "\n")
+        _real_stdout.flush()
 
 
 def _send_result(req_id: int | str, result: Any) -> None:
@@ -68,7 +75,18 @@ def _send_error(req_id: int | str | None, code: int, message: str) -> None:
     _send({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
 
 
+_notif_count = 0
+_notif_count_lock = threading.Lock()
+
 def _send_notification(method: str, params: Any) -> None:
+    global _notif_count
+    if method == "run/result":
+        with _notif_count_lock:
+            _notif_count += 1
+            n = _notif_count
+        if n <= 20 or n % 50 == 0:
+            sys.stderr.write(f"[DEBUG _send_notification] run/result #{n}\n")
+            sys.stderr.flush()
     _send({"jsonrpc": "2.0", "method": method, "params": params})
 
 
@@ -92,6 +110,7 @@ def _get_db():
 
 _run_cancel = threading.Event()
 _run_thread: threading.Thread | None = None
+_active_worker: Any = None  # Worker | None — set while a run is active
 
 _analyze_cancel: dict[str, threading.Event] = {}  # imagePath -> cancel event
 
@@ -178,7 +197,7 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
 
     builtins.print = _patched_print
     try:
-        processor.ingest(
+        ingest_stats = processor.ingest(
             folders=folders,
             modules=modules,
             force=force,
@@ -193,7 +212,12 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
     finally:
         builtins.print = _orig_print
 
-    _send_result(req_id, {"ok": True})
+    _send_result(req_id, {
+        "ok": True,
+        "registered": ingest_stats.get("registered", 0),
+        "enqueued": ingest_stats.get("enqueued", 0),
+        "skipped": ingest_stats.get("skipped", 0),
+    })
 
 
 def _handle_run(req_id: int | str, params: dict) -> None:
@@ -215,13 +239,29 @@ def _handle_run(req_id: int | str, params: dict) -> None:
     detection_prompt = params.get("detectionPrompt")
     detection_threshold = params.get("detectionThreshold")
     face_threshold = params.get("faceThreshold")
+    stale_timeout = params.get("staleTimeout")  # None = use Worker default (10 min)
 
     def _run_worker():
+        global _active_worker
         try:
             from imganalyzer.pipeline.worker import Worker
+            from imganalyzer.db.connection import get_db_path
 
-            conn = _get_db()
-            worker = Worker(
+            # Open a FRESH connection for this thread — SQLite connections
+            # cannot be shared across threads (check_same_thread=True by default).
+            db_path = get_db_path()
+            conn = sqlite3.connect(
+                str(db_path),
+                timeout=30,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+            worker_kwargs = dict(
                 conn=conn,
                 workers=workers,
                 cloud_workers=cloud_workers,
@@ -233,31 +273,36 @@ def _handle_run(req_id: int | str, params: dict) -> None:
                 verbose=verbose,
                 write_xmp=write_xmp,
             )
+            if stale_timeout is not None:
+                worker_kwargs["stale_timeout_minutes"] = stale_timeout
+            worker = Worker(**worker_kwargs)
+            _active_worker = worker
 
-            # Intercept [RESULT] output from the worker
-            import builtins
-            _orig_print = builtins.print
-
-            def _patched_print(*args, **kwargs):
-                text = " ".join(str(a) for a in args)
-                if text.startswith("[RESULT] "):
-                    try:
-                        payload = json.loads(text[len("[RESULT] "):])
-                        _send_notification("run/result", payload)
-                        return
-                    except Exception:
-                        pass
-                _orig_print(*args, **kwargs)
-
-            builtins.print = _patched_print
+            # Wire up direct result-notification callback (bypasses print)
+            from imganalyzer.pipeline import worker as worker_mod
+            worker_mod._result_notify = lambda payload: _send_notification("run/result", payload)
+            sys.stderr.write(
+                f"[DEBUG server] callback installed: id(worker_mod)={id(worker_mod)}, "
+                f"_result_notify is None={worker_mod._result_notify is None}\n"
+            )
+            sys.stderr.flush()
             try:
+                sys.stderr.write("[DEBUG server] calling worker.run()...\n")
+                sys.stderr.flush()
                 result = worker.run(batch_size=batch_size)
+                sys.stderr.write(f"[DEBUG server] worker.run() returned: {result}\n")
+                sys.stderr.flush()
                 _send_notification("run/done", result)
             except Exception as exc:
+                sys.stderr.write(f"[DEBUG server] worker.run() EXCEPTION: {exc}\n")
+                sys.stderr.flush()
                 _send_notification("run/error", {"error": str(exc)})
             finally:
-                builtins.print = _orig_print
+                worker_mod._result_notify = None
+                _active_worker = None
+                conn.close()
         except Exception as exc:
+            _active_worker = None
             _send_notification("run/error", {"error": str(exc), "traceback": traceback.format_exc()})
 
     _run_thread = threading.Thread(target=_run_worker, daemon=True, name="rpc-run")
@@ -266,15 +311,13 @@ def _handle_run(req_id: int | str, params: dict) -> None:
 
 
 def _handle_cancel_run(params: dict) -> dict:
-    """Cancel a running batch by sending SIGINT to self (Worker catches it)."""
+    """Cancel a running batch by setting the Worker's shutdown event."""
     _run_cancel.set()
-    # The Worker installs a SIGINT handler for graceful shutdown.
-    # We simulate it by raising KeyboardInterrupt in the main thread,
-    # but since Worker runs in a daemon thread, we use os.kill instead.
-    try:
-        os.kill(os.getpid(), signal.SIGINT)
-    except Exception:
-        pass
+    # Directly signal the active worker to stop (graceful shutdown).
+    # The worker checks _shutdown.is_set() between jobs and will finish
+    # the current batch then exit.
+    if _active_worker is not None:
+        _active_worker._shutdown.set()
     return {"cancelled": True}
 
 

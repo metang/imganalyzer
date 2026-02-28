@@ -93,8 +93,13 @@ export function useBatchProcess(): UseBatchProcessReturn {
 
   // Subscribe to events once on mount
   useEffect(() => {
+    let rendererResultCount = 0
     unsubTickRef.current = window.api.onBatchTick((s) => setStats(s))
     unsubResultRef.current = window.api.onBatchResult((r) => {
+      rendererResultCount++
+      if (rendererResultCount <= 5 || rendererResultCount % 50 === 0) {
+        console.log(`[DEBUG onBatchResult #${rendererResultCount}] ${r.status} ${r.module} path=${r.path?.slice(-40)}`)
+      }
       setResults((prev) => {
         const next = [r, ...prev]
         return next.length > MAX_RESULTS ? next.slice(0, MAX_RESULTS) : next

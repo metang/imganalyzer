@@ -254,6 +254,16 @@ export function BatchRunView({
     await batch.stop(folder)
   }, [batch, folder])
 
+  // Combined resume handler: use batch.resume() when paused (has sessionConfig),
+  // otherwise use resumePending() which works without sessionConfig.
+  const handleResume = useCallback(async () => {
+    if (stats.status === 'paused') {
+      await batch.resume()
+    } else {
+      await batch.resumePending()
+    }
+  }, [batch, stats.status])
+
   const handleClearQueue = useCallback(async () => {
     await batch.clearQueue()
   }, [batch])
@@ -287,7 +297,7 @@ export function BatchRunView({
         <ProgressDashboard
           stats={stats}
           onPause={batch.pause}
-          onResume={batch.resume}
+          onResume={handleResume}
           onStop={() => setShowStopDialog(true)}
           onRetryFailed={batch.retryFailed}
           onClearQueue={handleClearQueue}

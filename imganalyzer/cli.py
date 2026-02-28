@@ -565,13 +565,15 @@ def run_queue(
     detection_prompt: Optional[str] = typer.Option(None, "--detection-prompt"),
     detection_threshold: Optional[float] = typer.Option(None, "--detection-threshold", min=0.0, max=1.0),
     face_threshold: Optional[float] = typer.Option(None, "--face-threshold", min=0.0, max=1.0),
+    retry_failed: bool = typer.Option(False, "--retry-failed", help="Re-queue previously failed jobs before processing"),
 ) -> None:
     """Start processing the job queue.
 
     Processes pending jobs from the database queue.  Press Ctrl+C to pause
     gracefully (current batch finishes, remaining jobs stay queued).
 
-    Resume by running this command again.
+    Resume by running this command again.  Previously failed jobs are NOT
+    retried automatically — pass ``--retry-failed`` to re-queue them.
 
     Example::
 
@@ -579,6 +581,7 @@ def run_queue(
         imganalyzer run --workers 4
         # Ctrl+C to pause
         imganalyzer run  # resumes
+        imganalyzer run --retry-failed  # also retries failed jobs
     """
     from dotenv import load_dotenv
     load_dotenv()
@@ -598,6 +601,7 @@ def run_queue(
         face_match_threshold=face_threshold,
         verbose=verbose,
         write_xmp=not no_xmp,
+        retry_failed=retry_failed,
     )
     worker.run(batch_size=batch_size)
 

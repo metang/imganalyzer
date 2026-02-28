@@ -99,6 +99,11 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
 
   const isRunning = status === 'running'
   const isPaused  = status === 'paused'
+  const hasPending = totals.pending > 0
+
+  // Show Resume when paused OR when there are pending jobs but the worker
+  // is no longer running (e.g. worker exited / finished early / error state).
+  const showResume = isPaused || (!isRunning && hasPending)
 
   // Modules with at least one failure — passed to onRetryFailed
   const failedModules = Object.entries(modules)
@@ -183,7 +188,7 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
             Pause
           </button>
         )}
-        {isPaused && (
+        {showResume && (
           <button
             onClick={onResume}
             className="

@@ -108,8 +108,14 @@ function emitTick(stats: BatchStats): void {
   mainWin?.webContents?.send('batch:tick', stats)
 }
 
+let emitResultCount = 0
+
 /** Emit a batch:result event to the renderer. */
 function emitResult(result: BatchResult): void {
+  emitResultCount++
+  if (emitResultCount <= 5 || emitResultCount % 50 === 0) {
+    console.error(`[DEBUG emitResult #${emitResultCount}] ${result.status} ${result.module} mainWin=${!!mainWin} webContents=${!!mainWin?.webContents}`)
+  }
   mainWin?.webContents?.send('batch:result', result)
 }
 
@@ -267,26 +273,51 @@ function setupNotificationListener(): void {
       }
 
       case 'run/done':
-        // Run completed successfully
+        // Run completed — check if there are still jobs remaining
+        // (e.g. stale 'running' jobs from a previous crash that weren't
+        // recovered because they're newer than the 10-minute timeout).
         if (batchStatus === 'running') {
-          batchStatus = 'done'
           isRunActive = false
-          void doPoll().then(() => {
+          stopPolling()
+          void rpc.call('status', {}).then((data: any) => {
+            const pending = data?.totals?.pending ?? 0
+            const running = data?.totals?.running ?? 0
+            if (pending + running > 0) {
+              // Jobs remain — show as paused so Resume/Stop buttons appear
+              batchStatus = 'paused'
+            } else {
+              batchStatus = 'done'
+              setTimeout(() => { batchStatus = 'idle' }, 3000)
+            }
+            void doPoll()
+          }).catch(() => {
+            batchStatus = 'done'
+            void doPoll()
             setTimeout(() => { batchStatus = 'idle' }, 3000)
           })
-          stopPolling()
         }
         break
 
       case 'run/error':
-        // Run encountered an error
+        // Run encountered an error — same logic: check for remaining jobs
         if (batchStatus === 'running') {
-          batchStatus = 'error'
           isRunActive = false
-          void doPoll().then(() => {
+          stopPolling()
+          void rpc.call('status', {}).then((data: any) => {
+            const pending = data?.totals?.pending ?? 0
+            const running = data?.totals?.running ?? 0
+            if (pending + running > 0) {
+              batchStatus = 'paused'
+            } else {
+              batchStatus = 'error'
+              setTimeout(() => { batchStatus = 'idle' }, 3000)
+            }
+            void doPoll()
+          }).catch(() => {
+            batchStatus = 'error'
+            void doPoll()
             setTimeout(() => { batchStatus = 'idle' }, 3000)
           })
-          stopPolling()
         }
         break
     }
@@ -333,15 +364,17 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
       try {
         await ensureServerRunning()
-        await rpc.call('ingest', {
+        const result = await rpc.call('ingest', {
           folders: [folder],
           modules: modules.join(','),
           recursive,
           computeHash: !noHash,
-        })
-        // The ingest result is forwarded via notifications (ingest/progress)
-        // Return a summary — the UI already has per-file progress
-        return { registered: 0, enqueued: 0, skipped: 0 }
+        }) as { registered?: number; enqueued?: number; skipped?: number }
+        return {
+          registered: result.registered ?? 0,
+          enqueued: result.enqueued ?? 0,
+          skipped: result.skipped ?? 0,
+        }
       } catch (err) {
         throw new Error(`Ingest failed: ${err}`)
       }
@@ -399,21 +432,32 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
   // ── batch:resume ──────────────────────────────────────────────────────────
   ipcMain.handle('batch:resume', async (): Promise<void> => {
-    if (!sessionConfig) return
-    const { workers, cloudWorkers, cloudProvider } = sessionConfig
+    // Use session config if available, otherwise fall back to sensible defaults
+    // (e.g. after crash recovery when sessionConfig was never populated).
+    const w     = sessionConfig?.workers       ?? 1
+    const cw    = sessionConfig?.cloudWorkers  ?? 4
+    const cloud = sessionConfig?.cloudProvider ?? 'copilot'
+
+    // When there's no sessionConfig, we're recovering from a crash/restart —
+    // use staleTimeout=0 to reclaim all stuck 'running' jobs immediately.
+    const needsStaleRecovery = !sessionConfig
 
     batchStatus = 'running'
     isRunActive = true
 
     try {
       await ensureServerRunning()
-      await rpc.call('run', {
-        workers,
-        cloudWorkers,
-        cloudProvider,
+      const runParams: Record<string, unknown> = {
+        workers: w,
+        cloudWorkers: cw,
+        cloudProvider: cloud,
         noXmp: true,
         verbose: true,
-      })
+      }
+      if (needsStaleRecovery) {
+        runParams.staleTimeout = 0
+      }
+      await rpc.call('run', runParams)
     } catch { /* ignore */ }
 
     startPolling()
@@ -473,6 +517,20 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       const cw = sessionConfig?.cloudWorkers ?? cloudWorkers
       const cloud = sessionConfig?.cloudProvider ?? cloudProvider
 
+      // Populate sessionConfig if it wasn't set (crash recovery / fresh start)
+      // so that subsequent batch:resume calls have it available.
+      if (!sessionConfig) {
+        sessionConfig = {
+          folder: '',
+          modules: [],
+          workers: w,
+          cloudWorkers: cw,
+          cloudProvider: cloud,
+          recursive: true,
+          noHash: false,
+        }
+      }
+
       sessionStartMs = Date.now()
       completionWindow.length = 0
       batchStatus = 'running'
@@ -480,12 +538,15 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
       try {
         await ensureServerRunning()
+        // Use staleTimeout=0 to recover ALL stuck 'running' jobs from a
+        // previous crash, regardless of how recently they were claimed.
         await rpc.call('run', {
           workers: w,
           cloudWorkers: cw,
           cloudProvider: cloud,
           noXmp: true,
           verbose: true,
+          staleTimeout: 0,
         })
       } catch { /* ignore */ }
 
@@ -532,6 +593,10 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   )
 
   // ── batch:queue-clear-all ─────────────────────────────────────────────────
+  // Only clears pending/running/failed jobs. Done and skipped rows are
+  // preserved so that re-ingest correctly skips already-processed images
+  // (especially modules skipped at runtime like cloud_ai/aesthetic with
+  // has_people guard, which have no analysis-table data).
   ipcMain.handle('batch:queue-clear-all', async (): Promise<{ deleted: number }> => {
     if (batchStatus === 'running' || batchStatus === 'paused') {
       throw new Error('Cannot clear queue while a batch is running. Stop the batch first.')
@@ -539,7 +604,9 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
     stopPolling()
 
-    const result = await rpc.call('queue_clear', { status: 'all' }) as { deleted: number }
+    const result = await rpc.call('queue_clear', {
+      status: 'pending,running,failed',
+    }) as { deleted: number }
 
     // Reset server-side state
     sessionConfig = null

@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -81,8 +82,19 @@ _PREREQUISITES: dict[str, str] = {
 }
 
 
+# ── Result notification callback ──────────────────────────────────────────────
+# When running under the JSON-RPC server, this is set to a function that
+# sends a ``run/result`` notification directly (bypassing print).
+# When running from the CLI, it stays None and _emit_result falls back to
+# printing a [RESULT] line to stdout.
+_result_notify: Any = None   # Callable[[dict], None] | None
+_emit_count = 0
+_emit_count_lock = threading.Lock()
+
+
 def _emit_result(path: str, module: str, status: str, ms: int, error: str = "") -> None:
-    """Print a machine-readable [RESULT] line to stdout."""
+    """Emit a machine-readable result — via callback or [RESULT] stdout line."""
+    global _emit_count
     payload: dict[str, Any] = {
         "path":   path,
         "module": module,
@@ -91,8 +103,27 @@ def _emit_result(path: str, module: str, status: str, ms: int, error: str = "") 
     }
     if error:
         payload["error"] = error
-    # Use json.dumps so all string values are correctly escaped
-    print(f"[RESULT] {json.dumps(payload)}", flush=True)
+
+    with _emit_count_lock:
+        _emit_count += 1
+        n = _emit_count
+
+    if _result_notify is not None:
+        # Server mode: send JSON-RPC notification directly
+        try:
+            _result_notify(payload)
+        except Exception as exc:
+            sys.stderr.write(f"[DEBUG _emit_result #{n}] callback error: {exc}\n")
+            sys.stderr.flush()
+        if n <= 20 or n % 50 == 0:
+            sys.stderr.write(f"[DEBUG _emit_result #{n}] {status} {module} via callback\n")
+            sys.stderr.flush()
+    else:
+        # CLI mode: print [RESULT] line to stdout
+        if n <= 20 or n % 50 == 0:
+            sys.stderr.write(f"[DEBUG _emit_result #{n}] {status} {module} via print (NO CALLBACK)\n")
+            sys.stderr.flush()
+        print(f"[RESULT] {json.dumps(payload)}", flush=True)
 
 
 class Worker:
@@ -111,6 +142,7 @@ class Worker:
         verbose: bool = False,
         stale_timeout_minutes: int = 10,
         write_xmp: bool = True,
+        retry_failed: bool = False,
     ) -> None:
         # Main-thread connection — used only for queue management (claim, recover, etc.)
         self.conn = conn
@@ -129,6 +161,7 @@ class Worker:
         self.verbose = verbose
         self.stale_timeout = stale_timeout_minutes
         self.write_xmp = write_xmp
+        self.retry_failed_on_start = retry_failed
         self._shutdown = threading.Event()
         # Track images that had a job complete this run (for XMP generation)
         self._xmp_candidates: set[int] = set()
@@ -190,16 +223,26 @@ class Worker:
 
         Returns summary: {done: N, failed: N, skipped: N}.
         """
-        # Install signal handler for graceful shutdown
-        original_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, self._handle_sigint)
+        # Install signal handler for graceful shutdown.
+        # signal.signal() only works from the main thread — when running
+        # under the JSON-RPC server the worker is spawned in a daemon
+        # thread, so we skip signal handling and rely on the server's
+        # cancel_run mechanism (sets _shutdown via _run_cancel event).
+        original_handler = None
+        is_main = threading.current_thread() is threading.main_thread()
+        if is_main:
+            original_handler = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, self._handle_sigint)
 
         try:
             return self._run_loop(batch_size)
         finally:
-            signal.signal(signal.SIGINT, original_handler)
+            if is_main and original_handler is not None:
+                signal.signal(signal.SIGINT, original_handler)
 
     def _run_loop(self, batch_size: int) -> dict[str, int]:
+        sys.stderr.write(f"[DEBUG _run_loop] ENTERED, batch_size={batch_size}\n")
+        sys.stderr.flush()
         stats = {"done": 0, "failed": 0, "skipped": 0}
 
         # Recover stale jobs from previous crashes
@@ -207,12 +250,20 @@ class Worker:
         if recovered:
             console.print(f"[yellow]Recovered {recovered} stale job(s) from previous run[/yellow]")
 
-        # Retry previously failed jobs
-        retried = self.queue.retry_failed()
-        if retried:
-            console.print(f"[yellow]Retrying {retried} previously failed job(s)[/yellow]")
+        # Retry previously failed jobs (only when explicitly requested;
+        # the GUI has a dedicated "Retry failed" button that calls the
+        # rebuild RPC to re-enqueue failed jobs before starting a run).
+        if self.retry_failed_on_start:
+            retried = self.queue.retry_failed()
+            if retried:
+                console.print(f"[yellow]Retrying {retried} previously failed job(s)[/yellow]")
 
         total_pending = self.queue.pending_count()
+        sys.stderr.write(
+            f"[DEBUG _run_loop] recovered={recovered}, total_pending={total_pending}, "
+            f"stale_timeout={self.stale_timeout}, _result_notify is None={_result_notify is None}\n"
+        )
+        sys.stderr.flush()
         if total_pending == 0:
             console.print("[green]No pending jobs in queue.[/green]")
             return stats
@@ -270,8 +321,15 @@ class Worker:
                         result_status = fut.result(timeout=300)
                         stats[result_status] = stats.get(result_status, 0) + 1
                     except Exception as exc:
-                        self.queue.mark_failed(job["id"], str(exc))
+                        error_msg = f"{type(exc).__name__}: {exc}"
+                        self.queue.mark_failed(job["id"], error_msg)
                         stats["failed"] += 1
+                        # Emit a [RESULT] line so the UI shows the failure.
+                        # (_process_job normally does this itself, but if the
+                        # future raises we need a fallback.)
+                        image_row = self.repo.get_image(job["image_id"])
+                        path = image_row["file_path"] if image_row else f"id={job['image_id']}"
+                        _emit_result(path, job["module"], "failed", 0, error_msg)
                     progress.advance(task)
 
             # ════════════════════════════════════════════════════════════════
@@ -395,8 +453,12 @@ class Worker:
                                     result_status = fut.result()
                                     stats[result_status] = stats.get(result_status, 0) + 1
                                 except Exception as exc:
-                                    self.queue.mark_failed(job2["id"], str(exc))
+                                    error_msg = f"{type(exc).__name__}: {exc}"
+                                    self.queue.mark_failed(job2["id"], error_msg)
                                     stats["failed"] += 1
+                                    image_row = self.repo.get_image(job2["image_id"])
+                                    path = image_row["file_path"] if image_row else f"id={job2['image_id']}"
+                                    _emit_result(path, job2["module"], "failed", 0, error_msg)
                                 progress.advance(task)
 
                             # Periodic flush: commit FTS5 + XMP every ~60s
@@ -410,6 +472,21 @@ class Worker:
 
                     # All GPU passes done — collect remaining IO futures
                     _collect_futures(pending_futures)
+
+                    # ════════════════════════════════════════════════════════════
+                    # Phase 3: Drain any remaining IO/cloud jobs.
+                    #
+                    # When GPU work finishes before all IO/cloud jobs have been
+                    # submitted (common on resume when only cloud_ai / aesthetic
+                    # remain), keep claiming and processing IO batches until
+                    # the queue is empty.
+                    # ════════════════════════════════════════════════════════════
+                    while not self._shutdown.is_set():
+                        io_futures = _submit_io_jobs(local_pool, cloud_pool)
+                        if not io_futures:
+                            break
+                        _collect_futures(io_futures)
+                        self._maybe_periodic_flush()
 
         if self._shutdown.is_set():
             console.print("\n[yellow]Paused.[/yellow] Run `imganalyzer run` to resume.")

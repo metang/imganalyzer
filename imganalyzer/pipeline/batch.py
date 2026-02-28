@@ -148,6 +148,20 @@ class BatchProcessor:
                     for r in rows:
                         analyzed_set.add((r["image_id"], "cloud_ai"))
 
+                # Also check job_queue for done/skipped jobs — these may have
+                # no analysis data (e.g. cloud_ai/aesthetic skipped due to
+                # has_people guard) but should not be re-enqueued.
+                id_placeholders = ",".join("?" * len(existing_ids))
+                for mod in target_modules:
+                    rows = self.conn.execute(
+                        f"SELECT image_id FROM job_queue "
+                        f"WHERE image_id IN ({id_placeholders}) AND module = ? "
+                        f"AND status IN ('done', 'skipped')",
+                        existing_ids + [mod],
+                    ).fetchall()
+                    for r in rows:
+                        analyzed_set.add((r["image_id"], mod))
+
             # Run the batch inside a single transaction
             self.conn.execute("BEGIN IMMEDIATE")
             try:
