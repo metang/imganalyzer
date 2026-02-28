@@ -49,6 +49,7 @@ export interface BatchModuleStats {
   done: number
   failed: number
   skipped: number
+  imagesPerSec: number
 }
 
 export interface BatchStats {
@@ -97,8 +98,8 @@ let batchStatus: BatchStatus = 'idle'
 let sessionStartMs = 0
 let isRunActive = false
 
-// Sliding window of { timestamp, durationMs } for rate + avg computation
-const completionWindow: Array<{ ts: number; durationMs: number }> = []
+// Sliding window of { timestamp, durationMs, module } for rate + avg computation
+const completionWindow: Array<{ ts: number; durationMs: number; module: string }> = []
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -118,9 +119,9 @@ function emitIngestProgress(progress: BatchIngestProgress): void {
 }
 
 /** Record a completion and maintain the sliding window. */
-function recordCompletion(durationMs: number): void {
+function recordCompletion(durationMs: number, module: string): void {
   const now = Date.now()
-  completionWindow.push({ ts: now, durationMs })
+  completionWindow.push({ ts: now, durationMs, module })
   // Evict entries older than RATE_WINDOW_MS
   const cutoff = now - RATE_WINDOW_MS
   while (completionWindow.length > 0 && completionWindow[0].ts < cutoff) {
@@ -159,6 +160,24 @@ function computeMetrics(
   return { imagesPerSec, avgMsPerImage, estimatedMs }
 }
 
+/** Compute per-module images/sec from the completion window. */
+function computeModuleSpeeds(): Record<string, number> {
+  const now = Date.now()
+  const cutoff = now - RATE_WINDOW_MS
+  const recent = completionWindow.filter((e) => e.ts >= cutoff)
+
+  const counts: Record<string, number> = {}
+  for (const e of recent) {
+    counts[e.module] = (counts[e.module] ?? 0) + 1
+  }
+
+  const speeds: Record<string, number> = {}
+  for (const [mod, count] of Object.entries(counts)) {
+    speeds[mod] = count / (RATE_WINDOW_MS / 1000)
+  }
+  return speeds
+}
+
 /** Poll status via RPC (no subprocess) and emit a batch:tick. */
 async function doPoll(): Promise<void> {
   try {
@@ -172,11 +191,21 @@ async function doPoll(): Promise<void> {
     const cloudWorkers = sessionConfig?.cloudWorkers ?? 4
     const pending = data.totals.pending ?? 0
     const metrics = computeMetrics(pending, workers, cloudWorkers)
+    const moduleSpeeds = computeModuleSpeeds()
+
+    // Merge per-module speed into each module's stats
+    const modulesWithSpeed: Partial<Record<string, BatchModuleStats>> = {}
+    for (const [mod, modStats] of Object.entries(data.modules)) {
+      modulesWithSpeed[mod] = {
+        ...(modStats as unknown as BatchModuleStats),
+        imagesPerSec: moduleSpeeds[mod] ?? 0,
+      }
+    }
 
     const stats: BatchStats = {
       status: batchStatus,
       totalImages: data.total_images,
-      modules: data.modules as Partial<Record<string, BatchModuleStats>>,
+      modules: modulesWithSpeed,
       totals: {
         pending:  data.totals.pending  ?? 0,
         running:  data.totals.running  ?? 0,
@@ -232,7 +261,7 @@ function setupNotificationListener(): void {
         }
         emitResult(result)
         if (result.status === 'done') {
-          recordCompletion(result.durationMs)
+          recordCompletion(result.durationMs, result.module)
         }
         break
       }

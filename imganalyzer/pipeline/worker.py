@@ -136,9 +136,14 @@ class Worker:
         # Track images needing FTS5 search index rebuild (deferred).
         # Instead of rebuilding after every module write (5-7 SELECTs + FTS5
         # DELETE+INSERT per call, ~3M calls at 500K images), we mark images
-        # as dirty and flush once after all modules complete.
+        # as dirty and flush periodically (every 60s) and at end-of-run.
         self._fts_dirty: set[int] = set()
         self._fts_lock = threading.Lock()
+        # Periodic flush: ensure FTS5 + XMP are flushed at least every 60s
+        # so that a crash loses at most 1 minute of search index / XMP work.
+        # (Analysis data + queue status are committed per-job and survive crashes.)
+        self._flush_interval_s = 60
+        self._last_flush_time = time.time()
         # Thread-local storage for per-thread DB objects
         self._local = threading.local()
 
@@ -328,6 +333,10 @@ class Worker:
                             stats["failed"] += 1
                         progress.advance(task)
 
+                    # Periodic flush: commit FTS5 + XMP every ~60s so a crash
+                    # loses at most 1 minute of search-index / XMP work.
+                    self._maybe_periodic_flush()
+
             # ════════════════════════════════════════════════════════════════
             # Phase 2: Remaining GPU passes (batched where supported) +
             #          cloud passes (parallel)
@@ -390,6 +399,9 @@ class Worker:
                                     stats["failed"] += 1
                                 progress.advance(task)
 
+                            # Periodic flush: commit FTS5 + XMP every ~60s
+                            self._maybe_periodic_flush()
+
                         # All jobs for this GPU module are done — unload its
                         # model to free VRAM before the next module loads.
                         # Peak VRAM drops from ~9.5 GB (all co-resident) to
@@ -404,14 +416,13 @@ class Worker:
         else:
             console.print(f"\n[green]Complete.[/green]")
 
-        # Flush deferred FTS5 search index updates.
-        # Each image's index is rebuilt once (instead of once per module).
+        # Final flush: pick up any FTS5 / XMP work accumulated since the
+        # last periodic flush (at most ~60s worth).
         if self._fts_dirty:
             fts_count = self._flush_fts_dirty()
             if fts_count and self.verbose:
                 console.print(f"  FTS5 search index rebuilt for {fts_count} image(s)")
 
-        # Write XMP sidecars for images that had jobs complete
         if self.write_xmp and self._xmp_candidates:
             xmp_written = self._write_pending_xmps()
             if xmp_written:
@@ -667,6 +678,63 @@ class Worker:
             if self.verbose:
                 console.print(f"  [red]Failed:[/red] {path} module={module}: {error_msg}")
             return "failed"
+
+    def _maybe_periodic_flush(self) -> None:
+        """Flush FTS5 + XMP if at least ``_flush_interval_s`` seconds elapsed.
+
+        Called from the main-thread GPU loop between batches.  This
+        ensures that a crash loses at most ~60s of search-index and XMP
+        work.  Analysis data and queue status are always committed
+        per-job and are not affected.
+        """
+        now = time.time()
+        if now - self._last_flush_time < self._flush_interval_s:
+            return
+        self._last_flush_time = now
+
+        # Snapshot and clear dirty sets under their locks
+        with self._fts_lock:
+            fts_snapshot = list(self._fts_dirty)
+            self._fts_dirty.clear()
+        with self._xmp_lock:
+            xmp_snapshot = set(self._xmp_candidates)
+            self._xmp_candidates.clear()
+
+        # Flush FTS5
+        if fts_snapshot:
+            BATCH = 500
+            for start in range(0, len(fts_snapshot), BATCH):
+                chunk = fts_snapshot[start:start + BATCH]
+                self.conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for image_id in chunk:
+                        try:
+                            self.repo.update_search_index(image_id)
+                        except Exception:
+                            pass
+                    self.conn.commit()
+                except Exception:
+                    self.conn.rollback()
+            if self.verbose:
+                console.print(
+                    f"  [dim]Periodic flush: FTS5 rebuilt for "
+                    f"{len(fts_snapshot)} image(s)[/dim]"
+                )
+
+        # Flush XMP
+        if self.write_xmp and xmp_snapshot:
+            count = 0
+            for image_id in xmp_snapshot:
+                try:
+                    xmp_path = write_xmp_from_db(self.repo, image_id)
+                    if xmp_path:
+                        count += 1
+                except Exception:
+                    pass
+            if count and self.verbose:
+                console.print(
+                    f"  [dim]Periodic flush: {count} XMP sidecar(s) written[/dim]"
+                )
 
     def _write_pending_xmps(self) -> int:
         """Write XMP sidecars for images that had at least one job complete."""

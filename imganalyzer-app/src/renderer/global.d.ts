@@ -171,6 +171,7 @@ export interface BatchModuleStats {
   done: number
   failed: number
   skipped: number
+  imagesPerSec: number
 }
 
 export interface BatchStats {

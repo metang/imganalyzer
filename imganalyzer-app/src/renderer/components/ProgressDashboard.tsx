@@ -23,7 +23,7 @@ function fmtMs(ms: number): string {
 
 function fmtRate(imgPerSec: number): string {
   if (imgPerSec <= 0) return '—'
-  return `${imgPerSec.toFixed(1)} img/s`
+  return `${imgPerSec.toFixed(1)}`
 }
 
 const MODULE_LABELS: Record<string, string> = {
@@ -41,31 +41,50 @@ const MODULE_LABELS: Record<string, string> = {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function ModuleRow({ name, stats }: { name: string; stats: BatchModuleStats }) {
-  const total   = stats.pending + stats.running + stats.done + stats.failed + stats.skipped
+function ModuleTableRow({ name, stats }: { name: string; stats: BatchModuleStats }) {
+  const total    = stats.pending + stats.running + stats.done + stats.failed + stats.skipped
   const complete = stats.done + stats.failed + stats.skipped
-  const pct = total > 0 ? Math.round((complete / total) * 100) : 0
+  const pct      = total > 0 ? Math.round((complete / total) * 100) : 0
 
   return (
-    <div className="flex items-center gap-3 text-xs">
-      <span className="w-32 shrink-0 text-neutral-400">{MODULE_LABELS[name] ?? name}</span>
-      <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
-        <div
-          className="h-full bg-blue-600 rounded-full transition-all duration-300"
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <span className="w-8 text-right text-neutral-500">{pct}%</span>
-      <span className="w-28 text-right text-neutral-600">
-        {complete} / {total}
-        {stats.failed > 0 && (
-          <span className="text-red-500 ml-1">({stats.failed} err)</span>
-        )}
-        {stats.skipped > 0 && (
-          <span className="text-yellow-600 ml-1">({stats.skipped} skip)</span>
-        )}
-      </span>
-    </div>
+    <tr className="text-xs">
+      {/* Module name */}
+      <td className="py-1 pr-3 text-neutral-400 whitespace-nowrap">
+        {MODULE_LABELS[name] ?? name}
+      </td>
+      {/* Progress bar */}
+      <td className="py-1 pr-3 w-full">
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-600 rounded-full transition-all duration-300"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <span className="text-neutral-500 w-8 text-right shrink-0">{pct}%</span>
+        </div>
+      </td>
+      {/* Speed */}
+      <td className="py-1 px-2 text-right font-mono text-neutral-300 whitespace-nowrap">
+        {fmtRate(stats.imagesPerSec)}
+      </td>
+      {/* Processed (done) */}
+      <td className="py-1 px-2 text-right font-mono text-neutral-300 whitespace-nowrap">
+        {stats.done.toLocaleString()}
+      </td>
+      {/* Skipped */}
+      <td className={`py-1 px-2 text-right font-mono whitespace-nowrap ${stats.skipped > 0 ? 'text-yellow-500' : 'text-neutral-600'}`}>
+        {stats.skipped > 0 ? stats.skipped.toLocaleString() : '—'}
+      </td>
+      {/* Error */}
+      <td className={`py-1 px-2 text-right font-mono whitespace-nowrap ${stats.failed > 0 ? 'text-red-500' : 'text-neutral-600'}`}>
+        {stats.failed > 0 ? stats.failed.toLocaleString() : '—'}
+      </td>
+      {/* Total */}
+      <td className="py-1 pl-2 text-right font-mono text-neutral-500 whitespace-nowrap">
+        {total.toLocaleString()}
+      </td>
+    </tr>
   )
 }
 
@@ -89,6 +108,10 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
   const canRetry      = failedModules.length > 0 && !isRunning
   const canClearQueue = !isRunning && !isPaused && totalJobs > 0
 
+  const moduleEntries = Object.entries(modules).filter(
+    (entry): entry is [string, BatchModuleStats] => entry[1] != null
+  )
+
   return (
     <div className="flex flex-col gap-4">
 
@@ -110,19 +133,32 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
         </div>
       </div>
 
-      {/* ── Per-module breakdown ─────────────────────────────────────────────── */}
-      {Object.keys(modules).length > 0 && (
-        <div className="flex flex-col gap-1.5">
-          {Object.entries(modules).map(([mod, s]) =>
-            s ? <ModuleRow key={mod} name={mod} stats={s} /> : null
-          )}
-        </div>
+      {/* ── Per-module table ─────────────────────────────────────────────────── */}
+      {moduleEntries.length > 0 && (
+        <table className="w-full border-collapse">
+          <thead>
+            <tr className="text-[10px] uppercase tracking-wider text-neutral-600">
+              <th className="py-1 pr-3 text-left font-medium">Module</th>
+              <th className="py-1 pr-3 text-left font-medium">Progress</th>
+              <th className="py-1 px-2 text-right font-medium whitespace-nowrap">img/s</th>
+              <th className="py-1 px-2 text-right font-medium">Processed</th>
+              <th className="py-1 px-2 text-right font-medium">Skipped</th>
+              <th className="py-1 px-2 text-right font-medium">Error</th>
+              <th className="py-1 pl-2 text-right font-medium">Total</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-neutral-800/50">
+            {moduleEntries.map(([mod, s]) => (
+              <ModuleTableRow key={mod} name={mod} stats={s} />
+            ))}
+          </tbody>
+        </table>
       )}
 
       {/* ── Stats row ────────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-4 gap-2 text-xs">
         {[
-          { label: 'Rate',    value: fmtRate(imagesPerSec) },
+          { label: 'Rate',    value: imagesPerSec > 0 ? fmtRate(imagesPerSec) + ' img/s' : '—' },
           { label: 'Avg/img', value: fmtMs(avgMsPerImage) },
           { label: 'ETA',     value: fmtMs(estimatedMs) },
           { label: 'Elapsed', value: fmtMs(elapsedMs) },
