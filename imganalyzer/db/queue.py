@@ -161,6 +161,20 @@ class JobQueue:
         )
         self.conn.commit()
 
+    def mark_pending(self, job_id: int) -> None:
+        """Reset a claimed (running) job back to pending.
+
+        Used during shutdown when a job was claimed but could not be
+        submitted to the thread pool — ensures it is retried next run.
+        """
+        self.conn.execute(
+            """UPDATE job_queue
+               SET status = 'pending', started_at = NULL
+               WHERE id = ?""",
+            [job_id],
+        )
+        self.conn.commit()
+
     # ── Retry failed jobs ──────────────────────────────────────────────────
 
     def retry_failed(self, max_attempts: int = 3) -> int:

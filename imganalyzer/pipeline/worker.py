@@ -287,10 +287,22 @@ class Worker:
                 ):
                     for mod in module_set:
                         jobs = self.queue.claim(batch_size=batch_size, module=mod)
-                        for job in jobs:
-                            if not self._shutdown.is_set():
+                        for i, job in enumerate(jobs):
+                            if self._shutdown.is_set():
+                                # Release this and all remaining claimed jobs
+                                # back to pending for the next run.
+                                for j in range(i, len(jobs)):
+                                    self.queue.mark_pending(jobs[j]["id"])
+                                return futures
+                            try:
                                 fut = pool.submit(self._process_job, job)
                                 futures[fut] = job
+                            except RuntimeError:
+                                # Pool already shut down (app exit race) —
+                                # release the claimed job back to pending so
+                                # it can be retried on the next run.
+                                self.queue.mark_pending(job["id"])
+                                return futures
                 return futures
 
             # ── Helper: collect results from futures ──────────────────────────
