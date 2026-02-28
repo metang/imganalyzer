@@ -39,7 +39,20 @@ def _dms_to_decimal(dms: list, ref: str) -> float | None:
 
 
 def _reverse_geocode(lat: float, lon: float) -> dict[str, str]:
-    """Best-effort reverse geocoding via nominatim (no API key needed)."""
+    """Best-effort reverse geocoding via nominatim (no API key needed).
+
+    Results are cached by GPS coordinates rounded to 4 decimal places
+    (~11 m resolution) so that images taken at the same location reuse
+    the result.  At 500K images this avoids ~400K redundant HTTP requests
+    (Nominatim rate-limits to 1 req/s → ~111 hours without the cache).
+    """
+    # Round to 4 decimal places (~11m) — images from the same spot
+    # will share the cached result without a visible location difference.
+    cache_key = (round(lat, 4), round(lon, 4))
+    cached = _geocode_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         import httpx
         resp = httpx.get(
@@ -50,14 +63,23 @@ def _reverse_geocode(lat: float, lon: float) -> dict[str, str]:
         )
         data = resp.json()
         addr = data.get("address", {})
-        return {
+        result = {
             "location_city": addr.get("city") or addr.get("town") or addr.get("village", ""),
             "location_state": addr.get("state", ""),
             "location_country": addr.get("country", ""),
             "location_country_code": addr.get("country_code", "").upper(),
         }
     except Exception:
-        return {}
+        result = {}
+
+    _geocode_cache[cache_key] = result
+    return result
+
+
+# GPS reverse-geocoding cache.  Keyed by (lat, lon) rounded to 4 decimal
+# places (~11 m resolution).  Survives the full ingest run so that images
+# from the same location share a single HTTP request.
+_geocode_cache: dict[tuple[float, float], dict[str, str]] = {}
 
 
 class MetadataExtractor:

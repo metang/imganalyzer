@@ -1,6 +1,6 @@
-import { readdir, readFile } from 'fs/promises'
+import { readdir, readFile, stat, access } from 'fs/promises'
 import { join, extname, basename } from 'path'
-import { statSync, writeFileSync, existsSync } from 'fs'
+import { writeFileSync, existsSync } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { tmpdir } from 'os'
@@ -36,16 +36,20 @@ export async function listImages(folderPath: string): Promise<ImageFile[]> {
   const entries = await readdir(folderPath)
   const images: ImageFile[] = []
 
-  for (const entry of entries) {
-    const ext = extname(entry).toLowerCase()
-    if (!IMAGE_EXTENSIONS.has(ext)) continue
-    const fullPath = join(folderPath, entry)
-    try {
-      const s = statSync(fullPath)
-      if (!s.isFile()) continue
+  // Use Promise.allSettled to stat all candidate files concurrently instead
+  // of blocking the main thread with statSync per file.
+  const candidates = entries
+    .map((entry) => ({ entry, ext: extname(entry).toLowerCase() }))
+    .filter(({ ext }) => IMAGE_EXTENSIONS.has(ext))
+
+  const results = await Promise.allSettled(
+    candidates.map(async ({ entry, ext }) => {
+      const fullPath = join(folderPath, entry)
+      const s = await stat(fullPath)
+      if (!s.isFile()) return null
       const xmpPath = fullPath.replace(/\.[^.]+$/, '.xmp')
-      const hasXmp = (() => { try { statSync(xmpPath); return true } catch { return false } })()
-      images.push({
+      const hasXmp = await access(xmpPath).then(() => true, () => false)
+      return {
         path: fullPath,
         name: basename(entry),
         ext,
@@ -54,17 +58,48 @@ export async function listImages(folderPath: string): Promise<ImageFile[]> {
         hasXmp,
         size: s.size,
         mtime: s.mtimeMs
-      })
-    } catch {
-      // skip unreadable files
+      } as ImageFile
+    })
+  )
+
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value) {
+      images.push(r.value)
     }
   }
 
   return images.sort((a, b) => a.name.localeCompare(b.name))
 }
 
-// Cache thumbnails in memory to avoid re-generating on every gallery render
+// ── Bounded LRU thumbnail cache ──────────────────────────────────────────────
+// At 500K images the old unbounded Map would OOM.  This LRU cache evicts the
+// least-recently-used entry when the size exceeds MAX_THUMB_CACHE.  Map
+// iteration order is insertion order, so a "get" promotes the key by
+// re-inserting it.
+const MAX_THUMB_CACHE = 1000
 const thumbCache = new Map<string, string>()
+
+function thumbCacheGet(key: string): string | undefined {
+  const val = thumbCache.get(key)
+  if (val !== undefined) {
+    // Promote to most-recently-used by re-inserting
+    thumbCache.delete(key)
+    thumbCache.set(key, val)
+  }
+  return val
+}
+
+function thumbCacheSet(key: string, value: string): void {
+  // If key already exists, delete first so the re-insert moves it to the end
+  if (thumbCache.has(key)) thumbCache.delete(key)
+  thumbCache.set(key, value)
+  // Evict oldest entries if over limit
+  while (thumbCache.size > MAX_THUMB_CACHE) {
+    const oldest = thumbCache.keys().next().value
+    if (oldest !== undefined) thumbCache.delete(oldest)
+    else break
+  }
+}
 // In-flight promises to deduplicate concurrent requests for the same image
 const inFlight = new Map<string, Promise<string>>()
 // Limit concurrent thumbnail processes to avoid overwhelming the system
@@ -89,7 +124,8 @@ function releaseSlot(): void {
 }
 
 export async function getThumbnail(imagePath: string): Promise<string> {
-  if (thumbCache.has(imagePath)) return thumbCache.get(imagePath)!
+  const cached = thumbCacheGet(imagePath)
+  if (cached !== undefined) return cached
   if (inFlight.has(imagePath)) return inFlight.get(imagePath)!
 
   const promise = (async () => {
@@ -97,7 +133,7 @@ export async function getThumbnail(imagePath: string): Promise<string> {
     try {
       const jpegBuffer = await pythonThumbnail(imagePath)
       const dataUrl = `data:image/jpeg;base64,${jpegBuffer.toString('base64')}`
-      thumbCache.set(imagePath, dataUrl)
+      thumbCacheSet(imagePath, dataUrl)
       return dataUrl
     } catch (err) {
       console.error('Thumbnail error for', imagePath, err)

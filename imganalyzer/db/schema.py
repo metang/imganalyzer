@@ -6,10 +6,11 @@ version *N*.  ``ensure_schema`` applies all pending migrations in order.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -26,6 +27,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         1: _migrate_v1,
         2: _migrate_v2,
         3: _migrate_v3,
+        4: _migrate_v4,
+        5: _migrate_v5,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -306,4 +309,60 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
             analyzed_at     TEXT
         );
     """)
+
+
+# ── Migration v4: Performance indexes ────────────────────────────────────────
+
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    """Add composite and covering indexes for performance-critical queries."""
+    conn.executescript("""
+        -- Composite index for queue claim(): status + module + priority + queued_at
+        CREATE INDEX IF NOT EXISTS idx_job_queue_claim
+            ON job_queue(status, module, priority DESC, queued_at ASC);
+
+        -- Metadata query indexes
+        CREATE INDEX IF NOT EXISTS idx_metadata_date
+            ON analysis_metadata(date_time_original);
+        CREATE INDEX IF NOT EXISTS idx_metadata_iso
+            ON analysis_metadata(iso);
+        CREATE INDEX IF NOT EXISTS idx_metadata_camera
+            ON analysis_metadata(camera_make, camera_model);
+
+        -- Face identity lookup by display_name
+        CREATE INDEX IF NOT EXISTS idx_face_identities_display
+            ON face_identities(display_name);
+    """)
+
+
+# ── Migration v5: Face aliases table ─────────────────────────────────────────
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    """Create an indexed ``face_aliases`` table and migrate existing JSON aliases."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS face_aliases (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            identity_id  INTEGER NOT NULL REFERENCES face_identities(id) ON DELETE CASCADE,
+            alias        TEXT    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_face_aliases_alias
+            ON face_aliases(alias);
+        CREATE INDEX IF NOT EXISTS idx_face_aliases_identity
+            ON face_aliases(identity_id);
+    """)
+
+    # Migrate existing JSON aliases from face_identities.aliases column
+    rows = conn.execute(
+        "SELECT id, aliases FROM face_identities WHERE aliases IS NOT NULL AND aliases != '[]'"
+    ).fetchall()
+    for row in rows:
+        try:
+            aliases = json.loads(row["aliases"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for alias in aliases:
+            if alias:
+                conn.execute(
+                    "INSERT INTO face_aliases (identity_id, alias) VALUES (?, ?)",
+                    [row["id"], alias],
+                )
 

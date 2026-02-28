@@ -37,6 +37,7 @@ These lines are always emitted (regardless of --verbose) and are JSON-safe
 from __future__ import annotations
 
 import json
+import os
 import signal
 import threading
 import time
@@ -62,6 +63,12 @@ LOCAL_IO_MODULES = {"metadata", "technical"}
 CLOUD_MODULES = {"cloud_ai", "aesthetic"}
 # Combined set (kept for backwards-compat references)
 IO_MODULES = LOCAL_IO_MODULES | CLOUD_MODULES
+
+# Modules whose output contributes to the FTS5 search index.
+# The search index is rebuilt *once* per image after all its jobs complete,
+# rather than after every individual module write (saves ~3M FTS5 cycles
+# at 500K images with 6 text-producing modules each).
+_FTS_MODULES = {"metadata", "local_ai", "blip2", "faces", "cloud_ai"}
 
 # The ``objects`` pass must complete for an image before cloud/aesthetic
 # may run (it provides ``has_person`` for the privacy gate).
@@ -94,7 +101,7 @@ class Worker:
     def __init__(
         self,
         conn: sqlite3.Connection,
-        workers: int = 1,
+        workers: int = min(os.cpu_count() or 1, 8),
         cloud_workers: int = 4,
         force: bool = False,
         cloud_provider: str = "openai",
@@ -126,6 +133,12 @@ class Worker:
         # Track images that had a job complete this run (for XMP generation)
         self._xmp_candidates: set[int] = set()
         self._xmp_lock = threading.Lock()
+        # Track images needing FTS5 search index rebuild (deferred).
+        # Instead of rebuilding after every module write (5-7 SELECTs + FTS5
+        # DELETE+INSERT per call, ~3M calls at 500K images), we mark images
+        # as dirty and flush once after all modules complete.
+        self._fts_dirty: set[int] = set()
+        self._fts_lock = threading.Lock()
         # Thread-local storage for per-thread DB objects
         self._local = threading.local()
 
@@ -371,6 +384,13 @@ class Worker:
         else:
             console.print(f"\n[green]Complete.[/green]")
 
+        # Flush deferred FTS5 search index updates.
+        # Each image's index is rebuilt once (instead of once per module).
+        if self._fts_dirty:
+            fts_count = self._flush_fts_dirty()
+            if fts_count and self.verbose:
+                console.print(f"  FTS5 search index rebuilt for {fts_count} image(s)")
+
         # Write XMP sidecars for images that had jobs complete
         if self.write_xmp and self._xmp_candidates:
             xmp_written = self._write_pending_xmps()
@@ -451,6 +471,12 @@ class Worker:
                 with self._xmp_lock:
                     self._xmp_candidates.add(image_id)
 
+            # Mark image as needing FTS5 search index rebuild (deferred).
+            # Only modules that produce searchable text need this.
+            if module in _FTS_MODULES:
+                with self._fts_lock:
+                    self._fts_dirty.add(image_id)
+
             return "done"
 
         except Exception as exc:
@@ -479,6 +505,36 @@ class Worker:
                     )
         self._xmp_candidates.clear()
         return count
+
+    def _flush_fts_dirty(self) -> int:
+        """Rebuild FTS5 search index for all images marked dirty.
+
+        Processes in batches of 500 inside a single transaction to
+        minimise commit overhead.  Uses the main-thread connection
+        (``self.conn``) since this runs after all worker threads have
+        joined.
+        """
+        dirty = list(self._fts_dirty)
+        self._fts_dirty.clear()
+        if not dirty:
+            return 0
+
+        BATCH = 500
+        rebuilt = 0
+        for start in range(0, len(dirty), BATCH):
+            chunk = dirty[start:start + BATCH]
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                for image_id in chunk:
+                    try:
+                        self.repo.update_search_index(image_id)
+                        rebuilt += 1
+                    except Exception:
+                        pass  # best-effort; don't crash the batch
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+        return rebuilt
 
     def _handle_sigint(self, signum: int, frame: Any) -> None:
         console.print("\n[yellow]Ctrl+C received — finishing current batch...[/yellow]")

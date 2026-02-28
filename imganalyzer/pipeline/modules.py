@@ -32,6 +32,23 @@ def compute_file_hash(path: Path, chunk_size: int = 65536) -> str:
     return h.hexdigest()
 
 
+def compute_file_fingerprint(path: Path) -> str:
+    """Fast fingerprint using path, size, and mtime.
+
+    At 500K images, SHA-256 hashing reads every byte of every file (12.5 TB+
+    at 25 MB average) taking ~7 hours of pure I/O.  A (path, size, mtime)
+    fingerprint is effectively free — a single ``stat()`` call per file.
+
+    The fingerprint is deterministic for a given file state and changes when
+    the file is modified.  Collisions are astronomically unlikely for the
+    deduplication use case (same path + same size + same mtime = same file).
+    """
+    st = path.stat()
+    # Combine path, size, and mtime into a stable string key.
+    # Using the resolved path ensures symlinks are handled correctly.
+    return f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}"
+
+
 def _read_image(path: Path) -> dict[str, Any]:
     """Read an image file and return image_data dict (same as Analyzer does)."""
     from imganalyzer.analyzer import RAW_EXTENSIONS
@@ -47,6 +64,66 @@ def _read_image(path: Path) -> dict[str, Any]:
         reader = StandardReader(path)
 
     return reader.read()
+
+
+def _read_image_headers(path: Path) -> dict[str, Any]:
+    """Read only image metadata/headers — no full pixel decode.
+
+    Used by the metadata module which only needs EXIF headers and sensor
+    info, not the actual pixel data.  Saves the entire demosaic/decode
+    cost (~2-5s per RAW file, ~300-600 CPU-hours at 500K images).
+    """
+    from imganalyzer.analyzer import RAW_EXTENSIONS
+
+    suffix = path.suffix.lower()
+    is_raw = suffix in RAW_EXTENSIONS
+
+    if is_raw:
+        from imganalyzer.readers.raw import RawReader
+        return RawReader(path).read_headers()
+    else:
+        from imganalyzer.readers.standard import StandardReader
+        return StandardReader(path).read_headers()
+
+
+# Maximum long-edge pixels for AI modules.  All downstream models
+# (CLIP 224px, GroundingDINO 800px, BLIP-2 364px, TrOCR 384px,
+# InsightFace 640px) internally resize to well below this limit.
+# Pre-shrinking to 1920 px once avoids 7+ redundant (and larger) resizes
+# and cuts per-image memory from ~600 MB (50 MP x 12 bytes) to ~22 MB.
+_AI_MAX_LONG_EDGE = 1920
+
+
+def _pre_resize(image_data: dict[str, Any]) -> dict[str, Any]:
+    """Downsize ``rgb_array`` to at most ``_AI_MAX_LONG_EDGE`` on the long edge.
+
+    Modifies *image_data* in-place (replaces ``rgb_array``, updates
+    ``width``/``height``) and returns it.  If the image is already small
+    enough, no copy is made.
+    """
+    rgb = image_data.get("rgb_array")
+    if rgb is None:
+        return image_data
+
+    import numpy as _np
+
+    h, w = rgb.shape[:2]
+    long_edge = max(h, w)
+    if long_edge <= _AI_MAX_LONG_EDGE:
+        return image_data
+
+    # Compute new size preserving aspect ratio
+    scale = _AI_MAX_LONG_EDGE / long_edge
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    from PIL import Image as _PILImage
+    pil_img = _PILImage.fromarray(rgb)
+    pil_img = pil_img.resize((new_w, new_h), _PILImage.LANCZOS)
+    image_data["rgb_array"] = _np.asarray(pil_img)
+    image_data["width"] = new_w
+    image_data["height"] = new_h
+    return image_data
 
 
 class ModuleRunner:
@@ -71,6 +148,40 @@ class ModuleRunner:
         self.detection_threshold = detection_threshold
         self.face_match_threshold = face_match_threshold
         self.verbose = verbose
+        # Per-image decode cache: avoids re-reading the same image from disk
+        # when multiple modules run on the same image sequentially.  The cache
+        # is keyed by file path and stores the decoded image_data dict.  It
+        # holds at most one entry (the "current" image) and is invalidated
+        # automatically when a different path is requested.
+        self._image_cache_path: Path | None = None
+        self._image_cache_data: dict[str, Any] | None = None
+
+    def _cached_read_image(self, path: Path) -> dict[str, Any]:
+        """Return decoded image_data, using a single-entry cache.
+
+        When the worker processes multiple modules for the same image (the
+        common case), the image is decoded once and reused.  At 500K images ×
+        7+ modules each, this eliminates ~3.5M redundant file reads.
+
+        The cached ``rgb_array`` is pre-resized to at most
+        ``_AI_MAX_LONG_EDGE`` pixels on the long edge.  Every AI module
+        (CLIP, GroundingDINO, BLIP-2, InsightFace, TrOCR) internally
+        downsamples to ≤1920 px anyway, so passing a 50 MP array just
+        wastes memory and CPU cycles on a redundant resize per module.
+        Doing it once here saves those costs across all 7+ modules.
+        """
+        if self._image_cache_path == path and self._image_cache_data is not None:
+            return self._image_cache_data
+        data = _read_image(path)
+        data = _pre_resize(data)
+        self._image_cache_path = path
+        self._image_cache_data = data
+        return data
+
+    def invalidate_image_cache(self) -> None:
+        """Clear the per-image decode cache (call between different images)."""
+        self._image_cache_path = None
+        self._image_cache_data = None
 
     def should_run(self, image_id: int, module: str) -> bool:
         """Return False if the module is already analyzed and force is off."""
@@ -124,7 +235,9 @@ class ModuleRunner:
     # ── Individual module runners ──────────────────────────────────────────
 
     def _run_metadata(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = _read_image(path)
+        # Header-only read: skip full pixel decode (demosaic) since metadata
+        # extraction only needs EXIF headers and RAW sensor info.
+        image_data = _read_image_headers(path)
 
         # Update image dimensions if not set
         self.repo.update_image(
@@ -140,14 +253,14 @@ class ModuleRunner:
         # Atomic write
         with _transaction(self.conn):
             self.repo.upsert_metadata(image_id, result)
-            self.repo.update_search_index(image_id)
+
 
         if self.verbose:
             console.print(f"  [dim]Metadata extracted for image {image_id}[/dim]")
         return result
 
     def _run_technical(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = _read_image(path)
+        image_data = self._cached_read_image(path)
 
         from imganalyzer.analysis.technical import TechnicalAnalyzer
         result = TechnicalAnalyzer(image_data).analyze()
@@ -160,7 +273,7 @@ class ModuleRunner:
         return result
 
     def _run_local_ai(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = _read_image(path)
+        image_data = self._cached_read_image(path)
 
         from imganalyzer.analysis.ai.local_full import LocalAIFull
         result = LocalAIFull().analyze(
@@ -176,7 +289,6 @@ class ModuleRunner:
 
         with _transaction(self.conn):
             self.repo.upsert_local_ai(image_id, result)
-            self.repo.update_search_index(image_id)
 
         # Also populate the individual split tables so callers can query
         # blip2/objects/ocr/faces independently when local_ai was used.
@@ -256,7 +368,7 @@ class ModuleRunner:
                 pass
 
     def _run_blip2(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = _read_image(path)
+        image_data = self._cached_read_image(path)
 
         from imganalyzer.pipeline.passes.blip2 import run_blip2
         result = run_blip2(image_data, self.repo, image_id, self.conn)
@@ -266,7 +378,7 @@ class ModuleRunner:
         return result
 
     def _run_objects(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = _read_image(path)
+        image_data = self._cached_read_image(path)
 
         from imganalyzer.pipeline.passes.objects import run_objects
         result = run_objects(
@@ -280,7 +392,7 @@ class ModuleRunner:
         return result
 
     def _run_ocr(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = _read_image(path)
+        image_data = self._cached_read_image(path)
 
         from imganalyzer.pipeline.passes.ocr import run_ocr
         result = run_ocr(image_data, self.repo, image_id, self.conn)
@@ -290,7 +402,7 @@ class ModuleRunner:
         return result
 
     def _run_faces(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = _read_image(path)
+        image_data = self._cached_read_image(path)
 
         from imganalyzer.pipeline.passes.faces import run_faces
         result = run_faces(
@@ -312,14 +424,13 @@ class ModuleRunner:
                 )
             return {}
 
-        image_data = _read_image(path)
+        image_data = self._cached_read_image(path)
 
         from imganalyzer.analysis.ai.cloud import CloudAI
         result = CloudAI(backend=self.cloud_provider).analyze(path, image_data)
 
         with _transaction(self.conn):
             self.repo.upsert_cloud_ai(image_id, self.cloud_provider, result)
-            self.repo.update_search_index(image_id)
 
         if self.verbose:
             console.print(
@@ -337,7 +448,7 @@ class ModuleRunner:
                 )
             return {}
 
-        image_data = _read_image(path)
+        image_data = self._cached_read_image(path)
 
         # Use the cloud AI backend for aesthetic scoring
         # The cloud model is asked specifically for aesthetic analysis
@@ -397,7 +508,14 @@ class ModuleRunner:
         # produce centroid-clustered embeddings that poison search ranking.
         has_image_clip = False
         if path.exists():
-            image_vector = embedder.embed_image(path)
+            # Use cached decoded image if available (avoids redundant decode)
+            cached = self._image_cache_data if self._image_cache_path == path else None
+            if cached is not None:
+                from PIL import Image as _PILImage
+                pil_img = _PILImage.fromarray(cached["rgb_array"]).convert("RGB")
+                image_vector = embedder.embed_image_pil(pil_img)
+            else:
+                image_vector = embedder.embed_image(path)
             with _transaction(self.conn):
                 self.repo.upsert_embedding(
                     image_id, "image_clip",

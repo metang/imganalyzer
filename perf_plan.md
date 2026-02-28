@@ -282,37 +282,37 @@ Combining all three analyses into a single prioritized plan:
 
 ### Phase 1 — Quick Wins (1–2 days, low risk)
 
-| # | Item | Source | Effort |
-|---|------|--------|--------|
-| 1 | Single directory traversal (52x → 1x rglob) | Opus #6 | Very Low |
-| 2 | RAW half-size demosaic default | All three | Very Low |
-| 3 | Queue claim composite index | Opus #14 | Very Low |
-| 4 | Override negative cache | Opus #16 | Very Low |
-| 5 | Increase default worker parallelism | Codex OPP-9 | Trivial |
-| 6 | Metadata header-only read (skip pixel decode) | Codex OPP-8 | Low |
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| 1 | Single directory traversal (52x → 1x rglob) | Opus #6 | Very Low | ✅ DONE |
+| 2 | RAW half-size demosaic default | All three | Very Low | ✅ DONE |
+| 3 | Queue claim composite index | Opus #14 | Very Low | ✅ DONE |
+| 4 | Override negative cache | Opus #16 | Very Low | ✅ DONE |
+| 5 | Increase default worker parallelism | Codex OPP-9 | Trivial | ✅ DONE |
+| 6 | Metadata header-only read (skip pixel decode) | Codex OPP-8 | Low | ✅ DONE |
 
 ### Phase 2 — Core Pipeline Optimization (3–5 days, medium risk)
 
-| # | Item | Source | Effort |
-|---|------|--------|--------|
-| 7 | Per-image decode cache across modules | All three | Medium |
-| 8 | Batch DB ingest operations | All three | Low-Medium |
-| 9 | Batch queue commits | Sonnet #6, Opus #10 | Low-Medium |
-| 10 | Pre-resize images for AI modules | Opus #7, Codex OPP-7 | Low |
-| 11 | BLIP-2 VQA batching (5 passes → 1–2) | All three | Low-Medium |
-| 12 | Reverse geocoding cache | Sonnet #4 | Low |
-| 13 | SHA-256 → mtime/size fingerprint | All three | Low |
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| 7 | Per-image decode cache across modules | All three | Medium | ✅ DONE |
+| 8 | Batch DB ingest operations | All three | Low-Medium | ✅ DONE |
+| 9 | Batch queue commits | Sonnet #6, Opus #10 | Low-Medium | ✅ DONE |
+| 10 | Pre-resize images for AI modules | Opus #7, Codex OPP-7 | Low | ✅ DONE |
+| 11 | BLIP-2 VQA batching (5 passes → 1–2) | All three | Low-Medium | ✅ DONE |
+| 12 | Reverse geocoding cache | Sonnet #4 | Low | ✅ DONE |
+| 13 | SHA-256 → mtime/size fingerprint | All three | Low | ✅ DONE |
 
 ### Phase 3 — Search & UI (2–3 days)
 
-| # | Item | Source | Effort |
-|---|------|--------|--------|
-| 14 | Vectorized / FAISS semantic search | Sonnet #3, Opus #3 | Medium |
-| 15 | Deferred/batched FTS5 search index updates | All three | Low-Medium |
-| 16 | Face alias indexed table | Sonnet #11, Opus #9 | Medium |
-| 17 | Fix `listImages()` synchronous stats | Opus #5 | Medium |
-| 18 | Bounded LRU thumbnail cache | Opus #12 | Low-Medium |
-| 19 | Missing DB indexes (date, iso, camera) | Sonnet #14 | Low |
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| 14 | Vectorized / FAISS semantic search | Sonnet #3, Opus #3 | Medium | ✅ DONE |
+| 15 | Deferred/batched FTS5 search index updates | All three | Low-Medium | ✅ DONE |
+| 16 | Face alias indexed table | Sonnet #11, Opus #9 | Medium | ✅ DONE |
+| 17 | Fix `listImages()` synchronous stats | Opus #5 | Medium | ✅ DONE |
+| 18 | Bounded LRU thumbnail cache | Opus #12 | Low-Medium | ✅ DONE |
+| 19 | Missing DB indexes (date, iso, camera) | Sonnet #14 | Low | ✅ DONE |
 
 ### Phase 4 — GPU & Architecture (5–7 days, high risk)
 

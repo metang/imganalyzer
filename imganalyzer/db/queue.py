@@ -28,6 +28,7 @@ class JobQueue:
         module: str,
         priority: int = 0,
         force: bool = False,
+        _auto_commit: bool = True,
     ) -> int | None:
         """Add a job unless an identical pending/running/done job exists.
 
@@ -39,6 +40,9 @@ class JobQueue:
         This prevents normal ingest runs from re-queuing jobs that were
         intentionally skipped (e.g. has_people) or failed but whose analysis
         data was since populated by another means.
+
+        When *_auto_commit* is False, the caller is responsible for committing
+        (used by batched ingest to avoid per-job fsync overhead).
         """
         existing = self.conn.execute(
             "SELECT id, status FROM job_queue WHERE image_id = ? AND module = ?",
@@ -60,7 +64,8 @@ class JobQueue:
                    WHERE id = ?""",
                 [_now(), priority, existing["id"]],
             )
-            self.conn.commit()
+            if _auto_commit:
+                self.conn.commit()
             return existing["id"]
 
         cur = self.conn.execute(
@@ -68,7 +73,8 @@ class JobQueue:
                VALUES (?, ?, ?, 'pending', ?)""",
             [image_id, module, priority, _now()],
         )
-        self.conn.commit()
+        if _auto_commit:
+            self.conn.commit()
         return cur.lastrowid
 
     def enqueue_batch(

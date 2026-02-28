@@ -64,3 +64,53 @@ class StandardReader:
 
     def read(self) -> dict[str, Any]:
         return read(self.path)
+
+    def read_headers(self) -> dict[str, Any]:
+        return read_headers(self.path)
+
+
+def read_headers(path: Path) -> dict[str, Any]:
+    """Read only metadata from an image file — no full pixel decode.
+
+    Opens the file lazily (Pillow defers decoding until pixel access),
+    extracts format, dimensions, EXIF, and DPI info, then returns without
+    converting to a numpy array.  This avoids the expensive RGB decode
+    for the metadata extractor which only needs EXIF headers.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ImportError("Pillow is required: pip install Pillow")
+
+    # Register HEIC/HEIF support if available
+    if path.suffix.lower() in (".heic", ".heif"):
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        except ImportError:
+            raise ImportError(
+                "pillow-heif is required for HEIC/HEIF files: pip install pillow-heif"
+            )
+
+    img = Image.open(path)
+    fmt = img.format or path.suffix.upper().lstrip(".")
+    w, h = img.size
+
+    exif_bytes: bytes | None = None
+    try:
+        exif_bytes = img.info.get("exif")
+    except Exception:
+        pass
+
+    return {
+        "format": fmt,
+        "width": w,
+        "height": h,
+        "rgb_array": None,
+        "is_raw": False,
+        "pil_image": img,
+        "original_mode": img.mode,
+        "exif_bytes": exif_bytes,
+        "icc_profile": img.info.get("icc_profile"),
+        "dpi": img.info.get("dpi"),
+    }

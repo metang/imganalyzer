@@ -40,6 +40,10 @@ class Repository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
         self._column_cache: dict[str, set[str]] = {}
+        # Negative cache: set of image IDs that have ANY overrides.
+        # Loaded lazily on first _apply_override_mask call.  At 500K images
+        # with ~0.01% override rate, this avoids ~4.5M empty SELECT queries.
+        self._override_ids: set[int] | None = None
 
     def _known_columns(self, table: str) -> set[str]:
         """Return the set of column names for *table* (cached per instance)."""
@@ -339,6 +343,9 @@ class Repository:
             [image_id, table_name, field_name, json_value, note],
         )
         self.conn.commit()
+        # Invalidate override negative cache
+        if self._override_ids is not None:
+            self._override_ids.add(image_id)
 
     def get_overrides(self, image_id: int, table_name: str) -> dict[str, str]:
         """Return {field_name: value} for all overrides on this image+table."""
@@ -354,12 +361,26 @@ class Repository:
             [image_id, table_name, field_name],
         )
         self.conn.commit()
+        # Invalidate override negative cache (may no longer have overrides)
+        self._override_ids = None
         return cur.rowcount > 0
 
     def _apply_override_mask(
         self, image_id: int, table_name: str, data: dict[str, Any]
     ) -> dict[str, Any]:
-        """Remove fields from *data* that have active overrides (protected)."""
+        """Remove fields from *data* that have active overrides (protected).
+
+        Uses a negative cache: image IDs with overrides are loaded once into
+        a set.  The ~99.99% of images with no overrides skip the per-row
+        SELECT entirely.
+        """
+        if self._override_ids is None:
+            rows = self.conn.execute(
+                "SELECT DISTINCT image_id FROM overrides"
+            ).fetchall()
+            self._override_ids = {r["image_id"] for r in rows}
+        if image_id not in self._override_ids:
+            return data
         overrides = self.get_overrides(image_id, table_name)
         if not overrides:
             return data
@@ -411,6 +432,17 @@ class Repository:
             "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
             [json.dumps(aliases), _now(), row["id"]],
         )
+        # Also insert into indexed face_aliases table (idempotent)
+        if self._table_exists("face_aliases"):
+            existing = self.conn.execute(
+                "SELECT 1 FROM face_aliases WHERE identity_id = ? AND alias = ?",
+                [row["id"], alias],
+            ).fetchone()
+            if not existing:
+                self.conn.execute(
+                    "INSERT INTO face_aliases (identity_id, alias) VALUES (?, ?)",
+                    [row["id"], alias],
+                )
         self.conn.commit()
 
     def remove_face_alias(self, canonical_name: str, alias: str) -> bool:
@@ -428,6 +460,12 @@ class Repository:
             "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
             [json.dumps(aliases), _now(), row["id"]],
         )
+        # Also remove from indexed face_aliases table
+        if self._table_exists("face_aliases"):
+            self.conn.execute(
+                "DELETE FROM face_aliases WHERE identity_id = ? AND alias = ?",
+                [row["id"], alias],
+            )
         self.conn.commit()
         return True
 
@@ -458,7 +496,7 @@ class Repository:
             "UPDATE face_embeddings SET identity_id = ? WHERE identity_id = ?",
             [keep["id"], merge["id"]],
         )
-        # Merge aliases
+        # Merge aliases (JSON column — backward compat)
         keep_aliases = json.loads(keep["aliases"] or "[]")
         merge_aliases = json.loads(merge["aliases"] or "[]")
         all_aliases = list(set(keep_aliases + merge_aliases + [merge_name]))
@@ -468,7 +506,28 @@ class Repository:
             "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
             [json.dumps(all_aliases), _now(), keep["id"]],
         )
-        # Delete merged identity
+        # Sync face_aliases table: move merge's aliases to keep, add merge_name
+        if self._table_exists("face_aliases"):
+            self.conn.execute(
+                "UPDATE face_aliases SET identity_id = ? WHERE identity_id = ?",
+                [keep["id"], merge["id"]],
+            )
+            # Add merge_name as alias of keep (if not already present)
+            existing = self.conn.execute(
+                "SELECT 1 FROM face_aliases WHERE identity_id = ? AND alias = ?",
+                [keep["id"], merge_name],
+            ).fetchone()
+            if not existing:
+                self.conn.execute(
+                    "INSERT INTO face_aliases (identity_id, alias) VALUES (?, ?)",
+                    [keep["id"], merge_name],
+                )
+            # Remove keep_name from aliases (it's the canonical, not an alias)
+            self.conn.execute(
+                "DELETE FROM face_aliases WHERE identity_id = ? AND alias = ?",
+                [keep["id"], keep_name],
+            )
+        # Delete merged identity (CASCADE deletes its face_aliases rows too)
         self.conn.execute("DELETE FROM face_identities WHERE id = ?", [merge["id"]])
         self.conn.commit()
 
@@ -489,20 +548,36 @@ class Repository:
         return dict(row) if row else None
 
     def find_face_by_alias(self, name: str) -> dict[str, Any] | None:
-        """Find a face identity by canonical name, display name, or alias."""
-        # Check canonical_name first
+        """Find a face identity by canonical name, display name, or alias.
+
+        Uses the indexed ``face_aliases`` table (added in schema v5) instead of
+        scanning every row and parsing JSON.  Falls back to the legacy JSON
+        scan when the table has not been created yet.
+        """
+        # Check canonical_name / display_name first (indexed)
         row = self.conn.execute(
             "SELECT * FROM face_identities WHERE canonical_name = ? OR display_name = ?",
             [name, name],
         ).fetchone()
         if row:
             return dict(row)
-        # Search in aliases JSON
-        rows = self.conn.execute("SELECT * FROM face_identities").fetchall()
-        for r in rows:
-            aliases = json.loads(r["aliases"] or "[]")
-            if name in aliases:
-                return dict(r)
+        # Query indexed face_aliases table (O(log N) via idx_face_aliases_alias)
+        if self._table_exists("face_aliases"):
+            row = self.conn.execute(
+                """SELECT fi.* FROM face_identities fi
+                   JOIN face_aliases fa ON fi.id = fa.identity_id
+                   WHERE fa.alias = ?""",
+                [name],
+            ).fetchone()
+            if row:
+                return dict(row)
+        else:
+            # Legacy fallback: full table scan + JSON parsing
+            rows = self.conn.execute("SELECT * FROM face_identities").fetchall()
+            for r in rows:
+                aliases = json.loads(r["aliases"] or "[]")
+                if name in aliases:
+                    return dict(r)
         return None
 
     def remove_face_identity(self, canonical_name: str) -> bool:

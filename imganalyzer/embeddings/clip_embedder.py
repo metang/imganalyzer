@@ -92,6 +92,30 @@ class CLIPEmbedder:
         vec = features.cpu().numpy().flatten().astype(np.float32)
         return vec.tobytes()
 
+    def embed_image_pil(self, img: "Image.Image") -> bytes:
+        """Encode a pre-loaded PIL Image → float32 bytes (768-d).
+
+        Same pipeline as :meth:`embed_image` but skips the file read and
+        RAW/HEIC decode — used by the per-image decode cache in
+        :class:`ModuleRunner` to avoid redundant disk I/O when the image
+        has already been decoded for a prior module.
+        """
+        self._load_model()
+        import torch
+        from PIL import Image
+
+        img = img.convert("RGB")
+        img.thumbnail((EMBED_MAX_LONG_EDGE, EMBED_MAX_LONG_EDGE), Image.LANCZOS)
+
+        image_input = CLIPEmbedder._preprocess(img).unsqueeze(0).to(CLIPEmbedder._device)
+
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=(CLIPEmbedder._device != "cpu")):
+            features = CLIPEmbedder._model.encode_image(image_input)
+            features = features / features.norm(dim=-1, keepdim=True)
+
+        vec = features.cpu().numpy().flatten().astype(np.float32)
+        return vec.tobytes()
+
     def embed_text(self, text: str) -> bytes:
         """Encode a text query → float32 bytes (768-d)."""
         self._load_model()

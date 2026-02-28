@@ -10,7 +10,7 @@ from rich.console import Console
 
 from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository, ALL_MODULES
-from imganalyzer.pipeline.modules import compute_file_hash
+from imganalyzer.pipeline.modules import compute_file_fingerprint
 
 console = Console()
 
@@ -55,10 +55,12 @@ class BatchProcessor:
                 console.print(f"[yellow]Warning: '{folder}' is not a directory, skipping.[/yellow]")
                 continue
             if recursive:
-                for ext in IMAGE_EXTENSIONS:
-                    all_files.extend(folder.rglob(f"*{ext}"))
-                    # Also try uppercase
-                    all_files.extend(folder.rglob(f"*{ext.upper()}"))
+                # Single traversal — filter by suffix in Python instead of
+                # issuing 52 separate rglob calls (26 extensions × 2 cases).
+                all_files.extend(
+                    p for p in folder.rglob("*")
+                    if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+                )
             else:
                 all_files.extend(
                     p for p in folder.iterdir()
@@ -76,53 +78,133 @@ class BatchProcessor:
         total = len(all_files)
         console.print(f"[cyan]Found {total} image file(s). Registering...[/cyan]")
 
-        for idx, path in enumerate(all_files, start=1):
-            file_path_str = str(path.resolve())
+        # ── Batched ingest ────────────────────────────────────────────────
+        # Wrap register + enqueue in explicit transactions (every BATCH_SIZE
+        # images) to reduce fsync overhead.  At 500K images × 10 modules
+        # the old code issued ~5M individual COMMITs; batching reduces this
+        # to ~1000 COMMITs (500x fewer fsyncs).
+        BATCH_SIZE = 500
+        batch_start = 0
 
-            # Check if already registered
-            existing = self.repo.get_image_by_path(file_path_str)
-            if existing:
-                image_id = existing["id"]
-            else:
-                file_hash = compute_file_hash(path) if compute_hash else None
-                file_size = path.stat().st_size
-                image_id = self.repo.register_image(
-                    file_path=file_path_str,
-                    file_hash=file_hash,
-                    file_size=file_size,
-                )
-                stats["registered"] += 1
+        while batch_start < total:
+            batch_end = min(batch_start + BATCH_SIZE, total)
+            batch = all_files[batch_start:batch_end]
 
-            # Enqueue analysis jobs
-            for module in target_modules:
-                # Cache check: skip if already analyzed and not force
-                if not force and self.repo.is_analyzed(image_id, module):
-                    stats["skipped"] += 1
-                    continue
+            # Pre-fetch existing paths in one query to avoid N per-image SELECTs
+            batch_paths = [str(p.resolve()) for p in batch]
+            placeholders = ",".join("?" * len(batch_paths))
+            existing_rows = self.conn.execute(
+                f"SELECT id, file_path FROM images WHERE file_path IN ({placeholders})",
+                batch_paths,
+            ).fetchall()
+            existing_map = {r["file_path"]: r["id"] for r in existing_rows}
 
-                job_id = self.queue.enqueue(
-                    image_id=image_id,
-                    module=module,
-                    priority=_module_priority(module),
-                    force=force,
-                )
-                if job_id is not None:
-                    stats["enqueued"] += 1
-                else:
-                    stats["skipped"] += 1
+            # Pre-fetch already-analyzed (image_id, module) pairs for this batch
+            # to avoid N × M individual is_analyzed queries.
+            existing_ids = list(existing_map.values())
+            analyzed_set: set[tuple[int, str]] = set()
+            if existing_ids and not force:
+                # For each analysis table, check which image_ids have rows
+                for module_name, table_name in (
+                    ("metadata", "analysis_metadata"),
+                    ("technical", "analysis_technical"),
+                    ("local_ai", "analysis_local_ai"),
+                    ("blip2", "analysis_blip2"),
+                    ("objects", "analysis_objects"),
+                    ("ocr", "analysis_ocr"),
+                    ("faces", "analysis_faces"),
+                    ("aesthetic", "analysis_aesthetic"),
+                ):
+                    if module_name not in target_modules:
+                        continue
+                    id_placeholders = ",".join("?" * len(existing_ids))
+                    rows = self.conn.execute(
+                        f"SELECT image_id FROM {table_name} "
+                        f"WHERE image_id IN ({id_placeholders}) AND analyzed_at IS NOT NULL",
+                        existing_ids,
+                    ).fetchall()
+                    for r in rows:
+                        analyzed_set.add((r["image_id"], module_name))
 
-            # Emit structured progress line for the Electron UI
-            print(
-                "[PROGRESS] " + json.dumps({
-                    "scanned": idx,
-                    "total": total,
-                    "registered": stats["registered"],
-                    "enqueued": stats["enqueued"],
-                    "skipped": stats["skipped"],
-                    "current": file_path_str,
-                }),
-                flush=True,
-            )
+                # Embeddings use a different check (no analyzed_at column)
+                if "embedding" in target_modules:
+                    id_placeholders = ",".join("?" * len(existing_ids))
+                    rows = self.conn.execute(
+                        f"SELECT DISTINCT image_id FROM embeddings "
+                        f"WHERE image_id IN ({id_placeholders})",
+                        existing_ids,
+                    ).fetchall()
+                    for r in rows:
+                        analyzed_set.add((r["image_id"], "embedding"))
+
+                # Cloud AI uses a different check (multiple rows per image)
+                if "cloud_ai" in target_modules:
+                    id_placeholders = ",".join("?" * len(existing_ids))
+                    rows = self.conn.execute(
+                        f"SELECT DISTINCT image_id FROM analysis_cloud_ai "
+                        f"WHERE image_id IN ({id_placeholders}) AND analyzed_at IS NOT NULL",
+                        existing_ids,
+                    ).fetchall()
+                    for r in rows:
+                        analyzed_set.add((r["image_id"], "cloud_ai"))
+
+            # Run the batch inside a single transaction
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                for i, path in enumerate(batch):
+                    idx = batch_start + i + 1
+                    file_path_str = batch_paths[i]
+
+                    # Register or retrieve image
+                    image_id = existing_map.get(file_path_str)
+                    if image_id is None:
+                        file_hash = compute_file_fingerprint(path) if compute_hash else None
+                        file_size = path.stat().st_size
+                        cur = self.conn.execute(
+                            """INSERT INTO images (file_path, file_hash, file_size)
+                               VALUES (?, ?, ?)""",
+                            [file_path_str, file_hash, file_size],
+                        )
+                        image_id = cur.lastrowid
+                        stats["registered"] += 1
+
+                    # Enqueue analysis jobs
+                    for module in target_modules:
+                        if not force and (image_id, module) in analyzed_set:
+                            stats["skipped"] += 1
+                            continue
+
+                        job_id = self.queue.enqueue(
+                            image_id=image_id,
+                            module=module,
+                            priority=_module_priority(module),
+                            force=force,
+                            _auto_commit=False,
+                        )
+                        if job_id is not None:
+                            stats["enqueued"] += 1
+                        else:
+                            stats["skipped"] += 1
+
+                    # Emit structured progress line for the Electron UI
+                    print(
+                        "[PROGRESS] " + json.dumps({
+                            "scanned": idx,
+                            "total": total,
+                            "registered": stats["registered"],
+                            "enqueued": stats["enqueued"],
+                            "skipped": stats["skipped"],
+                            "current": file_path_str,
+                        }),
+                        flush=True,
+                    )
+
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+
+            batch_start = batch_end
 
         console.print(
             f"[green]Ingest complete.[/green] "

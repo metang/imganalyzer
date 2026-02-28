@@ -68,30 +68,47 @@ class LocalAI:
             caption = processor.decode(out[0], skip_special_tokens=True).strip()
         results["description"] = caption
 
-        # Free activation tensors from captioning before VQA runs.
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # 2. VQA — FlanT5 encoder-decoder generates the answer directly;
-        #    no prompt-slicing needed because the decoder output is answer-only.
-        for question, key in [
+        # 2. VQA — batch all 4 questions into a single forward pass.
+        # The ViT-L image encoder output is reused across all questions
+        # (the processor duplicates the pixel values internally), and
+        # a single model.generate() call amortises the CUDA launch overhead.
+        # Removes the per-question empty_cache() calls that caused unnecessary
+        # CUDA synchronisation stalls (~4x fewer forward passes).
+        vqa_questions = [
             ("What type of scene is this? Answer in 1-3 words.", "scene_type"),
             ("What is the main subject of this image? Answer in 1-5 words.", "main_subject"),
             ("What is the lighting condition or time of day? Answer in 1-3 words.", "lighting"),
             ("What is the mood or aesthetic of this image? Answer in 1-3 words.", "mood"),
-        ]:
-            try:
-                with torch.inference_mode():
-                    inputs = processor(pil_img, question, return_tensors="pt").to(device)
-                    out = model.generate(**inputs, max_new_tokens=30)
-                    answer = processor.decode(out[0], skip_special_tokens=True).strip()
-                if answer:
-                    results[key] = answer
-                # Release KV-cache and activation tensors between VQA calls.
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
+        ]
+
+        try:
+            with torch.inference_mode():
+                # Batch: replicate the image for each question and process together.
+                questions = [q for q, _ in vqa_questions]
+                images = [pil_img] * len(questions)
+                inputs = processor(images, questions, return_tensors="pt", padding=True).to(device)
+                outputs = model.generate(**inputs, max_new_tokens=30)
+
+                for idx, (_, key) in enumerate(vqa_questions):
+                    answer = processor.decode(outputs[idx], skip_special_tokens=True).strip()
+                    if answer:
+                        results[key] = answer
+        except Exception:
+            # Fallback: sequential VQA if batched inference fails (e.g. OOM)
+            for question, key in vqa_questions:
+                try:
+                    with torch.inference_mode():
+                        inputs = processor(pil_img, question, return_tensors="pt").to(device)
+                        out = model.generate(**inputs, max_new_tokens=30)
+                        answer = processor.decode(out[0], skip_special_tokens=True).strip()
+                    if answer:
+                        results[key] = answer
+                except Exception:
+                    pass
+
+        # Free activation tensors once after all VQA is done (not between questions).
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # 3. Keywords from caption
         results["keywords"] = _extract_keywords(caption)
