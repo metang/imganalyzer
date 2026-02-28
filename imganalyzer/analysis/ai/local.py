@@ -49,6 +49,7 @@ class LocalAI:
             LocalAI._model = Blip2ForConditionalGeneration.from_pretrained(
                 _MODEL_ID,
                 torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                low_cpu_mem_usage=True,
                 cache_dir=CACHE_DIR,
             ).to(device)
 
@@ -59,10 +60,17 @@ class LocalAI:
         results: dict[str, Any] = {}
 
         # 1. Image captioning (no text prompt → pure captioning mode)
-        inputs = processor(pil_img, return_tensors="pt").to(device)
-        out = model.generate(**inputs, max_new_tokens=100)
-        caption = processor.decode(out[0], skip_special_tokens=True).strip()
+        # inference_mode disables autograd entirely — no activation graph retained,
+        # saving 2–3 GB vs bare generate() calls.
+        with torch.inference_mode():
+            inputs = processor(pil_img, return_tensors="pt").to(device)
+            out = model.generate(**inputs, max_new_tokens=100)
+            caption = processor.decode(out[0], skip_special_tokens=True).strip()
         results["description"] = caption
+
+        # Free activation tensors from captioning before VQA runs.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # 2. VQA — FlanT5 encoder-decoder generates the answer directly;
         #    no prompt-slicing needed because the decoder output is answer-only.
@@ -73,11 +81,15 @@ class LocalAI:
             ("What is the mood or aesthetic of this image? Answer in 1-3 words.", "mood"),
         ]:
             try:
-                inputs = processor(pil_img, question, return_tensors="pt").to(device)
-                out = model.generate(**inputs, max_new_tokens=30)
-                answer = processor.decode(out[0], skip_special_tokens=True).strip()
+                with torch.inference_mode():
+                    inputs = processor(pil_img, question, return_tensors="pt").to(device)
+                    out = model.generate(**inputs, max_new_tokens=30)
+                    answer = processor.decode(out[0], skip_special_tokens=True).strip()
                 if answer:
                     results[key] = answer
+                # Release KV-cache and activation tensors between VQA calls.
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             except Exception:
                 pass
 

@@ -124,9 +124,12 @@ class CLIPEmbedder:
         Console().print("[dim]Loading CLIP ViT-L/14 model...[/dim]")
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Load weights directly in fp16 on CUDA — saves ~0.75 GB vs fp32 default.
+        # Inference already runs under autocast so this is fully consistent.
         model, _, preprocess = open_clip.create_model_and_transforms(
             "ViT-L-14",
             pretrained="openai",
+            precision="fp16" if device == "cuda" else "fp32",
             cache_dir=str(Path(CACHE_DIR) / "clip"),
         )
         tokenizer = open_clip.get_tokenizer("ViT-L-14")

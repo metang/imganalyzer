@@ -74,7 +74,7 @@ class ObjectDetector:
         model = ObjectDetector._model
         device = next(model.parameters()).device
 
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
             inputs = processor(
                 images=pil_img,
                 text=detection_prompt,

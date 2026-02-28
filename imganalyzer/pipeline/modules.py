@@ -106,6 +106,14 @@ class ModuleRunner:
             return self._run_technical(image_id, path)
         elif module == "local_ai":
             return self._run_local_ai(image_id, path)
+        elif module == "blip2":
+            return self._run_blip2(image_id, path)
+        elif module == "objects":
+            return self._run_objects(image_id, path)
+        elif module == "ocr":
+            return self._run_ocr(image_id, path)
+        elif module == "faces":
+            return self._run_faces(image_id, path)
         elif module == "cloud_ai":
             return self._run_cloud_ai(image_id, path)
         elif module == "aesthetic":
@@ -170,8 +178,128 @@ class ModuleRunner:
             self.repo.upsert_local_ai(image_id, result)
             self.repo.update_search_index(image_id)
 
+        # Also populate the individual split tables so callers can query
+        # blip2/objects/ocr/faces independently when local_ai was used.
+        self._write_split_tables(image_id, result)
+
+        # Release all local-AI activation tensors (BLIP-2 KV-cache, GDINO/TrOCR
+        # feature maps) before the embedding job loads CLIP.  All 4 models stay
+        # resident in VRAM as singletons, but their inference buffers are freed.
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
         if self.verbose:
             console.print(f"  [dim]Local AI analysis done for image {image_id}[/dim]")
+        return result
+
+    def _write_split_tables(self, image_id: int, merged: dict[str, Any]) -> None:
+        """Write the 4 individual pass tables from a merged local_ai result dict.
+
+        Called by _run_local_ai after the main analysis_local_ai write so that
+        blip2/objects/ocr/faces can be queried independently.  Failures are
+        silently suppressed — they must not break the existing local_ai path.
+        """
+        import json as _json
+
+        # blip2 fields
+        blip2_data: dict[str, Any] = {}
+        for key in ("description", "scene_type", "main_subject", "lighting", "mood", "keywords"):
+            if key in merged:
+                blip2_data[key] = merged[key]
+        if blip2_data:
+            try:
+                with _transaction(self.conn):
+                    self.repo.upsert_blip2(image_id, blip2_data)
+            except Exception:
+                pass
+
+        # objects fields — reconstruct from merged (local_full strips has_person/has_text
+        # before returning, so we derive from face_count / ocr_text presence)
+        # We only write what we can infer from the merged dict.
+        objects_data: dict[str, Any] = {}
+        if "detected_objects" in merged:
+            objects_data["detected_objects"] = merged["detected_objects"]
+        face_count = merged.get("face_count") or 0
+        objects_data["has_person"] = 1 if int(face_count) > 0 else 0
+        ocr_text = merged.get("ocr_text") or ""
+        objects_data["has_text"] = 1 if ocr_text else 0
+        objects_data["text_boxes"] = _json.dumps([])
+        if objects_data:
+            try:
+                with _transaction(self.conn):
+                    self.repo.upsert_objects(image_id, objects_data)
+            except Exception:
+                pass
+
+        # ocr fields
+        if merged.get("ocr_text"):
+            try:
+                with _transaction(self.conn):
+                    self.repo.upsert_ocr(image_id, {"ocr_text": merged["ocr_text"]})
+            except Exception:
+                pass
+
+        # faces fields
+        faces_data: dict[str, Any] = {}
+        for key in ("face_count", "face_identities", "face_details"):
+            if key in merged:
+                faces_data[key] = merged[key]
+        if faces_data:
+            try:
+                with _transaction(self.conn):
+                    self.repo.upsert_faces(image_id, faces_data)
+            except Exception:
+                pass
+
+    def _run_blip2(self, image_id: int, path: Path) -> dict[str, Any]:
+        image_data = _read_image(path)
+
+        from imganalyzer.pipeline.passes.blip2 import run_blip2
+        result = run_blip2(image_data, self.repo, image_id, self.conn)
+
+        if self.verbose:
+            console.print(f"  [dim]BLIP-2 done for image {image_id}[/dim]")
+        return result
+
+    def _run_objects(self, image_id: int, path: Path) -> dict[str, Any]:
+        image_data = _read_image(path)
+
+        from imganalyzer.pipeline.passes.objects import run_objects
+        result = run_objects(
+            image_data, self.repo, image_id, self.conn,
+            prompt=self.detection_prompt,
+            threshold=self.detection_threshold,
+        )
+
+        if self.verbose:
+            console.print(f"  [dim]Object detection done for image {image_id}[/dim]")
+        return result
+
+    def _run_ocr(self, image_id: int, path: Path) -> dict[str, Any]:
+        image_data = _read_image(path)
+
+        from imganalyzer.pipeline.passes.ocr import run_ocr
+        result = run_ocr(image_data, self.repo, image_id, self.conn)
+
+        if self.verbose:
+            console.print(f"  [dim]OCR done for image {image_id}[/dim]")
+        return result
+
+    def _run_faces(self, image_id: int, path: Path) -> dict[str, Any]:
+        image_data = _read_image(path)
+
+        from imganalyzer.pipeline.passes.faces import run_faces
+        result = run_faces(
+            image_data, self.repo, image_id, self.conn,
+            face_match_threshold=self.face_match_threshold,
+        )
+
+        if self.verbose:
+            console.print(f"  [dim]Face analysis done for image {image_id}[/dim]")
         return result
 
     def _run_cloud_ai(self, image_id: int, path: Path) -> dict[str, Any]:

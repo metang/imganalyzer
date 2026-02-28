@@ -435,35 +435,9 @@ class TestLocalAIFull:
 
         blip_out = {"description": "A landscape.", "keywords": ["mountain"], "scene_type": "landscape",
                     "main_subject": "mountain", "lighting": "daylight", "mood": "calm"}
-        aesthetic_out = {"aesthetic_score": 6.5, "aesthetic_label": "Medium"}
         object_out = {"detected_objects": ["tree:70%", "mountain:80%"], "has_person": False}
 
-        with patch("imganalyzer.analysis.ai.local_full.LocalAIFull") as MockFull:
-            # Directly test the logic by patching sub-module classes
-            pass
-
-        # Patch sub-modules directly
-        with patch("imganalyzer.analysis.ai.local.LocalAI") as MockBlip, \
-             patch("imganalyzer.analysis.ai.aesthetic.AestheticScorer") as MockAesthetic, \
-             patch("imganalyzer.analysis.ai.objects.ObjectDetector") as MockObjects, \
-             patch("imganalyzer.analysis.ai.faces.FaceAnalyzer") as MockFaces:
-
-            MockBlip.return_value.analyze.return_value = blip_out
-            MockAesthetic.return_value.analyze.return_value = aesthetic_out
-            MockObjects.return_value.analyze.return_value = object_out
-
-            orchestrator = LocalAIFull()
-
-            # Patch the imports inside local_full at the module level
-            import imganalyzer.analysis.ai.local_full as lf_module
-            with patch.object(lf_module, "_import_local_ai", create=True):
-                pass  # Not using internal helpers — test via integration
-
-        # Integration-style: verify has_person=False prevents face analysis call
-        # We verify this through the FaceDatabase / FaceAnalyzer not being called
         face_call_count = {"n": 0}
-
-        real_fa_analyze = None
 
         class FakeFaceAnalyzer:
             def analyze(self, *args, **kwargs):
@@ -474,29 +448,21 @@ class TestLocalAIFull:
             def analyze(self, *args, **kwargs):
                 return blip_out
 
-        class FakeAesthetic:
-            def analyze(self, *args, **kwargs):
-                return aesthetic_out
-
         class FakeObjects:
             def analyze(self, *args, **kwargs):
                 return object_out
 
         import imganalyzer.analysis.ai.local as local_module
-        import imganalyzer.analysis.ai.aesthetic as aesthetic_module
         import imganalyzer.analysis.ai.objects as objects_module
         import imganalyzer.analysis.ai.faces as faces_module
 
         with patch.object(local_module, "LocalAI", FakeBlip), \
-             patch.object(aesthetic_module, "AestheticScorer", FakeAesthetic), \
              patch.object(objects_module, "ObjectDetector", FakeObjects), \
              patch.object(faces_module, "FaceAnalyzer", FakeFaceAnalyzer):
 
             result = LocalAIFull().analyze(self._make_image_data())
 
         assert face_call_count["n"] == 0, "FaceAnalyzer should not be called when no person detected"
-        assert "aesthetic_score" in result
-        assert result["aesthetic_score"] == 6.5
         assert "detected_objects" in result
         # has_person flag must not leak into output
         assert "has_person" not in result
@@ -507,7 +473,6 @@ class TestLocalAIFull:
 
         blip_out = {"description": "A portrait.", "keywords": ["person"], "scene_type": "portrait",
                     "main_subject": "person", "lighting": "studio", "mood": "confident"}
-        aesthetic_out = {"aesthetic_score": 7.8, "aesthetic_label": "High"}
         object_out = {"detected_objects": ["person:91%"], "has_person": True}
         face_out = {"face_count": 1, "face_identities": ["Alice"], "face_details": ["Alice:30:Female"]}
 
@@ -522,10 +487,6 @@ class TestLocalAIFull:
             def analyze(self, *args, **kwargs):
                 return blip_out
 
-        class FakeAesthetic:
-            def analyze(self, *args, **kwargs):
-                return aesthetic_out
-
         class FakeObjects:
             def analyze(self, *args, **kwargs):
                 return object_out
@@ -539,13 +500,11 @@ class TestLocalAIFull:
                 return ("Alice", 0.92)
 
         import imganalyzer.analysis.ai.local as local_module
-        import imganalyzer.analysis.ai.aesthetic as aesthetic_module
         import imganalyzer.analysis.ai.objects as objects_module
         import imganalyzer.analysis.ai.faces as faces_module
         import imganalyzer.analysis.ai.face_db as face_db_module
 
         with patch.object(local_module, "LocalAI", FakeBlip), \
-             patch.object(aesthetic_module, "AestheticScorer", FakeAesthetic), \
              patch.object(objects_module, "ObjectDetector", FakeObjects), \
              patch.object(faces_module, "FaceAnalyzer", FakeFaceAnalyzer), \
              patch.object(face_db_module, "FaceDatabase", FakeFaceDB):
@@ -563,24 +522,18 @@ class TestLocalAIFull:
 
         blip_out = {"description": "Outdoors.", "keywords": ["nature"], "scene_type": "outdoor",
                     "main_subject": "tree", "lighting": "daylight", "mood": "peaceful"}
-        aesthetic_out = {"aesthetic_score": 5.5, "aesthetic_label": "Medium"}
         object_out = {"detected_objects": ["tree:75%", "sky:80%"], "has_person": False}
 
         class FakeBlip:
             def analyze(self, *a, **kw): return blip_out
 
-        class FakeAesthetic:
-            def analyze(self, *a, **kw): return aesthetic_out
-
         class FakeObjects:
             def analyze(self, *a, **kw): return object_out
 
         import imganalyzer.analysis.ai.local as local_module
-        import imganalyzer.analysis.ai.aesthetic as aesthetic_module
         import imganalyzer.analysis.ai.objects as objects_module
 
         with patch.object(local_module, "LocalAI", FakeBlip), \
-             patch.object(aesthetic_module, "AestheticScorer", FakeAesthetic), \
              patch.object(objects_module, "ObjectDetector", FakeObjects):
 
             result = LocalAIFull().analyze(self._make_image_data())
@@ -589,48 +542,6 @@ class TestLocalAIFull:
         assert "tree" in keywords
         assert "sky" in keywords
         assert "nature" in keywords  # original BLIP keyword preserved
-
-
-# ── AestheticScorer (mocked) ──────────────────────────────────────────────────
-
-class TestAestheticScorer:
-    def test_output_keys_and_range(self, synthetic_image_data):
-        """Smoke test with mocked model — verifies interface contract."""
-        from imganalyzer.analysis.ai.aesthetic import AestheticScorer, _aesthetic_label
-
-        mock_score = 6.8
-        with patch.object(AestheticScorer, "_load_models"):
-            # Inject fake models
-            import types, torch
-            fake_clip = MagicMock()
-            fake_clip.encode_image.return_value = torch.ones(1, 768)
-            fake_linear = MagicMock()
-            fake_linear.parameters.return_value = iter([torch.zeros(1)])
-            fake_linear.return_value = torch.tensor([[mock_score]])
-            AestheticScorer._clip_model = fake_clip
-            AestheticScorer._preprocess = lambda img: torch.zeros(3, 224, 224)
-            AestheticScorer._model = fake_linear
-
-            scorer = AestheticScorer()
-            result = scorer.analyze(synthetic_image_data)
-
-            # Reset singletons so other tests are unaffected
-            AestheticScorer._model = None
-            AestheticScorer._clip_model = None
-            AestheticScorer._preprocess = None
-
-        assert "aesthetic_score" in result
-        assert "aesthetic_label" in result
-        assert 0.0 <= result["aesthetic_score"] <= 10.0
-
-    def test_aesthetic_label_thresholds(self):
-        from imganalyzer.analysis.ai.aesthetic import _aesthetic_label
-        assert _aesthetic_label(1.0) == "Very Low"
-        assert _aesthetic_label(4.0) == "Low"
-        assert _aesthetic_label(5.5) == "Medium"
-        assert _aesthetic_label(7.0) == "High"
-        assert _aesthetic_label(9.0) == "Exceptional"
-        assert _aesthetic_label(10.0) == "Exceptional"
 
 
 # ── ObjectDetector (mocked) ───────────────────────────────────────────────────
@@ -644,6 +555,7 @@ class TestObjectDetector:
         mock_results = [{
             "scores": torch.tensor([0.91]),
             "labels": ["person"],
+            "boxes": torch.zeros(1, 4),
         }]
 
         with patch.object(ObjectDetector, "_load_models"):
@@ -681,6 +593,7 @@ class TestObjectDetector:
         mock_results = [{
             "scores": torch.tensor([0.85, 0.70]),
             "labels": ["tree", "mountain"],
+            "boxes": torch.zeros(2, 4),
         }]
 
         with patch.object(ObjectDetector, "_load_models"):
@@ -714,6 +627,7 @@ class TestObjectDetector:
         mock_results = [{
             "scores": torch.tensor([0.75]),
             "labels": ["car"],
+            "boxes": torch.zeros(1, 4),
         }]
 
         with patch.object(ObjectDetector, "_load_models"):

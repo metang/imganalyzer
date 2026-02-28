@@ -22,6 +22,10 @@ MODULE_TABLE_MAP: dict[str, str] = {
     "metadata":   "analysis_metadata",
     "technical":  "analysis_technical",
     "local_ai":   "analysis_local_ai",
+    "blip2":      "analysis_blip2",
+    "objects":    "analysis_objects",
+    "ocr":        "analysis_ocr",
+    "faces":      "analysis_faces",
     "cloud_ai":   "analysis_cloud_ai",
     "aesthetic":  "analysis_aesthetic",
     "embedding":  "embeddings",
@@ -237,6 +241,72 @@ class Repository:
         vals = [image_id] + list(data.values()) + [_now()]
         self.conn.execute(
             f"INSERT INTO analysis_aesthetic ({col_str}) VALUES ({placeholders})", vals
+        )
+
+    def upsert_blip2(self, image_id: int, data: dict[str, Any]) -> None:
+        """Atomic write of the BLIP-2 captioning result."""
+        if "keywords" in data and isinstance(data["keywords"], list):
+            data["keywords"] = json.dumps(data["keywords"])
+        data = self._filter_to_known_columns("analysis_blip2", data)
+        data = self._apply_override_mask(image_id, "analysis_blip2", data)
+        self.conn.execute("DELETE FROM analysis_blip2 WHERE image_id = ?", [image_id])
+        cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_str = ", ".join(cols)
+        vals = [image_id] + list(data.values()) + [_now()]
+        self.conn.execute(
+            f"INSERT INTO analysis_blip2 ({col_str}) VALUES ({placeholders})", vals
+        )
+
+    def upsert_objects(self, image_id: int, data: dict[str, Any]) -> None:
+        """Atomic write of the GroundingDINO object detection result."""
+        if "detected_objects" in data and isinstance(data["detected_objects"], list):
+            data["detected_objects"] = json.dumps(data["detected_objects"])
+        if "text_boxes" in data and isinstance(data["text_boxes"], list):
+            data["text_boxes"] = json.dumps(data["text_boxes"])
+        if "has_person" in data:
+            data["has_person"] = 1 if data["has_person"] else 0
+        if "has_text" in data:
+            data["has_text"] = 1 if data["has_text"] else 0
+        data = self._filter_to_known_columns("analysis_objects", data)
+        data = self._apply_override_mask(image_id, "analysis_objects", data)
+        self.conn.execute("DELETE FROM analysis_objects WHERE image_id = ?", [image_id])
+        cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_str = ", ".join(cols)
+        vals = [image_id] + list(data.values()) + [_now()]
+        self.conn.execute(
+            f"INSERT INTO analysis_objects ({col_str}) VALUES ({placeholders})", vals
+        )
+
+    def upsert_ocr(self, image_id: int, data: dict[str, Any]) -> None:
+        """Atomic write of the TrOCR result."""
+        data = self._filter_to_known_columns("analysis_ocr", data)
+        data = self._apply_override_mask(image_id, "analysis_ocr", data)
+        self.conn.execute("DELETE FROM analysis_ocr WHERE image_id = ?", [image_id])
+        cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_str = ", ".join(cols)
+        vals = [image_id] + list(data.values()) + [_now()]
+        self.conn.execute(
+            f"INSERT INTO analysis_ocr ({col_str}) VALUES ({placeholders})", vals
+        )
+
+    def upsert_faces(self, image_id: int, data: dict[str, Any]) -> None:
+        """Atomic write of the InsightFace face analysis result."""
+        if "face_identities" in data and isinstance(data["face_identities"], list):
+            data["face_identities"] = json.dumps(data["face_identities"])
+        if "face_details" in data and isinstance(data["face_details"], (list, dict)):
+            data["face_details"] = json.dumps(data["face_details"])
+        data = self._filter_to_known_columns("analysis_faces", data)
+        data = self._apply_override_mask(image_id, "analysis_faces", data)
+        self.conn.execute("DELETE FROM analysis_faces WHERE image_id = ?", [image_id])
+        cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_str = ", ".join(cols)
+        vals = [image_id] + list(data.values()) + [_now()]
+        self.conn.execute(
+            f"INSERT INTO analysis_faces ({col_str}) VALUES ({placeholders})", vals
         )
 
     def clear_analysis(self, image_id: int, module: str) -> None:
@@ -486,7 +556,7 @@ class Repository:
         faces_parts: list[str] = []
         exif_parts: list[str] = []
 
-        # Local AI
+        # Local AI (legacy full-pipeline table)
         local = self.conn.execute(
             "SELECT * FROM analysis_local_ai WHERE image_id = ?", [image_id]
         ).fetchone()
@@ -511,6 +581,41 @@ class Repository:
                 kw_parts.append(local["mood"])
             if local["lighting"]:
                 kw_parts.append(local["lighting"])
+
+        # BLIP-2 individual pass (supplement local_ai or used alone)
+        blip2 = self.conn.execute(
+            "SELECT * FROM analysis_blip2 WHERE image_id = ?", [image_id]
+        ).fetchone() if self._table_exists("analysis_blip2") else None
+        if blip2:
+            if blip2["description"] and blip2["description"] not in desc_parts:
+                desc_parts.append(blip2["description"])
+            if blip2["main_subject"] and blip2["main_subject"] not in subjects_parts:
+                subjects_parts.append(blip2["main_subject"])
+            if blip2["scene_type"] and blip2["scene_type"] not in subjects_parts:
+                subjects_parts.append(blip2["scene_type"])
+            if blip2["keywords"]:
+                try:
+                    for kw in json.loads(blip2["keywords"]):
+                        if kw not in kw_parts:
+                            kw_parts.append(kw)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if blip2["mood"] and blip2["mood"] not in kw_parts:
+                kw_parts.append(blip2["mood"])
+            if blip2["lighting"] and blip2["lighting"] not in kw_parts:
+                kw_parts.append(blip2["lighting"])
+
+        # Faces individual pass
+        faces_row = self.conn.execute(
+            "SELECT * FROM analysis_faces WHERE image_id = ?", [image_id]
+        ).fetchone() if self._table_exists("analysis_faces") else None
+        if faces_row and faces_row["face_identities"]:
+            try:
+                for name in json.loads(faces_row["face_identities"]):
+                    if name not in faces_parts:
+                        faces_parts.append(name)
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         # Cloud AI (all providers)
         cloud_rows = self.conn.execute(
@@ -570,6 +675,13 @@ class Repository:
             ],
         )
 
+    def _table_exists(self, table: str) -> bool:
+        """Return True if a table exists in the database (cached via column cache)."""
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [table]
+        ).fetchone()
+        return row is not None
+
     # ── Helpers ────────────────────────────────────────────────────────────
 
     def get_full_result(self, image_id: int) -> dict[str, Any]:
@@ -579,7 +691,7 @@ class Repository:
         if img:
             result["image"] = img
 
-        for module in ("metadata", "technical", "local_ai", "aesthetic"):
+        for module in ("metadata", "technical", "local_ai", "blip2", "objects", "ocr", "faces", "aesthetic"):
             data = self.get_analysis(image_id, module)
             if data:
                 # Apply overrides on top

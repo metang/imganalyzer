@@ -211,12 +211,16 @@ class OCRAnalyzer:
         )
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Load in fp16 on CUDA — halves static weight memory (~1.3 GB → ~0.65 GB)
+        # and also halves activation/beam-search tensors during inference.
+        load_dtype = torch.float16 if device == "cuda" else torch.float32
 
         cls._processor = TrOCRProcessor.from_pretrained(
             _MODEL_ID, cache_dir=CACHE_DIR
         )
         cls._model = VisionEncoderDecoderModel.from_pretrained(
             _MODEL_ID,
+            torch_dtype=load_dtype,
             cache_dir=CACHE_DIR,
         ).to(device)  # type: ignore[union-attr]
 
@@ -224,16 +228,17 @@ class OCRAnalyzer:
         # GroundingDINO) was loaded first, TrOCRSinusoidalPositionalEmbedding
         # keeps its `weights` tensor on the meta device (non-persistent buffer,
         # so .to() doesn't move it).  Re-compute the sinusoidal table on the
-        # correct device using the module's own get_embedding() method.
+        # correct device using the module's own get_embedding() method, then
+        # cast to the model dtype so it matches fp16 weights.
         for mod in cls._model.modules():  # type: ignore[union-attr]
             if type(mod).__name__ == "TrOCRSinusoidalPositionalEmbedding":
                 w = vars(mod).get("weights")
                 if isinstance(w, torch.Tensor) and w.device.type == "meta":
                     num_embeddings = w.shape[0]
-                    # get_embedding creates on CPU; move result to target device
+                    # get_embedding creates on CPU float32; cast to model dtype/device
                     mod.weights = mod.get_embedding(
                         num_embeddings, mod.embedding_dim, mod.padding_idx
-                    ).to(device)
+                    ).to(device=device, dtype=load_dtype)
 
         cls._model.eval()  # type: ignore[union-attr]
 

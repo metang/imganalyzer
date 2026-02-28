@@ -11,6 +11,21 @@ from __future__ import annotations
 from typing import Any
 
 
+def _empty_cache() -> None:
+    """Release the PyTorch CUDA allocator cache between pipeline stages.
+
+    Called after each model's forward pass completes so that activation
+    tensors and KV-cache buffers are returned to the OS before the next
+    model runs.  No-op when CUDA is unavailable.
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 class LocalAIFull:
     """Full local AI pipeline for image analysis.
 
@@ -43,6 +58,9 @@ class LocalAIFull:
         except Exception as exc:
             _con.print(f"[yellow]  BLIP-2 warning: {exc}[/yellow]")
 
+        # Release BLIP-2 activation tensors (2–3 GB) before GroundingDINO runs.
+        _empty_cache()
+
         # ── Stage 2: Object detection ──────────────────────────────────────
         _con.print("[dim]  [2/4] Object detection...[/dim]")
         object_result: dict[str, Any] = {}
@@ -60,6 +78,9 @@ class LocalAIFull:
         has_text: bool = object_result.get("has_text", False)
         text_boxes: list = object_result.get("text_boxes", [])
 
+        # Release GroundingDINO activation tensors before OCR/face stages.
+        _empty_cache()
+
         # ── Stage 3: OCR (gated on has_text) ──────────────────────────────
         ocr_result: dict[str, Any] = {}
         if has_text:
@@ -69,6 +90,8 @@ class LocalAIFull:
                 ocr_result = OCRAnalyzer().analyze(image_data, text_boxes=text_boxes)
             except Exception as exc:
                 _con.print(f"[yellow]  OCR warning: {exc}[/yellow]")
+            # Release TrOCR beam-search tensors before face analysis.
+            _empty_cache()
         else:
             _con.print("[dim]  [3/4] No text detected — skipping OCR.[/dim]")
 

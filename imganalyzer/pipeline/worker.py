@@ -1,7 +1,26 @@
 """Worker — pulls jobs from the queue and dispatches to module runners.
 
 Supports multi-threaded processing with graceful shutdown on SIGINT (Ctrl+C).
-GPU-bound modules (local_ai, embedding) are serialized to avoid VRAM contention.
+GPU-bound modules are serialized to avoid VRAM contention.
+
+Processing strategy
+-------------------
+The worker uses a two-phase loop designed to unlock cloud parallelism as
+early as possible:
+
+Phase 1 — ``objects`` pass (GPU, serial):
+  Drain ALL pending ``objects`` jobs first, one image at a time.  Once
+  ``objects`` is done for an image, ``has_person`` is known → ``cloud_ai``
+  and ``aesthetic`` jobs for that image are unblocked.
+
+  ``metadata`` / ``technical`` jobs run concurrently in a thread pool
+  throughout both phases.
+
+Phase 2 — remaining passes (GPU serial + cloud parallel):
+  The remaining GPU passes (``blip2``, ``ocr``, ``faces``, ``embedding``,
+  ``local_ai``) continue running serially on the main thread.
+  Meanwhile, ``cloud_ai`` and ``aesthetic`` jobs run in the cloud thread
+  pool, overlapping freely with the GPU work.
 
 Structured output
 -----------------
@@ -9,8 +28,8 @@ Each completed job emits a ``[RESULT]`` line to stdout so that the Electron
 GUI can parse per-job progress without depending on Rich formatting:
 
     [RESULT] {"path": "/a/b.jpg", "module": "technical", "status": "done", "ms": 45}
-    [RESULT] {"path": "/a/b.jpg", "module": "cloud_ai",  "status": "skipped", "ms": 0, "error": "prerequisite not met: local_ai"}
-    [RESULT] {"path": "/a/b.jpg", "module": "local_ai",  "status": "failed",  "ms": 812, "error": "CUDA OOM"}
+    [RESULT] {"path": "/a/b.jpg", "module": "cloud_ai",  "status": "skipped", "ms": 0, "error": "prerequisite not met: objects"}
+    [RESULT] {"path": "/a/b.jpg", "module": "objects",   "status": "failed",  "ms": 812, "error": "CUDA OOM"}
 
 These lines are always emitted (regardless of --verbose) and are JSON-safe
 (the ``error`` field has inner quotes escaped).
@@ -26,7 +45,7 @@ from typing import Any
 
 import sqlite3
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskID
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from imganalyzer.db.connection import get_db_path
 from imganalyzer.db.queue import JobQueue
@@ -35,8 +54,8 @@ from imganalyzer.pipeline.modules import ModuleRunner, write_xmp_from_db
 
 console = Console()
 
-# Modules that use GPU — must run single-threaded
-GPU_MODULES = {"local_ai", "embedding"}
+# Modules that use GPU — must run single-threaded on the main thread
+GPU_MODULES = {"local_ai", "embedding", "blip2", "objects", "ocr", "faces"}
 # Local I/O-bound modules — parallel, governed by `workers`
 LOCAL_IO_MODULES = {"metadata", "technical"}
 # Cloud API modules — parallel, governed by `cloud_workers`
@@ -44,18 +63,14 @@ CLOUD_MODULES = {"cloud_ai", "aesthetic"}
 # Combined set (kept for backwards-compat references)
 IO_MODULES = LOCAL_IO_MODULES | CLOUD_MODULES
 
-# Prerequisite map: a module may only run after its prerequisite has
-# completed successfully for the same image (checked via is_analyzed).
-# If the prerequisite has not run, the job is skipped with a log message.
-#
-# NOTE: "aesthetic" is intentionally NOT listed here.  The people-privacy
-# guard below (lines ~283-289) already skips aesthetic when local_ai has
-# been run and detected people (has_people=1).  When local_ai has NOT run,
-# get_analysis returns None → has_people is falsy → aesthetic proceeds.
-# Requiring local_ai as a hard prerequisite would force users to run the
-# full local_ai suite just to get aesthetic scores on images with no people.
+# The ``objects`` pass must complete for an image before cloud/aesthetic
+# may run (it provides ``has_person`` for the privacy gate).
+# ``ocr`` and ``faces`` also depend on ``objects`` for their gate flags.
 _PREREQUISITES: dict[str, str] = {
-    "cloud_ai": "local_ai",
+    "cloud_ai": "objects",
+    "aesthetic": "objects",
+    "ocr": "objects",
+    "faces": "objects",
 }
 
 
@@ -197,52 +212,159 @@ class Worker:
         ) as progress:
             task = progress.add_task("Processing", total=total_pending)
 
-            while not self._shutdown.is_set():
-                jobs = self.queue.claim(batch_size=batch_size)
-                if not jobs:
-                    break
-
-                # Split into GPU, local-IO, and cloud jobs
-                gpu_jobs       = [j for j in jobs if j["module"] in GPU_MODULES]
-                local_io_jobs  = [j for j in jobs if j["module"] in LOCAL_IO_MODULES]
-                cloud_jobs     = [j for j in jobs if j["module"] in CLOUD_MODULES]
-
-                # Process GPU jobs serially
-                for job in gpu_jobs:
-                    if self._shutdown.is_set():
+            # ── Helper: drain a specific GPU module serially ──────────────────
+            def _drain_gpu_module(module_name: str) -> None:
+                """Process all pending jobs for one GPU module, one at a time."""
+                while not self._shutdown.is_set():
+                    jobs = self.queue.claim(batch_size=batch_size, module=module_name)
+                    if not jobs:
                         break
-                    result_status = self._process_job(job)
+                    for job in jobs:
+                        if self._shutdown.is_set():
+                            break
+                        result_status = self._process_job(job)
+                        stats[result_status] += 1
+                        progress.advance(task)
+
+            # ── Helper: submit IO jobs to their pools ─────────────────────────
+            def _submit_io_jobs(
+                local_pool: ThreadPoolExecutor,
+                cloud_pool: ThreadPoolExecutor,
+            ) -> dict[Future, dict[str, Any]]:
+                """Claim and submit a batch of local-IO and cloud jobs."""
+                futures: dict[Future, dict[str, Any]] = {}
+                for module_set, pool in (
+                    (LOCAL_IO_MODULES, local_pool),
+                    (CLOUD_MODULES, cloud_pool),
+                ):
+                    for mod in module_set:
+                        jobs = self.queue.claim(batch_size=batch_size, module=mod)
+                        for job in jobs:
+                            if not self._shutdown.is_set():
+                                fut = pool.submit(self._process_job, job)
+                                futures[fut] = job
+                return futures
+
+            # ── Helper: collect results from futures ──────────────────────────
+            def _collect_futures(futures: dict[Future, dict[str, Any]]) -> None:
+                for fut, job in futures.items():
+                    try:
+                        result_status = fut.result(timeout=300)
+                        stats[result_status] = stats.get(result_status, 0) + 1
+                    except Exception as exc:
+                        self.queue.mark_failed(job["id"], str(exc))
+                        stats["failed"] += 1
+                    progress.advance(task)
+
+            # ════════════════════════════════════════════════════════════════
+            # Phase 1: Drain ALL ``objects`` jobs (GPU, serial).
+            #
+            # ``objects`` runs GroundingDINO across every image first so that
+            # ``has_person`` is known for the whole batch.  That unblocks
+            # ``cloud_ai`` / ``aesthetic`` which need this flag before they
+            # can decide whether to run.
+            #
+            # ``metadata`` / ``technical`` run concurrently in a thread pool
+            # throughout this phase.
+            # ════════════════════════════════════════════════════════════════
+            if self.queue.pending_count(module="objects") > 0 and not self._shutdown.is_set():
+                console.print("[dim]Phase 1 — object detection (people flag)[/dim]")
+
+            with (
+                ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
+                ThreadPoolExecutor(max_workers=self.cloud_workers) as cloud_pool,
+            ):
+                pending_futures: dict[Future, dict[str, Any]] = {}
+
+                while not self._shutdown.is_set():
+                    # Serial: one objects job at a time
+                    obj_jobs = self.queue.claim(batch_size=1, module="objects")
+                    if not obj_jobs:
+                        # No more objects jobs — collect any remaining IO futures
+                        # then break out of phase 1
+                        _collect_futures(pending_futures)
+                        pending_futures = {}
+                        break
+
+                    # Process the single objects job on the main thread
+                    result_status = self._process_job(obj_jobs[0])
                     stats[result_status] += 1
                     progress.advance(task)
 
-                # Process local-IO and cloud jobs concurrently in separate pools
-                if (local_io_jobs or cloud_jobs) and not self._shutdown.is_set():
-                    futures: dict[Future, dict[str, Any]] = {}
-                    with (
-                        ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
-                        ThreadPoolExecutor(max_workers=self.cloud_workers) as cloud_pool,
-                    ):
-                        for job in local_io_jobs:
-                            if self._shutdown.is_set():
-                                break
-                            fut = local_pool.submit(self._process_job, job)
-                            futures[fut] = job
-                        for job in cloud_jobs:
-                            if self._shutdown.is_set():
-                                break
-                            fut = cloud_pool.submit(self._process_job, job)
-                            futures[fut] = job
+                    # After each objects job, fire a fresh batch of IO jobs
+                    # (metadata/technical/cloud_ai/aesthetic)
+                    new_io = _submit_io_jobs(local_pool, cloud_pool)
+                    pending_futures.update(new_io)
 
-                    for fut, job in futures.items():
-                        if self._shutdown.is_set():
-                            break
+                    # Reap any IO futures that are already done to keep the
+                    # dict from growing unbounded
+                    done_futs = [f for f in pending_futures if f.done()]
+                    for fut in done_futs:
+                        job = pending_futures.pop(fut)
                         try:
-                            result_status = fut.result(timeout=300)
+                            result_status = fut.result()
                             stats[result_status] = stats.get(result_status, 0) + 1
                         except Exception as exc:
                             self.queue.mark_failed(job["id"], str(exc))
                             stats["failed"] += 1
                         progress.advance(task)
+
+            # ════════════════════════════════════════════════════════════════
+            # Phase 2: Remaining GPU passes (serial) + cloud passes (parallel)
+            #
+            # blip2 / ocr / faces / local_ai / embedding run one at a time on
+            # the main thread.  cloud_ai / aesthetic are now unblocked and run
+            # concurrently in the cloud thread pool, overlapping freely with
+            # the GPU work.  metadata / technical also continue in parallel.
+            # ════════════════════════════════════════════════════════════════
+            if not self._shutdown.is_set():
+                # GPU pass order: blip2 first (captioning, no prereqs),
+                # then ocr/faces (need objects — already done), then
+                # local_ai (legacy full pipeline), then embedding last
+                # (needs descriptions to exist).
+                remaining_gpu = ["blip2", "ocr", "faces", "local_ai", "embedding"]
+
+                with (
+                    ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
+                    ThreadPoolExecutor(max_workers=self.cloud_workers) as cloud_pool,
+                ):
+                    # Kick off all available cloud + local-IO work immediately
+                    pending_futures = _submit_io_jobs(local_pool, cloud_pool)
+
+                    for gpu_module in remaining_gpu:
+                        if self._shutdown.is_set():
+                            break
+
+                        while not self._shutdown.is_set():
+                            gpu_jobs = self.queue.claim(batch_size=batch_size, module=gpu_module)
+                            if not gpu_jobs:
+                                break
+                            for job in gpu_jobs:
+                                if self._shutdown.is_set():
+                                    break
+                                result_status = self._process_job(job)
+                                stats[result_status] += 1
+                                progress.advance(task)
+
+                                # After each GPU job, sweep for newly available
+                                # cloud/IO work and submit it
+                                new_io = _submit_io_jobs(local_pool, cloud_pool)
+                                pending_futures.update(new_io)
+
+                                # Reap completed futures
+                                done_futs = [f for f in pending_futures if f.done()]
+                                for fut in done_futs:
+                                    job2 = pending_futures.pop(fut)
+                                    try:
+                                        result_status = fut.result()
+                                        stats[result_status] = stats.get(result_status, 0) + 1
+                                    except Exception as exc:
+                                        self.queue.mark_failed(job2["id"], str(exc))
+                                        stats["failed"] += 1
+                                    progress.advance(task)
+
+                    # All GPU passes done — collect remaining IO futures
+                    _collect_futures(pending_futures)
 
         if self._shutdown.is_set():
             console.print("\n[yellow]Paused.[/yellow] Run `imganalyzer run` to resume.")
@@ -301,9 +423,19 @@ class Worker:
                 return "skipped"
 
             # ── People guard for cloud/aesthetic (privacy) ───────────────────
+            # Primary source: analysis_objects.has_person (set by the objects pass).
+            # Fallback: analysis_local_ai.has_people (set by the legacy local_ai
+            # pass) for databases populated before the split-pass refactor.
             if module in ("cloud_ai", "aesthetic"):
-                local_data = repo.get_analysis(image_id, "local_ai")
-                if local_data and local_data.get("has_people"):
+                has_people = False
+                objects_data = repo.get_analysis(image_id, "objects")
+                if objects_data is not None:
+                    has_people = bool(objects_data.get("has_person"))
+                else:
+                    local_data = repo.get_analysis(image_id, "local_ai")
+                    if local_data:
+                        has_people = bool(local_data.get("has_people"))
+                if has_people:
                     queue.mark_skipped(job_id, "has_people")
                     _emit_result(path, module, "skipped", 0, "has_people")
                     return "skipped"

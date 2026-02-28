@@ -514,7 +514,7 @@ def ingest(
     modules: Optional[str] = typer.Option(
         None, "--modules", "-m",
         help="Comma-separated modules to enqueue (default: all). "
-             "Options: metadata,technical,local_ai,cloud_ai,aesthetic,embedding",
+             "Options: metadata,technical,local_ai,blip2,objects,ocr,faces,cloud_ai,aesthetic,embedding",
     ),
     force: bool = typer.Option(False, "--force", help="Re-enqueue even if already analyzed"),
     no_recursive: bool = typer.Option(False, "--no-recursive", help="Don't scan subfolders"),

@@ -208,12 +208,16 @@ class BatchProcessor:
 
 
 def _module_priority(module: str) -> int:
-    """Assign default priorities — metadata first, embeddings last."""
+    """Assign default priorities — metadata first, objects highest GPU (gates cloud), embedding last."""
     return {
-        "metadata": 100,
-        "technical": 90,
-        "local_ai": 80,
-        "cloud_ai": 70,
-        "aesthetic": 60,
-        "embedding": 50,
+        "metadata":  100,
+        "technical":  90,
+        "objects":    85,   # highest GPU priority — unlocks cloud_ai/aesthetic
+        "blip2":      80,
+        "local_ai":   80,
+        "ocr":        78,
+        "faces":      77,
+        "cloud_ai":   70,
+        "aesthetic":  60,
+        "embedding":  50,
     }.get(module, 0)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -25,6 +25,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     migrations = {
         1: _migrate_v1,
         2: _migrate_v2,
+        3: _migrate_v3,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -260,3 +261,49 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
             )
         except Exception:
             pass  # column already exists
+
+
+# ── Migration v3: Individual AI pass tables ───────────────────────────────────
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    """Add split tables for the individual AI pipeline passes (blip2, objects, ocr, faces)."""
+    conn.executescript("""
+        -- ── analysis_blip2 ────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS analysis_blip2 (
+            image_id     INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+            description  TEXT,
+            scene_type   TEXT,
+            main_subject TEXT,
+            lighting     TEXT,
+            mood         TEXT,
+            keywords     TEXT,   -- JSON array
+            analyzed_at  TEXT
+        );
+
+        -- ── analysis_objects ──────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS analysis_objects (
+            image_id          INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+            detected_objects  TEXT,   -- JSON array of "label:pct%" strings
+            has_person        INTEGER DEFAULT 0,
+            has_text          INTEGER DEFAULT 0,
+            text_boxes        TEXT,   -- JSON array of [x0,y0,x1,y1] lists
+            analyzed_at       TEXT
+        );
+
+        -- ── analysis_ocr ──────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS analysis_ocr (
+            image_id    INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+            ocr_text    TEXT,
+            analyzed_at TEXT
+        );
+
+        -- ── analysis_faces ────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS analysis_faces (
+            image_id        INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+            face_count      INTEGER DEFAULT 0,
+            face_identities TEXT,   -- JSON array of name strings
+            face_details    TEXT,   -- JSON array of "name:age:gender" strings
+            analyzed_at     TEXT
+        );
+    """)
+
