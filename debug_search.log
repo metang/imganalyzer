@@ -1,0 +1,361 @@
+==========================================================================================
+  SEMANTIC SEARCH DIAGNOSTIC  —  query='sunset'  limit=20
+  2026-02-26 21:05:04
+  Log file: D:\Code\imganalyzer\debug_search.log
+==========================================================================================
+
+DB path: C:\Users\tangm\.cache\imganalyzer\imganalyzer.db
+
+══════════════════════════════════════════════════════════════════════════════════════════
+  SECTION 1 — DB OVERVIEW
+══════════════════════════════════════════════════════════════════════════════════════════
+
+Total images in DB:          4436
+Images with local_ai:        3042
+Images with cloud_ai:        1900
+
+Embeddings — image_clip:     846
+Embeddings — description_cl: 2977
+
+Embedding coverage breakdown:
+  both image_clip + description_clip : 811
+  image_clip only                    : 35
+  description_clip only              : 2166
+  neither (no embedding at all)      : 1424
+
+  ⚠  1424 images have NO embeddings — they are invisible to semantic search.
+
+  ⚠  35 images have image_clip but NO description_clip.
+     These are scored only on visual features, not on AI descriptions.
+     This can happen if embeddings were computed before local/cloud AI ran,
+     or before the recent _run_embedding change that skips image_clip when
+     a description is available.
+
+══════════════════════════════════════════════════════════════════════════════════════════
+  SECTION 2 — RAW COSINE SCORES
+══════════════════════════════════════════════════════════════════════════════════════════
+
+Query (text→image):  'a photo of sunset'
+Query (text→text):   'sunset'
+
+
+──────────────────────────────────────────────────────────────────────────────────────────
+  image_clip  top-20  (query: 'a photo of sunset')
+──────────────────────────────────────────────────────────────────────────────────────────
+Rank  image_id    cosine           computed_at  description (from DB)
+──────────────────────────────────────────────────────────────────────────────────────────
+   1       110    0.2317   2026-02-27 03:16:06  The image captures a view through a car window at sunset or …
+   2       102    0.2291   2026-02-27 03:16:04  The image shows a view from inside a vehicle, looking out th…
+   3      2071    0.2262   2026-02-27 03:16:54  a sunset with a palm tree in the background a sunset a sunse…
+   4       103    0.2208   2026-02-27 03:16:05  The image captures a dramatic sky with the sun low on the ho…
+   5      1602    0.2144   2026-02-27 03:16:19  a beach with palm trees beach scene the beach The image capt…
+   6      2144    0.2102   2026-02-27 03:16:56  a moon and a palm tree in the sky a sunset the moon
+   7       105    0.2040   2026-02-27 03:16:05  The image shows a view from inside a car, looking out throug…
+   8       111    0.2030   2026-02-27 03:16:07  (empty)
+   9       117    0.1917   2026-02-27 03:16:08  The image depicts a wide, open landscape with a blurred fore…
+  10       100    0.1897   2026-02-27 03:16:04  The image shows a view through a car windshield of a rural r…
+  11       101    0.1892   2026-02-27 03:16:04  The image shows a view from inside a car looking out onto a …
+  12      3321    0.1869   2026-02-27 03:17:31  a train is on the tracks a train on the tracks a train The i…
+  13       120    0.1861   2026-02-27 03:16:09  The image depicts a flat, expansive landscape with muddy fie…
+  14        99    0.1846   2026-02-27 03:16:04  The image shows a view from inside a vehicle looking out ont…
+  15       108    0.1844   2026-02-27 03:16:06  The image depicts a wide, flat expanse of rural land under a…
+  16       114    0.1838   2026-02-27 03:16:07  The image shows a dramatic landscape scene taken from inside…
+  17       109    0.1826   2026-02-27 03:16:06  The image depicts a wide, open landscape dominated by low, s…
+  18        98    0.1798   2026-02-27 03:16:03  The image depicts a rural road stretching into the distance …
+  19       107    0.1791   2026-02-27 03:16:06  The image shows a view from inside a car looking out through…
+  20      4178    0.1780   2026-02-27 03:18:25  a bag of chips a room with a lamp a bag of chips The image s…
+
+──────────────────────────────────────────────────────────────────────────────────────────
+  description_clip  top-20  (query: 'sunset')
+──────────────────────────────────────────────────────────────────────────────────────────
+Rank  image_id    cosine           computed_at  embedded text
+──────────────────────────────────────────────────────────────────────────────────────────
+   1      1618    0.8032   2026-02-27 03:16:21  a blue sky a beach scene a person on a surfboard The image s…
+   2      1620    0.8032   2026-02-27 03:16:21  a blue sky a beach scene a surfer The image depicts a vast c…
+   3      1758    0.8032   2026-02-27 03:16:34  a blue sky a beach scene a boat The image shows a marina sce…
+   4      1651    0.8018   2026-02-27 03:16:24  a cloudy sky a view of a city a city The image depicts a wid…
+   5      1682    0.7858   2026-02-27 03:16:27  a city is in the background a city a city The image shows a …
+   6      1798    0.7737   2026-02-27 03:16:39  a group of people a group of people people
+   7      1801    0.7737   2026-02-27 03:16:39  a group of people a group of people people
+   8      1804    0.7737   2026-02-27 03:16:39  a group of people a group of people a group of people
+   9      1806    0.7737   2026-02-27 03:16:40  a group of people a group of people people A group of people…
+  10      1836    0.7737   2026-02-27 03:16:43  a group of people a group of people people
+  11      1632    0.7723   2026-02-27 03:16:22  a city in the distance a city view a city The image shows a …
+  12      1677    0.7690   2026-02-27 03:16:26  a large body of water a view of a body of water a body of wa…
+  13       148    0.7636   2026-02-27 03:16:14  a boat is in the water a boat in the water a boat
+  14       154    0.7636   2026-02-27 03:16:14  a boat is in the water a boat docked in a waterway a boat
+  15      1669    0.7636   2026-02-27 03:16:26  a boat is in the water a boat on the water a boat The image …
+  16      4368    0.7618   2026-02-27 03:18:36  a fish in the water a pond a fish The image shows a large ta…
+  17      1728    0.7610   2026-02-27 03:16:31  a large crowd of people a crowd of people people
+  18      1729    0.7610   2026-02-27 03:16:32  a large crowd of people a crowd of people people walking in …
+  19      3321    0.7585   2026-02-27 03:17:31  a train is on the tracks a train on the tracks a train The i…
+  20      1838    0.7551   2026-02-27 03:16:43  a man is painting a group of people a man
+
+──────────────────────────────────────────────────────────────────────────────────────────
+  Cosine score distribution
+──────────────────────────────────────────────────────────────────────────────────────────
+image_clip    — count=846  min=0.0602  max=0.2317  mean=0.1286  stdev=0.0219
+description_cl— count=2977  min=-0.1365  max=0.8032  mean=0.3756  stdev=0.2241
+
+══════════════════════════════════════════════════════════════════════════════════════════
+  SECTION 3 — STALENESS CHECK
+══════════════════════════════════════════════════════════════════════════════════════════
+
+Comparing embedding computed_at vs analysis analyzed_at for top results.
+A stale embedding was computed BEFORE the latest AI analysis ran,
+meaning the stored vector may not reflect the current description.
+
+image_id            emb_img_at           emb_desc_at           local_ai_at           cloud_ai_at  stale?
+──────────────────────────────────────────────────────────────────────────────────────────
+    1798   2026-02-27 03:16:39   2026-02-27 03:16:39  2026-02-26T07:27:53+00:00                (none)  ok
+    1801   2026-02-27 03:16:39   2026-02-27 03:16:39  2026-02-26T07:27:57+00:00                (none)  ok
+    1804   2026-02-27 03:16:39   2026-02-27 03:16:39  2026-02-26T07:28:02+00:00                (none)  ok
+    1806   2026-02-27 03:16:40   2026-02-27 03:16:40  2026-02-26T07:28:05+00:00  2026-02-26T23:23:43+00:00  ok
+    1682   2026-02-27 03:16:27   2026-02-27 03:16:27  2026-02-26T07:22:47+00:00  2026-02-26T23:19:32+00:00  ok
+    2071   2026-02-27 03:16:54   2026-02-27 03:16:54  2026-02-26T07:42:21+00:00  2026-02-26T23:38:15+00:00  ok
+    1836   2026-02-27 03:16:43   2026-02-27 03:16:43  2026-02-26T07:29:00+00:00                (none)  ok
+    1602   2026-02-27 03:16:19   2026-02-27 03:16:19  2026-02-26T07:20:39+00:00  2026-02-26T23:14:32+00:00  ok
+    1618   2026-02-27 03:16:21   2026-02-27 03:16:21  2026-02-26T07:21:06+00:00  2026-02-26T23:15:13+00:00  ok
+    1620   2026-02-27 03:16:21   2026-02-27 03:16:21  2026-02-26T07:21:09+00:00  2026-02-26T23:15:11+00:00  ok
+    1758   2026-02-27 03:16:34   2026-02-27 03:16:34  2026-02-26T07:26:48+00:00  2026-02-26T23:22:19+00:00  ok
+    2144   2026-02-27 03:16:56   2026-02-27 03:16:56  2026-02-27T03:10:28+00:00                (none)  ⚠ STALE
+     100   2026-02-27 03:16:04   2026-02-27 03:16:04  2026-02-26T01:54:16+00:00  2026-02-26T06:07:10+00:00  ok
+     102   2026-02-27 03:16:04   2026-02-27 03:16:04  2026-02-26T01:54:27+00:00  2026-02-26T06:07:15+00:00  ok
+     103   2026-02-27 03:16:05   2026-02-27 03:16:05  2026-02-26T01:54:32+00:00  2026-02-26T06:07:27+00:00  ok
+     105   2026-02-27 03:16:05   2026-02-27 03:16:05  2026-02-26T01:54:43+00:00  2026-02-26T06:07:45+00:00  ok
+     110   2026-02-27 03:16:06   2026-02-27 03:16:06  2026-02-26T01:55:09+00:00  2026-02-26T06:08:29+00:00  ok
+     111   2026-02-27 03:16:07                (none)  2026-02-26T01:55:15+00:00                (none)  ok
+    1651   2026-02-27 03:16:24   2026-02-27 03:16:24  2026-02-26T07:21:56+00:00  2026-02-26T23:17:37+00:00  ok
+     117   2026-02-27 03:16:08   2026-02-27 03:16:08  2026-02-26T01:55:46+00:00  2026-02-26T06:09:11+00:00  ok
+
+══════════════════════════════════════════════════════════════════════════════════════════
+  SECTION 4 — RRF COMPARISON
+══════════════════════════════════════════════════════════════════════════════════════════
+
+Running SearchEngine._semantic_search() ...
+
+ RRF  image_id   RRF score   img_rank   img_cos   desc_rank   desc_cos  file_path
+──────────────────────────────────────────────────────────────────────────────────────────
+   1      3321     0.02655         12    0.1869          19     0.7585  IMG_6159.JPG
+   2       148     0.02350         42    0.1640          13     0.7636  100_3654.JPG
+   3      2071     0.02241          3    0.2262          93     0.7058  IMG_6148.JPG
+   4      1836     0.02164         76    0.1536          10     0.7737  IMG_0382.JPG
+   5      3714     0.01972         53    0.1593          32     0.7348  _ICT4220.JPG
+   6      3668     0.01935         52    0.1594          36     0.7348  _ICT4174.JPG
+   7      4178     0.01921         20    0.1780          89     0.7068  _ICT5151.JPG
+   8      3692     0.01844         63    0.1565          37     0.7348  _ICT4198.JPG
+   9      4378     0.01671         66    0.1557          54     0.7255  100_4618.JPG
+  10      1618     0.01639        286    0.1353           1     0.8032  103_3907.JPG
+  11       110     0.01639          1    0.2317        1112     0.5146  103_3614.JPG
+  12      3531     0.01621         73    0.1538          55     0.7249  _ICT4081.JPG
+  13      1620     0.01613        289    0.1352           2     0.8032  103_3909.JPG
+  14       102     0.01613          2    0.2291        2403     0.1411  103_3605.JPG
+  15      1758     0.01587        169    0.1431           3     0.8032  100_4125.JPG
+  16      1651     0.01562        212    0.1406           4     0.8018  100_4002.JPG
+  17       103     0.01562          4    0.2208        1797     0.2583  103_3606.JPG
+  18      1602     0.01538          5    0.2144         136     0.6939  100_3713.JPG
+  19      1682     0.01538        324    0.1337           5     0.7858  100_4035.JPG
+  20      2144     0.01515          6    0.2102         853     0.5733  PICT1592-Edit.tif
+
+
+──────────────────────────────────────────────────────────────────────────────────────────
+  Suspicious promotions (low raw cosine → high RRF rank)
+──────────────────────────────────────────────────────────────────────────────────────────
+Found 4 results in top-10 RRF that ranked >#20 in BOTH raw lists:
+  RRF#5  id=3714  img_rank=53  desc_rank=32  _ICT4220.JPG
+    description: a man with black hair a man looking at a wii remote a man The image shows a close-up view of a perso…
+  RRF#6  id=3668  img_rank=52  desc_rank=36  _ICT4174.JPG
+    description: a woman with long hair a group of people a woman The image shows two women seated indoors, with one …
+  RRF#8  id=3692  img_rank=63  desc_rank=37  _ICT4198.JPG
+    description: a woman with long hair a woman is talking on a cell phone a woman The image shows a close-up of a pe…
+  RRF#9  id=4378  img_rank=66  desc_rank=54  100_4618.JPG
+    description: a bar with a lot of liquor and other items bar a bar The image shows a well-stocked bar cabinet with…
+
+──────────────────────────────────────────────────────────────────────────────────────────
+  Missed high-cosine images (should have ranked but didn't)
+──────────────────────────────────────────────────────────────────────────────────────────
+Found 24 high-cosine images NOT in SearchEngine results (pool cutoff issue?):
+  [image_clip]  id=105  cosine=0.2040  103_3608.JPG
+  [image_clip]  id=111  cosine=0.2030  103_3616.JPG
+  [image_clip]  id=117  cosine=0.1917  103_3623.JPG
+  [image_clip]  id=100  cosine=0.1897  103_3602.JPG
+  [image_clip]  id=101  cosine=0.1892  103_3603.JPG
+  [image_clip]  id=120  cosine=0.1861  103_3626.JPG
+  [image_clip]  id=99  cosine=0.1846  103_3600.JPG
+  [image_clip]  id=108  cosine=0.1844  103_3612.JPG
+  [image_clip]  id=114  cosine=0.1838  103_3619.JPG
+  [image_clip]  id=109  cosine=0.1826  103_3613.JPG
+  [image_clip]  id=98  cosine=0.1798  103_3598.JPG
+  [image_clip]  id=107  cosine=0.1791  103_3611.JPG
+  [desc_clip]  id=1798  cosine=0.7737  IMG_0344.JPG
+  [desc_clip]  id=1801  cosine=0.7737  IMG_0347.JPG
+  [desc_clip]  id=1804  cosine=0.7737  IMG_0350.JPG
+  [desc_clip]  id=1806  cosine=0.7737  IMG_0352.JPG
+  [desc_clip]  id=1632  cosine=0.7723  100_3968.JPG
+  [desc_clip]  id=1677  cosine=0.7690  100_4030.JPG
+  [desc_clip]  id=154  cosine=0.7636  100_3660.JPG
+  [desc_clip]  id=1669  cosine=0.7636  100_4022.JPG
+
+══════════════════════════════════════════════════════════════════════════════════════════
+  SECTION 5 — PAGINATION / ORDERING BUG CHECK
+══════════════════════════════════════════════════════════════════════════════════════════
+
+Simulating search_json_cmd with query='sunset', limit=200
+
+Step 1: SearchEngine.search(limit=800) ...
+  Returned 800 candidate IDs
+Step 2: SQL WHERE IN (800 ids) LIMIT 200
+  SQL returned 200 rows
+  ⚠ SQL LIMIT cut 600 candidate IDs before score sort!
+  This means high-scoring images beyond row #200 are DROPPED
+  regardless of their search score.
+
+  Scores of CUT candidates (should have appeared in results):
+    image_id=3321  score=0.02655
+    image_id=2071  score=0.02241
+    image_id=1836  score=0.02164
+    image_id=1758  score=0.02024
+    image_id=3714  score=0.01972
+    image_id=3668  score=0.01935
+    image_id=4178  score=0.01921
+    image_id=4368  score=0.01881
+    image_id=3692  score=0.01844
+    image_id=3648  score=0.01740
+
+──────────────────────────────────────────────────────────────────────────────────────────
+  Score ordering after Python re-sort vs SearchEngine order
+──────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ 200 ordering mismatches between SearchEngine and SQL+re-sort.
+  This is expected if SQL LIMIT cut some candidates (see above).
+
+══════════════════════════════════════════════════════════════════════════════════════════
+  SECTION 6 — DESCRIPTION QUALITY SPOT-CHECK
+══════════════════════════════════════════════════════════════════════════════════════════
+
+For top and bottom ranked images (by description_clip cosine),
+print the full description text to assess AI output quality.
+
+
+──────────────────────────────────────────────────────────────────────────────────────────
+  TOP 5 results
+──────────────────────────────────────────────────────────────────────────────────────────
+
+  [#1]  image_id=1758  cosine=0.8032
+  file: 100_4125.JPG
+  local description : a blue sky
+  local scene_type  : a beach scene
+  local main_subject: a boat
+  local keywords    : blue, sky, tree, vehicle, furniture, water
+  [copilot] description: The image shows a marina scene with numerous sailboats docked at piers, set against a backdrop of hills and a clear blue…
+  [copilot] scene_type : landscape
+  [copilot] main_subj  : marina with sailboats and piers
+  → would embed text: a blue sky a beach scene a boat The image shows a marina scene with numerous sailboats docked at piers, set against a backdrop of hills and …
+
+  [#2]  image_id=1620  cosine=0.8032
+  file: 103_3909.JPG
+  local description : a blue sky
+  local scene_type  : a beach scene
+  local main_subject: a surfer
+  local keywords    : blue, sky, water, mountain
+  [copilot] description: The image depicts a vast coastal scene with rolling ocean waves stretching toward a distant mountain range under a clear…
+  [copilot] scene_type : landscape
+  [copilot] main_subj  : ocean waves and distant mountains
+  → would embed text: a blue sky a beach scene a surfer The image depicts a vast coastal scene with rolling ocean waves stretching toward a distant mountain range…
+
+  [#3]  image_id=1618  cosine=0.8032
+  file: 103_3907.JPG
+  local description : a blue sky
+  local scene_type  : a beach scene
+  local main_subject: a person on a surfboard
+  local keywords    : blue, sky, water, mountain, plant
+  [copilot] description: The image shows a wide expanse of ocean with rolling waves under a clear blue sky. In the background, a mountain range s…
+  [copilot] scene_type : landscape
+  [copilot] main_subj  : ocean waves and distant mountains
+  → would embed text: a blue sky a beach scene a person on a surfboard The image shows a wide expanse of ocean with rolling waves under a clear blue sky. In the b…
+
+  [#4]  image_id=1651  cosine=0.8018
+  file: 100_4002.JPG
+  local description : a cloudy sky
+  local scene_type  : a view of a city
+  local main_subject: a city
+  local keywords    : cloudy, sky, tree
+  [copilot] description: The image depicts a wide landscape view with a foreground of dense green trees, a midground of suburban buildings and op…
+  [copilot] scene_type : landscape
+  [copilot] main_subj  : suburban area and mountains
+  → would embed text: a cloudy sky a view of a city a city The image depicts a wide landscape view with a foreground of dense green trees, a midground of suburban…
+
+  [#5]  image_id=1682  cosine=0.7858
+  file: 100_4035.JPG
+  local description : a city is in the background
+  local scene_type  : a city
+  local main_subject: a city
+  local keywords    : city, background, water, tree, building, vehicle, sky, mountain
+  [copilot] description: The image shows a distant view of an island with historic buildings, surrounded by water, with a densely built urban cit…
+  [copilot] scene_type : landscape
+  [copilot] main_subj  : Alcatraz Island and San Francisco cityscape
+  → would embed text: a city is in the background a city a city The image shows a distant view of an island with historic buildings, surrounded by water, with a d…
+
+──────────────────────────────────────────────────────────────────────────────────────────
+  BOTTOM 5 results
+──────────────────────────────────────────────────────────────────────────────────────────
+
+  [#2973/2977]  image_id=27  cosine=-0.0717
+  file: 103_3510.JPG
+  local description : (empty)
+  local scene_type  : None
+  local main_subject: None
+  local keywords    : 
+  [copilot] description: The image shows the rear and side view of a classic white Pontiac GTO car, parked indoors against a dark backdrop. On th…
+  [copilot] scene_type : product
+  [copilot] main_subj  : classic Pontiac GTO car
+  → would embed text: The image shows the rear and side view of a classic white Pontiac GTO car, parked indoors against a dark backdrop. On the rear window shelf,…
+
+  [#2974/2977]  image_id=4084  cosine=-0.0876
+  file: _ICT5010.MRW
+  local description : a man wearing a plaid shirt
+  local scene_type  : a man is pointing at a bottle of wine
+  local main_subject: a man
+  local keywords    : man, wearing, plaid, shirt, person
+  [copilot] description: The image shows a man in a checkered shirt sitting at a table, holding up his hand with a ring and wristwatch visible. T…
+  [copilot] scene_type : portrait
+  [copilot] main_subj  : Man's hand and wrist with ring and watch
+  → would embed text: a man wearing a plaid shirt a man is pointing at a bottle of wine a man The image shows a man in a checkered shirt sitting at a table, holdi…
+
+  [#2975/2977]  image_id=2065  cosine=-0.0940
+  file: PICT1436.MRW
+  local description : a red flower is growing on a wooden fence
+  local scene_type  : a flower
+  local main_subject: flowers
+  local keywords    : red, flower, growing, wooden, fence
+  [copilot] description: The image shows a close-up of vibrant pink bougainvillea flowers with green leaves, set against a rustic wooden fence ba…
+  [copilot] scene_type : macro
+  [copilot] main_subj  : bougainvillea flowers
+  → would embed text: a red flower is growing on a wooden fence a flower flowers The image shows a close-up of vibrant pink bougainvillea flowers with green leave…
+
+  [#2976/2977]  image_id=1932  cosine=-0.1132
+  file: PICT0779.MRW
+  local description : a building with flags
+  local scene_type  : a city scene
+  local main_subject: a building
+  local keywords    : building, flags, tree, sky, building house, plant
+  [copilot] description: The image shows the front entrance of the San Jose McEnery Convention Center, featuring a modern architectural facade wi…
+  [copilot] scene_type : architecture
+  [copilot] main_subj  : San Jose McEnery Convention Center entrance
+  → would embed text: a building with flags a city scene a building The image shows the front entrance of the San Jose McEnery Convention Center, featuring a mode…
+
+  [#2977/2977]  image_id=2557  cosine=-0.1365
+  file: PICT2340.MRW
+  local description : a large fountain in the middle of a lake
+  local scene_type  : a night scene
+  local main_subject: a fountain
+  local keywords    : large, fountain, middle, lake, building, water, tree
+  [copilot] description: The image depicts a nighttime scene featuring a dramatic fountain show with fiery orange and red water jets in front of …
+  [copilot] scene_type : architecture
+  [copilot] main_subj  : fountain show with illuminated hotel
+  → would embed text: a large fountain in the middle of a lake a night scene a fountain The image depicts a nighttime scene featuring a dramatic fountain show wit…
+
+══════════════════════════════════════════════════════════════════════════════════════════
+  DIAGNOSTIC COMPLETE
+══════════════════════════════════════════════════════════════════════════════════════════
+
+Full log saved to: D:\Code\imganalyzer\debug_search.log
