@@ -75,18 +75,7 @@ def _send_error(req_id: int | str | None, code: int, message: str) -> None:
     _send({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
 
 
-_notif_count = 0
-_notif_count_lock = threading.Lock()
-
 def _send_notification(method: str, params: Any) -> None:
-    global _notif_count
-    if method == "run/result":
-        with _notif_count_lock:
-            _notif_count += 1
-            n = _notif_count
-        if n <= 20 or n % 50 == 0:
-            sys.stderr.write(f"[DEBUG _send_notification] run/result #{n}\n")
-            sys.stderr.flush()
     _send({"jsonrpc": "2.0", "method": method, "params": params})
 
 
@@ -281,21 +270,10 @@ def _handle_run(req_id: int | str, params: dict) -> None:
             # Wire up direct result-notification callback (bypasses print)
             from imganalyzer.pipeline import worker as worker_mod
             worker_mod._result_notify = lambda payload: _send_notification("run/result", payload)
-            sys.stderr.write(
-                f"[DEBUG server] callback installed: id(worker_mod)={id(worker_mod)}, "
-                f"_result_notify is None={worker_mod._result_notify is None}\n"
-            )
-            sys.stderr.flush()
             try:
-                sys.stderr.write("[DEBUG server] calling worker.run()...\n")
-                sys.stderr.flush()
                 result = worker.run(batch_size=batch_size)
-                sys.stderr.write(f"[DEBUG server] worker.run() returned: {result}\n")
-                sys.stderr.flush()
                 _send_notification("run/done", result)
             except Exception as exc:
-                sys.stderr.write(f"[DEBUG server] worker.run() EXCEPTION: {exc}\n")
-                sys.stderr.flush()
                 _send_notification("run/error", {"error": str(exc)})
             finally:
                 worker_mod._result_notify = None

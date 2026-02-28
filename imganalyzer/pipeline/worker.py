@@ -88,13 +88,10 @@ _PREREQUISITES: dict[str, str] = {
 # When running from the CLI, it stays None and _emit_result falls back to
 # printing a [RESULT] line to stdout.
 _result_notify: Any = None   # Callable[[dict], None] | None
-_emit_count = 0
-_emit_count_lock = threading.Lock()
 
 
 def _emit_result(path: str, module: str, status: str, ms: int, error: str = "") -> None:
     """Emit a machine-readable result — via callback or [RESULT] stdout line."""
-    global _emit_count
     payload: dict[str, Any] = {
         "path":   path,
         "module": module,
@@ -104,25 +101,14 @@ def _emit_result(path: str, module: str, status: str, ms: int, error: str = "") 
     if error:
         payload["error"] = error
 
-    with _emit_count_lock:
-        _emit_count += 1
-        n = _emit_count
-
     if _result_notify is not None:
         # Server mode: send JSON-RPC notification directly
         try:
             _result_notify(payload)
-        except Exception as exc:
-            sys.stderr.write(f"[DEBUG _emit_result #{n}] callback error: {exc}\n")
-            sys.stderr.flush()
-        if n <= 20 or n % 50 == 0:
-            sys.stderr.write(f"[DEBUG _emit_result #{n}] {status} {module} via callback\n")
-            sys.stderr.flush()
+        except Exception:
+            pass  # callback failure is non-fatal
     else:
         # CLI mode: print [RESULT] line to stdout
-        if n <= 20 or n % 50 == 0:
-            sys.stderr.write(f"[DEBUG _emit_result #{n}] {status} {module} via print (NO CALLBACK)\n")
-            sys.stderr.flush()
         print(f"[RESULT] {json.dumps(payload)}", flush=True)
 
 
@@ -199,7 +185,7 @@ class Worker:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA busy_timeout=30000")
             repo = Repository(conn)
             queue = JobQueue(conn)
             runner = ModuleRunner(
@@ -241,8 +227,6 @@ class Worker:
                 signal.signal(signal.SIGINT, original_handler)
 
     def _run_loop(self, batch_size: int) -> dict[str, int]:
-        sys.stderr.write(f"[DEBUG _run_loop] ENTERED, batch_size={batch_size}\n")
-        sys.stderr.flush()
         stats = {"done": 0, "failed": 0, "skipped": 0}
 
         # Recover stale jobs from previous crashes
@@ -259,11 +243,6 @@ class Worker:
                 console.print(f"[yellow]Retrying {retried} previously failed job(s)[/yellow]")
 
         total_pending = self.queue.pending_count()
-        sys.stderr.write(
-            f"[DEBUG _run_loop] recovered={recovered}, total_pending={total_pending}, "
-            f"stale_timeout={self.stale_timeout}, _result_notify is None={_result_notify is None}\n"
-        )
-        sys.stderr.flush()
         if total_pending == 0:
             console.print("[green]No pending jobs in queue.[/green]")
             return stats
@@ -318,7 +297,7 @@ class Worker:
             def _collect_futures(futures: dict[Future, dict[str, Any]]) -> None:
                 for fut, job in futures.items():
                     try:
-                        result_status = fut.result(timeout=300)
+                        result_status = fut.result()
                         stats[result_status] = stats.get(result_status, 0) + 1
                     except Exception as exc:
                         error_msg = f"{type(exc).__name__}: {exc}"
@@ -387,8 +366,12 @@ class Worker:
                             result_status = fut.result()
                             stats[result_status] = stats.get(result_status, 0) + 1
                         except Exception as exc:
-                            self.queue.mark_failed(job["id"], str(exc))
+                            error_msg = f"{type(exc).__name__}: {exc}"
+                            self.queue.mark_failed(job["id"], error_msg)
                             stats["failed"] += 1
+                            image_row = self.repo.get_image(job["image_id"])
+                            path = image_row["file_path"] if image_row else f"id={job['image_id']}"
+                            _emit_result(path, job["module"], "failed", 0, error_msg)
                         progress.advance(task)
 
                     # Periodic flush: commit FTS5 + XMP every ~60s so a crash
@@ -777,9 +760,12 @@ class Worker:
             xmp_snapshot = set(self._xmp_candidates)
             self._xmp_candidates.clear()
 
-        # Flush FTS5
+        # Flush FTS5 — use small batches (50 rows) with short transactions
+        # so we don't hold the write lock long enough to cause
+        # ``OperationalError: database is locked`` in concurrent cloud
+        # worker threads (which have a 30s busy_timeout).
         if fts_snapshot:
-            BATCH = 500
+            BATCH = 50
             for start in range(0, len(fts_snapshot), BATCH):
                 chunk = fts_snapshot[start:start + BATCH]
                 self.conn.execute("BEGIN IMMEDIATE")
@@ -834,17 +820,17 @@ class Worker:
     def _flush_fts_dirty(self) -> int:
         """Rebuild FTS5 search index for all images marked dirty.
 
-        Processes in batches of 500 inside a single transaction to
-        minimise commit overhead.  Uses the main-thread connection
-        (``self.conn``) since this runs after all worker threads have
-        joined.
+        Processes in batches of 50 inside a single transaction to keep
+        write-lock hold time short (consistent with _maybe_periodic_flush).
+        Uses the main-thread connection (``self.conn``) since this runs
+        after all worker threads have joined.
         """
         dirty = list(self._fts_dirty)
         self._fts_dirty.clear()
         if not dirty:
             return 0
 
-        BATCH = 500
+        BATCH = 50
         rebuilt = 0
         for start in range(0, len(dirty), BATCH):
             chunk = dirty[start:start + BATCH]

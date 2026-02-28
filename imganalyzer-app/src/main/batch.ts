@@ -108,14 +108,8 @@ function emitTick(stats: BatchStats): void {
   mainWin?.webContents?.send('batch:tick', stats)
 }
 
-let emitResultCount = 0
-
 /** Emit a batch:result event to the renderer. */
 function emitResult(result: BatchResult): void {
-  emitResultCount++
-  if (emitResultCount <= 5 || emitResultCount % 50 === 0) {
-    console.error(`[DEBUG emitResult #${emitResultCount}] ${result.status} ${result.module} mainWin=${!!mainWin} webContents=${!!mainWin?.webContents}`)
-  }
   mainWin?.webContents?.send('batch:result', result)
 }
 
