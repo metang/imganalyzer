@@ -17,7 +17,7 @@ SYSTEM_PROMPT = """You are an expert photography analyst. Analyze the provided i
 - main_subject: (string) Primary subject(s) in the image
 - lighting: (string) Lighting conditions and quality e.g. "golden hour", "overcast", "harsh midday", "studio softbox"
 - mood: (string) Emotional tone/aesthetic e.g. "serene", "dramatic", "intimate", "moody"
-- keywords: (array of strings) 10-15 descriptive keywords suitable as Lightroom tags
+- keywords: (array of strings) 10-15 descriptive keywords suitable as Lightroom tags. If the image contains animals, birds, insects, or plants, include specific species or common names as keywords (e.g. "Red-tailed Hawk", "Monarch Butterfly", "Japanese Maple", "Golden Retriever"). Prefer the most specific identification possible over generic terms like "bird" or "flower".
 - technical_notes: (string) Any notable photographic/technical observations
 
 Return ONLY valid JSON with no extra text."""
@@ -29,7 +29,7 @@ SYSTEM_PROMPT_WITH_AESTHETIC = """You are an expert photography analyst. Analyze
 - main_subject: (string) Primary subject(s) in the image
 - lighting: (string) Lighting conditions e.g. "golden hour", "overcast", "harsh midday", "studio softbox"
 - mood: (string) Emotional tone e.g. "serene", "dramatic", "intimate", "moody"
-- keywords: (array of strings) 10-15 descriptive keywords suitable as photo tags
+- keywords: (array of strings) 10-15 descriptive keywords suitable as photo tags. If the image contains animals, birds, insects, or plants, include specific species or common names as keywords (e.g. "Red-tailed Hawk", "Monarch Butterfly", "Japanese Maple", "Golden Retriever"). Prefer the most specific identification possible over generic terms like "bird" or "flower".
 - technical_notes: (string) Notable photographic or technical observations
 - aesthetic_score: (number) Overall aesthetic quality score from 0.0 to 10.0. Consider composition, lighting, subject interest, technical quality, and emotional impact. Be critical and realistic: 0-3 = poor, 4-5 = average, 6-7 = good, 8-9 = excellent, 10 = exceptional/masterpiece
 - aesthetic_label: (string) One-word label matching the score: "Poor" (0-3), "Average" (4-5), "Good" (6-7), "Excellent" (8-9), "Masterpiece" (10)
@@ -109,7 +109,7 @@ class CloudAI:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": SYSTEM_PROMPT_WITH_AESTHETIC},
                 {
                     "role": "user",
                     "content": [
@@ -121,7 +121,7 @@ class CloudAI:
                     ],
                 },
             ],
-            max_tokens=800,
+            max_tokens=1000,
         )
         return _parse_json_response(response.choices[0].message.content or "")
 
@@ -136,8 +136,8 @@ class CloudAI:
 
         message = client.messages.create(
             model="claude-3-5-sonnet-20241022",
-            max_tokens=800,
-            system=SYSTEM_PROMPT,
+            max_tokens=1000,
+            system=SYSTEM_PROMPT_WITH_AESTHETIC,
             messages=[
                 {
                     "role": "user",

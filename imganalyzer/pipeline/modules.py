@@ -429,8 +429,23 @@ class ModuleRunner:
         from imganalyzer.analysis.ai.cloud import CloudAI
         result = CloudAI(backend=self.cloud_provider).analyze(path, image_data)
 
+        # Extract aesthetic fields from the combined response before storing
+        # cloud_ai data (mirrors the CLI split logic in cli.py:240-258).
+        aesthetic_score = result.pop("aesthetic_score", None)
+        aesthetic_label = result.pop("aesthetic_label", None)
+        aesthetic_reason = result.pop("aesthetic_reason", None)
+
         with _transaction(self.conn):
             self.repo.upsert_cloud_ai(image_id, self.cloud_provider, result)
+            # Store aesthetic data from the same LLM call — avoids a
+            # redundant second API request from _run_aesthetic().
+            if aesthetic_score is not None:
+                self.repo.upsert_aesthetic(image_id, {
+                    "aesthetic_score": aesthetic_score,
+                    "aesthetic_label": aesthetic_label or "",
+                    "aesthetic_reason": aesthetic_reason or "",
+                    "provider": self.cloud_provider,
+                })
 
         if self.verbose:
             console.print(
@@ -448,15 +463,29 @@ class ModuleRunner:
                 )
             return {}
 
+        # If cloud_ai already wrote aesthetic data for this image, skip the
+        # redundant API call.  This is the common case when both cloud_ai and
+        # aesthetic modules are enabled — cloud_ai now extracts aesthetic
+        # fields from its combined prompt response.
+        existing = self.repo.get_analysis(image_id, "aesthetic")
+        if existing and existing.get("aesthetic_score") is not None:
+            if self.verbose:
+                console.print(
+                    f"  [dim]Aesthetic already populated by cloud_ai for image {image_id}[/dim]"
+                )
+            return {
+                "aesthetic_score": existing["aesthetic_score"],
+                "aesthetic_label": existing.get("aesthetic_label", ""),
+                "aesthetic_reason": existing.get("aesthetic_reason", ""),
+                "provider": existing.get("provider", ""),
+            }
+
         image_data = self._cached_read_image(path)
 
-        # Use the cloud AI backend for aesthetic scoring
-        # The cloud model is asked specifically for aesthetic analysis
+        # Fallback: if only aesthetic was selected (without cloud_ai), make
+        # the full cloud call and extract aesthetic fields.
         from imganalyzer.analysis.ai.cloud import CloudAI
         cloud = CloudAI(backend=self.cloud_provider)
-
-        # We call the normal cloud analysis and extract aesthetic fields
-        # In future, this could be a dedicated aesthetic prompt
         result = cloud.analyze(path, image_data)
 
         aesthetic_data = {
