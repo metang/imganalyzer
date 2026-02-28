@@ -625,11 +625,19 @@ def status(
     totals = queue.total_stats()
 
     if json_output:
-        # Emit a single JSON line — consumed by the Electron GUI poller
-        all_modules = ("metadata", "technical", "local_ai", "cloud_ai", "aesthetic", "embedding")
+        # Emit a single JSON line — consumed by the Electron GUI poller.
+        # Use ALL_MODULES as the canonical order, then append any unexpected
+        # modules that are actually in the queue (future-proof).
+        from imganalyzer.db.repository import ALL_MODULES
+        queue_modules = list(module_stats.keys())
+        ordered = [m for m in ALL_MODULES if m in module_stats or True]
+        extra = [m for m in queue_modules if m not in ALL_MODULES]
+        all_modules = ordered + extra
         modules_out: dict[str, dict[str, int]] = {}
         for mod in all_modules:
             s = module_stats.get(mod, {})
+            if not any(s.values()) and mod not in module_stats:
+                continue  # omit modules with no jobs at all
             modules_out[mod] = {
                 "pending": s.get("pending", 0),
                 "running": s.get("running", 0),

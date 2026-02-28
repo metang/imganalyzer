@@ -30,9 +30,9 @@ const MODULE_LABELS: Record<string, string> = {
   metadata:  'Metadata',
   technical: 'Technical',
   local_ai:  'Local AI',
-  blip2:     'Caption (BLIP-2)',
+  blip2:     'BLIP-2 Caption',
   objects:   'Objects (DINO)',
-  ocr:       'OCR (TrOCR)',
+  ocr:       'OCR',
   faces:     'Faces',
   cloud_ai:  'Cloud AI',
   aesthetic: 'Aesthetic',
@@ -48,7 +48,7 @@ function ModuleRow({ name, stats }: { name: string; stats: BatchModuleStats }) {
 
   return (
     <div className="flex items-center gap-3 text-xs">
-      <span className="w-20 shrink-0 text-neutral-400">{MODULE_LABELS[name] ?? name}</span>
+      <span className="w-32 shrink-0 text-neutral-400">{MODULE_LABELS[name] ?? name}</span>
       <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
         <div
           className="h-full bg-blue-600 rounded-full transition-all duration-300"
