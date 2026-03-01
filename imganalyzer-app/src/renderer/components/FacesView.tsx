@@ -277,10 +277,19 @@ export function FacesView() {
       const result = await window.api.rebuildFaces()
       if (result.error) {
         setError(result.error)
-      } else {
-        setError(null)
-        // Show enqueued count as a transient message
-        setError(`✓ ${result.enqueued} face jobs enqueued. Start a batch run to process them.`)
+        return
+      }
+      if (result.enqueued === 0) {
+        setError('No images found to rebuild faces for.')
+        return
+      }
+      // Auto-start the batch run
+      setError(null)
+      try {
+        await window.api.batchResume()
+        setError(`✓ ${result.enqueued} face jobs enqueued and running. Switch to the Batch tab to monitor progress.`)
+      } catch {
+        setError(`✓ ${result.enqueued} face jobs enqueued. Go to the Batch tab and click Resume to start processing.`)
       }
     } catch (err) {
       setError(String(err))
