@@ -337,7 +337,8 @@ class Worker:
 
             # ── Helper: claim jobs from queue ─────────────────────────────────
             def _claim_fn(batch_sz: int, module: str) -> list[dict[str, Any]]:
-                return self.queue.claim(batch_size=batch_sz, module=module)
+                _, _, tl_queue, _ = self._get_thread_db()
+                return tl_queue.claim(batch_size=batch_sz, module=module)
 
             # ── Helper: advance progress bar ──────────────────────────────────
             def _advance_fn(count: int) -> None:
