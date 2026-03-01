@@ -757,8 +757,9 @@ export function FacesView() {
             {occs.map((occ) => (
               <div
                 key={occ.id}
-                className="group relative"
-                title={`${occ.file_path.split(/[/\\]/).pop()}${occ.age ? ` | Age: ~${occ.age}` : ''}${occ.gender ? ` | ${occ.gender}` : ''}`}
+                className="group relative cursor-pointer"
+                title={`Click to open · ${occ.file_path.split(/[/\\]/).pop()}${occ.age ? ` | Age: ~${occ.age}` : ''}${occ.gender ? ` | ${occ.gender}` : ''}`}
+                onClick={() => window.api.openPath(occ.file_path)}
               >
                 <FaceCropThumbnail occurrenceId={occ.id} size="lg" />
                 <div className="absolute inset-x-0 bottom-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity px-1 py-0.5 rounded-b">

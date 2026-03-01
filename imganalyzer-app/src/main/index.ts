@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } from 'electron'
 import { join } from 'path'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -100,6 +100,11 @@ ipcMain.handle('fs:getThumbnail', async (_evt, imagePath: string) => {
 // ─── IPC: Get full-resolution image for lightbox ──────────────────────────────
 ipcMain.handle('fs:getFullImage', async (_evt, imagePath: string) => {
   return getFullImage(imagePath)
+})
+
+// ─── IPC: Open file in default system viewer ─────────────────────────────────
+ipcMain.handle('shell:openPath', async (_evt, filePath: string) => {
+  return shell.openPath(filePath)
 })
 
 // ─── IPC: Read XMP sidecar ───────────────────────────────────────────────────

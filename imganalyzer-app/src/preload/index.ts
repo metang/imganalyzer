@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('api', {
   getFullImage: (imagePath: string): Promise<string> =>
     ipcRenderer.invoke('fs:getFullImage', imagePath),
 
+  openPath: (filePath: string): Promise<string> =>
+    ipcRenderer.invoke('shell:openPath', filePath),
+
   readXmp: (imagePath: string): Promise<XmpData | null> =>
     ipcRenderer.invoke('fs:readXmp', imagePath),
 

@@ -268,6 +268,7 @@ declare global {
       listImages(folderPath: string): Promise<ImageFile[]>
       getThumbnail(imagePath: string): Promise<string>
       getFullImage(imagePath: string): Promise<string>
+      openPath(filePath: string): Promise<string>
       readXmp(imagePath: string): Promise<XmpData | null>
       runAnalysis(imagePath: string, aiBackend: string): Promise<{ xmp: XmpData | null; error?: string }>
       cancelAnalysis(imagePath: string): Promise<void>
