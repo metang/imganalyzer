@@ -530,12 +530,11 @@ class Worker:
                 batch_stats["skipped"] += 1
                 continue
 
-            # Prerequisite check
+            # Prerequisite check — defer (not skip) so job retries after prereq completes
             prereq = _PREREQUISITES.get(module)
             if prereq and not repo.is_analyzed(image_id, prereq):
                 reason = f"prerequisite not met: {prereq}"
-                queue.mark_skipped(job_id, f"prerequisite_not_met:{prereq}")
-                _emit_result(path_str, module, "skipped", 0, reason)
+                queue.mark_pending(job_id)
                 batch_stats["skipped"] += 1
                 continue
 
@@ -654,16 +653,10 @@ class Worker:
                 return "skipped"
 
             # ── Prerequisite check (DB-driven) ───────────────────────────────
+            # Defer back to pending so the job retries after prereq completes
             prereq = _PREREQUISITES.get(module)
             if prereq and not repo.is_analyzed(image_id, prereq):
-                reason = f"prerequisite not met: {prereq} has not run for this image"
-                queue.mark_skipped(job_id, f"prerequisite_not_met:{prereq}")
-                _emit_result(path, module, "skipped", 0, reason)
-                if self.verbose:
-                    console.print(
-                        f"  [yellow]Skipped[/yellow] {path} "
-                        f"[dim]module={module} — {reason}[/dim]"
-                    )
+                queue.mark_pending(job_id)
                 return "skipped"
 
             # ── People guard for cloud/aesthetic (privacy) ───────────────────
