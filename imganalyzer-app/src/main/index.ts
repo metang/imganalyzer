@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
 import { join } from 'path'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -20,10 +20,10 @@ function createWindow(): BrowserWindow {
     titleBarStyle: 'hiddenInset',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
+      // sandbox: false is required because the preload script uses contextBridge
       sandbox: false,
       contextIsolation: true,
-      nodeIntegration: false,
-      webSecurity: false // allow loading local file:// images in renderer
+      nodeIntegration: false
     },
     show: false
   })
@@ -40,6 +40,13 @@ function createWindow(): BrowserWindow {
 }
 
 app.whenReady().then(() => {
+  // Register a safe custom protocol for serving local files (e.g. images)
+  // without needing webSecurity:false. Usage: local-file:///C:/path/to/file.jpg
+  protocol.handle('local-file', (request) => {
+    const filePath = decodeURIComponent(request.url.replace('local-file://', ''))
+    return net.fetch(`file://${filePath}`)
+  })
+
   const win = createWindow()
   registerBatchHandlers(win)
   registerSearchHandlers()
