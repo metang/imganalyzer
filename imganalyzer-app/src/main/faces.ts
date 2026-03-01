@@ -149,6 +149,21 @@ export function registerFaceHandlers(): void {
   )
 
   ipcMain.handle(
+    'faces:cropBatch',
+    async (_evt, ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/crop-batch', { ids }) as {
+          thumbnails: Record<string, string>
+        }
+        return { thumbnails: result.thumbnails }
+      } catch (err) {
+        return { thumbnails: {}, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
     'faces:runClustering',
     async (_evt, threshold?: number): Promise<{ num_clusters: number; error?: string }> => {
       try {

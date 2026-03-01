@@ -130,6 +130,9 @@ contextBridge.exposeInMainWorld('api', {
   getFaceCrop: (occurrenceId: number): Promise<{ data?: string; error?: string }> =>
     ipcRenderer.invoke('faces:crop', occurrenceId),
 
+  getFaceCropBatch: (ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }> =>
+    ipcRenderer.invoke('faces:cropBatch', ids),
+
   runFaceClustering: (threshold?: number): Promise<{ num_clusters: number; error?: string }> =>
     ipcRenderer.invoke('faces:runClustering', threshold),
 })

@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -32,6 +32,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         6: _migrate_v6,
         7: _migrate_v7,
         8: _migrate_v8,
+        9: _migrate_v9,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -459,5 +460,12 @@ def _migrate_v8(conn: sqlite3.Connection) -> None:
     """Add ``det_score`` column to ``face_occurrences`` for detection confidence filtering."""
     conn.execute("""
         ALTER TABLE face_occurrences ADD COLUMN det_score REAL
+    """)
+
+
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """Add ``thumbnail`` BLOB column to ``face_occurrences`` for pre-generated crops."""
+    conn.execute("""
+        ALTER TABLE face_occurrences ADD COLUMN thumbnail BLOB
     """)
 

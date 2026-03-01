@@ -265,6 +265,7 @@ declare global {
       listFaceClusters(): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; error?: string }>
       getFaceClusterImages(clusterId: number | null, identityName: string | null, limit?: number): Promise<{ occurrences: FaceOccurrence[]; error?: string }>
       getFaceCrop(occurrenceId: number): Promise<{ data?: string; error?: string }>
+      getFaceCropBatch(ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }>
       runFaceClustering(threshold?: number): Promise<{ num_clusters: number; error?: string }>
 
       // Batch processing

@@ -840,6 +840,11 @@ def _handle_faces_crop(params: dict) -> dict:
     if occ is None:
         return {"error": "Occurrence not found"}
 
+    # Serve pre-generated thumbnail if available (1ms DB read vs 50-2000ms re-crop)
+    thumbnail = occ.get("thumbnail")
+    if thumbnail is not None:
+        return {"data": base64.b64encode(thumbnail).decode("ascii")}
+
     file_path = occ["file_path"]
     path = Path(file_path)
     if not path.exists():
@@ -922,6 +927,45 @@ def _handle_faces_run_clustering(params: dict) -> dict:
     return {"num_clusters": num_clusters}
 
 
+def _handle_faces_crop_batch(params: dict) -> dict:
+    """Return thumbnails for multiple face occurrences in one round-trip.
+
+    Accepts ``{"ids": [1, 2, 3, ...]}`` and returns
+    ``{"thumbnails": {"1": "<base64>", "2": "<base64>", ...}}``.
+    """
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    ids = params.get("ids", [])
+    if not ids:
+        return {"thumbnails": {}}
+
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""SELECT fo.id, fo.thumbnail, fo.bbox_x1, fo.bbox_y1, fo.bbox_x2, fo.bbox_y2,
+                   i.file_path
+            FROM face_occurrences fo
+            JOIN images i ON i.id = fo.image_id
+            WHERE fo.id IN ({placeholders})""",
+        ids,
+    ).fetchall()
+
+    thumbnails: dict[str, str] = {}
+    for row in rows:
+        row_d = dict(row)
+        oid = str(row_d["id"])
+        if row_d.get("thumbnail") is not None:
+            thumbnails[oid] = base64.b64encode(row_d["thumbnail"]).decode("ascii")
+        else:
+            # Fallback: generate on-the-fly for legacy rows
+            result = _handle_faces_crop({"occurrence_id": row_d["id"]})
+            if "data" in result:
+                thumbnails[oid] = result["data"]
+
+    return {"thumbnails": thumbnails}
+
+
 # ── Method dispatch ──────────────────────────────────────────────────────────
 
 # Methods that return a result synchronously (the response is sent
@@ -941,6 +985,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/clusters": _handle_faces_clusters,
     "faces/cluster-images": _handle_faces_cluster_images,
     "faces/crop": _handle_faces_crop,
+    "faces/crop-batch": _handle_faces_crop_batch,
     "faces/run-clustering": _handle_faces_run_clustering,
 }
 

@@ -14,6 +14,39 @@ CACHE_DIR = os.getenv("IMGANALYZER_MODEL_CACHE", str(Path.home() / ".cache" / "i
 _INSIGHTFACE_HOME = str(Path(CACHE_DIR) / "insightface")
 
 
+def _crop_thumbnail(
+    rgb: np.ndarray, bbox: np.ndarray, max_dim: int = 200, quality: int = 85
+) -> bytes:
+    """Crop a face from *rgb* using *bbox* [x1,y1,x2,y2] and return JPEG bytes."""
+    import io
+    from PIL import Image
+
+    h, w = rgb.shape[:2]
+    x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+
+    # Add 20% padding
+    fw, fh = x2 - x1, y2 - y1
+    pad_x, pad_y = int(fw * 0.2), int(fh * 0.2)
+    x1 = max(0, x1 - pad_x)
+    y1 = max(0, y1 - pad_y)
+    x2 = min(w, x2 + pad_x)
+    y2 = min(h, y2 + pad_y)
+
+    crop_arr = rgb[y1:y2, x1:x2]
+    pil_crop = Image.fromarray(crop_arr)
+
+    cw, ch = pil_crop.size
+    if cw > max_dim or ch > max_dim:
+        scale = max_dim / max(cw, ch)
+        pil_crop = pil_crop.resize(
+            (int(cw * scale), int(ch * scale)), Image.LANCZOS
+        )
+
+    buf = io.BytesIO()
+    pil_crop.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
 class FaceAnalyzer:
     """Face detection + recognition using InsightFace buffalo_l.
 
@@ -129,6 +162,9 @@ class FaceAnalyzer:
             }
             if embedding is not None:
                 occ["embedding"] = embedding.astype(np.float32).tobytes()
+
+            # Pre-generate thumbnail from the in-memory rgb_array
+            occ["thumbnail"] = _crop_thumbnail(rgb, bbox)
             occurrences.append(occ)
 
         return {

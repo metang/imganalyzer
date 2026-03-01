@@ -1,7 +1,77 @@
 import { useState, useEffect, useCallback, useRef, memo } from 'react'
 import type { FaceCluster, FaceOccurrence, FaceSummary, FaceImage } from '../global'
 
-// ── Face crop thumbnail (lazy-loaded) ─────────────────────────────────────────
+// ── Thumbnail cache & batch fetcher ───────────────────────────────────────────
+
+const THUMB_CACHE_MAX = 2000
+const thumbCache = new Map<number, string>() // occurrence_id → base64 data URI
+const pendingIds = new Set<number>()
+const pendingCallbacks = new Map<number, Array<(src: string | null) => void>>()
+let batchTimer: ReturnType<typeof setTimeout> | null = null
+
+function requestThumbnail(
+  occurrenceId: number,
+  callback: (src: string | null) => void
+): void {
+  // Serve from cache
+  const cached = thumbCache.get(occurrenceId)
+  if (cached) {
+    callback(cached)
+    return
+  }
+
+  // Register callback
+  const cbs = pendingCallbacks.get(occurrenceId) ?? []
+  cbs.push(callback)
+  pendingCallbacks.set(occurrenceId, cbs)
+  pendingIds.add(occurrenceId)
+
+  // Debounce: flush batch after 16ms (one animation frame)
+  if (batchTimer === null) {
+    batchTimer = setTimeout(flushBatch, 16)
+  }
+}
+
+async function flushBatch(): Promise<void> {
+  batchTimer = null
+  if (pendingIds.size === 0) return
+
+  const ids = [...pendingIds]
+  pendingIds.clear()
+
+  // Process in chunks of 50 to avoid overly large RPC payloads
+  const CHUNK = 50
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK)
+    try {
+      const result = await window.api.getFaceCropBatch(chunk)
+      for (const id of chunk) {
+        const b64 = result.thumbnails?.[String(id)]
+        const dataUri = b64 ? `data:image/jpeg;base64,${b64}` : null
+        if (dataUri) {
+          // Evict oldest if cache full
+          if (thumbCache.size >= THUMB_CACHE_MAX) {
+            const oldest = thumbCache.keys().next().value
+            if (oldest !== undefined) thumbCache.delete(oldest)
+          }
+          thumbCache.set(id, dataUri)
+        }
+        const cbs = pendingCallbacks.get(id) ?? []
+        pendingCallbacks.delete(id)
+        for (const cb of cbs) cb(dataUri)
+      }
+    } catch {
+      // On error, notify all callbacks with null
+      for (const id of chunk) {
+        const cbs = pendingCallbacks.get(id) ?? []
+        pendingCallbacks.delete(id)
+        for (const cb of cbs) cb(null)
+      }
+    }
+  }
+}
+
+// ── Face crop thumbnail (batch-loaded with LRU cache) ─────────────────────────
 
 const FaceCropThumbnail = memo(function FaceCropThumbnail({
   occurrenceId,
@@ -10,24 +80,21 @@ const FaceCropThumbnail = memo(function FaceCropThumbnail({
   occurrenceId: number
   size?: 'sm' | 'md' | 'lg'
 }) {
-  const [src, setSrc] = useState<string | null>(null)
+  const [src, setSrc] = useState<string | null>(() => thumbCache.get(occurrenceId) ?? null)
   const [failed, setFailed] = useState(false)
   const requested = useRef(false)
 
   useEffect(() => {
-    if (requested.current) return
+    if (src || requested.current) return
     requested.current = true
-    window.api
-      .getFaceCrop(occurrenceId)
-      .then((result) => {
-        if (result.data) {
-          setSrc(`data:image/jpeg;base64,${result.data}`)
-        } else {
-          setFailed(true)
-        }
-      })
-      .catch(() => setFailed(true))
-  }, [occurrenceId])
+    requestThumbnail(occurrenceId, (dataUri) => {
+      if (dataUri) {
+        setSrc(dataUri)
+      } else {
+        setFailed(true)
+      }
+    })
+  }, [occurrenceId, src])
 
   const sizeClass =
     size === 'sm'
