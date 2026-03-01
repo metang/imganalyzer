@@ -5,9 +5,10 @@ import { Gallery } from './components/Gallery'
 import { Lightbox } from './components/Lightbox'
 import { BatchConfigView, BatchRunView } from './components/BatchView'
 import { SearchView } from './components/SearchView'
+import { FacesView } from './components/FacesView'
 import { useBatchProcess } from './hooks/useBatchProcess'
 
-type Tab = 'gallery' | 'batch' | 'running' | 'search'
+type Tab = 'gallery' | 'batch' | 'running' | 'search' | 'faces'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('gallery')
@@ -106,6 +107,11 @@ export default function App() {
         <TabButton active={tab === 'search'} onClick={() => setTab('search')}>
           Search
         </TabButton>
+
+        {/* Faces */}
+        <TabButton active={tab === 'faces'} onClick={() => setTab('faces')}>
+          Faces
+        </TabButton>
       </div>
 
       {/* ── Gallery tab ───────────────────────────────────────────────────────── */}
@@ -176,6 +182,13 @@ export default function App() {
       <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'search' ? '' : ' hidden'}`}>
         <SearchView />
       </div>
+
+      {/* ── Faces tab ────────────────────────────────────────────────────────── */}
+      {tab === 'faces' && (
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          <FacesView />
+        </div>
+      )}
     </div>
   )
 }

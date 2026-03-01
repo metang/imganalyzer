@@ -191,6 +191,7 @@ export interface BatchResult {
   status: 'done' | 'failed' | 'skipped'
   durationMs: number
   error?: string
+  keywords?: string[]
 }
 
 export interface BatchIngestProgress {
@@ -200,6 +201,45 @@ export interface BatchIngestProgress {
   enqueued: number
   skipped: number
   current: string
+}
+
+// ── Face management types ─────────────────────────────────────────────────────
+
+export interface FaceSummary {
+  canonical_name: string
+  display_name: string | null
+  image_count: number
+  identity_id: number | null
+}
+
+export interface FaceImage {
+  image_id: number
+  file_path: string
+  face_count: number
+}
+
+export interface FaceCluster {
+  cluster_id: number | null
+  identity_name: string
+  display_name: string | null
+  identity_id: number | null
+  image_count: number
+  face_count: number
+  representative_id: number | null
+}
+
+export interface FaceOccurrence {
+  id: number
+  image_id: number
+  file_path: string
+  face_idx: number
+  bbox_x1: number
+  bbox_y1: number
+  bbox_x2: number
+  bbox_y2: number
+  age: number | null
+  gender: string | null
+  identity_name: string
 }
 
 declare global {
@@ -217,6 +257,15 @@ declare global {
 
       // Search
       searchImages(filters: SearchFilters): Promise<SearchResponse>
+
+      // Face management
+      listFaces(): Promise<{ faces: FaceSummary[]; error?: string }>
+      getFaceImages(name: string, limit?: number): Promise<{ images: FaceImage[]; error?: string }>
+      setFaceAlias(canonicalName: string, displayName: string): Promise<{ ok: boolean; error?: string }>
+      listFaceClusters(): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; error?: string }>
+      getFaceClusterImages(clusterId: number | null, identityName: string | null, limit?: number): Promise<{ occurrences: FaceOccurrence[]; error?: string }>
+      getFaceCrop(occurrenceId: number): Promise<{ data?: string; error?: string }>
+      runFaceClustering(threshold?: number): Promise<{ num_clusters: number; error?: string }>
 
       // Batch processing
       batchIngest(

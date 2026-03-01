@@ -78,6 +78,7 @@ export interface BatchResult {
   status: 'done' | 'failed' | 'skipped'
   durationMs: number
   error?: string
+  keywords?: string[]
 }
 
 export interface BatchIngestProgress {
@@ -268,6 +269,7 @@ function setupNotificationListener(): void {
           status:     p.status as 'done' | 'failed' | 'skipped',
           durationMs: p.ms as number,
           error:      p.error as string | undefined,
+          keywords:   p.keywords as string[] | undefined,
         }
         emitResult(result)
         if (result.status === 'done') {

@@ -33,6 +33,13 @@ Supported methods:
     fullimage       - Generate full-res JPEG for RAW/HEIC (one-shot, base64)
     cancel_run      - Cancel a running batch (one-shot)
     cancel_analyze  - Cancel a running single analysis (one-shot)
+    faces/list      - List all face identities with image counts (one-shot)
+    faces/images    - Get images containing a face identity (one-shot)
+    faces/set-alias - Set display name (alias) for a face identity (one-shot)
+    faces/clusters  - List face clusters with counts (one-shot)
+    faces/cluster-images - Get face occurrences for a cluster (one-shot)
+    faces/crop      - Crop a face from source image by occurrence ID (one-shot)
+    faces/run-clustering - Run embedding-based face clustering (one-shot)
     shutdown        - Gracefully shut down the server (one-shot)
 """
 from __future__ import annotations
@@ -725,6 +732,167 @@ def _handle_fullimage(params: dict) -> dict:
     return {"native": False, "data": base64.b64encode(jpeg_bytes).decode("ascii")}
 
 
+# ── Face management handlers ─────────────────────────────────────────────────
+
+def _handle_faces_list(params: dict) -> dict:
+    """List all face identities with image counts."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    faces = repo.list_face_summary()
+    return {"faces": faces}
+
+
+def _handle_faces_images(params: dict) -> dict:
+    """Get images containing a specific face identity."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    name = params["name"]
+    limit = params.get("limit", 100)
+    images = repo.get_images_for_face(name, limit=limit)
+    return {"images": images}
+
+
+def _handle_faces_set_alias(params: dict) -> dict:
+    """Set or update the display name (alias) for a face identity.
+
+    Creates a ``face_identities`` registry record if one doesn't exist yet.
+    """
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    canonical_name = params["canonical_name"]
+    display_name = params.get("display_name", "").strip()
+
+    # If the identity doesn't exist yet, create it
+    existing = repo.get_face_identity(canonical_name)
+    if existing is None:
+        repo.register_face_identity(canonical_name, display_name or None)
+    else:
+        repo.rename_face(canonical_name, display_name or None)
+
+    return {"ok": True}
+
+
+def _handle_faces_clusters(params: dict) -> dict:
+    """List face clusters (or identity groups if not clustered yet)."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    clusters = repo.list_face_clusters()
+    has_occurrences = repo.get_face_occurrences_count() > 0
+    return {"clusters": clusters, "has_occurrences": has_occurrences}
+
+
+def _handle_faces_cluster_images(params: dict) -> dict:
+    """Get face occurrences for a specific cluster or identity."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    cluster_id = params.get("cluster_id")
+    identity_name = params.get("identity_name")
+    limit = params.get("limit", 50)
+    occurrences = repo.get_cluster_occurrences(
+        cluster_id=cluster_id,
+        identity_name=identity_name,
+        limit=limit,
+    )
+    return {"occurrences": occurrences}
+
+
+def _handle_faces_crop(params: dict) -> dict:
+    """Crop a face from a source image using stored bounding box coordinates.
+
+    Returns a base64-encoded JPEG of the face crop.
+    """
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    occurrence_id = params["occurrence_id"]
+    occ = repo.get_face_occurrence(occurrence_id)
+    if occ is None:
+        return {"error": "Occurrence not found"}
+
+    file_path = occ["file_path"]
+    path = Path(file_path)
+    if not path.exists():
+        return {"error": f"Image file not found: {file_path}"}
+
+    from PIL import Image
+
+    ext = path.suffix.lower()
+    if ext in (".heic", ".heif"):
+        from pillow_heif import register_heif_opener
+        register_heif_opener()
+
+    RAW_EXTS = {
+        ".arw", ".cr2", ".cr3", ".nef", ".nrw", ".orf", ".raf", ".rw2",
+        ".dng", ".pef", ".srw", ".erf", ".kdc", ".mrw", ".3fr", ".fff",
+        ".sr2", ".srf", ".x3f", ".iiq", ".mos", ".raw",
+    }
+
+    if ext in RAW_EXTS:
+        import rawpy
+        import numpy as np
+        with rawpy.imread(str(path)) as raw:
+            rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
+        img = Image.fromarray(rgb)
+    else:
+        img = Image.open(path)
+        img = img.convert("RGB")
+
+    # Crop face region with some padding
+    w, h = img.size
+    x1 = max(0, int(occ["bbox_x1"]))
+    y1 = max(0, int(occ["bbox_y1"]))
+    x2 = min(w, int(occ["bbox_x2"]))
+    y2 = min(h, int(occ["bbox_y2"]))
+
+    # Add 20% padding around the face
+    fw = x2 - x1
+    fh = y2 - y1
+    pad_x = int(fw * 0.2)
+    pad_y = int(fh * 0.2)
+    x1 = max(0, x1 - pad_x)
+    y1 = max(0, y1 - pad_y)
+    x2 = min(w, x2 + pad_x)
+    y2 = min(h, y2 + pad_y)
+
+    crop = img.crop((x1, y1, x2, y2))
+
+    # Resize to max 200px on the longest side
+    max_dim = 200
+    cw, ch = crop.size
+    if cw > max_dim or ch > max_dim:
+        scale = max_dim / max(cw, ch)
+        crop = crop.resize(
+            (int(cw * scale), int(ch * scale)), Image.LANCZOS
+        )
+
+    buf = io.BytesIO()
+    crop.save(buf, format="JPEG", quality=85)
+    return {"data": base64.b64encode(buf.getvalue()).decode("ascii")}
+
+
+def _handle_faces_run_clustering(params: dict) -> dict:
+    """Run face clustering on all stored occurrences."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    threshold = params.get("threshold", 0.55)
+    num_clusters = repo.cluster_faces(threshold=threshold)
+    conn.commit()
+    return {"num_clusters": num_clusters}
+
+
 # ── Method dispatch ──────────────────────────────────────────────────────────
 
 # Methods that return a result synchronously (the response is sent
@@ -738,6 +906,13 @@ _SYNC_METHODS: dict[str, Any] = {
     "fullimage": _handle_fullimage,
     "cancel_run": _handle_cancel_run,
     "cancel_analyze": _handle_cancel_analyze,
+    "faces/list": _handle_faces_list,
+    "faces/images": _handle_faces_images,
+    "faces/set-alias": _handle_faces_set_alias,
+    "faces/clusters": _handle_faces_clusters,
+    "faces/cluster-images": _handle_faces_cluster_images,
+    "faces/crop": _handle_faces_crop,
+    "faces/run-clustering": _handle_faces_run_clustering,
 }
 
 # Methods that send their own result/error asynchronously (streaming).

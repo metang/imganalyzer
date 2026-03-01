@@ -51,6 +51,10 @@ def run_faces(
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_faces(image_id, result)
+        # Store per-face occurrences (bbox, embedding, age, gender)
+        occurrences = result.get("face_occurrences", [])
+        if occurrences:
+            repo.upsert_face_occurrences(image_id, occurrences)
         repo.update_search_index(image_id)
 
     return result

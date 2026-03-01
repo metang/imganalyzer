@@ -90,7 +90,14 @@ _PREREQUISITES: dict[str, str] = {
 _result_notify: Any = None   # Callable[[dict], None] | None
 
 
-def _emit_result(path: str, module: str, status: str, ms: int, error: str = "") -> None:
+def _emit_result(
+    path: str,
+    module: str,
+    status: str,
+    ms: int,
+    error: str = "",
+    keywords: list[str] | None = None,
+) -> None:
     """Emit a machine-readable result — via callback or [RESULT] stdout line."""
     payload: dict[str, Any] = {
         "path":   path,
@@ -100,6 +107,8 @@ def _emit_result(path: str, module: str, status: str, ms: int, error: str = "") 
     }
     if error:
         payload["error"] = error
+    if keywords:
+        payload["keywords"] = keywords
 
     if _result_notify is not None:
         # Server mode: send JSON-RPC notification directly
@@ -724,10 +733,12 @@ class Worker:
                     return "skipped"
 
             # ── Run the module ───────────────────────────────────────────────
-            runner.run(image_id, module)
+            result = runner.run(image_id, module)
             elapsed = int(time.time() * 1000) - start_ms
             queue.mark_done(job_id)
-            _emit_result(path, module, "done", elapsed)
+            # For cloud_ai, include keywords in the result notification
+            kw = result.get("keywords") if module == "cloud_ai" and result else None
+            _emit_result(path, module, "done", elapsed, keywords=kw)
 
             # Track image for XMP generation after all jobs finish
             if self.write_xmp:

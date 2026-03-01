@@ -106,4 +106,27 @@ contextBridge.exposeInMainWorld('api', {
 
   searchImages: (filters: SearchFilters): Promise<SearchResponse> =>
     ipcRenderer.invoke('search:run', filters),
+
+  // ── Face management ────────────────────────────────────────────────────────
+
+  listFaces: (): Promise<{ faces: Array<{ canonical_name: string; display_name: string | null; image_count: number; identity_id: number | null }>; error?: string }> =>
+    ipcRenderer.invoke('faces:list'),
+
+  getFaceImages: (name: string, limit?: number): Promise<{ images: Array<{ image_id: number; file_path: string; face_count: number }>; error?: string }> =>
+    ipcRenderer.invoke('faces:images', name, limit),
+
+  setFaceAlias: (canonicalName: string, displayName: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('faces:setAlias', canonicalName, displayName),
+
+  listFaceClusters: (): Promise<{ clusters: Array<{ cluster_id: number | null; identity_name: string; display_name: string | null; identity_id: number | null; image_count: number; face_count: number; representative_id: number | null }>; has_occurrences: boolean; error?: string }> =>
+    ipcRenderer.invoke('faces:clusters'),
+
+  getFaceClusterImages: (clusterId: number | null, identityName: string | null, limit?: number): Promise<{ occurrences: Array<{ id: number; image_id: number; file_path: string; face_idx: number; bbox_x1: number; bbox_y1: number; bbox_x2: number; bbox_y2: number; age: number | null; gender: string | null; identity_name: string }>; error?: string }> =>
+    ipcRenderer.invoke('faces:clusterImages', clusterId, identityName, limit),
+
+  getFaceCrop: (occurrenceId: number): Promise<{ data?: string; error?: string }> =>
+    ipcRenderer.invoke('faces:crop', occurrenceId),
+
+  runFaceClustering: (threshold?: number): Promise<{ num_clusters: number; error?: string }> =>
+    ipcRenderer.invoke('faces:runClustering', threshold),
 })

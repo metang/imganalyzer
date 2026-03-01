@@ -72,13 +72,16 @@ class FaceAnalyzer:
                 "face_count": 0,
                 "face_identities": [],
                 "face_details": [],
+                "face_occurrences": [],
             }
 
         identities: list[str] = []
         details: list[str] = []
+        occurrences: list[dict[str, Any]] = []
 
-        for face in faces:
+        for idx, face in enumerate(faces):
             embedding: np.ndarray = face.embedding  # 512-d float32
+            bbox = face.bbox  # [x1, y1, x2, y2] float array
             age: int = int(getattr(face, "age", -1))
             # InsightFace gender: 0=Female, 1=Male (attribute name varies by version)
             gender_raw = getattr(face, "gender", None)
@@ -95,10 +98,26 @@ class FaceAnalyzer:
             age_str = str(age) if age >= 0 else "?"
             details.append(f"{name}:{age_str}:{gender}")
 
+            # Per-face occurrence data for storage
+            occ: dict[str, Any] = {
+                "face_idx": idx,
+                "bbox_x1": float(bbox[0]),
+                "bbox_y1": float(bbox[1]),
+                "bbox_x2": float(bbox[2]),
+                "bbox_y2": float(bbox[3]),
+                "age": age if age >= 0 else None,
+                "gender": gender,
+                "identity_name": name,
+            }
+            if embedding is not None:
+                occ["embedding"] = embedding.astype(np.float32).tobytes()
+            occurrences.append(occ)
+
         return {
             "face_count": len(faces),
             "face_identities": identities,
             "face_details": details,
+            "face_occurrences": occurrences,
         }
 
     @classmethod

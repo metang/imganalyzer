@@ -593,6 +593,337 @@ class Repository:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_face_summary(self) -> list[dict[str, Any]]:
+        """Return all unique face identity names across both analysis tables,
+        with image counts and display_name from the face_identities registry.
+
+        Results are sorted by image_count DESC (most-seen faces first).
+        """
+        rows = self.conn.execute(
+            """
+            WITH all_faces AS (
+                SELECT image_id, face_identities
+                FROM analysis_faces
+                WHERE face_identities IS NOT NULL AND face_identities != '[]'
+                UNION
+                SELECT image_id, face_identities
+                FROM analysis_local_ai
+                WHERE face_identities IS NOT NULL AND face_identities != '[]'
+            )
+            SELECT
+                je.value       AS canonical_name,
+                COUNT(DISTINCT af.image_id) AS image_count,
+                fi.display_name,
+                fi.id          AS identity_id
+            FROM all_faces af, json_each(af.face_identities) je
+            LEFT JOIN face_identities fi ON fi.canonical_name = je.value
+            GROUP BY je.value
+            ORDER BY image_count DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_images_for_face(
+        self, name: str, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return images containing a specific face identity name.
+
+        Queries both ``analysis_faces`` and ``analysis_local_ai`` using
+        ``json_each()`` for reliable JSON-array matching.
+        """
+        rows = self.conn.execute(
+            """
+            WITH matched AS (
+                SELECT DISTINCT af.image_id
+                FROM analysis_faces af, json_each(af.face_identities) je
+                WHERE je.value = ?
+                UNION
+                SELECT DISTINCT la.image_id
+                FROM analysis_local_ai la, json_each(la.face_identities) je
+                WHERE je.value = ?
+            )
+            SELECT
+                m.image_id,
+                i.file_path,
+                COALESCE(af2.face_count, la2.face_count, 0) AS face_count
+            FROM matched m
+            JOIN images i ON i.id = m.image_id
+            LEFT JOIN analysis_faces    af2 ON af2.image_id = m.image_id
+            LEFT JOIN analysis_local_ai la2 ON la2.image_id = m.image_id
+            ORDER BY i.file_path
+            LIMIT ?
+            """,
+            [name, name, limit],
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Face occurrences & clustering ──────────────────────────────────────
+
+    def upsert_face_occurrences(
+        self, image_id: int, occurrences: list[dict[str, Any]]
+    ) -> None:
+        """Write per-face occurrence rows (bbox, embedding, age, gender).
+
+        Replaces any existing occurrences for this image.
+        """
+        self.conn.execute(
+            "DELETE FROM face_occurrences WHERE image_id = ?", [image_id]
+        )
+        for occ in occurrences:
+            self.conn.execute(
+                """INSERT INTO face_occurrences
+                   (image_id, face_idx, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
+                    embedding, age, gender, identity_name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    image_id,
+                    occ["face_idx"],
+                    occ["bbox_x1"],
+                    occ["bbox_y1"],
+                    occ["bbox_x2"],
+                    occ["bbox_y2"],
+                    occ.get("embedding"),
+                    occ.get("age"),
+                    occ.get("gender"),
+                    occ.get("identity_name", "Unknown"),
+                ],
+            )
+
+    def list_face_clusters(self) -> list[dict[str, Any]]:
+        """Return cluster summaries sorted by face count descending.
+
+        If clustering hasn't been run yet (all cluster_id are NULL),
+        falls back to grouping by identity_name.
+
+        Each row has: cluster_id, identity_name, display_name, image_count,
+        face_count, representative_id (a face_occurrences.id for thumbnail).
+        """
+        # Check if any clustering has been done
+        has_clusters = self.conn.execute(
+            "SELECT 1 FROM face_occurrences WHERE cluster_id IS NOT NULL LIMIT 1"
+        ).fetchone()
+
+        if has_clusters:
+            rows = self.conn.execute(
+                """
+                SELECT
+                    fo.cluster_id,
+                    -- Use the most common identity_name in the cluster
+                    (SELECT fo2.identity_name
+                     FROM face_occurrences fo2
+                     WHERE fo2.cluster_id = fo.cluster_id
+                     GROUP BY fo2.identity_name
+                     ORDER BY COUNT(*) DESC LIMIT 1) AS identity_name,
+                    fi.display_name,
+                    fi.id AS identity_id,
+                    COUNT(DISTINCT fo.image_id) AS image_count,
+                    COUNT(fo.id)                AS face_count,
+                    -- Pick the occurrence with the largest face area as representative
+                    (SELECT fo3.id FROM face_occurrences fo3
+                     WHERE fo3.cluster_id = fo.cluster_id
+                     ORDER BY (fo3.bbox_x2 - fo3.bbox_x1) * (fo3.bbox_y2 - fo3.bbox_y1) DESC
+                     LIMIT 1) AS representative_id
+                FROM face_occurrences fo
+                LEFT JOIN face_identities fi
+                    ON fi.canonical_name = (
+                        SELECT fo4.identity_name
+                        FROM face_occurrences fo4
+                        WHERE fo4.cluster_id = fo.cluster_id
+                        GROUP BY fo4.identity_name
+                        ORDER BY COUNT(*) DESC LIMIT 1
+                    )
+                WHERE fo.cluster_id IS NOT NULL
+                GROUP BY fo.cluster_id
+                ORDER BY face_count DESC
+                """
+            ).fetchall()
+        else:
+            # No clustering yet — group by identity_name
+            rows = self.conn.execute(
+                """
+                SELECT
+                    NULL AS cluster_id,
+                    fo.identity_name,
+                    fi.display_name,
+                    fi.id AS identity_id,
+                    COUNT(DISTINCT fo.image_id) AS image_count,
+                    COUNT(fo.id)                AS face_count,
+                    (SELECT fo2.id FROM face_occurrences fo2
+                     WHERE fo2.identity_name = fo.identity_name
+                     ORDER BY (fo2.bbox_x2 - fo2.bbox_x1) * (fo2.bbox_y2 - fo2.bbox_y1) DESC
+                     LIMIT 1) AS representative_id
+                FROM face_occurrences fo
+                LEFT JOIN face_identities fi ON fi.canonical_name = fo.identity_name
+                GROUP BY fo.identity_name
+                ORDER BY face_count DESC
+                """
+            ).fetchall()
+
+        return [dict(r) for r in rows]
+
+    def get_cluster_occurrences(
+        self, cluster_id: int | None = None, identity_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return face occurrences for a cluster (or by identity_name).
+
+        Each row includes: id, image_id, file_path, bbox coords, age, gender,
+        identity_name.
+        """
+        if cluster_id is not None:
+            rows = self.conn.execute(
+                """
+                SELECT fo.id, fo.image_id, i.file_path,
+                       fo.face_idx, fo.bbox_x1, fo.bbox_y1, fo.bbox_x2, fo.bbox_y2,
+                       fo.age, fo.gender, fo.identity_name
+                FROM face_occurrences fo
+                JOIN images i ON i.id = fo.image_id
+                WHERE fo.cluster_id = ?
+                ORDER BY (fo.bbox_x2 - fo.bbox_x1) * (fo.bbox_y2 - fo.bbox_y1) DESC
+                LIMIT ?
+                """,
+                [cluster_id, limit],
+            ).fetchall()
+        elif identity_name is not None:
+            rows = self.conn.execute(
+                """
+                SELECT fo.id, fo.image_id, i.file_path,
+                       fo.face_idx, fo.bbox_x1, fo.bbox_y1, fo.bbox_x2, fo.bbox_y2,
+                       fo.age, fo.gender, fo.identity_name
+                FROM face_occurrences fo
+                JOIN images i ON i.id = fo.image_id
+                WHERE fo.identity_name = ?
+                ORDER BY (fo.bbox_x2 - fo.bbox_x1) * (fo.bbox_y2 - fo.bbox_y1) DESC
+                LIMIT ?
+                """,
+                [identity_name, limit],
+            ).fetchall()
+        else:
+            return []
+
+        return [dict(r) for r in rows]
+
+    def get_face_occurrence(self, occurrence_id: int) -> dict[str, Any] | None:
+        """Return a single face occurrence with its image path."""
+        row = self.conn.execute(
+            """
+            SELECT fo.*, i.file_path
+            FROM face_occurrences fo
+            JOIN images i ON i.id = fo.image_id
+            WHERE fo.id = ?
+            """,
+            [occurrence_id],
+        ).fetchone()
+        return dict(row) if row else None
+
+    def cluster_faces(self, threshold: float = 0.55) -> int:
+        """Cluster all face occurrences by cosine similarity of embeddings.
+
+        Uses greedy agglomerative clustering: iterate through occurrences
+        sorted by image count (most common first), assign each to the
+        closest existing cluster within *threshold*, or create a new cluster.
+
+        Returns the total number of clusters created.
+        """
+        import struct
+
+        rows = self.conn.execute(
+            """SELECT id, embedding, identity_name
+               FROM face_occurrences
+               WHERE embedding IS NOT NULL
+               ORDER BY id"""
+        ).fetchall()
+
+        if not rows:
+            return 0
+
+        import numpy as _np
+
+        # Parse embeddings
+        items: list[tuple[int, _np.ndarray, str]] = []
+        for r in rows:
+            blob: bytes = r["embedding"]
+            n_floats = len(blob) // 4
+            vec = _np.array(struct.unpack(f"{n_floats}f", blob), dtype=_np.float32)
+            norm = _np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            items.append((r["id"], vec, r["identity_name"]))
+
+        # Greedy clustering
+        clusters: list[tuple[_np.ndarray, int]] = []  # (centroid, cluster_id)
+        assignments: list[tuple[int, int]] = []  # (occurrence_id, cluster_id)
+        next_cluster_id = 1
+
+        for occ_id, vec, identity in items:
+            # Named faces get their own cluster per name
+            if identity and identity != "Unknown":
+                # Find existing cluster for this named identity
+                found = False
+                for centroid, cid in clusters:
+                    sim = float(_np.dot(vec, centroid))
+                    if sim >= threshold:
+                        # Check if this cluster belongs to same identity
+                        # by checking the first assignment
+                        for aid, acid in assignments:
+                            if acid == cid:
+                                for i2, v2, n2 in items:
+                                    if i2 == aid and n2 == identity:
+                                        found = True
+                                        assignments.append((occ_id, cid))
+                                        # Update centroid as running average
+                                        count = sum(1 for _, c in assignments if c == cid)
+                                        centroid[:] = centroid * (count - 1) / count + vec / count
+                                        break
+                                break
+                        if found:
+                            break
+                if not found:
+                    cid = next_cluster_id
+                    next_cluster_id += 1
+                    clusters.append((vec.copy(), cid))
+                    assignments.append((occ_id, cid))
+            else:
+                # Unknown faces — pure embedding similarity
+                best_cid = -1
+                best_sim = -1.0
+                for centroid, cid in clusters:
+                    sim = float(_np.dot(vec, centroid))
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_cid = cid
+                if best_sim >= threshold and best_cid >= 0:
+                    assignments.append((occ_id, best_cid))
+                    # Update centroid
+                    count = sum(1 for _, c in assignments if c == best_cid)
+                    for i, (centroid, cid) in enumerate(clusters):
+                        if cid == best_cid:
+                            clusters[i] = (
+                                centroid * (count - 1) / count + vec / count,
+                                cid,
+                            )
+                            break
+                else:
+                    cid = next_cluster_id
+                    next_cluster_id += 1
+                    clusters.append((vec.copy(), cid))
+                    assignments.append((occ_id, cid))
+
+        # Write cluster assignments back to DB
+        self.conn.execute("UPDATE face_occurrences SET cluster_id = NULL")
+        for occ_id, cid in assignments:
+            self.conn.execute(
+                "UPDATE face_occurrences SET cluster_id = ? WHERE id = ?",
+                [cid, occ_id],
+            )
+
+        return len(clusters)
+
+    def get_face_occurrences_count(self) -> int:
+        """Return total number of face occurrences stored."""
+        row = self.conn.execute("SELECT COUNT(*) AS cnt FROM face_occurrences").fetchone()
+        return row["cnt"] if row else 0
+
     # ── Embeddings (CLIP) ──────────────────────────────────────────────────
 
     def upsert_embedding(

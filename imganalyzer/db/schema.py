@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -30,6 +30,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         4: _migrate_v4,
         5: _migrate_v5,
         6: _migrate_v6,
+        7: _migrate_v7,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -412,5 +413,43 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
             ON job_queue(status, priority DESC);
         CREATE INDEX IF NOT EXISTS idx_job_queue_image_module
             ON job_queue(image_id, module);
+    """)
+
+
+# ── Migration v7: Per-face occurrence table for clustering & crops ───────────
+
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """Add ``face_occurrences`` table to store per-face bounding boxes and
+    embeddings for each detected face in each image.
+
+    This enables:
+    - Face crop thumbnails (bbox coordinates)
+    - Embedding-based clustering of unknown faces
+    - Per-face linking to cluster / identity
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS face_occurrences (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            image_id    INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+            face_idx    INTEGER NOT NULL,          -- 0-based index within the image
+            bbox_x1     REAL    NOT NULL,           -- bounding box (pixel coords)
+            bbox_y1     REAL    NOT NULL,
+            bbox_x2     REAL    NOT NULL,
+            bbox_y2     REAL    NOT NULL,
+            embedding   BLOB,                       -- 512-d float32 (2048 bytes)
+            age         INTEGER,
+            gender      TEXT,
+            identity_name TEXT,                     -- matched name or 'Unknown'
+            cluster_id  INTEGER,                    -- assigned by clustering algorithm
+            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(image_id, face_idx)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_face_occ_image
+            ON face_occurrences(image_id);
+        CREATE INDEX IF NOT EXISTS idx_face_occ_cluster
+            ON face_occurrences(cluster_id);
+        CREATE INDEX IF NOT EXISTS idx_face_occ_identity
+            ON face_occurrences(identity_name);
     """)
 

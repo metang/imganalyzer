@@ -8,6 +8,7 @@ import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
 import { registerBatchHandlers, killAllBatchProcesses } from './batch'
 import { registerSearchHandlers } from './search'
+import { registerFaceHandlers } from './faces'
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -42,6 +43,7 @@ app.whenReady().then(() => {
   const win = createWindow()
   registerBatchHandlers(win)
   registerSearchHandlers()
+  registerFaceHandlers()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       const w = createWindow()

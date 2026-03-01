@@ -57,6 +57,13 @@ export function LiveResultsFeed({ results }: Props) {
             >
               {r.error}
             </span>
+          ) : r.keywords && r.keywords.length > 0 ? (
+            <span
+              className="flex-1 text-neutral-500 truncate min-w-0 cursor-help"
+              title={r.keywords.join(', ')}
+            >
+              {r.keywords.join(', ')}
+            </span>
           ) : (
             <span className="flex-1 min-w-0" />
           )}
