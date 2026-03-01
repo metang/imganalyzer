@@ -237,8 +237,12 @@ def _handle_run(req_id: int | str, params: dict) -> None:
     global _run_thread
 
     if _run_thread is not None and _run_thread.is_alive():
-        _send_error(req_id, -2, "A run is already in progress")
-        return
+        # The previous worker may still be winding down after cancel_run.
+        # Wait briefly for it to finish before rejecting.
+        _run_thread.join(timeout=10)
+        if _run_thread.is_alive():
+            _send_error(req_id, -2, "A run is already in progress")
+            return
 
     _run_cancel.clear()
 
