@@ -907,11 +907,10 @@ class Repository:
 
         # Write cluster assignments back to DB
         self.conn.execute("UPDATE face_occurrences SET cluster_id = NULL")
-        for occ_id, cid in assignments:
-            self.conn.execute(
-                "UPDATE face_occurrences SET cluster_id = ? WHERE id = ?",
-                [cid, occ_id],
-            )
+        self.conn.executemany(
+            "UPDATE face_occurrences SET cluster_id = ? WHERE id = ?",
+            [(cid, occ_id) for occ_id, cid in assignments],
+        )
 
         return len(cluster_ids)
 
