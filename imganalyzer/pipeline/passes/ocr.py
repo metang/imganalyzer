@@ -46,13 +46,6 @@ def run_ocr(
     from imganalyzer.analysis.ai.ocr import OCRAnalyzer
     result = OCRAnalyzer().analyze(image_data, text_boxes=text_boxes)
 
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
-
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_ocr(image_id, result)

@@ -45,13 +45,6 @@ def run_faces(
         min_face_pixels=face_min_size,
     )
 
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
-
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_faces(image_id, result)

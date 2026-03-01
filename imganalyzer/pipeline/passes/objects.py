@@ -22,13 +22,6 @@ def run_objects(
     from imganalyzer.analysis.ai.objects import ObjectDetector
     result = ObjectDetector().analyze(image_data, prompt=prompt, threshold=threshold)
 
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
-
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_objects(image_id, result)
@@ -51,13 +44,6 @@ def run_objects_batch(
     """
     from imganalyzer.analysis.ai.objects import ObjectDetector
     results = ObjectDetector().analyze_batch(image_data_list, prompt=prompt, threshold=threshold)
-
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
 
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):

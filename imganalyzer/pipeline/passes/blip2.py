@@ -20,13 +20,6 @@ def run_blip2(
     from imganalyzer.analysis.ai.local import LocalAI
     result = LocalAI().analyze(image_data)
 
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
-
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_blip2(image_id, result)
@@ -48,13 +41,6 @@ def run_blip2_batch(
     """
     from imganalyzer.analysis.ai.local import LocalAI
     results = LocalAI().analyze_batch(image_data_list)
-
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
 
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
