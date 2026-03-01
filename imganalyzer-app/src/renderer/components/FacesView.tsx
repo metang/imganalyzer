@@ -497,15 +497,36 @@ export function FacesView() {
         return
       }
       setExpandedPersonId(personId)
+
       // Load clusters for this person if not cached
-      if (!personClusters[personId]) {
+      let pClusters = personClusters[personId]
+      if (!pClusters) {
         const result = await window.api.getPersonClusters(personId)
         if (!result.error) {
-          setPersonClusters((prev) => ({ ...prev, [personId]: result.clusters }))
+          pClusters = result.clusters
+          setPersonClusters((prev) => ({ ...prev, [personId]: pClusters! }))
+        }
+      }
+
+      // Load all face occurrences for this person (all clusters merged)
+      const personKey = `person:${personId}`
+      if (pClusters && !clusterOccurrences[personKey]) {
+        setLoadingDetail(personKey)
+        try {
+          const allOccs: FaceOccurrence[] = []
+          for (const pc of pClusters) {
+            const r = await window.api.getFaceClusterImages(pc.cluster_id, null)
+            if (!r.error) allOccs.push(...r.occurrences)
+          }
+          setClusterOccurrences((prev) => ({ ...prev, [personKey]: allOccs }))
+        } catch {
+          // silently ignore
+        } finally {
+          setLoadingDetail(null)
         }
       }
     },
-    [expandedPersonId, personClusters]
+    [expandedPersonId, personClusters, clusterOccurrences]
   )
 
   // ── Expand / collapse ─────────────────────────────────────────────────────
@@ -1239,57 +1260,82 @@ export function FacesView() {
             </div>
           )}
 
-          {/* Expanded person: clusters detail (below grid) */}
+          {/* Expanded person: face thumbnails (below grid) */}
           {expandedPersonId !== null && (() => {
             const pClusters = personClusters[expandedPersonId] ?? []
             const person = persons.find((p) => p.id === expandedPersonId)
+            const personKey = `person:${expandedPersonId}`
+            const allOccs = clusterOccurrences[personKey]
+            const isLoading = loadingDetail === personKey
+
             return (
               <div className="mx-4 mb-4 rounded-lg border border-cyan-900/40 bg-neutral-900/70">
                 <div className="px-4 py-2 border-b border-neutral-800/60 flex items-center justify-between">
                   <span className="text-xs text-cyan-300 font-medium">
                     {person?.name} — {pClusters.length} cluster{pClusters.length !== 1 ? 's' : ''}
+                    {allOccs ? ` · ${allOccs.length} faces` : ''}
                   </span>
                   <button onClick={() => setExpandedPersonId(null)} className="text-neutral-500 hover:text-neutral-300 text-xs">
                     Close
                   </button>
                 </div>
-                {pClusters.length === 0 && (
-                  <div className="px-4 py-3 text-xs text-neutral-600">Loading clusters...</div>
-                )}
-                {pClusters.map((pc) => {
-                  const cKey = `cluster:${pc.cluster_id}`
-                  const isClusterExpanded = expandedKey === cKey
 
-                  return (
-                    <div key={cKey} className="border-b border-neutral-800/30 last:border-b-0">
-                      <div className="flex items-center gap-3 px-4 py-2 hover:bg-neutral-800/30 transition-colors">
+                {/* Face thumbnails grid */}
+                {isLoading && (
+                  <div className="px-4 py-3 flex items-center gap-2 text-xs text-neutral-500">
+                    <span className="w-3 h-3 border border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
+                    Loading faces...
+                  </div>
+                )}
+                {allOccs && allOccs.length > 0 && (
+                  <div className="px-4 py-3">
+                    <div className="flex flex-wrap gap-2">
+                      {allOccs.map((occ) => (
+                        <div
+                          key={occ.id}
+                          className="group relative cursor-pointer"
+                          title={`Click to open · ${occ.file_path.split(/[/\\]/).pop()}${occ.age ? ` | Age: ~${occ.age}` : ''}${occ.gender ? ` | ${occ.gender}` : ''}`}
+                          onClick={() => setLightboxPath(occ.file_path)}
+                        >
+                          <FaceCropThumbnail occurrenceId={occ.id} size="lg" />
+                          <div className="absolute inset-x-0 bottom-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity px-1 py-0.5 rounded-b">
+                            <p className="text-[10px] text-neutral-300 truncate">
+                              {occ.file_path.split(/[/\\]/).pop()}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {allOccs && allOccs.length === 0 && (
+                  <div className="px-4 py-3 text-xs text-neutral-600">No face occurrences found.</div>
+                )}
+
+                {/* Cluster management (collapsible) */}
+                {pClusters.length > 0 && (
+                  <div className="border-t border-neutral-800/60">
+                    <div className="px-4 py-1.5 text-[10px] text-neutral-500 uppercase tracking-wide">
+                      Clusters
+                    </div>
+                    {pClusters.map((pc) => (
+                      <div key={pc.cluster_id} className="flex items-center gap-2 px-4 py-1 text-xs hover:bg-neutral-800/30">
                         {pc.representative_id != null && (
                           <FaceCropThumbnail occurrenceId={pc.representative_id} size="sm" />
                         )}
-                        <button
-                          onClick={() => toggleExpand(cKey, { cluster_id: pc.cluster_id, identity_name: '', display_name: pc.label, identity_id: null, image_count: pc.image_count, face_count: pc.face_count, representative_id: pc.representative_id, person_id: expandedPersonId }, null)}
-                          className="text-neutral-500 hover:text-neutral-300 shrink-0"
-                        >
-                          <svg className={`w-3.5 h-3.5 transition-transform ${isClusterExpanded ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-                          </svg>
-                        </button>
-                        <span className="flex-1 text-xs text-neutral-300 truncate">{pc.label}</span>
-                        <span className="text-xs text-neutral-500">
-                          {pc.face_count} {pc.face_count === 1 ? 'face' : 'faces'}
-                        </span>
+                        <span className="flex-1 text-neutral-300 truncate">{pc.label}</span>
+                        <span className="text-neutral-500">{pc.face_count} faces</span>
                         <button
                           onClick={() => handleUnlinkCluster(pc.cluster_id)}
-                          className="text-xs text-neutral-600 hover:text-red-400 transition-colors"
+                          className="text-neutral-600 hover:text-red-400 transition-colors"
                           title="Unlink from person"
                         >
                           Unlink
                         </button>
                       </div>
-                      {isClusterExpanded && renderExpandedDetail(cKey)}
-                    </div>
-                  )
-                })}
+                    ))}
+                  </div>
+                )}
               </div>
             )
           })()}
