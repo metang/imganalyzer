@@ -174,6 +174,75 @@ function ImageThumbnail({ filePath }: { filePath: string }) {
   )
 }
 
+// ── Inline image lightbox (for viewing source image in-app) ───────────────────
+
+function FaceImageLightbox({
+  filePath,
+  onClose,
+}: {
+  filePath: string
+  onClose: () => void
+}) {
+  const [src, setSrc] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.getFullImage(filePath).then((url) => {
+      if (!cancelled) setSrc(url)
+    })
+    return () => { cancelled = true }
+  }, [filePath])
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
+      onClick={onClose}
+    >
+      {/* Close button */}
+      <button
+        onClick={onClose}
+        className="absolute top-4 right-4 z-10 text-neutral-400 hover:text-white transition-colors"
+        title="Close (Esc)"
+      >
+        <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+
+      {/* File name */}
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 bg-black/70 px-3 py-1.5 rounded-lg">
+        <p className="text-xs text-neutral-300 truncate max-w-md">
+          {filePath.split(/[/\\]/).pop()}
+        </p>
+      </div>
+
+      {/* Image */}
+      {src ? (
+        <img
+          src={src}
+          alt=""
+          className="max-w-[90vw] max-h-[90vh] object-contain rounded shadow-2xl"
+          onClick={(e) => e.stopPropagation()}
+          draggable={false}
+        />
+      ) : (
+        <div className="flex items-center gap-2 text-neutral-400">
+          <span className="w-5 h-5 border-2 border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
+          Loading...
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main FacesView component ──────────────────────────────────────────────────
 
 export function FacesView() {
@@ -211,6 +280,9 @@ export function FacesView() {
   // Rebuild state
   const [rebuilding, setRebuilding] = useState(false)
   const [showRebuildConfirm, setShowRebuildConfirm] = useState(false)
+
+  // Lightbox state (in-app image viewer)
+  const [lightboxPath, setLightboxPath] = useState<string | null>(null)
 
   // View mode: clusters or people
   type ViewMode = 'clusters' | 'people'
@@ -759,7 +831,7 @@ export function FacesView() {
                 key={occ.id}
                 className="group relative cursor-pointer"
                 title={`Click to open · ${occ.file_path.split(/[/\\]/).pop()}${occ.age ? ` | Age: ~${occ.age}` : ''}${occ.gender ? ` | ${occ.gender}` : ''}`}
-                onClick={() => window.api.openPath(occ.file_path)}
+                onClick={() => setLightboxPath(occ.file_path)}
               >
                 <FaceCropThumbnail occurrenceId={occ.id} size="lg" />
                 <div className="absolute inset-x-0 bottom-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity px-1 py-0.5 rounded-b">
@@ -1345,6 +1417,14 @@ export function FacesView() {
             )
           })}
         </div>
+      )}
+
+      {/* In-app lightbox */}
+      {lightboxPath && (
+        <FaceImageLightbox
+          filePath={lightboxPath}
+          onClose={() => setLightboxPath(null)}
+        />
       )}
     </div>
   )
