@@ -113,7 +113,7 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
 
   const canRetry      = failedModules.length > 0 && !isRunning
   const canClearQueue = !isRunning && !isPaused && totalJobs > 0
-  const canClearCompleted = !isRunning && (totals.done + totals.skipped) > 0
+  const canClearCompleted = (totals.done + totals.skipped) > 0
 
   const moduleEntries = Object.entries(modules).filter(
     (entry): entry is [string, BatchModuleStats] => entry[1] != null
