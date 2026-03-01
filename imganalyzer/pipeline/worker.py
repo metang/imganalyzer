@@ -1,26 +1,28 @@
 """Worker — pulls jobs from the queue and dispatches to module runners.
 
 Supports multi-threaded processing with graceful shutdown on SIGINT (Ctrl+C).
-GPU-bound modules are serialized to avoid VRAM contention.
+GPU-bound modules are serialized to avoid VRAM contention; small GPU models
+can run concurrently when they fit within the VRAM budget.
 
 Processing strategy
 -------------------
-The worker uses a two-phase loop designed to unlock cloud parallelism as
-early as possible:
+The worker uses a VRAM-budget-aware scheduler with three GPU phases:
 
-Phase 1 — ``objects`` pass (GPU, serial):
-  Drain ALL pending ``objects`` jobs first, one image at a time.  Once
-  ``objects`` is done for an image, ``has_person`` is known → ``cloud_ai``
-  and ``aesthetic`` jobs for that image are unblocked.
+Phase 0 — ``objects`` pass (GPU, serial):
+  Drain ALL pending ``objects`` jobs first.  Once ``objects`` is done for an
+  image, ``has_person`` is known → ``cloud_ai``, ``aesthetic``, ``ocr``, and
+  ``faces`` jobs are unblocked.  ``metadata`` / ``technical`` run concurrently
+  in a thread pool throughout all phases.
 
-  ``metadata`` / ``technical`` jobs run concurrently in a thread pool
-  throughout both phases.
+Phase 1 — ``blip2`` (GPU, exclusive):
+  BLIP-2 requires ~6 GB VRAM and runs alone (exclusive mode).
 
-Phase 2 — remaining passes (GPU serial + cloud parallel):
-  The remaining GPU passes (``blip2``, ``ocr``, ``faces``, ``embedding``,
-  ``local_ai``) continue running serially on the main thread.
-  Meanwhile, ``cloud_ai`` and ``aesthetic`` jobs run in the cloud thread
-  pool, overlapping freely with the GPU work.
+Phase 2 — ``faces`` + ``ocr`` + ``embedding`` (GPU, co-resident):
+  These small models (~2.75 GB total) run concurrently with separate CUDA
+  streams, saving two model load/unload cycles compared to serial execution.
+
+Cloud / IO work runs in parallel thread pools throughout all phases, with
+the cloud pool boosted to 2× when GPU is idle.
 
 Structured output
 -----------------
@@ -53,6 +55,8 @@ from imganalyzer.db.connection import get_db_path
 from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository
 from imganalyzer.pipeline.modules import ModuleRunner, write_xmp_from_db, unload_gpu_model
+from imganalyzer.pipeline.vram_budget import VRAMBudget
+from imganalyzer.pipeline.scheduler import ResourceScheduler
 
 console = Console()
 
@@ -247,6 +251,17 @@ class Worker:
         except Exception:
             pass
 
+        # Initialize VRAM budget and scheduler
+        vram = VRAMBudget()  # auto-detects GPU VRAM, applies 70% cap
+        scheduler = ResourceScheduler(
+            vram_budget=vram,
+            gpu_batch_sizes=self._GPU_BATCH_SIZES,
+            default_batch_size=batch_size,
+            cpu_workers=self.workers,
+            cloud_workers=self.cloud_workers,
+            shutdown_event=self._shutdown,
+        )
+
         # Recover stale jobs from previous crashes
         recovered = self.queue.recover_stale(self.stale_timeout)
         if recovered:
@@ -278,20 +293,6 @@ class Worker:
         ) as progress:
             task = progress.add_task("Processing", total=total_pending)
 
-            # ── Helper: drain a specific GPU module serially ──────────────────
-            def _drain_gpu_module(module_name: str) -> None:
-                """Process all pending jobs for one GPU module, one at a time."""
-                while not self._shutdown.is_set():
-                    jobs = self.queue.claim(batch_size=batch_size, module=module_name)
-                    if not jobs:
-                        break
-                    for job in jobs:
-                        if self._shutdown.is_set():
-                            break
-                        result_status = self._process_job(job)
-                        stats[result_status] += 1
-                        progress.advance(task)
-
             # ── Helper: submit IO jobs to their pools ─────────────────────────
             def _submit_io_jobs(
                 local_pool: ThreadPoolExecutor,
@@ -307,8 +308,6 @@ class Worker:
                         jobs = self.queue.claim(batch_size=batch_size, module=mod)
                         for i, job in enumerate(jobs):
                             if self._shutdown.is_set():
-                                # Release this and all remaining claimed jobs
-                                # back to pending for the next run.
                                 for j in range(i, len(jobs)):
                                     self.queue.mark_pending(jobs[j]["id"])
                                 return futures
@@ -316,8 +315,6 @@ class Worker:
                                 fut = pool.submit(self._process_job, job)
                                 futures[fut] = job
                             except RuntimeError:
-                                # Pool already shut down (app exit race) —
-                                # release all remaining claimed jobs back to pending.
                                 for j in range(i, len(jobs)):
                                     self.queue.mark_pending(jobs[j]["id"])
                                 return futures
@@ -333,173 +330,83 @@ class Worker:
                         error_msg = f"{type(exc).__name__}: {exc}"
                         self.queue.mark_failed(job["id"], error_msg)
                         stats["failed"] += 1
-                        # Emit a [RESULT] line so the UI shows the failure.
-                        # (_process_job normally does this itself, but if the
-                        # future raises we need a fallback.)
                         image_row = self.repo.get_image(job["image_id"])
                         path = image_row["file_path"] if image_row else f"id={job['image_id']}"
                         _emit_result(path, job["module"], "failed", 0, error_msg)
                     progress.advance(task)
 
-            # ════════════════════════════════════════════════════════════════
-            # Phase 1: Drain ALL ``objects`` jobs (GPU, serial).
-            #
-            # ``objects`` runs GroundingDINO across every image first so that
-            # ``has_person`` is known for the whole batch.  That unblocks
-            # ``cloud_ai`` / ``aesthetic`` which need this flag before they
-            # can decide whether to run.
-            #
-            # ``metadata`` / ``technical`` run concurrently in a thread pool
-            # throughout this phase.
-            # ════════════════════════════════════════════════════════════════
-            if self.queue.pending_count(module="objects") > 0 and not self._shutdown.is_set():
-                console.print("[dim]Phase 1 — object detection (people flag)[/dim]")
+            # ── Helper: claim jobs from queue ─────────────────────────────────
+            def _claim_fn(batch_sz: int, module: str) -> list[dict[str, Any]]:
+                return self.queue.claim(batch_size=batch_sz, module=module)
 
-            objects_batch_size = self._GPU_BATCH_SIZES["objects"]
-
-            with (
-                ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
-                ThreadPoolExecutor(max_workers=self.cloud_workers) as cloud_pool,
-            ):
-                pending_futures: dict[Future, dict[str, Any]] = {}
-
-                while not self._shutdown.is_set():
-                    # Batch: claim up to objects_batch_size jobs at once
-                    obj_jobs = self.queue.claim(batch_size=objects_batch_size, module="objects")
-                    if not obj_jobs:
-                        # No more objects jobs — collect any remaining IO futures
-                        # then break out of phase 1
-                        _collect_futures(pending_futures)
-                        pending_futures = {}
-                        # Unload GroundingDINO to free ~0.9 GB VRAM before
-                        # Phase 2 loads different models.
-                        unload_gpu_model("objects")
-                        break
-
-                    # Process the batch on the main thread (single GPU forward pass)
-                    batch_result = self._process_job_batch(obj_jobs, "objects")
-                    for k in ("done", "failed", "skipped"):
-                        stats[k] += batch_result[k]
-                    progress.advance(task, advance=len(obj_jobs))
-
-                    # After each batch, fire a fresh batch of IO jobs
-                    # (metadata/technical/cloud_ai/aesthetic)
-                    new_io = _submit_io_jobs(local_pool, cloud_pool)
-                    pending_futures.update(new_io)
-
-                    # Reap any IO futures that are already done to keep the
-                    # dict from growing unbounded
-                    done_futs = [f for f in pending_futures if f.done()]
-                    for fut in done_futs:
-                        job = pending_futures.pop(fut)
-                        try:
-                            result_status = fut.result()
-                            stats[result_status] = stats.get(result_status, 0) + 1
-                        except Exception as exc:
-                            error_msg = f"{type(exc).__name__}: {exc}"
-                            self.queue.mark_failed(job["id"], error_msg)
-                            stats["failed"] += 1
-                            image_row = self.repo.get_image(job["image_id"])
-                            path = image_row["file_path"] if image_row else f"id={job['image_id']}"
-                            _emit_result(path, job["module"], "failed", 0, error_msg)
-                        progress.advance(task)
-
-                    # Periodic flush: commit FTS5 + XMP every ~60s so a crash
-                    # loses at most 1 minute of search-index / XMP work.
-                    self._maybe_periodic_flush()
+            # ── Helper: advance progress bar ──────────────────────────────────
+            def _advance_fn(count: int) -> None:
+                progress.advance(task, advance=count)
 
             # ════════════════════════════════════════════════════════════════
-            # Phase 2: Remaining GPU passes (batched where supported) +
-            #          cloud passes (parallel)
-            #
-            # blip2 / embedding use batched GPU forward passes via
-            # ``_process_job_batch()``.  ocr / faces / local_ai remain
-            # serial (ONNX can't batch; local_ai is legacy).  cloud_ai /
-            # aesthetic run concurrently in the cloud thread pool.
+            # GPU Phases (scheduler-driven)
+            # Phase 0: objects (exclusive, unlocks dependencies)
+            # Phase 1: blip2 (exclusive, large model)
+            # Phase 2: faces + ocr + embedding (co-resident, ~2.75 GB)
             # ════════════════════════════════════════════════════════════════
-            if not self._shutdown.is_set():
-                # GPU pass order: blip2 first (captioning, no prereqs),
-                # then ocr/faces (need objects — already done), then
-                # local_ai (legacy full pipeline), then embedding last
-                # (needs descriptions to exist).
-                remaining_gpu = ["blip2", "ocr", "faces", "local_ai", "embedding"]
+            phase_labels = [
+                "Phase 0 — object detection (people flag)",
+                "Phase 1 — BLIP-2 captioning (exclusive GPU)",
+                "Phase 2 — faces + OCR + embeddings (co-resident GPU)",
+            ]
+
+            for phase_idx in range(len(scheduler.gpu_phases)):
+                if self._shutdown.is_set():
+                    break
+
+                phase_modules = scheduler.modules_for_phase(phase_idx)
+                has_pending = any(
+                    self.queue.pending_count(module=mod) > 0
+                    for mod in phase_modules
+                )
+                if not has_pending:
+                    continue
+
+                console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
 
                 with (
                     ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
                     ThreadPoolExecutor(max_workers=self.cloud_workers) as cloud_pool,
                 ):
-                    # Kick off all available cloud + local-IO work immediately
-                    pending_futures = _submit_io_jobs(local_pool, cloud_pool)
+                    scheduler.run_gpu_phase(
+                        phase_idx,
+                        claim_fn=_claim_fn,
+                        process_batch_fn=self._process_job_batch,
+                        process_single_fn=self._process_job,
+                        submit_io_fn=_submit_io_jobs,
+                        collect_fn=_collect_futures,
+                        advance_fn=_advance_fn,
+                        flush_fn=self._maybe_periodic_flush,
+                        local_pool=local_pool,
+                        cloud_pool=cloud_pool,
+                        stats=stats,
+                        unload_fn=unload_gpu_model,
+                    )
 
-                    for gpu_module in remaining_gpu:
-                        if self._shutdown.is_set():
-                            break
-
-                        # Use the tuned batch size if this module supports
-                        # batching, otherwise fall back to the queue claim
-                        # batch_size (which _process_job_batch will handle
-                        # with serial _process_job calls).
-                        gpu_batch_sz = self._GPU_BATCH_SIZES.get(gpu_module, batch_size)
-
-                        while not self._shutdown.is_set():
-                            gpu_jobs = self.queue.claim(batch_size=gpu_batch_sz, module=gpu_module)
-                            if not gpu_jobs:
-                                break
-
-                            # Dispatch: batch-capable modules use a single
-                            # GPU forward pass; others fall through to serial
-                            batch_result = self._process_job_batch(gpu_jobs, gpu_module)
-                            for k in ("done", "failed", "skipped"):
-                                stats[k] += batch_result[k]
-                            progress.advance(task, advance=len(gpu_jobs))
-
-                            # After each GPU batch, sweep for newly available
-                            # cloud/IO work and submit it
-                            new_io = _submit_io_jobs(local_pool, cloud_pool)
-                            pending_futures.update(new_io)
-
-                            # Reap completed futures
-                            done_futs = [f for f in pending_futures if f.done()]
-                            for fut in done_futs:
-                                job2 = pending_futures.pop(fut)
-                                try:
-                                    result_status = fut.result()
-                                    stats[result_status] = stats.get(result_status, 0) + 1
-                                except Exception as exc:
-                                    error_msg = f"{type(exc).__name__}: {exc}"
-                                    self.queue.mark_failed(job2["id"], error_msg)
-                                    stats["failed"] += 1
-                                    image_row = self.repo.get_image(job2["image_id"])
-                                    path = image_row["file_path"] if image_row else f"id={job2['image_id']}"
-                                    _emit_result(path, job2["module"], "failed", 0, error_msg)
-                                progress.advance(task)
-
-                            # Periodic flush: commit FTS5 + XMP every ~60s
-                            self._maybe_periodic_flush()
-
-                        # All jobs for this GPU module are done — unload its
-                        # model to free VRAM before the next module loads.
-                        # Peak VRAM drops from ~9.5 GB (all co-resident) to
-                        # ~4.7 GB (single largest model = BLIP-2).
-                        unload_gpu_model(gpu_module)
-
-                    # All GPU passes done — collect remaining IO futures
-                    _collect_futures(pending_futures)
-
-                    # ════════════════════════════════════════════════════════════
-                    # Phase 3: Drain any remaining IO/cloud jobs.
-                    #
-                    # When GPU work finishes before all IO/cloud jobs have been
-                    # submitted (common on resume when only cloud_ai / aesthetic
-                    # remain), keep claiming and processing IO batches until
-                    # the queue is empty.
-                    # ════════════════════════════════════════════════════════════
-                    while not self._shutdown.is_set():
-                        io_futures = _submit_io_jobs(local_pool, cloud_pool)
-                        if not io_futures:
-                            break
-                        _collect_futures(io_futures)
-                        self._maybe_periodic_flush()
+            # ════════════════════════════════════════════════════════════════
+            # IO drain: remaining cloud/IO jobs with boosted cloud pool
+            # ════════════════════════════════════════════════════════════════
+            if not self._shutdown.is_set():
+                boosted_cloud = scheduler.boosted_cloud_workers()
+                with (
+                    ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
+                    ThreadPoolExecutor(max_workers=boosted_cloud)      as cloud_pool,
+                ):
+                    console.print(
+                        f"[dim]IO drain — cloud threads boosted to {boosted_cloud}[/dim]"
+                    )
+                    scheduler.run_io_drain(
+                        submit_io_fn=_submit_io_jobs,
+                        collect_fn=_collect_futures,
+                        flush_fn=self._maybe_periodic_flush,
+                        local_pool=local_pool,
+                        cloud_pool=cloud_pool,
+                    )
 
         if self._shutdown.is_set():
             console.print("\n[yellow]Paused.[/yellow] Run `imganalyzer run` to resume.")
