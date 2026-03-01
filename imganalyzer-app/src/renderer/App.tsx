@@ -1,4 +1,5 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, Component } from 'react'
+import type { ErrorInfo, ReactNode } from 'react'
 import type { ImageFile } from './global'
 import { FolderPicker } from './components/FolderPicker'
 import { Gallery } from './components/Gallery'
@@ -9,6 +10,43 @@ import { FacesView } from './components/FacesView'
 import { useBatchProcess } from './hooks/useBatchProcess'
 
 type Tab = 'gallery' | 'batch' | 'running' | 'search' | 'faces'
+
+// ── Error Boundary ────────────────────────────────────────────────────────────
+
+class ErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[ErrorBoundary]', error, info.componentStack)
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="h-full flex flex-col items-center justify-center gap-4 p-8 text-center">
+          <p className="text-red-400 text-sm font-semibold">Something went wrong</p>
+          <pre className="text-xs text-neutral-500 max-w-lg whitespace-pre-wrap break-words">
+            {this.state.error.message}
+          </pre>
+          <button
+            onClick={() => this.setState({ error: null })}
+            className="px-4 py-1.5 rounded-lg text-sm bg-neutral-700 text-neutral-200 hover:bg-neutral-600 transition-colors"
+          >
+            Try again
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('gallery')
@@ -71,6 +109,7 @@ export default function App() {
     batch.stats.status === 'error'
 
   return (
+    <ErrorBoundary>
     <div className="h-full flex flex-col">
 
       {/* ── Tab bar ──────────────────────────────────────────────────────────── */}
@@ -190,6 +229,7 @@ export default function App() {
         </div>
       )}
     </div>
+    </ErrorBoundary>
   )
 }
 

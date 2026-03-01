@@ -263,13 +263,19 @@ function setupNotificationListener(): void {
         break
 
       case 'run/result': {
+        const rawKw = p.keywords
+        const keywords = Array.isArray(rawKw)
+          ? rawKw as string[]
+          : typeof rawKw === 'string'
+            ? rawKw.split(',').map((s: string) => s.trim()).filter(Boolean)
+            : undefined
         const result: BatchResult = {
-          path:       p.path as string,
-          module:     p.module as string,
+          path:       (p.path as string) ?? '',
+          module:     (p.module as string) ?? '',
           status:     p.status as 'done' | 'failed' | 'skipped',
-          durationMs: p.ms as number,
+          durationMs: (p.ms as number) ?? 0,
           error:      p.error as string | undefined,
-          keywords:   p.keywords as string[] | undefined,
+          keywords,
         }
         emitResult(result)
         if (result.status === 'done') {
