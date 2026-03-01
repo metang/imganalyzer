@@ -952,6 +952,12 @@ def _dispatch(msg: dict) -> None:
     params = msg.get("params", {})
 
     if method == "shutdown":
+        # Signal the active worker to stop and wait briefly for it to exit
+        _run_cancel.set()
+        if _active_worker is not None:
+            _active_worker._shutdown.set()
+        if _run_thread is not None and _run_thread.is_alive():
+            _run_thread.join(timeout=5)
         _send_result(req_id, {"ok": True})
         sys.exit(0)
 

@@ -17,7 +17,7 @@
  *   })
  */
 
-import { spawn, ChildProcess } from 'child_process'
+import { spawn, execSync, ChildProcess } from 'child_process'
 import { app } from 'electron'
 import { dirname } from 'path'
 
@@ -239,16 +239,26 @@ export function ensureServerRunning(): Promise<void> {
 export async function shutdownServer(): Promise<void> {
   if (!serverProcess || serverProcess.killed) return
 
+  const pid = serverProcess.pid
+
   try {
     await rpc.call('shutdown', {})
   } catch {
-    // If call fails, force kill
+    // If call fails, force kill below
   }
 
-  // Give it a moment to exit cleanly, then force kill
+  // Give it a moment to exit cleanly, then force kill the entire process tree
   await new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
-      try { serverProcess?.kill() } catch { /* ignore */ }
+      try {
+        if (pid && process.platform === 'win32') {
+          // Tree-kill: conda spawns python as a child process, so we need
+          // to kill the entire tree, not just the conda wrapper.
+          execSync(`taskkill /T /F /PID ${pid}`, { stdio: 'ignore' })
+        } else {
+          serverProcess?.kill()
+        }
+      } catch { /* ignore — process may already be gone */ }
       resolve()
     }, 3000)
 
