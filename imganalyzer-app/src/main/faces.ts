@@ -32,6 +32,7 @@ export interface FaceCluster {
   image_count: number
   face_count: number
   representative_id: number | null
+  person_id: number | null
 }
 
 export interface FaceOccurrence {
@@ -46,6 +47,24 @@ export interface FaceOccurrence {
   age: number | null
   gender: string | null
   identity_name: string
+}
+
+export interface FacePerson {
+  id: number
+  name: string
+  notes: string | null
+  cluster_count: number
+  face_count: number
+  image_count: number
+  representative_id: number | null
+}
+
+export interface PersonCluster {
+  cluster_id: number
+  face_count: number
+  image_count: number
+  label: string
+  representative_id: number | null
 }
 
 // ── IPC Registration ──────────────────────────────────────────────────────────
@@ -194,6 +213,106 @@ export function registerFaceHandlers(): void {
         return { enqueued: result.enqueued }
       } catch (err) {
         return { enqueued: 0, error: String(err) }
+      }
+    }
+  )
+
+  // ── Person (cross-age identity grouping) ────────────────────────────────
+
+  ipcMain.handle(
+    'faces:persons',
+    async (): Promise<{ persons: FacePerson[]; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/persons', {}) as { persons: FacePerson[] }
+        return { persons: result.persons }
+      } catch (err) {
+        return { persons: [], error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personCreate',
+    async (_evt, name: string): Promise<{ id: number; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/person-create', { name }) as { id: number }
+        return { id: result.id }
+      } catch (err) {
+        return { id: 0, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personRename',
+    async (_evt, personId: number, name: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        await rpc.call('faces/person-rename', { person_id: personId, name })
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personDelete',
+    async (_evt, personId: number): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        await rpc.call('faces/person-delete', { person_id: personId })
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personLinkCluster',
+    async (_evt, clusterId: number, personId: number): Promise<{ ok: boolean; updated: number; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/person-link-cluster', {
+          cluster_id: clusterId,
+          person_id: personId,
+        }) as { ok: boolean; updated: number }
+        return { ok: true, updated: result.updated }
+      } catch (err) {
+        return { ok: false, updated: 0, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personUnlinkCluster',
+    async (_evt, clusterId: number): Promise<{ ok: boolean; updated: number; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/person-unlink-cluster', {
+          cluster_id: clusterId,
+        }) as { ok: boolean; updated: number }
+        return { ok: true, updated: result.updated }
+      } catch (err) {
+        return { ok: false, updated: 0, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personClusters',
+    async (_evt, personId: number): Promise<{ clusters: PersonCluster[]; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/person-clusters', {
+          person_id: personId,
+        }) as { clusters: PersonCluster[] }
+        return { clusters: result.clusters }
+      } catch (err) {
+        return { clusters: [], error: String(err) }
       }
     }
   )

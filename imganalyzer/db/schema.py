@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -34,6 +34,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         8: _migrate_v8,
         9: _migrate_v9,
         10: _migrate_v10,
+        11: _migrate_v11,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -478,5 +479,24 @@ def _migrate_v10(conn: sqlite3.Connection) -> None:
             cluster_id INTEGER PRIMARY KEY,
             display_name TEXT NOT NULL
         )
+    """)
+
+
+def _migrate_v11(conn: sqlite3.Connection) -> None:
+    """Add ``face_persons`` table and ``person_id`` column on ``face_occurrences``."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS face_persons (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            notes      TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        ALTER TABLE face_occurrences ADD COLUMN person_id INTEGER REFERENCES face_persons(id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_face_occurrences_person_id
+        ON face_occurrences(person_id)
     """)
 

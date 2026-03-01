@@ -218,6 +218,24 @@ export interface FaceImage {
   face_count: number
 }
 
+export interface FacePerson {
+  id: number
+  name: string
+  notes: string | null
+  cluster_count: number
+  face_count: number
+  image_count: number
+  representative_id: number | null
+}
+
+export interface PersonCluster {
+  cluster_id: number
+  face_count: number
+  image_count: number
+  label: string
+  representative_id: number | null
+}
+
 export interface FaceCluster {
   cluster_id: number | null
   identity_name: string
@@ -226,6 +244,7 @@ export interface FaceCluster {
   image_count: number
   face_count: number
   representative_id: number | null
+  person_id: number | null
 }
 
 export interface FaceOccurrence {
@@ -268,6 +287,15 @@ declare global {
       getFaceCropBatch(ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }>
       runFaceClustering(threshold?: number): Promise<{ num_clusters: number; error?: string }>
       rebuildFaces(): Promise<{ enqueued: number; error?: string }>
+
+      // Person (cross-age identity grouping)
+      listPersons(): Promise<{ persons: FacePerson[]; error?: string }>
+      createPerson(name: string): Promise<{ id: number; error?: string }>
+      renamePerson(personId: number, name: string): Promise<{ ok: boolean; error?: string }>
+      deletePerson(personId: number): Promise<{ ok: boolean; error?: string }>
+      linkClusterToPerson(clusterId: number, personId: number): Promise<{ ok: boolean; updated: number; error?: string }>
+      unlinkClusterFromPerson(clusterId: number): Promise<{ ok: boolean; updated: number; error?: string }>
+      getPersonClusters(personId: number): Promise<{ clusters: PersonCluster[]; error?: string }>
 
       // Batch processing
       batchIngest(

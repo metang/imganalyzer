@@ -138,4 +138,26 @@ contextBridge.exposeInMainWorld('api', {
 
   rebuildFaces: (): Promise<{ enqueued: number; error?: string }> =>
     ipcRenderer.invoke('faces:rebuild'),
+
+  // Person (cross-age identity grouping)
+  listPersons: (): Promise<{ persons: Array<{ id: number; name: string; notes: string | null; cluster_count: number; face_count: number; image_count: number; representative_id: number | null }>; error?: string }> =>
+    ipcRenderer.invoke('faces:persons'),
+
+  createPerson: (name: string): Promise<{ id: number; error?: string }> =>
+    ipcRenderer.invoke('faces:personCreate', name),
+
+  renamePerson: (personId: number, name: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('faces:personRename', personId, name),
+
+  deletePerson: (personId: number): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('faces:personDelete', personId),
+
+  linkClusterToPerson: (clusterId: number, personId: number): Promise<{ ok: boolean; updated: number; error?: string }> =>
+    ipcRenderer.invoke('faces:personLinkCluster', clusterId, personId),
+
+  unlinkClusterFromPerson: (clusterId: number): Promise<{ ok: boolean; updated: number; error?: string }> =>
+    ipcRenderer.invoke('faces:personUnlinkCluster', clusterId),
+
+  getPersonClusters: (personId: number): Promise<{ clusters: Array<{ cluster_id: number; face_count: number; image_count: number; label: string; representative_id: number | null }>; error?: string }> =>
+    ipcRenderer.invoke('faces:personClusters', personId),
 })

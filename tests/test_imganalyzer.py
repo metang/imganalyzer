@@ -984,6 +984,164 @@ class TestFaceIdentityDB:
         assert len(embeddings) == 0
 
 
+class TestFacePersons:
+    """Tests for the cross-age person identity linking feature."""
+
+    def _seed_clusters(self, repo, conn):
+        """Insert test images + face occurrences in 3 clusters."""
+        for i in range(1, 4):
+            conn.execute(
+                "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+                [i, f"/img/{i}.jpg", f"hash{i}", 100],
+            )
+        emb = np.zeros(512, dtype=np.float32).tobytes()
+        rows = [
+            (1, 1, 0, emb, 1, 0.0, 0.0, 1.0, 1.0),
+            (2, 1, 1, emb, 1, 0.0, 0.0, 1.0, 1.0),
+            (3, 2, 0, emb, 2, 0.0, 0.0, 1.0, 1.0),
+            (4, 2, 1, emb, 2, 0.0, 0.0, 1.0, 1.0),
+            (5, 3, 0, emb, 3, 0.0, 0.0, 1.0, 1.0),
+        ]
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+
+    def test_create_and_list_persons(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        pid = repo.create_person("Dad")
+        assert pid > 0
+
+        persons = repo.list_persons()
+        assert len(persons) == 1
+        assert persons[0]["name"] == "Dad"
+        assert persons[0]["face_count"] == 0
+
+    def test_rename_person(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        pid = repo.create_person("Dad")
+        repo.rename_person(pid, "Father")
+        persons = repo.list_persons()
+        assert persons[0]["name"] == "Father"
+
+    def test_link_cluster_to_person(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        self._seed_clusters(repo, conn)
+
+        pid = repo.create_person("Dad")
+        updated = repo.link_cluster_to_person(1, pid)
+        assert updated == 2  # cluster 1 has 2 occurrences
+
+        persons = repo.list_persons()
+        assert persons[0]["face_count"] == 2
+        assert persons[0]["cluster_count"] == 1
+
+    def test_link_multiple_clusters(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        self._seed_clusters(repo, conn)
+
+        pid = repo.create_person("Dad")
+        repo.link_cluster_to_person(1, pid)
+        repo.link_cluster_to_person(2, pid)
+
+        persons = repo.list_persons()
+        assert persons[0]["face_count"] == 4
+        assert persons[0]["cluster_count"] == 2
+
+        pc = repo.get_person_clusters(pid)
+        assert len(pc) == 2
+
+    def test_unlink_cluster(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        self._seed_clusters(repo, conn)
+
+        pid = repo.create_person("Dad")
+        repo.link_cluster_to_person(1, pid)
+        repo.unlink_cluster_from_person(1)
+
+        persons = repo.list_persons()
+        assert persons[0]["face_count"] == 0
+
+    def test_delete_person_clears_links(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        self._seed_clusters(repo, conn)
+
+        pid = repo.create_person("Dad")
+        repo.link_cluster_to_person(1, pid)
+        repo.delete_person(pid)
+
+        persons = repo.list_persons()
+        assert len(persons) == 0
+        # person_id should be cleared
+        row = conn.execute(
+            "SELECT person_id FROM face_occurrences WHERE id = 1"
+        ).fetchone()
+        assert row["person_id"] is None
+
+    def test_auto_assign_after_recluster(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        self._seed_clusters(repo, conn)
+
+        pid = repo.create_person("Dad")
+        repo.link_cluster_to_person(1, pid)
+
+        # Simulate re-clustering: shift cluster_ids (1→10, 2→20, 3→30)
+        # but keep person_id on the occurrence
+        conn.execute("UPDATE face_occurrences SET cluster_id = cluster_id * 10")
+        conn.commit()
+
+        # Now cluster 10 has 2 occurrences with person_id = pid
+        updated = repo.auto_assign_persons_after_recluster()
+        assert updated == 0  # already assigned, no new ones to update
+
+        # Add an untagged occurrence to cluster 10
+        conn.execute(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, person_id, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) "
+            "VALUES (100, 1, 5, ?, 10, NULL, 0.0, 0.0, 1.0, 1.0)",
+            [np.zeros(512, dtype=np.float32).tobytes()],
+        )
+        conn.commit()
+
+        updated = repo.auto_assign_persons_after_recluster()
+        assert updated == 1  # the new occurrence should be assigned to Dad
+        row = conn.execute(
+            "SELECT person_id FROM face_occurrences WHERE id = 100"
+        ).fetchone()
+        assert row["person_id"] == pid
+
+    def test_list_clusters_includes_person_id(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        self._seed_clusters(repo, conn)
+
+        pid = repo.create_person("Dad")
+        repo.link_cluster_to_person(1, pid)
+
+        clusters = repo.list_face_clusters()
+        cluster_map = {c["cluster_id"]: c for c in clusters}
+        assert cluster_map[1]["person_id"] == pid
+        assert cluster_map[2]["person_id"] is None
+        assert cluster_map[3]["person_id"] is None
+
+
 class TestPersistResultToDB:
     """Test the _persist_result_to_db helper used by the analyze command."""
 

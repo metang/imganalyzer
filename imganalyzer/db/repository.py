@@ -496,6 +496,142 @@ class Repository:
             )
         self.conn.commit()
 
+    # ── Person (cross-age identity grouping) ─────────────────────────────
+
+    def create_person(self, name: str, notes: str | None = None) -> int:
+        """Create a person and return its id."""
+        cur = self.conn.execute(
+            "INSERT INTO face_persons (name, notes) VALUES (?, ?)",
+            [name, notes],
+        )
+        self.conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    def rename_person(self, person_id: int, name: str) -> None:
+        """Rename a person."""
+        self.conn.execute(
+            "UPDATE face_persons SET name = ? WHERE id = ?",
+            [name, person_id],
+        )
+        self.conn.commit()
+
+    def delete_person(self, person_id: int) -> None:
+        """Delete a person and clear person_id on all their occurrences."""
+        self.conn.execute(
+            "UPDATE face_occurrences SET person_id = NULL WHERE person_id = ?",
+            [person_id],
+        )
+        self.conn.execute("DELETE FROM face_persons WHERE id = ?", [person_id])
+        self.conn.commit()
+
+    def list_persons(self) -> list[dict]:
+        """Return persons with cluster count, face count, and a representative thumbnail."""
+        rows = self.conn.execute(
+            """
+            SELECT
+                fp.id,
+                fp.name,
+                fp.notes,
+                COUNT(DISTINCT fo.cluster_id) AS cluster_count,
+                COUNT(fo.id)                  AS face_count,
+                COUNT(DISTINCT fo.image_id)   AS image_count,
+                (SELECT fo2.id FROM face_occurrences fo2
+                 WHERE fo2.person_id = fp.id
+                 ORDER BY (fo2.bbox_x2 - fo2.bbox_x1) * (fo2.bbox_y2 - fo2.bbox_y1) DESC
+                 LIMIT 1) AS representative_id
+            FROM face_persons fp
+            LEFT JOIN face_occurrences fo ON fo.person_id = fp.id
+            GROUP BY fp.id
+            ORDER BY face_count DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def link_cluster_to_person(self, cluster_id: int, person_id: int) -> int:
+        """Set person_id on all occurrences in *cluster_id*. Returns rows updated."""
+        cur = self.conn.execute(
+            "UPDATE face_occurrences SET person_id = ? WHERE cluster_id = ?",
+            [person_id, cluster_id],
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def unlink_cluster_from_person(self, cluster_id: int) -> int:
+        """Clear person_id on all occurrences in *cluster_id*. Returns rows updated."""
+        cur = self.conn.execute(
+            "UPDATE face_occurrences SET person_id = NULL WHERE cluster_id = ?",
+            [cluster_id],
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def get_person_clusters(self, person_id: int) -> list[dict]:
+        """Return clusters belonging to a person, with face counts."""
+        rows = self.conn.execute(
+            """
+            SELECT
+                fo.cluster_id,
+                COUNT(fo.id) AS face_count,
+                COUNT(DISTINCT fo.image_id) AS image_count,
+                COALESCE(fcl.display_name, 'Cluster ' || fo.cluster_id) AS label,
+                (SELECT fo2.id FROM face_occurrences fo2
+                 WHERE fo2.cluster_id = fo.cluster_id
+                 ORDER BY (fo2.bbox_x2 - fo2.bbox_x1) * (fo2.bbox_y2 - fo2.bbox_y1) DESC
+                 LIMIT 1) AS representative_id
+            FROM face_occurrences fo
+            LEFT JOIN face_cluster_labels fcl ON fcl.cluster_id = fo.cluster_id
+            WHERE fo.person_id = ? AND fo.cluster_id IS NOT NULL
+            GROUP BY fo.cluster_id
+            ORDER BY face_count DESC
+            """,
+            [person_id],
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def auto_assign_persons_after_recluster(self) -> int:
+        """Propagate person_id within new clusters by majority vote.
+
+        For each cluster that has *some* occurrences with person_id set,
+        find the majority person_id (>50% of tagged occurrences) and apply
+        it to all occurrences in that cluster.
+
+        Returns the number of occurrences updated.
+        """
+        # Find clusters with mixed person assignments
+        rows = self.conn.execute(
+            """
+            SELECT cluster_id, person_id, COUNT(*) AS cnt
+            FROM face_occurrences
+            WHERE cluster_id IS NOT NULL AND person_id IS NOT NULL
+            GROUP BY cluster_id, person_id
+            """
+        ).fetchall()
+
+        # Build per-cluster vote tallies
+        cluster_votes: dict[int, list[tuple[int, int]]] = {}
+        for r in rows:
+            cid = r["cluster_id"]
+            cluster_votes.setdefault(cid, []).append((r["person_id"], r["cnt"]))
+
+        updated = 0
+        for cid, votes in cluster_votes.items():
+            # Total tagged occurrences in this cluster
+            total_tagged = sum(cnt for _, cnt in votes)
+            # Best person
+            best_person, best_cnt = max(votes, key=lambda x: x[1])
+            # Require majority (>50% of tagged)
+            if best_cnt > total_tagged / 2:
+                cur = self.conn.execute(
+                    "UPDATE face_occurrences SET person_id = ? "
+                    "WHERE cluster_id = ? AND (person_id IS NULL OR person_id != ?)",
+                    [best_person, cid, best_person],
+                )
+                updated += cur.rowcount
+
+        if updated:
+            self.conn.commit()
+        return updated
+
     def merge_faces(self, keep_name: str, merge_name: str) -> None:
         """Merge *merge_name* into *keep_name* — moves all embeddings."""
         keep = self.conn.execute(
@@ -744,7 +880,12 @@ class Repository:
                     (SELECT fo3.id FROM face_occurrences fo3
                      WHERE fo3.cluster_id = fo.cluster_id
                      ORDER BY (fo3.bbox_x2 - fo3.bbox_x1) * (fo3.bbox_y2 - fo3.bbox_y1) DESC
-                     LIMIT 1) AS representative_id
+                     LIMIT 1) AS representative_id,
+                    -- Most common person_id in the cluster (majority vote)
+                    (SELECT fo5.person_id FROM face_occurrences fo5
+                     WHERE fo5.cluster_id = fo.cluster_id AND fo5.person_id IS NOT NULL
+                     GROUP BY fo5.person_id
+                     ORDER BY COUNT(*) DESC LIMIT 1) AS person_id
                 FROM face_occurrences fo
                 LEFT JOIN face_identities fi
                     ON fi.canonical_name = (
@@ -928,6 +1069,9 @@ class Repository:
             "UPDATE face_occurrences SET cluster_id = ? WHERE id = ?",
             [(cid, occ_id) for occ_id, cid in assignments],
         )
+
+        # Auto-recover person links from previous clustering
+        self.auto_assign_persons_after_recluster()
 
         return len(cluster_ids)
 

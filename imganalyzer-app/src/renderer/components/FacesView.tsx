@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, memo } from 'react'
-import type { FaceCluster, FaceOccurrence, FaceSummary, FaceImage } from '../global'
+import type { FaceCluster, FaceOccurrence, FaceSummary, FaceImage, FacePerson, PersonCluster } from '../global'
 
 // ── Thumbnail cache & batch fetcher ───────────────────────────────────────────
 
@@ -212,14 +212,41 @@ export function FacesView() {
   const [rebuilding, setRebuilding] = useState(false)
   const [showRebuildConfirm, setShowRebuildConfirm] = useState(false)
 
+  // View mode: clusters or people
+  type ViewMode = 'clusters' | 'people'
+  const [viewMode, setViewMode] = useState<ViewMode>('clusters')
+
+  // Person state
+  const [persons, setPersons] = useState<FacePerson[]>([])
+  const [personClusters, setPersonClusters] = useState<Record<number, PersonCluster[]>>({})
+  const [expandedPersonId, setExpandedPersonId] = useState<number | null>(null)
+
+  // Person editing
+  const [editingPersonId, setEditingPersonId] = useState<number | null>(null)
+  const [personEditValue, setPersonEditValue] = useState('')
+  const personEditRef = useRef<HTMLInputElement>(null)
+
+  // Link-to-person dropdown
+  const [linkingClusterId, setLinkingClusterId] = useState<number | null>(null)
+  const [showCreatePerson, setShowCreatePerson] = useState(false)
+  const [newPersonName, setNewPersonName] = useState('')
+  const newPersonRef = useRef<HTMLInputElement>(null)
+
+  // Delete person confirmation
+  const [deletingPersonId, setDeletingPersonId] = useState<number | null>(null)
+
   // ── Load data ─────────────────────────────────────────────────────────────
 
   const loadData = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      // Try cluster mode first
-      const clusterResult = await window.api.listFaceClusters()
+      // Load clusters + persons in parallel
+      const [clusterResult, personsResult] = await Promise.all([
+        window.api.listFaceClusters(),
+        window.api.listPersons(),
+      ])
+
       if (clusterResult.error) {
         setError(clusterResult.error)
         return
@@ -238,6 +265,15 @@ export function FacesView() {
         } else {
           setLegacyFaces(legacyResult.faces)
           setClusters([])
+        }
+      }
+
+      // Load persons
+      if (!personsResult.error) {
+        setPersons(personsResult.persons)
+        // Auto-switch to people view if persons exist and no view preference yet
+        if (personsResult.persons.length > 0) {
+          setViewMode('people')
         }
       }
     } catch (err) {
@@ -297,6 +333,104 @@ export function FacesView() {
       setRebuilding(false)
     }
   }, [])
+
+  // ── Person actions ──────────────────────────────────────────────────────
+
+  const handleLinkCluster = useCallback(
+    async (clusterId: number, personId: number) => {
+      try {
+        await window.api.linkClusterToPerson(clusterId, personId)
+        setLinkingClusterId(null)
+        await loadData()
+      } catch (err) {
+        setError(String(err))
+      }
+    },
+    [loadData]
+  )
+
+  const handleUnlinkCluster = useCallback(
+    async (clusterId: number) => {
+      try {
+        await window.api.unlinkClusterFromPerson(clusterId)
+        await loadData()
+      } catch (err) {
+        setError(String(err))
+      }
+    },
+    [loadData]
+  )
+
+  const handleCreatePersonAndLink = useCallback(
+    async (clusterId: number) => {
+      const name = newPersonName.trim()
+      if (!name) return
+      try {
+        const result = await window.api.createPerson(name)
+        if (result.error) {
+          setError(result.error)
+          return
+        }
+        await window.api.linkClusterToPerson(clusterId, result.id)
+        setShowCreatePerson(false)
+        setNewPersonName('')
+        setLinkingClusterId(null)
+        await loadData()
+      } catch (err) {
+        setError(String(err))
+      }
+    },
+    [newPersonName, loadData]
+  )
+
+  const handleRenamePerson = useCallback(
+    async (personId: number) => {
+      const name = personEditValue.trim()
+      if (!name) return
+      try {
+        await window.api.renamePerson(personId, name)
+        setPersons((prev) =>
+          prev.map((p) => (p.id === personId ? { ...p, name } : p))
+        )
+      } catch (err) {
+        setError(String(err))
+      }
+      setEditingPersonId(null)
+      setPersonEditValue('')
+    },
+    [personEditValue]
+  )
+
+  const handleDeletePerson = useCallback(
+    async (personId: number) => {
+      try {
+        await window.api.deletePerson(personId)
+        setDeletingPersonId(null)
+        await loadData()
+      } catch (err) {
+        setError(String(err))
+      }
+    },
+    [loadData]
+  )
+
+  const togglePersonExpand = useCallback(
+    async (personId: number) => {
+      if (expandedPersonId === personId) {
+        setExpandedPersonId(null)
+        return
+      }
+      setExpandedPersonId(personId)
+      // Load clusters for this person if not cached
+      if (!personClusters[personId]) {
+        const result = await window.api.getPersonClusters(personId)
+        if (!result.error) {
+          setPersonClusters((prev) => ({ ...prev, [personId]: result.clusters }))
+        }
+      }
+    },
+    [expandedPersonId, personClusters]
+  )
 
   // ── Expand / collapse ─────────────────────────────────────────────────────
 
@@ -422,6 +556,94 @@ export function FacesView() {
   const totalFaceCount = hasOccurrences
     ? clusters.reduce((sum, c) => sum + c.face_count, 0)
     : legacyFaces.reduce((sum, f) => sum + f.image_count, 0)
+
+  // For people view: clusters not assigned to any person
+  const unlinkedClusters = clusters.filter(
+    (c) => c.cluster_id !== null && !c.person_id
+  )
+
+  // ── Link-to-Person dropdown ────────────────────────────────────────────
+
+  const renderLinkDropdown = (clusterId: number) => {
+    if (linkingClusterId !== clusterId) {
+      return (
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            setLinkingClusterId(clusterId)
+            setShowCreatePerson(false)
+            setNewPersonName('')
+          }}
+          className="text-xs text-cyan-400/70 hover:text-cyan-300 transition-colors shrink-0"
+          title="Link to person"
+        >
+          Link
+        </button>
+      )
+    }
+
+    return (
+      <div
+        className="absolute right-4 top-full mt-1 z-40 bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl
+                    min-w-[180px] py-1 text-sm"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {persons.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => handleLinkCluster(clusterId, p.id)}
+            className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-neutral-200 truncate"
+          >
+            {p.name}
+            <span className="text-neutral-500 ml-1 text-xs">({p.face_count})</span>
+          </button>
+        ))}
+        <div className="border-t border-neutral-700 mt-1 pt-1">
+          {showCreatePerson ? (
+            <div className="px-3 py-1.5 flex items-center gap-1">
+              <input
+                ref={newPersonRef}
+                value={newPersonName}
+                onChange={(e) => setNewPersonName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleCreatePersonAndLink(clusterId)
+                  if (e.key === 'Escape') { setShowCreatePerson(false); setLinkingClusterId(null) }
+                }}
+                placeholder="Person name..."
+                className="flex-1 px-2 py-0.5 text-xs rounded bg-neutral-800 border border-neutral-600
+                           text-neutral-100 placeholder-neutral-500 outline-none focus:border-blue-500"
+                autoFocus
+              />
+              <button
+                onClick={() => handleCreatePersonAndLink(clusterId)}
+                className="text-emerald-400 hover:text-emerald-300 text-xs font-medium"
+              >
+                ✓
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => {
+                setShowCreatePerson(true)
+                setTimeout(() => newPersonRef.current?.focus(), 0)
+              }}
+              className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-cyan-400"
+            >
+              + New Person...
+            </button>
+          )}
+        </div>
+        <div className="border-t border-neutral-700 mt-1 pt-1">
+          <button
+            onClick={() => setLinkingClusterId(null)}
+            className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-neutral-500 text-xs"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   const renderEditingField = (_key: string, identityName: string, clusterId?: number | null) => (
     <div className="flex items-center gap-2">
@@ -598,6 +820,30 @@ export function FacesView() {
           <h2 className="text-base font-medium text-neutral-100">
             Face Identities
           </h2>
+          {!loading && hasOccurrences && (
+            <div className="flex rounded-md overflow-hidden border border-neutral-700">
+              <button
+                onClick={() => setViewMode('clusters')}
+                className={`px-2.5 py-0.5 text-xs transition-colors ${
+                  viewMode === 'clusters'
+                    ? 'bg-neutral-700 text-neutral-100'
+                    : 'bg-neutral-900 text-neutral-500 hover:text-neutral-300'
+                }`}
+              >
+                Clusters
+              </button>
+              <button
+                onClick={() => setViewMode('people')}
+                className={`px-2.5 py-0.5 text-xs transition-colors ${
+                  viewMode === 'people'
+                    ? 'bg-neutral-700 text-neutral-100'
+                    : 'bg-neutral-900 text-neutral-500 hover:text-neutral-300'
+                }`}
+              >
+                People{persons.length > 0 && ` (${persons.length})`}
+              </button>
+            </div>
+          )}
           {!loading && (
             <span className="text-xs text-neutral-500">
               {totalEntries}{' '}
@@ -733,7 +979,7 @@ export function FacesView() {
       )}
 
       {/* Face list — cluster mode */}
-      {hasOccurrences && clusters.length > 0 && (
+      {hasOccurrences && clusters.length > 0 && viewMode === 'clusters' && (
         <div className="flex-1 overflow-y-auto">
           {clusters.map((cluster) => {
             const key = cluster.cluster_id !== null
@@ -808,6 +1054,13 @@ export function FacesView() {
                       cluster.display_name,
                       cluster.identity_name
                     )}
+
+                  {/* Link to person button */}
+                  {!isEditing && cluster.cluster_id !== null && (
+                    <div className="relative">
+                      {renderLinkDropdown(cluster.cluster_id)}
+                    </div>
+                  )}
                 </div>
 
                 {/* Expanded detail */}
@@ -815,6 +1068,217 @@ export function FacesView() {
               </div>
             )
           })}
+        </div>
+      )}
+
+      {/* Face list — people mode */}
+      {hasOccurrences && viewMode === 'people' && (
+        <div className="flex-1 overflow-y-auto">
+          {/* Persons */}
+          {persons.map((person) => {
+            const isExpPerson = expandedPersonId === person.id
+            const pClusters = personClusters[person.id] ?? []
+
+            return (
+              <div key={`person:${person.id}`} className="border-b border-neutral-800/60">
+                <div className="flex items-center gap-3 px-5 py-2.5 hover:bg-neutral-800/40 transition-colors">
+                  {/* Representative thumbnail */}
+                  {person.representative_id != null && (
+                    <FaceCropThumbnail occurrenceId={person.representative_id} size="sm" />
+                  )}
+
+                  {/* Expand chevron */}
+                  <button
+                    onClick={() => togglePersonExpand(person.id)}
+                    className="text-neutral-500 hover:text-neutral-300 transition-colors shrink-0"
+                    title={isExpPerson ? 'Collapse' : 'Expand to see clusters'}
+                  >
+                    <svg
+                      className={`w-4 h-4 transition-transform ${isExpPerson ? 'rotate-90' : ''}`}
+                      fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                    </svg>
+                  </button>
+
+                  {/* Name (editable) */}
+                  <div className="flex-1 min-w-0">
+                    {editingPersonId === person.id ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          ref={personEditRef}
+                          type="text"
+                          value={personEditValue}
+                          onChange={(e) => setPersonEditValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleRenamePerson(person.id)
+                            if (e.key === 'Escape') setEditingPersonId(null)
+                          }}
+                          className="flex-1 px-2 py-1 text-sm rounded bg-neutral-800 border border-neutral-600
+                                     text-neutral-100 outline-none focus:border-blue-500 min-w-0"
+                          autoFocus
+                        />
+                        <button onClick={() => handleRenamePerson(person.id)} className="text-emerald-400 hover:text-emerald-300">✓</button>
+                        <button onClick={() => setEditingPersonId(null)} className="text-neutral-500 hover:text-neutral-300">✕</button>
+                      </div>
+                    ) : (
+                      <span className="text-sm text-neutral-100 font-medium truncate block">
+                        {person.name}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Stats */}
+                  <span className="text-xs text-neutral-400 bg-neutral-800 px-2 py-0.5 rounded-full shrink-0">
+                    {person.cluster_count} {person.cluster_count === 1 ? 'cluster' : 'clusters'}
+                    {' · '}
+                    {person.face_count} {person.face_count === 1 ? 'face' : 'faces'}
+                  </span>
+
+                  {/* Edit button */}
+                  {editingPersonId !== person.id && (
+                    <button
+                      onClick={() => {
+                        setEditingPersonId(person.id)
+                        setPersonEditValue(person.name)
+                        setTimeout(() => personEditRef.current?.focus(), 0)
+                      }}
+                      className="text-neutral-600 hover:text-neutral-300 transition-colors shrink-0"
+                      title="Rename person"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round"
+                          d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+                      </svg>
+                    </button>
+                  )}
+
+                  {/* Delete button */}
+                  <button
+                    onClick={() => setDeletingPersonId(person.id)}
+                    className="text-neutral-600 hover:text-red-400 transition-colors shrink-0"
+                    title="Delete person"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round"
+                        d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                    </svg>
+                  </button>
+                </div>
+
+                {/* Expanded: show clusters within this person */}
+                {isExpPerson && (
+                  <div className="pl-8 border-l-2 border-cyan-900/40 ml-5">
+                    {pClusters.length === 0 && (
+                      <div className="px-5 py-2 text-xs text-neutral-600">Loading clusters...</div>
+                    )}
+                    {pClusters.map((pc) => {
+                      const cKey = `cluster:${pc.cluster_id}`
+                      const isClusterExpanded = expandedKey === cKey
+
+                      return (
+                        <div key={cKey} className="border-b border-neutral-800/30">
+                          <div className="flex items-center gap-3 px-5 py-2 hover:bg-neutral-800/30 transition-colors">
+                            {pc.representative_id != null && (
+                              <FaceCropThumbnail occurrenceId={pc.representative_id} size="sm" />
+                            )}
+                            <button
+                              onClick={() => toggleExpand(cKey, { cluster_id: pc.cluster_id, identity_name: '', display_name: pc.label, identity_id: null, image_count: pc.image_count, face_count: pc.face_count, representative_id: pc.representative_id }, null)}
+                              className="text-neutral-500 hover:text-neutral-300 shrink-0"
+                            >
+                              <svg className={`w-3.5 h-3.5 transition-transform ${isClusterExpanded ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                              </svg>
+                            </button>
+                            <span className="flex-1 text-xs text-neutral-300 truncate">{pc.label}</span>
+                            <span className="text-xs text-neutral-500">
+                              {pc.face_count} {pc.face_count === 1 ? 'face' : 'faces'}
+                            </span>
+                            <button
+                              onClick={() => handleUnlinkCluster(pc.cluster_id)}
+                              className="text-xs text-neutral-600 hover:text-red-400 transition-colors"
+                              title="Unlink from person"
+                            >
+                              Unlink
+                            </button>
+                          </div>
+                          {isClusterExpanded && renderExpandedDetail(cKey)}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+
+          {/* Unlinked clusters */}
+          {unlinkedClusters.length > 0 && (
+            <>
+              <div className="px-5 py-2 text-xs text-neutral-500 font-medium uppercase tracking-wide bg-neutral-900/80 border-b border-neutral-800/60 sticky top-0">
+                Unlinked Clusters ({unlinkedClusters.length})
+              </div>
+              {unlinkedClusters.map((cluster) => {
+                const key = `cluster:${cluster.cluster_id}`
+                const isExpanded = expandedKey === key
+                const displayLabel = cluster.display_name || cluster.identity_name
+
+                return (
+                  <div key={key} className="border-b border-neutral-800/60">
+                    <div className="flex items-center gap-3 px-5 py-2.5 hover:bg-neutral-800/40 transition-colors">
+                      {cluster.representative_id != null && (
+                        <FaceCropThumbnail occurrenceId={cluster.representative_id} size="sm" />
+                      )}
+                      <button
+                        onClick={() => toggleExpand(key, cluster, null)}
+                        className="text-neutral-500 hover:text-neutral-300 shrink-0"
+                      >
+                        <svg className={`w-4 h-4 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                        </svg>
+                      </button>
+                      <span className="flex-1 text-sm text-neutral-100 truncate">{displayLabel}</span>
+                      <span className="text-xs text-neutral-400 bg-neutral-800 px-2 py-0.5 rounded-full shrink-0">
+                        {cluster.face_count} {cluster.face_count === 1 ? 'face' : 'faces'}
+                      </span>
+                      {cluster.cluster_id !== null && (
+                        <div className="relative">
+                          {renderLinkDropdown(cluster.cluster_id)}
+                        </div>
+                      )}
+                    </div>
+                    {isExpanded && renderExpandedDetail(key)}
+                  </div>
+                )
+              })}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Delete person confirmation dialog */}
+      {deletingPersonId !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl p-6 max-w-sm mx-4">
+            <h3 className="text-sm font-semibold text-neutral-200 mb-2">Delete Person?</h3>
+            <p className="text-xs text-neutral-400 mb-4">
+              This will remove the person and unlink all their clusters. The face data itself is not deleted.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDeletingPersonId(null)}
+                className="px-3 py-1.5 text-xs rounded-md bg-neutral-800 text-neutral-300 hover:bg-neutral-700 transition-colors border border-neutral-600"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deletingPersonId && handleDeletePerson(deletingPersonId)}
+                className="px-3 py-1.5 text-xs rounded-md bg-red-700 text-white hover:bg-red-600 transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

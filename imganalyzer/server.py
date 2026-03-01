@@ -816,6 +816,80 @@ def _handle_faces_clusters(params: dict) -> dict:
     return {"clusters": clusters, "has_occurrences": has_occurrences}
 
 
+# ── Person (cross-age identity grouping) ─────────────────────────────────
+
+
+def _handle_faces_persons(_params: dict) -> dict:
+    """List all persons with stats."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    return {"persons": repo.list_persons()}
+
+
+def _handle_faces_person_create(params: dict) -> dict:
+    """Create a new person."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    person_id = repo.create_person(params["name"], params.get("notes"))
+    return {"id": person_id}
+
+
+def _handle_faces_person_rename(params: dict) -> dict:
+    """Rename a person."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    repo.rename_person(int(params["person_id"]), params["name"])
+    return {"ok": True}
+
+
+def _handle_faces_person_delete(params: dict) -> dict:
+    """Delete a person (clears links on occurrences)."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    repo.delete_person(int(params["person_id"]))
+    return {"ok": True}
+
+
+def _handle_faces_person_link(params: dict) -> dict:
+    """Link a cluster to a person."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    updated = repo.link_cluster_to_person(
+        int(params["cluster_id"]), int(params["person_id"])
+    )
+    return {"ok": True, "updated": updated}
+
+
+def _handle_faces_person_unlink(params: dict) -> dict:
+    """Unlink a cluster from its person."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    updated = repo.unlink_cluster_from_person(int(params["cluster_id"]))
+    return {"ok": True, "updated": updated}
+
+
+def _handle_faces_person_clusters(params: dict) -> dict:
+    """Get clusters belonging to a person."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    clusters = repo.get_person_clusters(int(params["person_id"]))
+    return {"clusters": clusters}
+
+
 def _handle_faces_cluster_images(params: dict) -> dict:
     """Get face occurrences for a specific cluster or identity."""
     from imganalyzer.db.repository import Repository
@@ -994,6 +1068,13 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/crop": _handle_faces_crop,
     "faces/crop-batch": _handle_faces_crop_batch,
     "faces/run-clustering": _handle_faces_run_clustering,
+    "faces/persons": _handle_faces_persons,
+    "faces/person-create": _handle_faces_person_create,
+    "faces/person-rename": _handle_faces_person_rename,
+    "faces/person-delete": _handle_faces_person_delete,
+    "faces/person-link-cluster": _handle_faces_person_link,
+    "faces/person-unlink-cluster": _handle_faces_person_unlink,
+    "faces/person-clusters": _handle_faces_person_clusters,
 }
 
 # Methods that send their own result/error asynchronously (streaming).
