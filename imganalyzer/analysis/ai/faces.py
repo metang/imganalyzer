@@ -198,10 +198,21 @@ class FaceAnalyzer:
         # Determine execution provider
         providers = _get_providers()
 
+        # Limit ONNX Runtime CPU thread usage.  By default ONNX RT uses
+        # all cores for intra-op parallelism, saturating the CPU even when
+        # the heavy lifting is on GPU.  2 threads suffice for CPU
+        # post-processing (NMS, bbox decode) and leave cores free for
+        # IO prefetch, other GPU modules, and system responsiveness.
+        import onnxruntime as ort
+        sess_opts = ort.SessionOptions()
+        sess_opts.intra_op_num_threads = 2
+        sess_opts.inter_op_num_threads = 1
+
         app = FaceAnalysis(
             name="buffalo_l",
             root=_INSIGHTFACE_HOME,
             providers=providers,
+            session_options=sess_opts,
         )
         # ctx_id=0 → GPU 0; ctx_id=-1 → CPU
         # providers may be strings or (name, opts) tuples
