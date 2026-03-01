@@ -78,6 +78,9 @@ contextBridge.exposeInMainWorld('api', {
   batchQueueClearAll: (): Promise<{ deleted: number }> =>
     ipcRenderer.invoke('batch:queue-clear-all'),
 
+  batchQueueClearDone: (): Promise<{ deleted: number }> =>
+    ipcRenderer.invoke('batch:queue-clear-done'),
+
   onBatchTick: (cb: (stats: BatchStats) => void) => {
     const handler = (_evt: Electron.IpcRendererEvent, stats: BatchStats) => cb(stats)
     ipcRenderer.on('batch:tick', handler)

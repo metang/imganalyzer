@@ -66,6 +66,8 @@ export interface UseBatchProcessReturn {
   retryFailed(modules: string[]): Promise<void>
   /** Wipe the entire job queue and reset to idle. Returns number of deleted jobs. */
   clearQueue(): Promise<number>
+  /** Remove completed (done + skipped) jobs from the queue. Returns number of deleted jobs. */
+  clearCompleted(): Promise<number>
   pause(): Promise<void>
   resume(): Promise<void>
   stop(folder: string): Promise<void>
@@ -233,6 +235,16 @@ export function useBatchProcess(): UseBatchProcessReturn {
     }
   }, [])
 
+  const clearCompleted = useCallback(async (): Promise<number> => {
+    try {
+      const { deleted } = await window.api.batchQueueClearDone()
+      return deleted
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      return 0
+    }
+  }, [])
+
   return {
     stats,
     results,
@@ -244,6 +256,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
     resumePending,
     retryFailed,
     clearQueue,
+    clearCompleted,
     pause,
     resume,
     stop,

@@ -268,6 +268,10 @@ export function BatchRunView({
     await batch.clearQueue()
   }, [batch])
 
+  const handleClearCompleted = useCallback(async () => {
+    await batch.clearCompleted()
+  }, [batch])
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <div className="flex flex-col gap-4 h-full overflow-hidden px-4 py-4">
@@ -301,6 +305,7 @@ export function BatchRunView({
           onStop={() => setShowStopDialog(true)}
           onRetryFailed={batch.retryFailed}
           onClearQueue={handleClearQueue}
+          onClearCompleted={handleClearCompleted}
         />
 
         <div className="flex-1 flex flex-col min-h-0 border-t border-neutral-800 pt-3">

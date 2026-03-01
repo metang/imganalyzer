@@ -7,6 +7,7 @@ interface Props {
   onStop(): void
   onRetryFailed(modules: string[]): void
   onClearQueue(): void
+  onClearCompleted(): void
 }
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
@@ -90,7 +91,7 @@ function ModuleTableRow({ name, stats }: { name: string; stats: BatchModuleStats
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFailed, onClearQueue }: Props) {
+export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFailed, onClearQueue, onClearCompleted }: Props) {
   const { status, totals, modules, imagesPerSec, avgMsPerImage, estimatedMs, elapsedMs } = stats
 
   const totalJobs  = totals.pending + totals.running + totals.done + totals.failed + totals.skipped
@@ -112,6 +113,7 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
 
   const canRetry      = failedModules.length > 0 && !isRunning
   const canClearQueue = !isRunning && !isPaused && totalJobs > 0
+  const canClearCompleted = !isRunning && !isPaused && (totals.done + totals.skipped) > 0
 
   const moduleEntries = Object.entries(modules).filter(
     (entry): entry is [string, BatchModuleStats] => entry[1] != null
@@ -235,6 +237,19 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
             title="Delete all jobs from the queue and reset to idle"
           >
             Clear queue
+          </button>
+        )}
+        {canClearCompleted && (
+          <button
+            onClick={onClearCompleted}
+            className="
+              px-4 py-1.5 rounded-lg text-sm text-neutral-400
+              bg-neutral-800 border border-neutral-700
+              hover:bg-neutral-700/50 hover:border-neutral-600 hover:text-neutral-200 transition-colors
+            "
+            title={`Remove ${totals.done + totals.skipped} completed job${totals.done + totals.skipped !== 1 ? 's' : ''} from the queue`}
+          >
+            Clear completed ({totals.done + totals.skipped})
           </button>
         )}
       </div>

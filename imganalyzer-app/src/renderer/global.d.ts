@@ -290,6 +290,7 @@ declare global {
       batchResumePending(workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<void>
       batchRetryFailed(modules: string[]): Promise<void>
       batchQueueClearAll(): Promise<{ deleted: number }>
+      batchQueueClearDone(): Promise<{ deleted: number }>
       onBatchTick(cb: (stats: BatchStats) => void): () => void
       onBatchResult(cb: (result: BatchResult) => void): () => void
       onBatchIngestLine(cb: (line: string) => void): () => void

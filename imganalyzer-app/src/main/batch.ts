@@ -667,4 +667,23 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
     return result
   })
+
+  // ── batch:queue-clear-done ────────────────────────────────────────────────
+  // Removes completed (done + skipped) jobs from the queue.
+  // Safe to call while idle — does not affect pending/running/failed jobs.
+  // Note: after clearing, re-ingest will re-enqueue these images.
+  ipcMain.handle('batch:queue-clear-done', async (): Promise<{ deleted: number }> => {
+    if (batchStatus === 'running' || batchStatus === 'paused') {
+      throw new Error('Cannot clear completed jobs while a batch is running. Stop the batch first.')
+    }
+
+    const result = await rpc.call('queue_clear', {
+      status: 'done,skipped',
+    }) as { deleted: number }
+
+    // Refresh stats so the renderer sees updated counts
+    void doPoll()
+
+    return result
+  })
 }
