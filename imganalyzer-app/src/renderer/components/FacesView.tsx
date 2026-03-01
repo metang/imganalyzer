@@ -306,7 +306,9 @@ export function FacesView() {
   const [linkingClusterId, setLinkingClusterId] = useState<number | null>(null)
   const [showCreatePerson, setShowCreatePerson] = useState(false)
   const [newPersonName, setNewPersonName] = useState('')
+  const [linkSearchFilter, setLinkSearchFilter] = useState('')
   const newPersonRef = useRef<HTMLInputElement>(null)
+  const linkSearchRef = useRef<HTMLInputElement>(null)
 
   // Delete person confirmation
   const [deletingPersonId, setDeletingPersonId] = useState<number | null>(null)
@@ -670,6 +672,8 @@ export function FacesView() {
             setLinkingClusterId(clusterId)
             setShowCreatePerson(false)
             setNewPersonName('')
+            setLinkSearchFilter('')
+            setTimeout(() => linkSearchRef.current?.focus(), 0)
           }}
           className="text-xs text-cyan-400/70 hover:text-cyan-300 transition-colors shrink-0"
           title="Link to person"
@@ -679,22 +683,50 @@ export function FacesView() {
       )
     }
 
+    const lowerFilter = linkSearchFilter.toLowerCase()
+    const filteredPersons = lowerFilter
+      ? persons.filter((p) => p.name.toLowerCase().includes(lowerFilter))
+      : persons
+
     return (
       <div
         className="absolute right-4 top-full mt-1 z-40 bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl
-                    min-w-[180px] py-1 text-sm"
+                    min-w-[220px] py-1 text-sm"
         onClick={(e) => e.stopPropagation()}
       >
-        {persons.map((p) => (
-          <button
-            key={p.id}
-            onClick={() => handleLinkCluster(clusterId, p.id)}
-            className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-neutral-200 truncate"
-          >
-            {p.name}
-            <span className="text-neutral-500 ml-1 text-xs">({p.face_count})</span>
-          </button>
-        ))}
+        {/* Search filter */}
+        <div className="px-2 pb-1 pt-0.5">
+          <input
+            ref={linkSearchRef}
+            value={linkSearchFilter}
+            onChange={(e) => setLinkSearchFilter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') { setLinkingClusterId(null); setLinkSearchFilter('') }
+              if (e.key === 'Enter' && filteredPersons.length === 1) {
+                handleLinkCluster(clusterId, filteredPersons[0].id)
+              }
+            }}
+            placeholder="Search persons..."
+            className="w-full px-2 py-1 text-xs rounded bg-neutral-800 border border-neutral-600
+                       text-neutral-100 placeholder-neutral-500 outline-none focus:border-blue-500"
+            autoFocus
+          />
+        </div>
+        <div className="max-h-[200px] overflow-y-auto">
+          {filteredPersons.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => handleLinkCluster(clusterId, p.id)}
+              className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-neutral-200 truncate"
+            >
+              {p.name}
+              <span className="text-neutral-500 ml-1 text-xs">({p.face_count})</span>
+            </button>
+          ))}
+          {filteredPersons.length === 0 && lowerFilter && (
+            <div className="px-3 py-1.5 text-xs text-neutral-500">No match</div>
+          )}
+        </div>
         <div className="border-t border-neutral-700 mt-1 pt-1">
           {showCreatePerson ? (
             <div className="px-3 py-1.5 flex items-center gap-1">
