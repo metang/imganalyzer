@@ -47,13 +47,14 @@ const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellPro
     const el = cellRef.current
     if (!el) return
 
+    let cancelled = false
+
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0].isIntersecting && !loadedRef.current) {
           loadedRef.current = true
           observer.disconnect()
 
-          let cancelled = false
           setLoading(true)
           setError(false)
 
@@ -71,15 +72,16 @@ const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellPro
               setLoading(false)
             }
           })
-
-          return () => { cancelled = true }
         }
       },
       { rootMargin: '200px' }  // start loading 200px before it enters view
     )
 
     observer.observe(el)
-    return () => observer.disconnect()
+    return () => {
+      cancelled = true
+      observer.disconnect()
+    }
   }, [item.file_path])
 
   // Aesthetic score badge color
