@@ -161,8 +161,22 @@ def _handle_status(params: dict) -> dict:
 def _handle_ingest(req_id: int | str, params: dict) -> None:
     """Ingest folders — streaming progress notifications, then final result."""
     from imganalyzer.pipeline.batch import BatchProcessor
+    from imganalyzer.db.connection import get_db_path
 
-    conn = _get_db()
+    # Open a FRESH connection for this thread — _handle_ingest runs in a
+    # daemon thread (async RPC method) and cannot reuse the main-thread
+    # singleton returned by _get_db().
+    db_path = get_db_path()
+    conn = sqlite3.connect(
+        str(db_path),
+        timeout=30,
+        check_same_thread=False,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
     processor = BatchProcessor(conn)
 
     folders = [Path(f) for f in params.get("folders", [])]
@@ -203,11 +217,13 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
         )
     except Exception as exc:
         builtins.print = _orig_print
+        conn.close()
         _send_error(req_id, -1, f"Ingest failed: {exc}")
         return
     finally:
         builtins.print = _orig_print
 
+    conn.close()
     _send_result(req_id, {
         "ok": True,
         "registered": ingest_stats.get("registered", 0),
