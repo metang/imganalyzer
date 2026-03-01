@@ -11,7 +11,7 @@ from typing import Any
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class JobQueue:
@@ -108,29 +108,35 @@ class JobQueue:
             params.append(module)
         params.append(batch_size)
 
-        # SQLite doesn't support UPDATE ... RETURNING in older versions,
-        # so we use a two-step SELECT + UPDATE within an exclusive lock.
-        rows = self.conn.execute(
-            f"""SELECT id, image_id, module, attempts
-                FROM job_queue
-                {where}
-                ORDER BY priority DESC, queued_at ASC
-                LIMIT ?""",
-            params,
-        ).fetchall()
+        # Use BEGIN IMMEDIATE to prevent concurrent claims from selecting
+        # the same jobs (atomic SELECT + UPDATE).
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.conn.execute(
+                f"""SELECT id, image_id, module, attempts
+                    FROM job_queue
+                    {where}
+                    ORDER BY priority DESC, queued_at ASC
+                    LIMIT ?""",
+                params,
+            ).fetchall()
 
-        if not rows:
-            return []
+            if not rows:
+                self.conn.rollback()
+                return []
 
-        job_ids = [r["id"] for r in rows]
-        placeholders = ",".join("?" * len(job_ids))
-        self.conn.execute(
-            f"""UPDATE job_queue
-                SET status = 'running', started_at = ?
-                WHERE id IN ({placeholders})""",
-            [_now()] + job_ids,
-        )
-        self.conn.commit()
+            job_ids = [r["id"] for r in rows]
+            placeholders = ",".join("?" * len(job_ids))
+            self.conn.execute(
+                f"""UPDATE job_queue
+                    SET status = 'running', started_at = ?
+                    WHERE id IN ({placeholders})""",
+                [_now()] + job_ids,
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return [dict(r) for r in rows]
 
     # ── Complete / Fail / Skip ─────────────────────────────────────────────
