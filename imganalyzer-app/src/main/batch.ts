@@ -98,6 +98,8 @@ let sessionConfig: SessionConfig | null = null
 let batchStatus: BatchStatus = 'idle'
 let sessionStartMs = 0
 let isRunActive = false
+let currentRunId = 0
+let idleTimer: ReturnType<typeof setTimeout> | null = null
 
 // Sliding window of { timestamp, durationMs, module } for avg-per-image computation
 const completionWindow: Array<{ ts: number; durationMs: number; module: string }> = []
@@ -284,54 +286,59 @@ function setupNotificationListener(): void {
         break
       }
 
-      case 'run/done':
-        // Run completed — check if there are still jobs remaining
-        // (e.g. stale 'running' jobs from a previous crash that weren't
-        // recovered because they're newer than the 10-minute timeout).
-        if (batchStatus === 'running') {
-          isRunActive = false
-          stopPolling()
-          void rpc.call('status', {}).then((data: any) => {
-            const pending = data?.totals?.pending ?? 0
-            const running = data?.totals?.running ?? 0
-            if (pending + running > 0) {
-              // Jobs remain — show as paused so Resume/Stop buttons appear
-              batchStatus = 'paused'
-            } else {
-              batchStatus = 'done'
-              setTimeout(() => { batchStatus = 'idle' }, 3000)
-            }
-            void doPoll()
-          }).catch(() => {
+      case 'run/done': {
+        const runId = currentRunId
+        if (batchStatus !== 'running') break
+        isRunActive = false
+        stopPolling()
+        void rpc.call('status', {}).then((data: any) => {
+          if (currentRunId !== runId) return
+          const pending = data?.totals?.pending ?? 0
+          const running = data?.totals?.running ?? 0
+          if (pending + running > 0) {
+            batchStatus = 'paused'
+          } else {
             batchStatus = 'done'
-            void doPoll()
-            setTimeout(() => { batchStatus = 'idle' }, 3000)
-          })
-        }
+            if (idleTimer) clearTimeout(idleTimer)
+            idleTimer = setTimeout(() => { batchStatus = 'idle' }, 3000)
+          }
+          void doPoll()
+        }).catch(() => {
+          if (currentRunId !== runId) return
+          batchStatus = 'done'
+          void doPoll()
+          if (idleTimer) clearTimeout(idleTimer)
+          idleTimer = setTimeout(() => { batchStatus = 'idle' }, 3000)
+        })
         break
+      }
 
-      case 'run/error':
-        // Run encountered an error — same logic: check for remaining jobs
-        if (batchStatus === 'running') {
-          isRunActive = false
-          stopPolling()
-          void rpc.call('status', {}).then((data: any) => {
-            const pending = data?.totals?.pending ?? 0
-            const running = data?.totals?.running ?? 0
-            if (pending + running > 0) {
-              batchStatus = 'paused'
-            } else {
-              batchStatus = 'error'
-              setTimeout(() => { batchStatus = 'idle' }, 3000)
-            }
-            void doPoll()
-          }).catch(() => {
+      case 'run/error': {
+        const runId = currentRunId
+        if (batchStatus !== 'running') break
+        isRunActive = false
+        stopPolling()
+        void rpc.call('status', {}).then((data: any) => {
+          if (currentRunId !== runId) return
+          const pending = data?.totals?.pending ?? 0
+          const running = data?.totals?.running ?? 0
+          if (pending + running > 0) {
+            batchStatus = 'paused'
+          } else {
             batchStatus = 'error'
-            void doPoll()
-            setTimeout(() => { batchStatus = 'idle' }, 3000)
-          })
-        }
+            if (idleTimer) clearTimeout(idleTimer)
+            idleTimer = setTimeout(() => { batchStatus = 'idle' }, 3000)
+          }
+          void doPoll()
+        }).catch(() => {
+          if (currentRunId !== runId) return
+          batchStatus = 'error'
+          void doPoll()
+          if (idleTimer) clearTimeout(idleTimer)
+          idleTimer = setTimeout(() => { batchStatus = 'idle' }, 3000)
+        })
         break
+      }
     }
   })
 }
@@ -409,6 +416,8 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash }
       sessionStartMs = Date.now()
       resetSessionCounters()
+      currentRunId++
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
       batchStatus = 'running'
       isRunActive = true
 
@@ -421,9 +430,12 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           noXmp: true,
           verbose: true,
         })
-      } catch {
-        // The 'run' RPC returns immediately after starting the worker thread.
-        // Errors during actual processing are reported via run/error notification.
+      } catch (err) {
+        isRunActive = false
+        batchStatus = 'error'
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => { batchStatus = 'idle' }, 5000)
+        return
       }
 
       startPolling()
@@ -454,6 +466,8 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     // use staleTimeout=0 to reclaim all stuck 'running' jobs immediately.
     const needsStaleRecovery = !sessionConfig
 
+    currentRunId++
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
     batchStatus = 'running'
     isRunActive = true
 
@@ -470,7 +484,13 @@ export function registerBatchHandlers(win: BrowserWindow): void {
         runParams.staleTimeout = 0
       }
       await rpc.call('run', runParams)
-    } catch { /* ignore */ }
+    } catch (err) {
+      isRunActive = false
+      batchStatus = 'error'
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => { batchStatus = 'idle' }, 5000)
+      return
+    }
 
     startPolling()
   })
@@ -545,6 +565,8 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
       sessionStartMs = Date.now()
       resetSessionCounters()
+      currentRunId++
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
       batchStatus = 'running'
       isRunActive = true
 
@@ -560,7 +582,13 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           verbose: true,
           staleTimeout: 0,
         })
-      } catch { /* ignore */ }
+      } catch (err) {
+        isRunActive = false
+        batchStatus = 'error'
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => { batchStatus = 'idle' }, 5000)
+        return
+      }
 
       startPolling()
     }
@@ -586,6 +614,8 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
       sessionStartMs = Date.now()
       resetSessionCounters()
+      currentRunId++
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
       batchStatus = 'running'
       isRunActive = true
 
@@ -598,7 +628,13 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           noXmp: true,
           verbose: true,
         })
-      } catch { /* ignore */ }
+      } catch (err) {
+        isRunActive = false
+        batchStatus = 'error'
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => { batchStatus = 'idle' }, 5000)
+        return
+      }
 
       startPolling()
     }
