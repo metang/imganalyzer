@@ -308,9 +308,9 @@ class Worker:
                                 futures[fut] = job
                             except RuntimeError:
                                 # Pool already shut down (app exit race) —
-                                # release the claimed job back to pending so
-                                # it can be retried on the next run.
-                                self.queue.mark_pending(job["id"])
+                                # release all remaining claimed jobs back to pending.
+                                for j in range(i, len(jobs)):
+                                    self.queue.mark_pending(jobs[j]["id"])
                                 return futures
                 return futures
 
@@ -788,6 +788,7 @@ class Worker:
         # ``OperationalError: database is locked`` in concurrent cloud
         # worker threads (which have a 30s busy_timeout).
         if fts_snapshot:
+            failed_ids: list[int] = []
             BATCH = 50
             for start in range(0, len(fts_snapshot), BATCH):
                 chunk = fts_snapshot[start:start + BATCH]
@@ -797,26 +798,37 @@ class Worker:
                         try:
                             self.repo.update_search_index(image_id)
                         except Exception:
-                            pass
+                            failed_ids.append(image_id)
                     self.conn.commit()
                 except Exception:
                     self.conn.rollback()
+                    failed_ids.extend(chunk)
+            # Re-add failed IDs so they'll be retried on next flush
+            if failed_ids:
+                with self._fts_lock:
+                    self._fts_dirty.update(failed_ids)
             if self.verbose:
-                console.print(
-                    f"  [dim]Periodic flush: FTS5 rebuilt for "
-                    f"{len(fts_snapshot)} image(s)[/dim]"
-                )
+                count = len(fts_snapshot) - len(failed_ids)
+                if count > 0:
+                    console.print(
+                        f"  [dim]Periodic flush: FTS5 rebuilt for "
+                        f"{count} image(s)[/dim]"
+                    )
 
         # Flush XMP
         if self.write_xmp and xmp_snapshot:
             count = 0
+            failed_xmp: set[int] = set()
             for image_id in xmp_snapshot:
                 try:
                     xmp_path = write_xmp_from_db(self.repo, image_id)
                     if xmp_path:
                         count += 1
                 except Exception:
-                    pass
+                    failed_xmp.add(image_id)
+            if failed_xmp:
+                with self._xmp_lock:
+                    self._xmp_candidates.update(failed_xmp)
             if count and self.verbose:
                 console.print(
                     f"  [dim]Periodic flush: {count} XMP sidecar(s) written[/dim]"
