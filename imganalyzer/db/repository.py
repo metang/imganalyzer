@@ -826,8 +826,8 @@ class Repository:
         """Cluster all face occurrences by cosine similarity of embeddings.
 
         Uses greedy agglomerative clustering: iterate through occurrences
-        sorted by image count (most common first), assign each to the
-        closest existing cluster within *threshold*, or create a new cluster.
+        sorted by id, assign each to the closest existing cluster within
+        *threshold*, or create a new cluster.
 
         Returns the total number of clusters created.
         """
@@ -856,64 +856,53 @@ class Repository:
                 vec = vec / norm
             items.append((r["id"], vec, r["identity_name"]))
 
-        # Greedy clustering
-        clusters: list[tuple[_np.ndarray, int]] = []  # (centroid, cluster_id)
-        assignments: list[tuple[int, int]] = []  # (occurrence_id, cluster_id)
+        # Build centroid matrix for vectorized similarity (O(n·k) instead of O(n²·k))
+        centroids: list[_np.ndarray] = []
+        cluster_ids: list[int] = []
+        cluster_counts: list[int] = []
+        cluster_identity: list[str] = []  # identity of first member
+        assignments: list[tuple[int, int]] = []
         next_cluster_id = 1
 
         for occ_id, vec, identity in items:
-            # Named faces get their own cluster per name
-            if identity and identity != "Unknown":
-                # Find existing cluster for this named identity
-                found = False
-                for centroid, cid in clusters:
-                    sim = float(_np.dot(vec, centroid))
-                    if sim >= threshold:
-                        # Check if this cluster belongs to same identity
-                        # by checking the first assignment
-                        for aid, acid in assignments:
-                            if acid == cid:
-                                for i2, v2, n2 in items:
-                                    if i2 == aid and n2 == identity:
-                                        found = True
-                                        assignments.append((occ_id, cid))
-                                        # Update centroid as running average
-                                        count = sum(1 for _, c in assignments if c == cid)
-                                        centroid[:] = centroid * (count - 1) / count + vec / count
-                                        break
-                                break
-                        if found:
+            matched_idx = -1
+
+            if centroids:
+                # Vectorized cosine similarity against all centroids
+                centroid_mat = _np.stack(centroids)
+                sims = centroid_mat @ vec  # (k,) dot products
+
+                if identity and identity != "Unknown":
+                    # Named: match only clusters with same identity
+                    for i in _np.argsort(-sims):
+                        if sims[i] < threshold:
                             break
-                if not found:
-                    cid = next_cluster_id
-                    next_cluster_id += 1
-                    clusters.append((vec.copy(), cid))
-                    assignments.append((occ_id, cid))
-            else:
-                # Unknown faces — pure embedding similarity
-                best_cid = -1
-                best_sim = -1.0
-                for centroid, cid in clusters:
-                    sim = float(_np.dot(vec, centroid))
-                    if sim > best_sim:
-                        best_sim = sim
-                        best_cid = cid
-                if best_sim >= threshold and best_cid >= 0:
-                    assignments.append((occ_id, best_cid))
-                    # Update centroid
-                    count = sum(1 for _, c in assignments if c == best_cid)
-                    for i, (centroid, cid) in enumerate(clusters):
-                        if cid == best_cid:
-                            clusters[i] = (
-                                centroid * (count - 1) / count + vec / count,
-                                cid,
-                            )
+                        if cluster_identity[i] == identity:
+                            matched_idx = i
                             break
                 else:
-                    cid = next_cluster_id
-                    next_cluster_id += 1
-                    clusters.append((vec.copy(), cid))
-                    assignments.append((occ_id, cid))
+                    # Unknown: match best cluster above threshold
+                    best_idx = int(_np.argmax(sims))
+                    if sims[best_idx] >= threshold:
+                        matched_idx = best_idx
+
+            if matched_idx >= 0:
+                cid = cluster_ids[matched_idx]
+                assignments.append((occ_id, cid))
+                # Update centroid as running average
+                n = cluster_counts[matched_idx] + 1
+                centroids[matched_idx] = (
+                    centroids[matched_idx] * (n - 1) / n + vec / n
+                )
+                cluster_counts[matched_idx] = n
+            else:
+                cid = next_cluster_id
+                next_cluster_id += 1
+                centroids.append(vec.copy())
+                cluster_ids.append(cid)
+                cluster_counts.append(1)
+                cluster_identity.append(identity or "Unknown")
+                assignments.append((occ_id, cid))
 
         # Write cluster assignments back to DB
         self.conn.execute("UPDATE face_occurrences SET cluster_id = NULL")
@@ -923,7 +912,7 @@ class Repository:
                 [cid, occ_id],
             )
 
-        return len(clusters)
+        return len(cluster_ids)
 
     def get_face_occurrences_count(self) -> int:
         """Return total number of face occurrences stored."""

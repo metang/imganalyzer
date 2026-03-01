@@ -868,12 +868,21 @@ def _handle_faces_crop(params: dict) -> dict:
         img = Image.open(path)
         img = img.convert("RGB")
 
-    # Crop face region with some padding
+    # Crop face region with some padding.
+    # IMPORTANT: bbox coordinates were computed on a pre-resized image
+    # (max 1920px long edge) — scale them to the original resolution.
     w, h = img.size
-    x1 = max(0, int(occ["bbox_x1"]))
-    y1 = max(0, int(occ["bbox_y1"]))
-    x2 = min(w, int(occ["bbox_x2"]))
-    y2 = min(h, int(occ["bbox_y2"]))
+    det_long_edge = 1920  # _AI_MAX_LONG_EDGE in modules.py
+    orig_long_edge = max(w, h)
+    if orig_long_edge > det_long_edge:
+        scale = orig_long_edge / det_long_edge
+    else:
+        scale = 1.0
+
+    x1 = max(0, int(occ["bbox_x1"] * scale))
+    y1 = max(0, int(occ["bbox_y1"] * scale))
+    x2 = min(w, int(occ["bbox_x2"] * scale))
+    y2 = min(h, int(occ["bbox_y2"] * scale))
 
     # Add 20% padding around the face
     fw = x2 - x1

@@ -155,7 +155,7 @@ export function registerFaceHandlers(): void {
         await ensureServerRunning()
         const result = await rpc.call('faces/run-clustering', {
           threshold: threshold ?? 0.55,
-        }) as { num_clusters: number }
+        }, undefined, 300_000) as { num_clusters: number }
         return { num_clusters: result.num_clusters }
       } catch (err) {
         return { num_clusters: 0, error: String(err) }
