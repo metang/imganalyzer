@@ -238,6 +238,15 @@ class Worker:
     def _run_loop(self, batch_size: int) -> dict[str, int]:
         stats = {"done": 0, "failed": 0, "skipped": 0}
 
+        # Cap PyTorch CUDA memory usage to 70% of physical VRAM to leave
+        # headroom for other applications and avoid virtual memory spilling.
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.set_per_process_memory_fraction(0.70)
+        except Exception:
+            pass
+
         # Recover stale jobs from previous crashes
         recovered = self.queue.recover_stale(self.stale_timeout)
         if recovered:
@@ -516,11 +525,12 @@ class Worker:
         return stats
 
     # ── GPU batch sizes per module ──────────────────────────────────────
-    # Tuned to stay within the 14 GB VRAM ceiling with model unloading.
+    # Tuned to stay within ~70% of GPU VRAM (e.g. ~11 GB on a 16 GB card)
+    # to leave headroom for other applications and CUDA allocator overhead.
     _GPU_BATCH_SIZES: dict[str, int] = {
-        "objects":   8,   # GroundingDINO mixed fp16/fp32, ~1.1 GB model
-        "blip2":     2,   # BLIP-2 fp16, beam search is memory-hungry
-        "embedding": 32,  # CLIP ViT-L/14 fp16, ~0.95 GB model
+        "objects":   4,   # GroundingDINO mixed fp16/fp32, ~1.1 GB model
+        "blip2":     1,   # BLIP-2 fp16, ~4.7 GB model + beam search
+        "embedding": 16,  # CLIP ViT-L/14 fp16, ~0.95 GB model
     }
 
     def _process_job_batch(
