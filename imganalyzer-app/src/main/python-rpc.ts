@@ -18,10 +18,13 @@
  */
 
 import { spawn, ChildProcess } from 'child_process'
+import { app } from 'electron'
+import { dirname } from 'path'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const PKG_ROOT = process.env.IMGANALYZER_PKG_ROOT || 'D:\\Code\\imganalyzer'
+// app.getAppPath() returns imganalyzer-app/ in dev; the package root is its parent.
+const PKG_ROOT = process.env.IMGANALYZER_PKG_ROOT || dirname(app.getAppPath())
 const CONDA_ENV = 'imganalyzer'
 const STARTUP_TIMEOUT_MS = 30_000
 const CALL_TIMEOUT_MS = 120_000

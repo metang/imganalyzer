@@ -18,6 +18,7 @@
  */
 
 import { spawn, execSync, execFileSync } from 'child_process'
+import { app } from 'electron'
 import { existsSync, unlinkSync, writeFileSync } from 'fs'
 import { dirname, join, extname } from 'path'
 import { tmpdir } from 'os'
@@ -81,7 +82,7 @@ function convertRawToJpeg(rawPath: string): string {
 
   writeFileSync(scriptPath, RAW_CONVERT_SCRIPT, 'utf-8')
 
-  const pkgRoot = process.env.IMGANALYZER_PKG_ROOT || 'D:\\Code\\imganalyzer'
+  const pkgRoot = process.env.IMGANALYZER_PKG_ROOT || dirname(app.getAppPath())
 
   execFileSync(
     'conda',
