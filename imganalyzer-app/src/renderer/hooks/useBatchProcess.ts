@@ -72,6 +72,7 @@ export interface UseBatchProcessReturn {
 }
 
 const MAX_RESULTS = 200
+const MAX_INGEST_LINES = 500
 
 export function useBatchProcess(): UseBatchProcessReturn {
   const [stats, setStats] = useState<BatchStats>(emptyStats())
@@ -101,7 +102,10 @@ export function useBatchProcess(): UseBatchProcessReturn {
       })
     })
     unsubIngestRef.current = window.api.onBatchIngestLine((line) => {
-      setIngestLines((prev) => [...prev, line])
+      setIngestLines((prev) => {
+        const next = [...prev, line]
+        return next.length > MAX_INGEST_LINES ? next.slice(-MAX_INGEST_LINES) : next
+      })
     })
     unsubIngestProgressRef.current = window.api.onBatchIngestProgress((p) => {
       setIngestProgress(p)
