@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -31,6 +31,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         5: _migrate_v5,
         6: _migrate_v6,
         7: _migrate_v7,
+        8: _migrate_v8,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -451,5 +452,12 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
             ON face_occurrences(cluster_id);
         CREATE INDEX IF NOT EXISTS idx_face_occ_identity
             ON face_occurrences(identity_name);
+    """)
+
+
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """Add ``det_score`` column to ``face_occurrences`` for detection confidence filtering."""
+    conn.execute("""
+        ALTER TABLE face_occurrences ADD COLUMN det_score REAL
     """)
 

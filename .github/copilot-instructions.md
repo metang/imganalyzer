@@ -64,7 +64,7 @@ Prerequisites: `cloud_ai`, `aesthetic`, `ocr`, and `faces` all depend on `object
 
 SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema managed by sequential migrations in `db/schema.py`. The `overrides` table protects user-edited fields from being overwritten during re-analysis.
 
-## Critical Conventions
+for ## Critical Conventions
 
 ### SQLite: NEVER reuse connections across threads
 

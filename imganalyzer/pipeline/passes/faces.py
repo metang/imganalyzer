@@ -18,6 +18,8 @@ def run_faces(
     image_id: int,
     conn: sqlite3.Connection,
     face_match_threshold: float | None = None,
+    face_det_score_threshold: float = 0.65,
+    face_min_size: int = 40,
 ) -> dict[str, Any]:
     """Run InsightFace on *image_data* using the person flag from ``analysis_objects``.
 
@@ -39,6 +41,8 @@ def run_faces(
         image_data,
         face_db=face_db if len(face_db) > 0 else None,
         match_threshold=face_match_threshold,
+        det_score_threshold=face_det_score_threshold,
+        min_face_pixels=face_min_size,
     )
 
     try:

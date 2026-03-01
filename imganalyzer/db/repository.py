@@ -678,8 +678,8 @@ class Repository:
             self.conn.execute(
                 """INSERT INTO face_occurrences
                    (image_id, face_idx, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
-                    embedding, age, gender, identity_name)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    embedding, age, gender, identity_name, det_score)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     image_id,
                     occ["face_idx"],
@@ -691,6 +691,7 @@ class Repository:
                     occ.get("age"),
                     occ.get("gender"),
                     occ.get("identity_name", "Unknown"),
+                    occ.get("det_score"),
                 ],
             )
 

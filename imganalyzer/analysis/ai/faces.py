@@ -49,6 +49,8 @@ class FaceAnalyzer:
         image_data: dict[str, Any],
         face_db: "Any | None" = None,
         match_threshold: float | None = None,
+        det_score_threshold: float = 0.65,
+        min_face_pixels: int = 40,
     ) -> dict[str, Any]:
         try:
             import insightface  # noqa: F401
@@ -66,6 +68,21 @@ class FaceAnalyzer:
         app = FaceAnalyzer._app
 
         faces = app.get(bgr)
+
+        # Filter out low-confidence and tiny detections
+        if faces:
+            filtered = []
+            for face in faces:
+                score = getattr(face, "det_score", 1.0)
+                if score < det_score_threshold:
+                    continue
+                bbox = face.bbox
+                fw = bbox[2] - bbox[0]
+                fh = bbox[3] - bbox[1]
+                if min(fw, fh) < min_face_pixels:
+                    continue
+                filtered.append(face)
+            faces = filtered
 
         if not faces:
             return {
@@ -105,6 +122,7 @@ class FaceAnalyzer:
                 "bbox_y1": float(bbox[1]),
                 "bbox_x2": float(bbox[2]),
                 "bbox_y2": float(bbox[3]),
+                "det_score": float(getattr(face, "det_score", 0.0)),
                 "age": age if age >= 0 else None,
                 "gender": gender,
                 "identity_name": name,
