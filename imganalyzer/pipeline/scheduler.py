@@ -13,6 +13,7 @@ Key improvements over the old phase-based approach:
 
 from __future__ import annotations
 
+import queue as _queue
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Optional
@@ -172,6 +173,7 @@ class ResourceScheduler:
         cloud_pool: ThreadPoolExecutor,
         stats: dict[str, int],
         unload_fn: Callable[[str], None],
+        prefetch_fn: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
     ) -> None:
         """Execute one GPU phase, potentially with co-resident models.
 
@@ -219,22 +221,80 @@ class ResourceScheduler:
 
                 flush_fn()
         else:
-            # Multi-module phase: each GPU module gets its own thread
+            # Multi-module phase: each GPU module gets its own thread.
+            # When a prefetch_fn is provided, IO threads read+decode images
+            # ahead of GPU consumption so the GPU never waits for disk IO.
             gpu_threads: list[threading.Thread] = []
             lock = threading.Lock()
 
+            _PREFETCH_DEPTH = 4   # max images buffered ahead of GPU
+            _PREFETCH_WORKERS = 3  # IO reader threads per module
+
             def _drain_module(mod: str) -> None:
                 batch_sz = self.batch_size_for(mod)
-                while not self.is_shutdown:
-                    jobs = claim_fn(batch_sz, mod)
-                    if not jobs:
-                        break
+                use_prefetch = prefetch_fn is not None and not self.is_batch_capable(mod)
 
-                    batch_result = process_batch_fn(jobs, mod)
+                if not use_prefetch:
+                    # Original path for batch-capable modules
+                    while not self.is_shutdown:
+                        jobs = claim_fn(batch_sz, mod)
+                        if not jobs:
+                            break
+                        batch_result = process_batch_fn(jobs, mod)
+                        with lock:
+                            for k in ("done", "failed", "skipped"):
+                                stats[k] += batch_result[k]
+                        advance_fn(len(jobs))
+                    return
+
+                # ── Prefetched pipeline for non-batch modules ────────────
+                # Producer threads read images; GPU thread consumes.
+                prefetch_q: _queue.Queue[
+                    tuple[dict[str, Any], dict[str, Any] | None] | None
+                ] = _queue.Queue(maxsize=_PREFETCH_DEPTH)
+                producer_done = threading.Event()
+
+                def _producer() -> None:
+                    """Claim jobs and prefetch images into the queue."""
+                    try:
+                        while not self.is_shutdown:
+                            jobs = claim_fn(batch_sz, mod)
+                            if not jobs:
+                                break
+                            for job in jobs:
+                                if self.is_shutdown:
+                                    return
+                                try:
+                                    img_data = prefetch_fn(job)
+                                except Exception:
+                                    img_data = None
+                                prefetch_q.put((job, img_data))
+                    finally:
+                        producer_done.set()
+                        # Sentinel: tell consumer no more items
+                        prefetch_q.put(None)
+
+                # Start producer thread
+                prod_t = threading.Thread(
+                    target=_producer, daemon=True,
+                    name=f"prefetch-{mod}",
+                )
+                prod_t.start()
+
+                # Consumer: GPU inference on prefetched images
+                while True:
+                    item = prefetch_q.get()
+                    if item is None:
+                        break
+                    job, img_data = item
+                    # process_single_fn will use the cached image if
+                    # prefetch_fn populated the thread-local cache
+                    status = process_single_fn(job)
                     with lock:
-                        for k in ("done", "failed", "skipped"):
-                            stats[k] += batch_result[k]
-                    advance_fn(len(jobs))
+                        stats[status] = stats.get(status, 0) + 1
+                    advance_fn(1)
+
+                prod_t.join(timeout=5)
 
             for mod in modules:
                 t = threading.Thread(

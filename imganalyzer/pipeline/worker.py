@@ -45,6 +45,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
+from pathlib import Path
 from typing import Any
 
 import sqlite3
@@ -54,7 +55,9 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from imganalyzer.db.connection import get_db_path
 from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository
-from imganalyzer.pipeline.modules import ModuleRunner, write_xmp_from_db, unload_gpu_model
+from imganalyzer.pipeline.modules import (
+    ModuleRunner, write_xmp_from_db, unload_gpu_model, _read_image, _pre_resize,
+)
 from imganalyzer.pipeline.vram_budget import VRAMBudget
 from imganalyzer.pipeline.scheduler import ResourceScheduler
 
@@ -178,6 +181,10 @@ class Worker:
         self._last_flush_time = time.time()
         # Thread-local storage for per-thread DB objects
         self._local = threading.local()
+        # Prefetch cache: maps image_id → pre-read image_data for IO/GPU overlap.
+        # Populated by the scheduler's prefetch producer threads, consumed by
+        # _process_job on the GPU thread.  Thread-safe via dict atomicity.
+        self._prefetch_cache: dict[int, dict[str, Any]] = {}
 
     def _get_thread_db(self) -> tuple[sqlite3.Connection, Repository, JobQueue, "ModuleRunner"]:
         """Return (conn, repo, queue, runner) local to the current thread.
@@ -344,6 +351,30 @@ class Worker:
             def _advance_fn(count: int) -> None:
                 progress.advance(task, advance=count)
 
+            # ── Helper: prefetch image for IO/GPU overlap ─────────────────────
+            def _prefetch_image(job: dict[str, Any]) -> dict[str, Any] | None:
+                """Read + decode + resize an image on a background IO thread.
+
+                Stores result in ``_prefetch_cache[image_id]`` so that
+                ``_process_job`` → ``_cached_read_image`` can skip disk IO.
+                """
+                image_id = job["image_id"]
+                _, repo, _, _ = self._get_thread_db()
+                image_row = repo.get_image(image_id)
+                if image_row is None:
+                    return None
+                path = Path(image_row["file_path"])
+                if not path.exists():
+                    return None
+                try:
+                    data = _read_image(path)
+                    data = _pre_resize(data)
+                    # Store in shared cache for the GPU consumer thread
+                    self._prefetch_cache[image_id] = data
+                    return data
+                except Exception:
+                    return None
+
             # ════════════════════════════════════════════════════════════════
             # GPU Phases (scheduler-driven)
             # Phase 0: objects (exclusive, unlocks dependencies)
@@ -387,6 +418,7 @@ class Worker:
                         cloud_pool=cloud_pool,
                         stats=stats,
                         unload_fn=unload_gpu_model,
+                        prefetch_fn=_prefetch_image,
                     )
 
             # ════════════════════════════════════════════════════════════════
@@ -439,6 +471,8 @@ class Worker:
         "objects":   4,   # GroundingDINO mixed fp16/fp32, ~1.1 GB model
         "blip2":     1,   # BLIP-2 fp16, ~4.7 GB model + beam search
         "embedding": 16,  # CLIP ViT-L/14 fp16, ~0.95 GB model
+        "faces":     8,   # InsightFace ONNX — claim granularity for prefetch
+        "ocr":       4,   # TrOCR — claim granularity for prefetch
     }
 
     def _process_job_batch(
@@ -649,6 +683,11 @@ class Worker:
                     queue.mark_skipped(job_id, "has_people")
                     _emit_result(path, module, "skipped", 0, "has_people")
                     return "skipped"
+
+            # ── Prime image cache from prefetch (IO/GPU overlap) ────────────
+            prefetched = self._prefetch_cache.pop(image_id, None)
+            if prefetched is not None:
+                runner.prime_image_cache(Path(path), prefetched)
 
             # ── Run the module ───────────────────────────────────────────────
             result = runner.run(image_id, module)

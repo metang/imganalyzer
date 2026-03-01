@@ -28,7 +28,7 @@ class TestVRAMBudget:
         vram = self._make()
         vram.reserve("faces")
         assert "faces" in vram.loaded_modules
-        assert vram.used_gb == pytest.approx(0.5)
+        assert vram.used_gb == pytest.approx(1.0)
 
         vram.release("faces")
         assert vram.loaded_modules == []
@@ -36,14 +36,14 @@ class TestVRAMBudget:
 
     def test_can_fit_small_models(self):
         vram = self._make()
-        # All three small models fit together: 0.5 + 1.3 + 0.95 = 2.75 GB
+        # All three small models fit together: 1.0 + 1.3 + 0.95 = 3.25 GB
         assert vram.can_fit("faces")
         vram.reserve("faces")
         assert vram.can_fit("ocr")
         vram.reserve("ocr")
         assert vram.can_fit("embedding")
         vram.reserve("embedding")
-        assert vram.used_gb == pytest.approx(2.75)
+        assert vram.used_gb == pytest.approx(3.25)
 
     def test_exclusive_module_alone(self):
         vram = self._make()
@@ -65,7 +65,7 @@ class TestVRAMBudget:
         vram = self._make()
         vram.reserve("faces")
         vram.reserve("faces")  # no-op
-        assert vram.used_gb == pytest.approx(0.5)
+        assert vram.used_gb == pytest.approx(1.0)
 
     def test_release_nonexistent(self):
         vram = self._make()

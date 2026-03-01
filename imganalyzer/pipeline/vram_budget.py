@@ -20,7 +20,7 @@ _MODULE_VRAM_GB: dict[str, float] = {
     "objects":   2.4,   # GroundingDINO mixed fp16/fp32, batch=4
     "blip2":     6.0,   # BLIP-2 FlanT5-XL fp16 + beam search
     "ocr":       1.3,   # TrOCR large-printed fp16
-    "faces":     0.5,   # InsightFace buffalo_l ONNX (512 MB cap)
+    "faces":     1.0,   # InsightFace buffalo_l ONNX (1 GB arena cap)
     "embedding": 0.95,  # CLIP ViT-L/14 fp16, batch=16
 }
 

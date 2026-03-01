@@ -183,6 +183,14 @@ class ModuleRunner:
         self._image_cache_path = None
         self._image_cache_data = None
 
+    def prime_image_cache(self, path: Path, data: dict[str, Any]) -> None:
+        """Populate the single-entry cache with pre-read image data.
+
+        Used by the prefetch pipeline to overlap IO with GPU inference.
+        """
+        self._image_cache_path = path
+        self._image_cache_data = data
+
     def should_run(self, image_id: int, module: str) -> bool:
         """Return False if the module is already analyzed and force is off."""
         if self.force:

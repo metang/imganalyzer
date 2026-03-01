@@ -219,23 +219,19 @@ class FaceAnalyzer:
 def _get_providers() -> list:
     """Return ONNX Runtime execution providers, preferring CUDA.
 
-    When CUDA is available, applies a GPU memory limit (512 MB) and
-    conservative arena strategy to prevent ONNX RT from over-allocating
-    VRAM.  InsightFace buffalo_l weights total ~400 MB, so 512 MB
-    provides sufficient headroom without wasting GPU memory that other
-    models (BLIP-2, CLIP, etc.) need.
+    When CUDA is available, applies a GPU memory limit (1 GB) and
+    conservative arena strategy.  InsightFace buffalo_l weights total
+    ~400 MB; the extra headroom allows ONNX RT to keep intermediate
+    tensors in GPU memory across inference calls, avoiding repeated
+    allocation overhead.  The VRAM budget system (vram_budget.py)
+    manages co-residency at a higher level.
     """
     try:
         import onnxruntime as ort
         available = ort.get_available_providers()
         if "CUDAExecutionProvider" in available:
             cuda_opts = {
-                # Cap the ONNX arena allocator at 512 MB.  Without this,
-                # ONNX RT may speculatively allocate up to 2 GB via its
-                # default doubling strategy.
-                "gpu_mem_limit": str(512 * 1024 * 1024),
-                # Prevent arena from doubling on every extension — allocate
-                # only what is actually needed.  Reduces peak VRAM waste.
+                "gpu_mem_limit": str(1024 * 1024 * 1024),  # 1 GB
                 "arena_extend_strategy": "kSameAsRequested",
             }
             return [
