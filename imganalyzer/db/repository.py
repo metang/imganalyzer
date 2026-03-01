@@ -319,6 +319,10 @@ class Repository:
         if table is None:
             raise ValueError(f"Unknown module: {module}")
         self.conn.execute(f"DELETE FROM {table} WHERE image_id = ?", [image_id])
+        if module == "faces":
+            self.conn.execute(
+                "DELETE FROM face_occurrences WHERE image_id = ?", [image_id]
+            )
         if commit:
             self.conn.commit()
 
