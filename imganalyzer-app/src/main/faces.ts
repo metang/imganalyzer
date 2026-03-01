@@ -177,4 +177,20 @@ export function registerFaceHandlers(): void {
       }
     }
   )
+
+  ipcMain.handle(
+    'faces:rebuild',
+    async (): Promise<{ enqueued: number; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('rebuild', {
+          module: 'faces',
+          force: true,
+        }) as { enqueued: number }
+        return { enqueued: result.enqueued }
+      } catch (err) {
+        return { enqueued: 0, error: String(err) }
+      }
+    }
+  )
 }

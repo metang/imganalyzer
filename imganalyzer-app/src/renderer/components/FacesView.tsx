@@ -208,6 +208,10 @@ export function FacesView() {
   // Clustering state
   const [clustering, setClustering] = useState(false)
 
+  // Rebuild state
+  const [rebuilding, setRebuilding] = useState(false)
+  const [showRebuildConfirm, setShowRebuildConfirm] = useState(false)
+
   // ── Load data ─────────────────────────────────────────────────────────────
 
   const loadData = useCallback(async () => {
@@ -265,6 +269,25 @@ export function FacesView() {
       setClustering(false)
     }
   }, [loadData])
+
+  const handleRebuild = useCallback(async () => {
+    setShowRebuildConfirm(false)
+    setRebuilding(true)
+    try {
+      const result = await window.api.rebuildFaces()
+      if (result.error) {
+        setError(result.error)
+      } else {
+        setError(null)
+        // Show enqueued count as a transient message
+        setError(`✓ ${result.enqueued} face jobs enqueued. Start a batch run to process them.`)
+      }
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setRebuilding(false)
+    }
+  }, [])
 
   // ── Expand / collapse ─────────────────────────────────────────────────────
 
@@ -589,6 +612,22 @@ export function FacesView() {
             </button>
           )}
           <button
+            onClick={() => setShowRebuildConfirm(true)}
+            disabled={rebuilding}
+            className="px-3 py-1 text-xs rounded-md bg-amber-900/50 text-amber-300 hover:bg-amber-800/60
+                       disabled:opacity-50 transition-colors border border-amber-700/40"
+            title="Re-enqueue face analysis for all images (regenerates thumbnails)"
+          >
+            {rebuilding ? (
+              <span className="flex items-center gap-1.5">
+                <span className="w-3 h-3 border border-amber-600 border-t-amber-300 rounded-full animate-spin" />
+                Rebuilding...
+              </span>
+            ) : (
+              'Rebuild Faces'
+            )}
+          </button>
+          <button
             onClick={loadData}
             disabled={loading}
             className="px-3 py-1 text-xs rounded-md bg-neutral-800 text-neutral-300 hover:bg-neutral-700
@@ -606,6 +645,36 @@ export function FacesView() {
           </button>
         </div>
       </div>
+
+      {/* Rebuild confirmation dialog */}
+      {showRebuildConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl p-6 max-w-sm mx-4">
+            <h3 className="text-sm font-semibold text-neutral-200 mb-2">Rebuild Face Analysis?</h3>
+            <p className="text-xs text-neutral-400 mb-4">
+              This will re-enqueue face detection jobs for <strong>all images</strong>.
+              Existing face data will be replaced when the batch runs.
+              You&apos;ll need to start a batch run afterwards to process the queue.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowRebuildConfirm(false)}
+                className="px-3 py-1.5 text-xs rounded-md bg-neutral-800 text-neutral-300 hover:bg-neutral-700
+                           transition-colors border border-neutral-600"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRebuild}
+                className="px-3 py-1.5 text-xs rounded-md bg-amber-700 text-white hover:bg-amber-600
+                           transition-colors"
+              >
+                Rebuild All Faces
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Error state */}
       {error && (

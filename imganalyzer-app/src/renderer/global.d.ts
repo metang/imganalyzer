@@ -267,6 +267,7 @@ declare global {
       getFaceCrop(occurrenceId: number): Promise<{ data?: string; error?: string }>
       getFaceCropBatch(ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }>
       runFaceClustering(threshold?: number): Promise<{ num_clusters: number; error?: string }>
+      rebuildFaces(): Promise<{ enqueued: number; error?: string }>
 
       // Batch processing
       batchIngest(

@@ -135,4 +135,7 @@ contextBridge.exposeInMainWorld('api', {
 
   runFaceClustering: (threshold?: number): Promise<{ num_clusters: number; error?: string }> =>
     ipcRenderer.invoke('faces:runClustering', threshold),
+
+  rebuildFaces: (): Promise<{ enqueued: number; error?: string }> =>
+    ipcRenderer.invoke('faces:rebuild'),
 })
