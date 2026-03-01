@@ -118,8 +118,8 @@ contextBridge.exposeInMainWorld('api', {
   getFaceImages: (name: string, limit?: number): Promise<{ images: Array<{ image_id: number; file_path: string; face_count: number }>; error?: string }> =>
     ipcRenderer.invoke('faces:images', name, limit),
 
-  setFaceAlias: (canonicalName: string, displayName: string): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('faces:setAlias', canonicalName, displayName),
+  setFaceAlias: (canonicalName: string, displayName: string, clusterId?: number | null): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('faces:setAlias', canonicalName, displayName, clusterId ?? null),
 
   listFaceClusters: (): Promise<{ clusters: Array<{ cluster_id: number | null; identity_name: string; display_name: string | null; identity_id: number | null; image_count: number; face_count: number; representative_id: number | null }>; has_occurrences: boolean; error?: string }> =>
     ipcRenderer.invoke('faces:clusters'),

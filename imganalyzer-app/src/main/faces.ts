@@ -78,13 +78,17 @@ export function registerFaceHandlers(): void {
 
   ipcMain.handle(
     'faces:setAlias',
-    async (_evt, canonicalName: string, displayName: string): Promise<{ ok: boolean; error?: string }> => {
+    async (_evt, canonicalName: string, displayName: string, clusterId?: number | null): Promise<{ ok: boolean; error?: string }> => {
       try {
         await ensureServerRunning()
-        await rpc.call('faces/set-alias', {
+        const rpcParams: Record<string, unknown> = {
           canonical_name: canonicalName,
           display_name: displayName,
-        })
+        }
+        if (clusterId != null) {
+          rpcParams.cluster_id = clusterId
+        }
+        await rpc.call('faces/set-alias', rpcParams)
         return { ok: true }
       } catch (err) {
         return { ok: false, error: String(err) }

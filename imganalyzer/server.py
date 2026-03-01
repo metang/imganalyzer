@@ -777,16 +777,23 @@ def _handle_faces_images(params: dict) -> dict:
 
 
 def _handle_faces_set_alias(params: dict) -> dict:
-    """Set or update the display name (alias) for a face identity.
+    """Set or update the display name (alias) for a face cluster or identity.
 
-    Creates a ``face_identities`` registry record if one doesn't exist yet.
+    When ``cluster_id`` is provided, stores a per-cluster label.
+    Otherwise falls back to updating the ``face_identities`` registry.
     """
     from imganalyzer.db.repository import Repository
 
     conn = _get_db()
     repo = Repository(conn)
-    canonical_name = params["canonical_name"]
     display_name = params.get("display_name", "").strip()
+
+    cluster_id = params.get("cluster_id")
+    if cluster_id is not None:
+        repo.set_cluster_label(int(cluster_id), display_name or None)
+        return {"ok": True}
+
+    canonical_name = params["canonical_name"]
 
     # If the identity doesn't exist yet, create it
     existing = repo.get_face_identity(canonical_name)

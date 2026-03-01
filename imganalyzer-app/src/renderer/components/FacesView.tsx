@@ -364,12 +364,20 @@ export function FacesView() {
   }, [])
 
   const saveAlias = useCallback(
-    async (identityName: string) => {
+    async (identityName: string, clusterId?: number | null) => {
       const trimmed = editValue.trim()
       try {
-        await window.api.setFaceAlias(identityName, trimmed)
+        await window.api.setFaceAlias(identityName, trimmed, clusterId)
         // Update local state
-        if (clusters.length > 0) {
+        if (clusters.length > 0 && clusterId != null) {
+          setClusters((prev) =>
+            prev.map((c) =>
+              c.cluster_id === clusterId
+                ? { ...c, display_name: trimmed || null }
+                : c
+            )
+          )
+        } else if (clusters.length > 0) {
           setClusters((prev) =>
             prev.map((c) =>
               c.identity_name === identityName
@@ -396,10 +404,10 @@ export function FacesView() {
   )
 
   const handleEditKeyDown = useCallback(
-    (e: React.KeyboardEvent, identityName: string) => {
+    (e: React.KeyboardEvent, identityName: string, clusterId?: number | null) => {
       if (e.key === 'Enter') {
         e.preventDefault()
-        saveAlias(identityName)
+        saveAlias(identityName, clusterId)
       } else if (e.key === 'Escape') {
         e.preventDefault()
         cancelEditing()
@@ -415,21 +423,21 @@ export function FacesView() {
     ? clusters.reduce((sum, c) => sum + c.face_count, 0)
     : legacyFaces.reduce((sum, f) => sum + f.image_count, 0)
 
-  const renderEditingField = (_key: string, identityName: string) => (
+  const renderEditingField = (_key: string, identityName: string, clusterId?: number | null) => (
     <div className="flex items-center gap-2">
       <input
         ref={editInputRef}
         type="text"
         value={editValue}
         onChange={(e) => setEditValue(e.target.value)}
-        onKeyDown={(e) => handleEditKeyDown(e, identityName)}
+        onKeyDown={(e) => handleEditKeyDown(e, identityName, clusterId)}
         placeholder="Enter alias..."
         className="flex-1 px-2 py-1 text-sm rounded bg-neutral-800 border border-neutral-600
                    text-neutral-100 placeholder-neutral-500 outline-none focus:border-blue-500
                    min-w-0"
       />
       <button
-        onClick={() => saveAlias(identityName)}
+        onClick={() => saveAlias(identityName, clusterId)}
         className="text-emerald-400 hover:text-emerald-300 shrink-0"
         title="Save (Enter)"
       >
@@ -771,7 +779,7 @@ export function FacesView() {
                   {/* Name / alias */}
                   <div className="flex-1 min-w-0">
                     {isEditing ? (
-                      renderEditingField(key, cluster.identity_name)
+                      renderEditingField(key, cluster.identity_name, cluster.cluster_id)
                     ) : (
                       <div>
                         <span className="text-sm text-neutral-100 font-medium truncate block">

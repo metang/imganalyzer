@@ -261,7 +261,7 @@ declare global {
       // Face management
       listFaces(): Promise<{ faces: FaceSummary[]; error?: string }>
       getFaceImages(name: string, limit?: number): Promise<{ images: FaceImage[]; error?: string }>
-      setFaceAlias(canonicalName: string, displayName: string): Promise<{ ok: boolean; error?: string }>
+      setFaceAlias(canonicalName: string, displayName: string, clusterId?: number | null): Promise<{ ok: boolean; error?: string }>
       listFaceClusters(): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; error?: string }>
       getFaceClusterImages(clusterId: number | null, identityName: string | null, limit?: number): Promise<{ occurrences: FaceOccurrence[]; error?: string }>
       getFaceCrop(occurrenceId: number): Promise<{ data?: string; error?: string }>

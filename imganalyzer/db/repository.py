@@ -481,6 +481,21 @@ class Repository:
         )
         self.conn.commit()
 
+    def set_cluster_label(self, cluster_id: int, display_name: str | None) -> None:
+        """Set or clear a per-cluster display name."""
+        if display_name:
+            self.conn.execute(
+                "INSERT INTO face_cluster_labels (cluster_id, display_name) VALUES (?, ?)"
+                " ON CONFLICT(cluster_id) DO UPDATE SET display_name = excluded.display_name",
+                [cluster_id, display_name],
+            )
+        else:
+            self.conn.execute(
+                "DELETE FROM face_cluster_labels WHERE cluster_id = ?",
+                [cluster_id],
+            )
+        self.conn.commit()
+
     def merge_faces(self, keep_name: str, merge_name: str) -> None:
         """Merge *merge_name* into *keep_name* — moves all embeddings."""
         keep = self.conn.execute(
@@ -721,7 +736,7 @@ class Repository:
                      WHERE fo2.cluster_id = fo.cluster_id
                      GROUP BY fo2.identity_name
                      ORDER BY COUNT(*) DESC LIMIT 1) AS identity_name,
-                    fi.display_name,
+                    COALESCE(fcl.display_name, fi.display_name) AS display_name,
                     fi.id AS identity_id,
                     COUNT(DISTINCT fo.image_id) AS image_count,
                     COUNT(fo.id)                AS face_count,
@@ -739,6 +754,8 @@ class Repository:
                         GROUP BY fo4.identity_name
                         ORDER BY COUNT(*) DESC LIMIT 1
                     )
+                LEFT JOIN face_cluster_labels fcl
+                    ON fcl.cluster_id = fo.cluster_id
                 WHERE fo.cluster_id IS NOT NULL
                 GROUP BY fo.cluster_id
                 ORDER BY face_count DESC
