@@ -1350,12 +1350,16 @@ export function FacesView() {
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-3">
                   {unlinkedClusters.map((cluster) => {
                     const displayLabel = cluster.display_name || cluster.identity_name
+                    const isSelected = expandedKey === `cluster:${cluster.cluster_id}`
 
                     return (
                       <div
                         key={`unlinked:${cluster.cluster_id}`}
-                        className="group relative rounded-lg border border-neutral-800 hover:border-neutral-700
-                                   bg-neutral-900/50 hover:bg-neutral-800/40 transition-colors cursor-pointer"
+                        className={`group relative rounded-lg border transition-colors cursor-pointer ${
+                          isSelected
+                            ? 'border-blue-700/60 bg-blue-900/20'
+                            : 'border-neutral-800 hover:border-neutral-700 bg-neutral-900/50 hover:bg-neutral-800/40'
+                        }`}
                         onClick={() => {
                           if (cluster.cluster_id !== null) {
                             const key = `cluster:${cluster.cluster_id}`
