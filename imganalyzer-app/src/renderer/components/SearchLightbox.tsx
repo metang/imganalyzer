@@ -232,6 +232,7 @@ function AnalysisSidebar({ item }: { item: SearchResult }) {
 export function SearchLightbox({ item, items, onClose, onNavigate }: SearchLightboxProps) {
   const [thumb, setThumb] = useState<string>('')
   const [src, setSrc] = useState<string>('')
+  const [loadError, setLoadError] = useState(false)
 
   // Zoom/pan state
   const [zoom, setZoom] = useState(1)
@@ -251,14 +252,19 @@ export function SearchLightbox({ item, items, onClose, onNavigate }: SearchLight
     let cancelled = false
     setThumb('')
     setSrc('')
+    setLoadError(false)
 
     window.api.getThumbnail(item.file_path).then((url) => {
       if (!cancelled && url) setThumb(url)
-    }).catch(() => {})
+    }).catch(() => {
+      if (!cancelled) setLoadError(true)
+    })
 
     window.api.getFullImage(item.file_path).then((url) => {
       if (!cancelled && url) setSrc(url)
-    }).catch(() => {})
+    }).catch(() => {
+      if (!cancelled) setLoadError(true)
+    })
 
     return () => { cancelled = true }
   }, [item.file_path])
@@ -398,8 +404,14 @@ export function SearchLightbox({ item, items, onClose, onNavigate }: SearchLight
           onMouseLeave={handleMouseUp}
           onDoubleClick={handleDblClick}
         >
-          {!thumb && !src && (
+          {!thumb && !src && !loadError && (
             <div className="w-8 h-8 border-2 border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
+          )}
+
+          {loadError && !src && !thumb && (
+            <div className="flex items-center justify-center w-full h-full text-zinc-400">
+              <span>Failed to load image</span>
+            </div>
           )}
 
           {thumb && !src && (
