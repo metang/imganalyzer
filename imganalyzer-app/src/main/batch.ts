@@ -673,7 +673,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   // Safe to call while idle — does not affect pending/running/failed jobs.
   // Note: after clearing, re-ingest will re-enqueue these images.
   ipcMain.handle('batch:queue-clear-done', async (): Promise<{ deleted: number }> => {
-    if (batchStatus === 'running' || batchStatus === 'paused') {
+    if (batchStatus === 'running') {
       throw new Error('Cannot clear completed jobs while a batch is running. Stop the batch first.')
     }
 
