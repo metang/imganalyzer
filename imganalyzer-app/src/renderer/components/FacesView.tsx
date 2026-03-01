@@ -1431,15 +1431,25 @@ export function FacesView() {
           )
         })()}
 
-        {expandedKey && unlinkedClusters.some((c) => `cluster:${c.cluster_id}` === expandedKey) && (
+        {expandedKey && unlinkedClusters.some((c) => `cluster:${c.cluster_id}` === expandedKey) && (() => {
+          const cId = parseInt(expandedKey.replace('cluster:', ''), 10)
+          const cl = unlinkedClusters.find((c) => c.cluster_id === cId)
+          const displayLabel = cl?.display_name || cl?.identity_name || `Cluster #${cId}`
+          return (
           <div className="shrink-0 border-t border-neutral-700 bg-neutral-900 max-h-[40vh] overflow-y-auto">
             <div className="px-4 py-2 border-b border-neutral-800/60 flex items-center justify-between sticky top-0 bg-neutral-900 z-10">
-              <span className="text-xs text-neutral-300 font-medium">{expandedKey.replace('cluster:', 'Cluster #')}</span>
-              <button onClick={() => setExpandedKey(null)} className="text-neutral-500 hover:text-neutral-300 text-xs">Close</button>
+              <span className="text-xs text-neutral-300 font-medium">{displayLabel}</span>
+              <div className="flex items-center gap-3">
+                <div className="relative">
+                  {renderLinkDropdown(cId)}
+                </div>
+                <button onClick={() => setExpandedKey(null)} className="text-neutral-500 hover:text-neutral-300 text-xs">Close</button>
+              </div>
             </div>
             {renderExpandedDetail(expandedKey)}
           </div>
-        )}
+          )
+        })()}
         </div>
       )}
 
