@@ -682,7 +682,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     }) as { deleted: number }
 
     // Refresh stats so the renderer sees updated counts
-    void doPoll()
+    await doPoll()
 
     return result
   })
