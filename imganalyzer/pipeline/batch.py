@@ -284,18 +284,25 @@ class BatchProcessor:
         else:
             self.queue.clear_module(module)
 
-        # Clear analysis data (not overrides) and re-enqueue
+        # Clear analysis data (not overrides) and re-enqueue in a single transaction
         count = 0
-        for image_id in image_ids:
-            self.repo.clear_analysis(image_id, module)
-            job_id = self.queue.enqueue(
-                image_id=image_id,
-                module=module,
-                priority=_module_priority(module),
-                force=True,
-            )
-            if job_id is not None:
-                count += 1
+        self.conn.execute("BEGIN")
+        try:
+            for image_id in image_ids:
+                self.repo.clear_analysis(image_id, module, commit=False)
+                job_id = self.queue.enqueue(
+                    image_id=image_id,
+                    module=module,
+                    priority=_module_priority(module),
+                    force=True,
+                    _auto_commit=False,
+                )
+                if job_id is not None:
+                    count += 1
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
         console.print(
             f"[green]Rebuild queued.[/green] {count} job(s) enqueued for '{module}'."

@@ -313,13 +313,14 @@ class Repository:
             f"INSERT INTO analysis_faces ({col_str}) VALUES ({placeholders})", vals
         )
 
-    def clear_analysis(self, image_id: int, module: str) -> None:
+    def clear_analysis(self, image_id: int, module: str, *, commit: bool = True) -> None:
         """Delete analysis data for a module (preserves overrides)."""
         table = MODULE_TABLE_MAP.get(module)
         if table is None:
             raise ValueError(f"Unknown module: {module}")
         self.conn.execute(f"DELETE FROM {table} WHERE image_id = ?", [image_id])
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     # ── Overrides ──────────────────────────────────────────────────────────
 
