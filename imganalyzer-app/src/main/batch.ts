@@ -41,6 +41,7 @@ export interface SessionConfig {
   cloudProvider: string
   recursive: boolean
   noHash: boolean
+  profile: boolean
 }
 
 export interface BatchModuleStats {
@@ -414,7 +415,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       cloudWorkers = 4,
       profile = false
     ): Promise<void> => {
-      sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash }
+      sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash, profile }
       sessionStartMs = Date.now()
       resetSessionCounters()
       currentRunId++
@@ -481,6 +482,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
         cloudProvider: cloud,
         noXmp: true,
         verbose: true,
+        profile: sessionConfig?.profile ?? false,
       }
       if (needsStaleRecovery) {
         runParams.staleTimeout = 0
@@ -562,6 +564,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           cloudProvider: cloud,
           recursive: true,
           noHash: false,
+          profile: false,
         }
       }
 
@@ -583,6 +586,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           noXmp: true,
           verbose: true,
           staleTimeout: 0,
+          profile: sessionConfig?.profile ?? false,
         })
       } catch (err) {
         isRunActive = false
@@ -629,6 +633,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           cloudProvider: cloud,
           noXmp: true,
           verbose: true,
+          profile: sessionConfig?.profile ?? false,
         })
       } catch (err) {
         isRunActive = false
