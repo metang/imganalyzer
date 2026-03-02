@@ -275,9 +275,12 @@ export function BatchRunView({
   // Combined resume handler: use batch.resume() when paused (has sessionConfig),
   // otherwise use resumePending() which works without sessionConfig.
   const handleResume = useCallback(async () => {
+    console.log('[handleResume] stats.status:', stats.status)
     if (stats.status === 'paused') {
+      console.log('[handleResume] calling batch.resume()')
       await batch.resume()
     } else {
+      console.log('[handleResume] calling batch.resumePending()')
       await batch.resumePending()
     }
   }, [batch, stats.status])

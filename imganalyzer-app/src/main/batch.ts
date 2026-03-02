@@ -289,6 +289,7 @@ function setupNotificationListener(): void {
 
       case 'run/done': {
         const runId = currentRunId
+        console.log('[notification] run/done, batchStatus:', batchStatus, 'runId:', runId)
         if (batchStatus !== 'running') break
         isRunActive = false
         stopPolling()
@@ -296,8 +297,10 @@ function setupNotificationListener(): void {
           if (currentRunId !== runId) return
           const pending = data?.totals?.pending ?? 0
           const running = data?.totals?.running ?? 0
+          console.log('[run/done] status check: pending:', pending, 'running:', running)
           if (pending + running > 0) {
             batchStatus = 'paused'
+            console.log('[run/done] set batchStatus to paused (pending jobs remain)')
           } else {
             batchStatus = 'done'
             if (idleTimer) clearTimeout(idleTimer)
@@ -415,6 +418,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       cloudWorkers = 4,
       profile = false
     ): Promise<void> => {
+      console.log('[batch:start] folder:', folder, 'workers:', workers, 'profile:', profile)
       sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash, profile }
       sessionStartMs = Date.now()
       resetSessionCounters()
@@ -425,6 +429,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
       try {
         await ensureServerRunning()
+        console.log('[batch:start] calling rpc.call("run")')
         await rpc.call('run', {
           workers,
           cloudWorkers,
@@ -433,7 +438,9 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           verbose: true,
           profile,
         })
+        console.log('[batch:start] rpc.call("run") returned ok')
       } catch (err) {
+        console.error('[batch:start] rpc.call("run") failed:', err)
         isRunActive = false
         batchStatus = 'error'
         if (idleTimer) clearTimeout(idleTimer)
@@ -447,18 +454,23 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
   // ── batch:pause ───────────────────────────────────────────────────────────
   ipcMain.handle('batch:pause', async (): Promise<void> => {
+    console.log('[batch:pause] pausing, batchStatus was:', batchStatus)
     try {
       await rpc.call('cancel_run', {})
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.error('[batch:pause] cancel_run failed:', err)
+    }
     isRunActive = false
     stopPolling()
     batchStatus = 'paused'
+    console.log('[batch:pause] done, batchStatus:', batchStatus, 'sessionConfig:', !!sessionConfig)
     // Emit one tick so the UI updates immediately
     void doPoll()
   })
 
   // ── batch:resume ──────────────────────────────────────────────────────────
   ipcMain.handle('batch:resume', async (): Promise<void> => {
+    console.log('[batch:resume] called, batchStatus:', batchStatus, 'sessionConfig:', sessionConfig)
     // Use session config if available, otherwise fall back to sensible defaults
     // (e.g. after crash recovery when sessionConfig was never populated).
     const w     = sessionConfig?.workers       ?? 1
@@ -487,8 +499,11 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       if (needsStaleRecovery) {
         runParams.staleTimeout = 0
       }
+      console.log('[batch:resume] calling rpc.call("run")', runParams)
       await rpc.call('run', runParams)
+      console.log('[batch:resume] rpc.call("run") returned ok')
     } catch (err) {
+      console.error('[batch:resume] rpc.call("run") failed:', err)
       isRunActive = false
       batchStatus = 'error'
       if (idleTimer) clearTimeout(idleTimer)
@@ -547,7 +562,11 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   ipcMain.handle(
     'batch:resume-pending',
     async (_evt, workers = 1, cloudProvider = 'copilot', cloudWorkers = 4): Promise<void> => {
-      if (batchStatus === 'running') return
+      console.log('[batch:resume-pending] called, batchStatus:', batchStatus, 'sessionConfig:', !!sessionConfig)
+      if (batchStatus === 'running') {
+        console.log('[batch:resume-pending] already running, skipping')
+        return
+      }
 
       const w  = sessionConfig?.workers      ?? workers
       const cw = sessionConfig?.cloudWorkers ?? cloudWorkers
