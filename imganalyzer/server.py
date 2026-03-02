@@ -264,6 +264,9 @@ def _handle_run(req_id: int | str, params: dict) -> None:
             from imganalyzer.pipeline.worker import Worker
             from imganalyzer.db.connection import get_db_path
 
+            sys.stderr.write(f"[server._run_worker] starting, workers={workers}, stale_timeout={stale_timeout}\n")
+            sys.stderr.flush()
+
             # Open a FRESH connection for this thread — SQLite connections
             # cannot be shared across threads (check_same_thread=True by default).
             db_path = get_db_path()
@@ -301,14 +304,20 @@ def _handle_run(req_id: int | str, params: dict) -> None:
             worker_mod._result_notify = lambda payload: _send_notification("run/result", payload)
             try:
                 result = worker.run(batch_size=batch_size)
+                sys.stderr.write(f"[server._run_worker] worker.run() finished, result keys: {list(result.keys()) if isinstance(result, dict) else type(result)}\n")
+                sys.stderr.flush()
                 _send_notification("run/done", result)
             except Exception as exc:
+                sys.stderr.write(f"[server._run_worker] worker.run() exception: {exc}\n")
+                sys.stderr.flush()
                 _send_notification("run/error", {"error": str(exc)})
             finally:
                 worker_mod._result_notify = None
                 _active_worker = None
                 conn.close()
         except Exception as exc:
+            sys.stderr.write(f"[server._run_worker] outer exception: {exc}\n")
+            sys.stderr.flush()
             _active_worker = None
             _send_notification("run/error", {"error": str(exc), "traceback": traceback.format_exc()})
 

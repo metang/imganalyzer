@@ -277,6 +277,8 @@ class Worker:
 
         # Recover stale jobs from previous crashes
         recovered = self.queue.recover_stale(self.stale_timeout)
+        sys.stderr.write(f"[worker.run] stale_timeout={self.stale_timeout}, recovered={recovered}\n")
+        sys.stderr.flush()
         if recovered:
             console.print(f"[yellow]Recovered {recovered} stale job(s) from previous run[/yellow]")
 
@@ -289,6 +291,8 @@ class Worker:
                 console.print(f"[yellow]Retrying {retried} previously failed job(s)[/yellow]")
 
         total_pending = self.queue.pending_count()
+        sys.stderr.write(f"[worker.run] total_pending={total_pending}\n")
+        sys.stderr.flush()
         if total_pending == 0:
             console.print("[green]No pending jobs in queue.[/green]")
             return stats
