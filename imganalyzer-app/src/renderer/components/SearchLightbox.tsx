@@ -255,13 +255,23 @@ export function SearchLightbox({ item, items, onClose, onNavigate }: SearchLight
     setLoadError(false)
 
     window.api.getThumbnail(item.file_path).then((url) => {
-      if (!cancelled && url) setThumb(url)
+      if (cancelled) return
+      if (url) {
+        setThumb(url)
+      } else {
+        setLoadError(true)
+      }
     }).catch(() => {
       if (!cancelled) setLoadError(true)
     })
 
     window.api.getFullImage(item.file_path).then((url) => {
-      if (!cancelled && url) setSrc(url)
+      if (cancelled) return
+      if (url) {
+        setSrc(url)
+      } else {
+        setLoadError(true)
+      }
     }).catch(() => {
       if (!cancelled) setLoadError(true)
     })

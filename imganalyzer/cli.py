@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import print as rprint
 
-from imganalyzer.analyzer import Analyzer
+from imganalyzer.analyzer import Analyzer, AnalysisResult
 
 app = typer.Typer(
     name="imganalyzer",

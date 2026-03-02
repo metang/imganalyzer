@@ -72,13 +72,23 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
     setLoadError(false)
 
     window.api.getThumbnail(image.path).then((url) => {
-      if (!cancelled && url) setThumb(url)
+      if (cancelled) return
+      if (url) {
+        setThumb(url)
+      } else {
+        setLoadError(true)
+      }
     }).catch(() => {
       if (!cancelled) setLoadError(true)
     })
 
     window.api.getFullImage(image.path).then((url) => {
-      if (!cancelled && url) setSrc(url)
+      if (cancelled) return
+      if (url) {
+        setSrc(url)
+      } else {
+        setLoadError(true)
+      }
     }).catch(() => {
       if (!cancelled) setLoadError(true)
     })

@@ -264,10 +264,13 @@ class ResourceScheduler:
                             for job in jobs:
                                 if self.is_shutdown:
                                     return
-                                try:
-                                    img_data = prefetch_fn(job)
-                                except Exception:
+                                if prefetch_fn is None:
                                     img_data = None
+                                else:
+                                    try:
+                                        img_data = prefetch_fn(job)
+                                    except Exception:
+                                        img_data = None
                                 prefetch_q.put((job, img_data))
                     finally:
                         producer_done.set()

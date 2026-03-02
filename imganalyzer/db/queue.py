@@ -199,13 +199,20 @@ class JobQueue:
 
     def recover_stale(self, timeout_minutes: int = 10) -> int:
         """Reset jobs stuck in 'running' state (e.g. after a crash)."""
-        cur = self.conn.execute(
-            """UPDATE job_queue
-               SET status = 'pending', attempts = attempts + 1
-               WHERE status = 'running'
-               AND started_at < datetime('now', '-' || ? || ' minutes')""",
-            [timeout_minutes],
-        )
+        if timeout_minutes <= 0:
+            cur = self.conn.execute(
+                """UPDATE job_queue
+                   SET status = 'pending', attempts = attempts + 1
+                   WHERE status = 'running'"""
+            )
+        else:
+            cur = self.conn.execute(
+                """UPDATE job_queue
+                   SET status = 'pending', attempts = attempts + 1
+                   WHERE status = 'running'
+                   AND started_at <= datetime('now', '-' || ? || ' minutes')""",
+                [timeout_minutes],
+            )
         self.conn.commit()
         return cur.rowcount
 

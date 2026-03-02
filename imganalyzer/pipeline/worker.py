@@ -41,7 +41,6 @@ from __future__ import annotations
 import json
 import os
 import signal
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -277,8 +276,6 @@ class Worker:
 
         # Recover stale jobs from previous crashes
         recovered = self.queue.recover_stale(self.stale_timeout)
-        sys.stderr.write(f"[worker.run] stale_timeout={self.stale_timeout}, recovered={recovered}\n")
-        sys.stderr.flush()
         if recovered:
             console.print(f"[yellow]Recovered {recovered} stale job(s) from previous run[/yellow]")
 
@@ -291,8 +288,6 @@ class Worker:
                 console.print(f"[yellow]Retrying {retried} previously failed job(s)[/yellow]")
 
         total_pending = self.queue.pending_count()
-        sys.stderr.write(f"[worker.run] total_pending={total_pending}\n")
-        sys.stderr.flush()
         if total_pending == 0:
             console.print("[green]No pending jobs in queue.[/green]")
             return stats
@@ -812,7 +807,10 @@ class Worker:
     def _write_pending_xmps(self) -> int:
         """Write XMP sidecars for images that had at least one job complete."""
         count = 0
-        for image_id in self._xmp_candidates:
+        candidates = set(self._xmp_candidates)
+        self._xmp_candidates.clear()
+        failed_xmp: set[int] = set()
+        for image_id in candidates:
             try:
                 xmp_path = write_xmp_from_db(self.repo, image_id)
                 if xmp_path and self.verbose:
@@ -820,11 +818,13 @@ class Worker:
                 if xmp_path:
                     count += 1
             except Exception as exc:
+                failed_xmp.add(image_id)
                 if self.verbose:
                     console.print(
                         f"  [red]XMP write failed for image {image_id}: {exc}[/red]"
                     )
-        self._xmp_candidates.clear()
+        if failed_xmp:
+            self._xmp_candidates.update(failed_xmp)
         return count
 
     def _flush_fts_dirty(self) -> int:
@@ -842,6 +842,7 @@ class Worker:
 
         BATCH = 50
         rebuilt = 0
+        failed_ids: list[int] = []
         for start in range(0, len(dirty), BATCH):
             chunk = dirty[start:start + BATCH]
             self.conn.execute("BEGIN IMMEDIATE")
@@ -851,10 +852,13 @@ class Worker:
                         self.repo.update_search_index(image_id)
                         rebuilt += 1
                     except Exception:
-                        pass  # best-effort; don't crash the batch
+                        failed_ids.append(image_id)
                 self.conn.commit()
             except Exception:
                 self.conn.rollback()
+                failed_ids.extend(chunk)
+        if failed_ids:
+            self._fts_dirty.update(failed_ids)
         return rebuilt
 
     def _handle_sigint(self, signum: int, frame: Any) -> None:

@@ -889,6 +889,64 @@ class TestJobQueue:
         assert "technical" in stats
         assert stats["technical"]["pending"] == 1
 
+    def test_recover_stale_zero_reclaims_all_running(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        img_id = repo.register_image(file_path="/photos/recover.jpg")
+        job_id = queue.enqueue(img_id, "metadata")
+        assert job_id is not None
+        claimed = queue.claim(batch_size=1, module="metadata")
+        assert len(claimed) == 1
+
+        recovered = queue.recover_stale(timeout_minutes=0)
+        assert recovered == 1
+
+        row = conn.execute("SELECT status FROM job_queue WHERE id = ?", [job_id]).fetchone()
+        assert row is not None
+        assert row["status"] == "pending"
+
+
+class TestWorkerFlushRecovery:
+    def test_flush_fts_requeues_failed_ids(self, tmp_path):
+        from imganalyzer.pipeline.worker import Worker
+
+        conn = _make_test_db(tmp_path)
+        worker = Worker(conn, workers=1, cloud_workers=1)
+        worker._fts_dirty = {101, 102}
+
+        def _update_search_index(image_id: int) -> None:
+            if image_id == 102:
+                raise RuntimeError("fts rebuild failed")
+
+        worker.repo.update_search_index = _update_search_index  # type: ignore[method-assign]
+
+        rebuilt = worker._flush_fts_dirty()
+        assert rebuilt == 1
+        assert worker._fts_dirty == {102}
+
+    def test_write_pending_xmps_requeues_failed_ids(self, tmp_path):
+        from imganalyzer.pipeline.worker import Worker
+
+        conn = _make_test_db(tmp_path)
+        worker = Worker(conn, workers=1, cloud_workers=1, write_xmp=True)
+        worker._xmp_candidates = {201, 202}
+
+        def _write_xmp(_repo, image_id: int):
+            if image_id == 202:
+                raise RuntimeError("xmp failed")
+            return f"/tmp/{image_id}.xmp"
+
+        with patch("imganalyzer.pipeline.worker.write_xmp_from_db", side_effect=_write_xmp):
+            written = worker._write_pending_xmps()
+
+        assert written == 1
+        assert worker._xmp_candidates == {202}
+
 
 class TestSearchIndex:
     """Tests for the FTS5 search index."""
