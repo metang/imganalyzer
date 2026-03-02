@@ -417,7 +417,8 @@ class Worker:
 
                 console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
 
-                with self.profiler.span("gpu_phase", phase=phase_idx), (
+                with (
+                    self.profiler.span("gpu_phase", phase=phase_idx),
                     ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
                     ThreadPoolExecutor(max_workers=self.cloud_workers) as cloud_pool,
                 ):
@@ -442,7 +443,8 @@ class Worker:
             # ════════════════════════════════════════════════════════════════
             if not self._shutdown.is_set():
                 boosted_cloud = scheduler.boosted_cloud_workers()
-                with self.profiler.span("io_drain"), (
+                with (
+                    self.profiler.span("io_drain"),
                     ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
                     ThreadPoolExecutor(max_workers=boosted_cloud)      as cloud_pool,
                 ):
