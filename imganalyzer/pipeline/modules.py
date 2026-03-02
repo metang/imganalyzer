@@ -139,6 +139,7 @@ class ModuleRunner:
         detection_threshold: float | None = None,
         face_match_threshold: float | None = None,
         verbose: bool = False,
+        profiler: Any = None,
     ) -> None:
         self.conn = conn
         self.repo = repo
@@ -148,6 +149,8 @@ class ModuleRunner:
         self.detection_threshold = detection_threshold
         self.face_match_threshold = face_match_threshold
         self.verbose = verbose
+        from imganalyzer.pipeline.profiler import NullProfiler
+        self.profiler: Any = profiler or NullProfiler()
         # Per-image decode cache: avoids re-reading the same image from disk
         # when multiple modules run on the same image sequentially.  The cache
         # is keyed by file path and stores the decoded image_data dict.  It
@@ -156,7 +159,7 @@ class ModuleRunner:
         self._image_cache_path: Path | None = None
         self._image_cache_data: dict[str, Any] | None = None
 
-    def _cached_read_image(self, path: Path) -> dict[str, Any]:
+    def _cached_read_image(self, path: Path, image_id: int | None = None) -> dict[str, Any]:
         """Return decoded image_data, using a single-entry cache.
 
         When the worker processes multiple modules for the same image (the
@@ -171,9 +174,18 @@ class ModuleRunner:
         Doing it once here saves those costs across all 7+ modules.
         """
         if self._image_cache_path == path and self._image_cache_data is not None:
+            self.profiler.record_event("cache_hit", 0.0, image_id=image_id)
             return self._image_cache_data
-        data = _read_image(path)
-        data = _pre_resize(data)
+        file_size = path.stat().st_size if path.exists() else None
+        fmt = path.suffix.lower()
+        with self.profiler.span("io_read", image_id=image_id,
+                                image_file_size=file_size, image_format=fmt):
+            data = _read_image(path)
+        w = data.get("width")
+        h = data.get("height")
+        with self.profiler.span("io_resize", image_id=image_id,
+                                image_width=w, image_height=h):
+            data = _pre_resize(data)
         self._image_cache_path = path
         self._image_cache_data = data
         return data
@@ -203,6 +215,11 @@ class ModuleRunner:
         Returns the result dict, or an empty dict if skipped/cached.
         Raises on analysis failure (caller should handle).
         """
+        with self.profiler.span("module_run", image_id=image_id, module=module):
+            return self._run_dispatch(image_id, module)
+
+    def _run_dispatch(self, image_id: int, module: str) -> dict[str, Any]:
+        """Internal dispatch — separated so profiler.span wraps the whole call."""
         image = self.repo.get_image(image_id)
         if image is None:
             raise ValueError(f"Image id={image_id} not found in database")
@@ -268,7 +285,7 @@ class ModuleRunner:
         return result
 
     def _run_technical(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = self._cached_read_image(path)
+        image_data = self._cached_read_image(path, image_id)
 
         from imganalyzer.analysis.technical import TechnicalAnalyzer
         result = TechnicalAnalyzer(image_data).analyze()
@@ -281,7 +298,7 @@ class ModuleRunner:
         return result
 
     def _run_local_ai(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = self._cached_read_image(path)
+        image_data = self._cached_read_image(path, image_id)
 
         from imganalyzer.analysis.ai.local_full import LocalAIFull
         result = LocalAIFull().analyze(
@@ -376,7 +393,7 @@ class ModuleRunner:
                 pass
 
     def _run_blip2(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = self._cached_read_image(path)
+        image_data = self._cached_read_image(path, image_id)
 
         from imganalyzer.pipeline.passes.blip2 import run_blip2
         result = run_blip2(image_data, self.repo, image_id, self.conn)
@@ -386,7 +403,7 @@ class ModuleRunner:
         return result
 
     def _run_objects(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = self._cached_read_image(path)
+        image_data = self._cached_read_image(path, image_id)
 
         from imganalyzer.pipeline.passes.objects import run_objects
         result = run_objects(
@@ -400,7 +417,7 @@ class ModuleRunner:
         return result
 
     def _run_ocr(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = self._cached_read_image(path)
+        image_data = self._cached_read_image(path, image_id)
 
         from imganalyzer.pipeline.passes.ocr import run_ocr
         result = run_ocr(image_data, self.repo, image_id, self.conn)
@@ -410,7 +427,7 @@ class ModuleRunner:
         return result
 
     def _run_faces(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = self._cached_read_image(path)
+        image_data = self._cached_read_image(path, image_id)
 
         from imganalyzer.pipeline.passes.faces import run_faces
         result = run_faces(
@@ -432,7 +449,7 @@ class ModuleRunner:
                 )
             return {}
 
-        image_data = self._cached_read_image(path)
+        image_data = self._cached_read_image(path, image_id)
 
         from imganalyzer.analysis.ai.cloud import CloudAI
         result = CloudAI(backend=self.cloud_provider).analyze(path, image_data)
@@ -505,7 +522,7 @@ class ModuleRunner:
                 "provider": existing.get("provider", ""),
             }
 
-        image_data = self._cached_read_image(path)
+        image_data = self._cached_read_image(path, image_id)
 
         # Fallback: if only aesthetic was selected (without cloud_ai), make
         # the full cloud call and extract aesthetic fields.

@@ -1216,3 +1216,132 @@ class TestPersistResultToDB:
         assert row is not None
 
         conn.close()
+
+
+class TestProfiler:
+    """Tests for the batch processing profiler."""
+
+    def _make_db(self, tmp_path):
+        import sqlite3
+        from imganalyzer.db.schema import ensure_schema
+        db_path = tmp_path / "profiler_test.db"
+        conn = sqlite3.connect(str(db_path), isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        ensure_schema(conn)
+        return conn
+
+    def test_null_profiler_noop(self):
+        """NullProfiler should do nothing with zero overhead."""
+        from imganalyzer.pipeline.profiler import NullProfiler
+        p = NullProfiler()
+        assert not p.enabled
+        assert p.run_id is None
+        with p.span("test_event"):
+            pass
+        p.record_event("test", 100.0)
+        p.flush()
+
+    def test_collector_start_end_run(self, tmp_path):
+        """ProfileCollector should create and finalize a run."""
+        from imganalyzer.pipeline.profiler import ProfileCollector
+        conn = self._make_db(tmp_path)
+        p = ProfileCollector(conn)
+
+        run_id = p.start_run(total_images=42)
+        assert run_id is not None
+        assert p.enabled
+
+        p.end_run()
+        assert not p.enabled
+
+        row = conn.execute(
+            "SELECT * FROM profiler_runs WHERE id = ?", [run_id]
+        ).fetchone()
+        assert row is not None
+        assert row["total_images"] == 42
+        assert row["ended_at"] is not None
+        conn.close()
+
+    def test_span_records_event(self, tmp_path):
+        """Span context manager should record a timed event."""
+        import time
+        from imganalyzer.pipeline.profiler import ProfileCollector
+        conn = self._make_db(tmp_path)
+        p = ProfileCollector(conn)
+
+        run_id = p.start_run(total_images=1)
+        with p.span("io_read", image_id=1, module="objects",
+                     image_file_size=5000, image_format=".jpg"):
+            time.sleep(0.01)  # ~10ms
+
+        p.flush()
+        rows = conn.execute(
+            "SELECT * FROM profiler_events WHERE run_id = ?", [run_id]
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["event_type"] == "io_read"
+        assert rows[0]["module"] == "objects"
+        assert rows[0]["image_id"] == 1
+        assert rows[0]["image_file_size"] == 5000
+        assert rows[0]["duration_ms"] >= 5  # at least 5ms
+
+        p.end_run()
+        conn.close()
+
+    def test_record_event_manual(self, tmp_path):
+        """record_event should store a pre-timed event."""
+        from imganalyzer.pipeline.profiler import ProfileCollector
+        conn = self._make_db(tmp_path)
+        p = ProfileCollector(conn)
+
+        run_id = p.start_run()
+        p.record_event("cache_hit", 0.0, image_id=5, module="faces")
+        p.flush()
+
+        rows = conn.execute(
+            "SELECT * FROM profiler_events WHERE run_id = ?", [run_id]
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["event_type"] == "cache_hit"
+        assert rows[0]["duration_ms"] == 0.0
+
+        p.end_run()
+        conn.close()
+
+    def test_multiple_events_flushed(self, tmp_path):
+        """Multiple events should all be flushed to DB."""
+        from imganalyzer.pipeline.profiler import ProfileCollector
+        conn = self._make_db(tmp_path)
+        p = ProfileCollector(conn)
+
+        run_id = p.start_run()
+        for i in range(10):
+            p.record_event("gpu_infer", float(i * 10), image_id=i, module="objects")
+        p.flush()
+
+        count = conn.execute(
+            "SELECT COUNT(*) as c FROM profiler_events WHERE run_id = ?", [run_id]
+        ).fetchone()["c"]
+        assert count == 10
+
+        p.end_run()
+        conn.close()
+
+    def test_disabled_profiler_no_events(self, tmp_path):
+        """Events recorded before start_run should be ignored."""
+        from imganalyzer.pipeline.profiler import ProfileCollector
+        conn = self._make_db(tmp_path)
+        p = ProfileCollector(conn)
+
+        # Not started — should be no-op
+        with p.span("test"):
+            pass
+        p.record_event("test", 100.0)
+        p.flush()
+
+        count = conn.execute(
+            "SELECT COUNT(*) as c FROM profiler_events"
+        ).fetchone()["c"]
+        assert count == 0
+        conn.close()

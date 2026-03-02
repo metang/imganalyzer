@@ -145,6 +145,7 @@ class Worker:
         stale_timeout_minutes: int = 10,
         write_xmp: bool = True,
         retry_failed: bool = False,
+        profile: bool = False,
     ) -> None:
         # Main-thread connection — used only for queue management (claim, recover, etc.)
         self.conn = conn
@@ -165,6 +166,10 @@ class Worker:
         self.write_xmp = write_xmp
         self.retry_failed_on_start = retry_failed
         self._shutdown = threading.Event()
+
+        # Profiler
+        from imganalyzer.pipeline.profiler import ProfileCollector, NullProfiler
+        self.profiler: Any = ProfileCollector(conn) if profile else NullProfiler()
         # Track images that had a job complete this run (for XMP generation)
         self._xmp_candidates: set[int] = set()
         self._xmp_lock = threading.Lock()
@@ -217,6 +222,7 @@ class Worker:
                 detection_threshold=self.detection_threshold,
                 face_match_threshold=self.face_match_threshold,
                 verbose=self.verbose,
+                profiler=self.profiler,
             )
             local.conn = conn
             local.repo = repo
@@ -286,6 +292,9 @@ class Worker:
         if total_pending == 0:
             console.print("[green]No pending jobs in queue.[/green]")
             return stats
+
+        # Start profiler run if enabled
+        self.profiler.start_run(total_images=total_pending)
 
         console.print(f"[cyan]Processing {total_pending} pending job(s)...[/cyan]")
         console.print("[dim]Press Ctrl+C to pause (current batch will finish).[/dim]")
@@ -367,9 +376,12 @@ class Worker:
                 if not path.exists():
                     return None
                 try:
-                    data = _read_image(path)
-                    data = _pre_resize(data)
-                    # Store in shared cache for the GPU consumer thread
+                    file_size = path.stat().st_size
+                    fmt = path.suffix.lower()
+                    with self.profiler.span("prefetch", image_id=image_id,
+                                            image_file_size=file_size, image_format=fmt):
+                        data = _read_image(path)
+                        data = _pre_resize(data)
                     self._prefetch_cache[image_id] = data
                     return data
                 except Exception:
@@ -401,7 +413,7 @@ class Worker:
 
                 console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
 
-                with (
+                with self.profiler.span("gpu_phase", phase=phase_idx), (
                     ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
                     ThreadPoolExecutor(max_workers=self.cloud_workers) as cloud_pool,
                 ):
@@ -426,7 +438,7 @@ class Worker:
             # ════════════════════════════════════════════════════════════════
             if not self._shutdown.is_set():
                 boosted_cloud = scheduler.boosted_cloud_workers()
-                with (
+                with self.profiler.span("io_drain"), (
                     ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
                     ThreadPoolExecutor(max_workers=boosted_cloud)      as cloud_pool,
                 ):
@@ -462,6 +474,10 @@ class Worker:
             f"  Done: {stats['done']}  Failed: {stats['failed']}  "
             f"Skipped: {stats['skipped']}"
         )
+
+        # End profiler run
+        self.profiler.end_run()
+
         return stats
 
     # ── GPU batch sizes per module ──────────────────────────────────────
@@ -724,6 +740,9 @@ class Worker:
         if now - self._last_flush_time < self._flush_interval_s:
             return
         self._last_flush_time = now
+
+        # Piggyback profiler flush
+        self.profiler.maybe_flush()
 
         # Snapshot and clear dirty sets under their locks
         with self._fts_lock:

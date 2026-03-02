@@ -256,6 +256,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
     detection_threshold = params.get("detectionThreshold")
     face_threshold = params.get("faceThreshold")
     stale_timeout = params.get("staleTimeout")  # None = use Worker default (10 min)
+    profile = params.get("profile", False)
 
     def _run_worker():
         global _active_worker
@@ -288,6 +289,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
                 face_match_threshold=face_threshold,
                 verbose=verbose,
                 write_xmp=write_xmp,
+                profile=profile,
             )
             if stale_timeout is not None:
                 worker_kwargs["stale_timeout_minutes"] = stale_timeout

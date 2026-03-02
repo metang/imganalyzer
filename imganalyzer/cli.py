@@ -566,6 +566,7 @@ def run_queue(
     detection_threshold: Optional[float] = typer.Option(None, "--detection-threshold", min=0.0, max=1.0),
     face_threshold: Optional[float] = typer.Option(None, "--face-threshold", min=0.0, max=1.0),
     retry_failed: bool = typer.Option(False, "--retry-failed", help="Re-queue previously failed jobs before processing"),
+    profile: bool = typer.Option(False, "--profile", help="Enable batch processing profiler (writes to profiler_* tables)"),
 ) -> None:
     """Start processing the job queue.
 
@@ -602,6 +603,7 @@ def run_queue(
         verbose=verbose,
         write_xmp=not no_xmp,
         retry_failed=retry_failed,
+        profile=profile,
     )
     worker.run(batch_size=batch_size)
 
@@ -1493,3 +1495,212 @@ def _detect_table_for_field(field: str) -> str | None:
 
 if __name__ == "__main__":
     app()
+
+
+@app.command(name="profile-report")
+def profile_report(
+    run_id: Optional[int] = typer.Option(None, "--run-id", help="Profiler run ID (default: latest)"),
+    format_: str = typer.Option("table", "--format", help="Output format: table, csv, json"),
+) -> None:
+    """Show profiler report for a batch processing run.
+
+    Requires a run completed with ``--profile`` enabled.
+    """
+    import json as _json
+
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from imganalyzer.db.connection import get_db
+    conn = get_db()
+
+    # Find the run
+    if run_id is None:
+        row = conn.execute(
+            "SELECT id FROM profiler_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            console.print("[red]No profiler runs found. Run with --profile first.[/red]")
+            raise typer.Exit(1)
+        run_id = row["id"]
+
+    run = conn.execute(
+        "SELECT * FROM profiler_runs WHERE id = ?", [run_id]
+    ).fetchone()
+    if run is None:
+        console.print(f"[red]Run {run_id} not found.[/red]")
+        raise typer.Exit(1)
+
+    # ── Summary ───────────────────────────────────────────────────────────
+    console.print(f"\n[bold cyan]Profiler Report — Run #{run_id}[/bold cyan]")
+    console.print(f"  Started:  {run['started_at']}")
+    console.print(f"  Ended:    {run['ended_at'] or 'still running'}")
+    console.print(f"  Images:   {run['total_images']}")
+    console.print(f"  GPU:      {run['gpu_name']} ({run['gpu_vram_gb']:.1f} GB)")
+    console.print(f"  CPU:      {run['cpu_count']} cores, {run['ram_gb']:.1f} GB RAM")
+
+    # ── Per-module breakdown ──────────────────────────────────────────────
+    module_stats = conn.execute("""
+        SELECT module,
+               COUNT(*) as count,
+               AVG(duration_ms) as avg_ms,
+               MIN(duration_ms) as min_ms,
+               MAX(duration_ms) as max_ms,
+               SUM(duration_ms) as total_ms
+        FROM profiler_events
+        WHERE run_id = ? AND event_type = 'module_run' AND module IS NOT NULL
+        GROUP BY module
+        ORDER BY total_ms DESC
+    """, [run_id]).fetchall()
+
+    if module_stats:
+        tbl = Table(title="Per-Module Breakdown")
+        tbl.add_column("Module", style="cyan")
+        tbl.add_column("Count", justify="right")
+        tbl.add_column("Avg (ms)", justify="right")
+        tbl.add_column("Min (ms)", justify="right")
+        tbl.add_column("Max (ms)", justify="right")
+        tbl.add_column("Total (s)", justify="right")
+        tbl.add_column("img/s", justify="right")
+
+        for r in module_stats:
+            total_s = r["total_ms"] / 1000
+            ips = r["count"] / total_s if total_s > 0 else 0
+            tbl.add_row(
+                r["module"],
+                str(r["count"]),
+                f"{r['avg_ms']:.1f}",
+                f"{r['min_ms']:.1f}",
+                f"{r['max_ms']:.1f}",
+                f"{total_s:.1f}",
+                f"{ips:.1f}",
+            )
+        console.print(tbl)
+
+    # ── Event type breakdown ──────────────────────────────────────────────
+    event_stats = conn.execute("""
+        SELECT event_type,
+               COUNT(*) as count,
+               AVG(duration_ms) as avg_ms,
+               SUM(duration_ms) as total_ms
+        FROM profiler_events
+        WHERE run_id = ?
+        GROUP BY event_type
+        ORDER BY total_ms DESC
+    """, [run_id]).fetchall()
+
+    if event_stats:
+        tbl = Table(title="Event Type Summary")
+        tbl.add_column("Event", style="green")
+        tbl.add_column("Count", justify="right")
+        tbl.add_column("Avg (ms)", justify="right")
+        tbl.add_column("Total (s)", justify="right")
+
+        for r in event_stats:
+            tbl.add_row(
+                r["event_type"],
+                str(r["count"]),
+                f"{r['avg_ms']:.1f}",
+                f"{r['total_ms'] / 1000:.1f}",
+            )
+        console.print(tbl)
+
+    # ── IO by format ──────────────────────────────────────────────────────
+    io_by_format = conn.execute("""
+        SELECT image_format,
+               COUNT(*) as count,
+               AVG(duration_ms) as avg_ms,
+               AVG(image_file_size) as avg_size
+        FROM profiler_events
+        WHERE run_id = ? AND event_type = 'io_read' AND image_format IS NOT NULL
+        GROUP BY image_format
+        ORDER BY count DESC
+    """, [run_id]).fetchall()
+
+    if io_by_format:
+        tbl = Table(title="IO Read by Image Format")
+        tbl.add_column("Format", style="yellow")
+        tbl.add_column("Count", justify="right")
+        tbl.add_column("Avg Read (ms)", justify="right")
+        tbl.add_column("Avg Size (MB)", justify="right")
+
+        for r in io_by_format:
+            avg_mb = (r["avg_size"] or 0) / (1024 * 1024)
+            tbl.add_row(
+                r["image_format"],
+                str(r["count"]),
+                f"{r['avg_ms']:.1f}",
+                f"{avg_mb:.2f}",
+            )
+        console.print(tbl)
+
+    # ── GPU phase timing ──────────────────────────────────────────────────
+    phase_stats = conn.execute("""
+        SELECT phase,
+               COUNT(*) as count,
+               SUM(duration_ms) as total_ms
+        FROM profiler_events
+        WHERE run_id = ? AND event_type = 'gpu_phase'
+        GROUP BY phase
+        ORDER BY phase
+    """, [run_id]).fetchall()
+
+    if phase_stats:
+        phase_names = {0: "objects", 1: "blip2", 2: "faces+ocr+embed"}
+        tbl = Table(title="GPU Phase Timing")
+        tbl.add_column("Phase", style="magenta")
+        tbl.add_column("Duration (s)", justify="right")
+
+        for r in phase_stats:
+            name = phase_names.get(r["phase"], str(r["phase"]))
+            tbl.add_row(name, f"{r['total_ms'] / 1000:.1f}")
+        console.print(tbl)
+
+    # ── GPU utilization (from snapshots) ──────────────────────────────────
+    gpu_snap = conn.execute("""
+        SELECT AVG(gpu_util_pct) as avg_util,
+               MAX(gpu_util_pct) as max_util,
+               AVG(gpu_mem_used_mb) as avg_mem,
+               MAX(gpu_mem_used_mb) as max_mem,
+               AVG(cpu_pct) as avg_cpu,
+               MAX(cpu_pct) as max_cpu,
+               AVG(ram_used_mb) as avg_ram,
+               COUNT(*) as samples
+        FROM profiler_snapshots
+        WHERE run_id = ?
+    """, [run_id]).fetchone()
+
+    if gpu_snap and gpu_snap["samples"] > 0:
+        console.print(f"\n[bold]System Utilization[/bold] ({gpu_snap['samples']} samples)")
+        if gpu_snap["avg_util"] is not None:
+            console.print(f"  GPU Util:  avg {gpu_snap['avg_util']:.0f}%, max {gpu_snap['max_util']:.0f}%")
+        if gpu_snap["avg_mem"] is not None:
+            console.print(f"  GPU Mem:   avg {gpu_snap['avg_mem']:.0f} MB, max {gpu_snap['max_mem']:.0f} MB")
+        if gpu_snap["avg_cpu"] is not None:
+            console.print(f"  CPU:       avg {gpu_snap['avg_cpu']:.0f}%, max {gpu_snap['max_cpu']:.0f}%")
+        if gpu_snap["avg_ram"] is not None:
+            console.print(f"  RAM:       avg {gpu_snap['avg_ram']:.0f} MB")
+
+    # ── Prefetch effectiveness ────────────────────────────────────────────
+    prefetch_hit = conn.execute(
+        "SELECT COUNT(*) as c FROM profiler_events WHERE run_id = ? AND event_type = 'cache_hit'",
+        [run_id],
+    ).fetchone()["c"]
+    prefetch_total = conn.execute(
+        "SELECT COUNT(*) as c FROM profiler_events WHERE run_id = ? AND event_type IN ('cache_hit', 'io_read')",
+        [run_id],
+    ).fetchone()["c"]
+
+    if prefetch_total > 0:
+        rate = prefetch_hit / prefetch_total * 100
+        console.print(f"\n[bold]Cache/Prefetch[/bold]")
+        console.print(f"  Cache hits: {prefetch_hit}/{prefetch_total} ({rate:.0f}%)")
+
+    # ── Bottleneck detection ──────────────────────────────────────────────
+    if event_stats:
+        top = max(event_stats, key=lambda r: r["total_ms"])
+        console.print(f"\n[bold]Bottleneck[/bold]: {top['event_type']} — "
+                      f"{top['total_ms'] / 1000:.1f}s total ({top['count']} events, "
+                      f"avg {top['avg_ms']:.1f}ms)")
+
+    console.print()

@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -35,6 +35,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         9: _migrate_v9,
         10: _migrate_v10,
         11: _migrate_v11,
+        12: _migrate_v12,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -498,5 +499,66 @@ def _migrate_v11(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_face_occurrences_person_id
         ON face_occurrences(person_id)
+    """)
+
+
+# ── Migration v12: Profiler tables ───────────────────────────────────────────
+
+def _migrate_v12(conn: sqlite3.Connection) -> None:
+    """Add profiler tables for batch processing performance analysis."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS profiler_runs (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at   TEXT NOT NULL,
+            ended_at     TEXT,
+            total_images INTEGER DEFAULT 0,
+            gpu_name     TEXT,
+            gpu_vram_gb  REAL,
+            cpu_count    INTEGER,
+            ram_gb       REAL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS profiler_events (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id          INTEGER NOT NULL REFERENCES profiler_runs(id) ON DELETE CASCADE,
+            image_id        INTEGER,
+            module          TEXT,
+            phase           INTEGER,
+            event_type      TEXT NOT NULL,
+            start_ts        REAL NOT NULL,
+            duration_ms     REAL NOT NULL,
+            thread_name     TEXT,
+            batch_size      INTEGER DEFAULT 1,
+            image_file_size INTEGER,
+            image_format    TEXT,
+            image_width     INTEGER,
+            image_height    INTEGER
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_profiler_events_run
+        ON profiler_events(run_id, event_type)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_profiler_events_module
+        ON profiler_events(run_id, module)
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS profiler_snapshots (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id               INTEGER NOT NULL REFERENCES profiler_runs(id) ON DELETE CASCADE,
+            ts                   REAL NOT NULL,
+            gpu_util_pct         REAL,
+            gpu_mem_used_mb      REAL,
+            gpu_mem_total_mb     REAL,
+            cpu_pct              REAL,
+            ram_used_mb          REAL,
+            prefetch_queue_depth INTEGER
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_profiler_snapshots_run
+        ON profiler_snapshots(run_id)
     """)
 
