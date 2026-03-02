@@ -477,10 +477,6 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     const cw    = sessionConfig?.cloudWorkers  ?? 4
     const cloud = sessionConfig?.cloudProvider ?? 'copilot'
 
-    // When there's no sessionConfig, we're recovering from a crash/restart —
-    // use staleTimeout=0 to reclaim all stuck 'running' jobs immediately.
-    const needsStaleRecovery = !sessionConfig
-
     currentRunId++
     if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
     batchStatus = 'running'
@@ -488,16 +484,16 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
     try {
       await ensureServerRunning()
+      // Always use staleTimeout=0 on resume: pausing leaves in-progress jobs
+      // stuck as 'running' in the DB, and they need immediate recovery.
       const runParams: Record<string, unknown> = {
         workers: w,
         cloudWorkers: cw,
         cloudProvider: cloud,
         noXmp: true,
         verbose: true,
+        staleTimeout: 0,
         profile: sessionConfig?.profile ?? false,
-      }
-      if (needsStaleRecovery) {
-        runParams.staleTimeout = 0
       }
       console.log('[batch:resume] calling rpc.call("run")', runParams)
       await rpc.call('run', runParams)
