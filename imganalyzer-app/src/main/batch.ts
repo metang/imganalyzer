@@ -51,6 +51,7 @@ export interface BatchModuleStats {
   failed: number
   skipped: number
   imagesPerSec: number
+  avgMsPerImage: number
 }
 
 export interface BatchStats {
@@ -105,19 +106,11 @@ let idleTimer: ReturnType<typeof setTimeout> | null = null
 // Sliding window of { timestamp, durationMs, module } for avg-per-image computation
 const completionWindow: Array<{ ts: number; durationMs: number; module: string }> = []
 
-// Session-lifetime counters for average img/s (total done / elapsed).
-let sessionCompletions = 0
-const moduleCompletions: Record<string, number> = {}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Reset all completion counters for a fresh session. */
 function resetSessionCounters(): void {
   completionWindow.length = 0
-  sessionCompletions = 0
-  for (const key of Object.keys(moduleCompletions)) {
-    delete moduleCompletions[key]
-  }
 }
 
 /** Emit a batch:tick event to the renderer with current stats. */
@@ -135,35 +128,45 @@ function emitIngestProgress(progress: BatchIngestProgress): void {
   mainWin?.webContents?.send('batch:ingest-progress', progress)
 }
 
+/** Remove outdated entries from the rolling completion window. */
+function pruneCompletionWindow(now: number): void {
+  const cutoff = now - COMPLETION_WINDOW_MS
+  while (completionWindow.length > 0 && completionWindow[0].ts < cutoff) {
+    completionWindow.shift()
+  }
+}
+
 /** Record a completion and maintain the sliding window + session counters. */
 function recordCompletion(durationMs: number, module: string): void {
   const now = Date.now()
   completionWindow.push({ ts: now, durationMs, module })
   // Evict entries older than COMPLETION_WINDOW_MS
-  const cutoff = now - COMPLETION_WINDOW_MS
-  while (completionWindow.length > 0 && completionWindow[0].ts < cutoff) {
-    completionWindow.shift()
-  }
+  pruneCompletionWindow(now)
   // Keep the window bounded
   if (completionWindow.length > AVG_WINDOW * 2) {
     completionWindow.splice(0, completionWindow.length - AVG_WINDOW * 2)
   }
-  // Session-lifetime counters for average speed
-  sessionCompletions++
-  moduleCompletions[module] = (moduleCompletions[module] ?? 0) + 1
 }
 
-/** Compute derived metrics using session-average speed. */
+/** Compute rate using a rolling time span from the oldest entry in the window. */
+function computeRollingRate(
+  entries: Array<{ ts: number; durationMs: number; module: string }>,
+  now: number
+): number {
+  if (entries.length === 0) return 0
+  const spanMs = Math.max(1000, now - entries[0].ts)
+  return entries.length / (spanMs / 1000)
+}
+
+/** Compute derived metrics using rolling done-only speed. */
 function computeMetrics(
   pending: number,
   workers: number,
   cloudWorkers: number
 ): { imagesPerSec: number; avgMsPerImage: number; estimatedMs: number } {
-  // Average img/s over the entire run (survives pauses / completion)
-  const elapsedSec = sessionStartMs > 0 ? (Date.now() - sessionStartMs) / 1000 : 0
-  const imagesPerSec = elapsedSec > 0 && sessionCompletions > 0
-    ? sessionCompletions / elapsedSec
-    : 0
+  const now = Date.now()
+  pruneCompletionWindow(now)
+  const imagesPerSec = computeRollingRate(completionWindow, now)
 
   const lastN = completionWindow.slice(-AVG_WINDOW)
   const avgMsPerImage =
@@ -180,16 +183,28 @@ function computeMetrics(
   return { imagesPerSec, avgMsPerImage, estimatedMs }
 }
 
-/** Compute per-module images/sec as session-average (total done / elapsed). */
-function computeModuleSpeeds(): Record<string, number> {
-  const elapsedSec = sessionStartMs > 0 ? (Date.now() - sessionStartMs) / 1000 : 0
-  if (elapsedSec <= 0) return {}
-
-  const speeds: Record<string, number> = {}
-  for (const [mod, count] of Object.entries(moduleCompletions)) {
-    speeds[mod] = count / elapsedSec
+/** Compute per-module rolling speed + avg latency from done events. */
+function computeModuleMetrics(): Record<string, { imagesPerSec: number; avgMsPerImage: number }> {
+  const now = Date.now()
+  pruneCompletionWindow(now)
+  const byModule: Record<string, Array<{ ts: number; durationMs: number; module: string }>> = {}
+  for (const entry of completionWindow) {
+    if (!byModule[entry.module]) byModule[entry.module] = []
+    byModule[entry.module].push(entry)
   }
-  return speeds
+  const metrics: Record<string, { imagesPerSec: number; avgMsPerImage: number }> = {}
+  for (const [mod, entries] of Object.entries(byModule)) {
+    const lastN = entries.slice(-AVG_WINDOW)
+    const avgMsPerImage =
+      lastN.length > 0
+        ? lastN.reduce((sum, e) => sum + e.durationMs, 0) / lastN.length
+        : 0
+    metrics[mod] = {
+      imagesPerSec: computeRollingRate(entries, now),
+      avgMsPerImage,
+    }
+  }
+  return metrics
 }
 
 /** Poll status via RPC (no subprocess) and emit a batch:tick. */
@@ -205,14 +220,15 @@ async function doPoll(): Promise<void> {
     const cloudWorkers = sessionConfig?.cloudWorkers ?? 4
     const pending = data.totals.pending ?? 0
     const metrics = computeMetrics(pending, workers, cloudWorkers)
-    const moduleSpeeds = computeModuleSpeeds()
+    const moduleMetrics = computeModuleMetrics()
 
     // Merge per-module speed into each module's stats
     const modulesWithSpeed: Partial<Record<string, BatchModuleStats>> = {}
     for (const [mod, modStats] of Object.entries(data.modules)) {
       modulesWithSpeed[mod] = {
         ...(modStats as unknown as BatchModuleStats),
-        imagesPerSec: moduleSpeeds[mod] ?? 0,
+        imagesPerSec: moduleMetrics[mod]?.imagesPerSec ?? 0,
+        avgMsPerImage: moduleMetrics[mod]?.avgMsPerImage ?? 0,
       }
     }
 

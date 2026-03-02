@@ -69,6 +69,10 @@ function ModuleTableRow({ name, stats }: { name: string; stats: BatchModuleStats
       <td className="py-1 px-2 text-right font-mono text-neutral-300 whitespace-nowrap">
         {fmtRate(stats.imagesPerSec)}
       </td>
+      {/* Avg ms */}
+      <td className="py-1 px-2 text-right font-mono text-neutral-400 whitespace-nowrap">
+        {fmtMs(stats.avgMsPerImage)}
+      </td>
       {/* Processed (done) */}
       <td className="py-1 px-2 text-right font-mono text-neutral-300 whitespace-nowrap">
         {stats.done.toLocaleString()}
@@ -147,7 +151,8 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
             <tr className="text-[10px] uppercase tracking-wider text-neutral-600">
               <th className="py-1 pr-3 text-left font-medium">Module</th>
               <th className="py-1 pr-3 text-left font-medium">Progress</th>
-              <th className="py-1 px-2 text-right font-medium whitespace-nowrap">img/s</th>
+              <th className="py-1 px-2 text-right font-medium whitespace-nowrap">done/s</th>
+              <th className="py-1 px-2 text-right font-medium whitespace-nowrap">Avg ms</th>
               <th className="py-1 px-2 text-right font-medium">Processed</th>
               <th className="py-1 px-2 text-right font-medium">Skipped</th>
               <th className="py-1 px-2 text-right font-medium">Error</th>
@@ -163,9 +168,9 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
       )}
 
       {/* ── Stats row ────────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-4 gap-2 text-xs">
+        <div className="grid grid-cols-4 gap-2 text-xs">
         {[
-          { label: 'Rate',    value: imagesPerSec > 0 ? fmtRate(imagesPerSec) + ' img/s' : '—' },
+          { label: 'Done rate', value: imagesPerSec > 0 ? fmtRate(imagesPerSec) + ' img/s' : '—' },
           { label: 'Avg/img', value: fmtMs(avgMsPerImage) },
           { label: 'ETA',     value: fmtMs(estimatedMs) },
           { label: 'Elapsed', value: fmtMs(elapsedMs) },

@@ -172,6 +172,7 @@ export interface BatchModuleStats {
   failed: number
   skipped: number
   imagesPerSec: number
+  avgMsPerImage: number
 }
 
 export interface BatchStats {
@@ -330,4 +331,3 @@ declare global {
     }
   }
 }
-
