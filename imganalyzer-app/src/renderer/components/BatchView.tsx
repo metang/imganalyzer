@@ -25,6 +25,8 @@ interface ConfigPanelProps {
   onFolderChange(path: string): void
   passSel: PassSelectorValue
   onPassSelChange(v: PassSelectorValue): void
+  profile: boolean
+  onProfileChange(v: boolean): void
   onStart(): void
   error: string | null
   nothingToRun: boolean
@@ -35,6 +37,8 @@ function ConfigPanel({
   onFolderChange,
   passSel,
   onPassSelChange,
+  profile,
+  onProfileChange,
   onStart,
   error,
   nothingToRun,
@@ -92,6 +96,17 @@ function ConfigPanel({
           {error}
         </p>
       )}
+
+      {/* Profiler toggle */}
+      <label className="flex items-center gap-2 text-xs text-neutral-400 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={profile}
+          onChange={(e) => onProfileChange(e.target.checked)}
+          className="rounded border-neutral-600 bg-neutral-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+        />
+        Enable profiler (performance analysis)
+      </label>
 
       <button
         onClick={onStart}
@@ -180,12 +195,12 @@ export function BatchConfigView({ batch, initialFolder = '', onBatchStarted }: B
 
   const [folder, setFolder] = useState(initialFolder)
   const [passSel, setPassSel] = useState<PassSelectorValue>(defaultPassSelectorValue)
+  const [profile, setProfile] = useState(false)
 
   const phase = stats.status === 'ingesting' ? 'ingesting' : 'config'
 
   const handleStart = useCallback(async () => {
     const modules = resolveModuleKeys(passSel.selectedKeys)
-    // Kick off the batch — this transitions status to 'ingesting' then 'running'
     batch.startBatch({
       folder,
       modules,
@@ -194,13 +209,14 @@ export function BatchConfigView({ batch, initialFolder = '', onBatchStarted }: B
       cloudProvider: passSel.cloudProvider,
       recursive: passSel.recursive,
       noHash: passSel.noHash,
+      profile,
     }).then(() => {
       // startBatch resolves after ingest; if something was enqueued the status
       // will have moved to 'running' — let the parent switch tabs.
     })
     // Switch the parent to Running tab as soon as ingest begins
     onBatchStarted?.()
-  }, [batch, folder, passSel, onBatchStarted])
+  }, [batch, folder, passSel, profile, onBatchStarted])
 
   if (phase === 'ingesting') {
     return (
@@ -217,6 +233,8 @@ export function BatchConfigView({ batch, initialFolder = '', onBatchStarted }: B
         onFolderChange={setFolder}
         passSel={passSel}
         onPassSelChange={setPassSel}
+        profile={profile}
+        onProfileChange={setProfile}
         onStart={handleStart}
         error={error}
         nothingToRun={ingestSummary !== null && ingestSummary.enqueued === 0}

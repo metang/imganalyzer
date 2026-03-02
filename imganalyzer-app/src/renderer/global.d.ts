@@ -312,7 +312,8 @@ declare global {
         cloudProvider: string,
         recursive: boolean,
         noHash: boolean,
-        cloudWorkers: number
+        cloudWorkers: number,
+        profile: boolean
       ): Promise<void>
       batchPause(): Promise<void>
       batchResume(): Promise<void>

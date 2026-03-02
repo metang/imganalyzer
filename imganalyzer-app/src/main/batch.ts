@@ -411,7 +411,8 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       cloudProvider = 'copilot',
       recursive = true,
       noHash = false,
-      cloudWorkers = 4
+      cloudWorkers = 4,
+      profile = false
     ): Promise<void> => {
       sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash }
       sessionStartMs = Date.now()
@@ -429,6 +430,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           cloudProvider,
           noXmp: true,
           verbose: true,
+          profile,
         })
       } catch (err) {
         isRunActive = false

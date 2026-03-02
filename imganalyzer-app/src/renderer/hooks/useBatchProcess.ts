@@ -43,6 +43,7 @@ export interface BatchConfig {
   cloudProvider: string
   recursive: boolean
   noHash: boolean
+  profile: boolean
 }
 
 export interface UseBatchProcessReturn {
@@ -153,7 +154,8 @@ export function useBatchProcess(): UseBatchProcessReturn {
         config.cloudProvider,
         config.recursive,
         config.noHash,
-        config.cloudWorkers
+        config.cloudWorkers,
+        config.profile
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))

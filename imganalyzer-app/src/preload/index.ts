@@ -56,9 +56,10 @@ contextBridge.exposeInMainWorld('api', {
     cloudProvider: string,
     recursive: boolean,
     noHash: boolean,
-    cloudWorkers: number
+    cloudWorkers: number,
+    profile: boolean
   ): Promise<void> =>
-    ipcRenderer.invoke('batch:start', folder, modules, workers, cloudProvider, recursive, noHash, cloudWorkers),
+    ipcRenderer.invoke('batch:start', folder, modules, workers, cloudProvider, recursive, noHash, cloudWorkers, profile),
 
   batchPause: (): Promise<void> =>
     ipcRenderer.invoke('batch:pause'),
