@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -38,6 +38,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         12: _migrate_v12,
         13: _migrate_v13,
         14: _migrate_v14,
+        15: _migrate_v15,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -596,5 +597,41 @@ def _migrate_v14(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_face_occ_cluster_person
         ON face_occurrences(cluster_id, person_id)
+    """)
+
+
+# ── Migration v15: Distributed worker lease tables ────────────────────────────
+
+def _migrate_v15(conn: sqlite3.Connection) -> None:
+    """Add worker registry + lease tables for distributed execution."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS worker_nodes (
+            id              TEXT PRIMARY KEY,
+            display_name    TEXT NOT NULL,
+            platform        TEXT,
+            capabilities    TEXT,  -- JSON object
+            status          TEXT NOT NULL DEFAULT 'offline',
+            last_heartbeat  TEXT,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS job_leases (
+            job_id            INTEGER PRIMARY KEY REFERENCES job_queue(id) ON DELETE CASCADE,
+            worker_id         TEXT NOT NULL REFERENCES worker_nodes(id) ON DELETE CASCADE,
+            lease_token       TEXT NOT NULL UNIQUE,
+            leased_at         TEXT NOT NULL DEFAULT (datetime('now')),
+            heartbeat_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            lease_expires_at  TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_leases_worker
+        ON job_leases(worker_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_leases_expiry
+        ON job_leases(lease_expires_at)
     """)
 
