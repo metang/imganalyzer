@@ -13,8 +13,10 @@ Key improvements over the old phase-based approach:
 
 from __future__ import annotations
 
+import gc
 import queue as _queue
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
@@ -153,6 +155,64 @@ class ResourceScheduler:
     def is_shutdown(self) -> bool:
         return self._shutdown.is_set()
 
+    # ── CUDA memory readiness ───────────────────────────────────────────────
+
+    @staticmethod
+    def _cuda_free_gb() -> float | None:
+        """Return currently free CUDA memory in GB, or None when unavailable."""
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return None
+            free_bytes, _total_bytes = torch.cuda.mem_get_info()
+            return free_bytes / (1024 ** 3)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _force_cuda_cleanup() -> None:
+        """Best-effort allocator cleanup before the next GPU phase."""
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                # ipc_collect helps release cached blocks held for IPC sharing.
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+    def _wait_for_vram_ready(self, module: str) -> None:
+        """Wait until enough CUDA free memory is visible for *module*.
+
+        This avoids racing into the next phase before memory from the previous
+        model unload is returned to the allocator/driver.
+        """
+        needed_gb = self.vram.vram_for(module)
+        if needed_gb <= 0:
+            return
+        # If the model cannot fit physically on this GPU, don't spin forever.
+        if needed_gb > self.vram.total_gb:
+            return
+        # No CUDA visibility (CPU mode / unsupported backend): nothing to wait for.
+        if self._cuda_free_gb() is None:
+            return
+
+        timeout_s = 120.0
+        deadline = time.monotonic() + timeout_s
+        while not self.is_shutdown:
+            free_gb = self._cuda_free_gb()
+            if free_gb is None or free_gb >= needed_gb:
+                return
+            self._force_cuda_cleanup()
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Timed out waiting for VRAM for {module}: "
+                    f"need {needed_gb:.2f} GB, free {free_gb:.2f} GB"
+                )
+            self._shutdown.wait(timeout=0.25)
+
     # ── Execution helpers ─────────────────────────────────────────────────
 
     def run_gpu_phase(
@@ -188,155 +248,164 @@ class ResourceScheduler:
         if not modules:
             return
 
-        # Reserve VRAM for all modules in this phase
-        for mod in modules:
-            if self.vram.vram_for(mod) > 0:
-                self.vram.reserve(mod)
-
+        reserved_modules: list[str] = []
         pending_futures: dict[Future, dict[str, Any]] = {}
+        try:
+            # Reserve VRAM for all modules in this phase
+            for mod in modules:
+                if self.vram.vram_for(mod) > 0:
+                    self._wait_for_vram_ready(mod)
+                    if self.is_shutdown:
+                        break
+                    self.vram.reserve(mod)
+                    reserved_modules.append(mod)
 
-        if len(modules) == 1:
-            # Single-module phase: run on current thread
-            mod = modules[0]
-            batch_sz = self.batch_size_for(mod)
+            if self.is_shutdown:
+                return
 
-            while not self.is_shutdown:
-                jobs = claim_fn(batch_sz, mod)
-                if not jobs:
-                    break
-
-                batch_result = process_batch_fn(jobs, mod)
-                for k in ("done", "failed", "skipped"):
-                    stats[k] += batch_result[k]
-                advance_fn(len(jobs))
-
-                # Sweep for IO/cloud work
-                new_io = submit_io_fn(local_pool, cloud_pool)
-                pending_futures.update(new_io)
-
-                # Reap completed IO futures
-                done_futs = {f: pending_futures.pop(f) for f in list(pending_futures) if f.done()}
-                if done_futs:
-                    collect_fn(done_futs)
-
-                flush_fn()
-        else:
-            # Multi-module phase: each GPU module gets its own thread.
-            # When a prefetch_fn is provided, IO threads read+decode images
-            # ahead of GPU consumption so the GPU never waits for disk IO.
-            gpu_threads: list[threading.Thread] = []
-            lock = threading.Lock()
-
-            _PREFETCH_DEPTH = 4   # max images buffered ahead of GPU
-            _PREFETCH_WORKERS = 3  # IO reader threads per module
-
-            def _drain_module(mod: str) -> None:
+            if len(modules) == 1:
+                # Single-module phase: run on current thread
+                mod = modules[0]
                 batch_sz = self.batch_size_for(mod)
-                use_prefetch = prefetch_fn is not None and not self.is_batch_capable(mod)
 
-                if not use_prefetch:
-                    # Original path for batch-capable modules
-                    while not self.is_shutdown:
-                        jobs = claim_fn(batch_sz, mod)
-                        if not jobs:
-                            break
-                        batch_result = process_batch_fn(jobs, mod)
-                        with lock:
-                            for k in ("done", "failed", "skipped"):
-                                stats[k] += batch_result[k]
-                        advance_fn(len(jobs))
-                    return
+                while not self.is_shutdown:
+                    jobs = claim_fn(batch_sz, mod)
+                    if not jobs:
+                        break
 
-                # ── Prefetched pipeline for non-batch modules ────────────
-                # Producer threads read images; GPU thread consumes.
-                prefetch_q: _queue.Queue[
-                    tuple[dict[str, Any], dict[str, Any] | None] | None
-                ] = _queue.Queue(maxsize=_PREFETCH_DEPTH)
-                producer_done = threading.Event()
+                    batch_result = process_batch_fn(jobs, mod)
+                    for k in ("done", "failed", "skipped"):
+                        stats[k] += batch_result[k]
+                    advance_fn(len(jobs))
 
-                def _producer() -> None:
-                    """Claim jobs and prefetch images into the queue."""
-                    try:
+                    # Sweep for IO/cloud work
+                    new_io = submit_io_fn(local_pool, cloud_pool)
+                    pending_futures.update(new_io)
+
+                    # Reap completed IO futures
+                    done_futs = {f: pending_futures.pop(f) for f in list(pending_futures) if f.done()}
+                    if done_futs:
+                        collect_fn(done_futs)
+
+                    flush_fn()
+            else:
+                # Multi-module phase: each GPU module gets its own thread.
+                # When a prefetch_fn is provided, IO threads read+decode images
+                # ahead of GPU consumption so the GPU never waits for disk IO.
+                gpu_threads: list[threading.Thread] = []
+                lock = threading.Lock()
+
+                _PREFETCH_DEPTH = 4   # max images buffered ahead of GPU
+
+                def _drain_module(mod: str) -> None:
+                    batch_sz = self.batch_size_for(mod)
+                    use_prefetch = prefetch_fn is not None and not self.is_batch_capable(mod)
+
+                    if not use_prefetch:
+                        # Original path for batch-capable modules
                         while not self.is_shutdown:
                             jobs = claim_fn(batch_sz, mod)
                             if not jobs:
                                 break
-                            for job in jobs:
-                                if self.is_shutdown:
-                                    return
-                                if prefetch_fn is None:
-                                    img_data = None
-                                else:
-                                    try:
-                                        img_data = prefetch_fn(job)
-                                    except Exception:
+                            batch_result = process_batch_fn(jobs, mod)
+                            with lock:
+                                for k in ("done", "failed", "skipped"):
+                                    stats[k] += batch_result[k]
+                            advance_fn(len(jobs))
+                        return
+
+                    # ── Prefetched pipeline for non-batch modules ────────────
+                    # Producer threads read images; GPU thread consumes.
+                    prefetch_q: _queue.Queue[
+                        tuple[dict[str, Any], dict[str, Any] | None] | None
+                    ] = _queue.Queue(maxsize=_PREFETCH_DEPTH)
+                    producer_done = threading.Event()
+
+                    def _producer() -> None:
+                        """Claim jobs and prefetch images into the queue."""
+                        try:
+                            while not self.is_shutdown:
+                                jobs = claim_fn(batch_sz, mod)
+                                if not jobs:
+                                    break
+                                for job in jobs:
+                                    if self.is_shutdown:
+                                        return
+                                    if prefetch_fn is None:
                                         img_data = None
-                                prefetch_q.put((job, img_data))
-                    finally:
-                        producer_done.set()
-                        # Sentinel: tell consumer no more items
-                        prefetch_q.put(None)
+                                    else:
+                                        try:
+                                            img_data = prefetch_fn(job)
+                                        except Exception:
+                                            img_data = None
+                                    prefetch_q.put((job, img_data))
+                        finally:
+                            producer_done.set()
+                            # Sentinel: tell consumer no more items
+                            prefetch_q.put(None)
 
-                # Start producer thread
-                prod_t = threading.Thread(
-                    target=_producer, daemon=True,
-                    name=f"prefetch-{mod}",
-                )
-                prod_t.start()
+                    # Start producer thread
+                    prod_t = threading.Thread(
+                        target=_producer, daemon=True,
+                        name=f"prefetch-{mod}",
+                    )
+                    prod_t.start()
 
-                # Consumer: GPU inference on prefetched images
-                while True:
-                    item = prefetch_q.get()
-                    if item is None:
-                        break
-                    job, img_data = item
-                    # process_single_fn will use the cached image if
-                    # prefetch_fn populated the thread-local cache
-                    status = process_single_fn(job)
-                    with lock:
-                        stats[status] = stats.get(status, 0) + 1
-                    advance_fn(1)
+                    # Consumer: GPU inference on prefetched images
+                    while True:
+                        item = prefetch_q.get()
+                        if item is None:
+                            break
+                        job, img_data = item
+                        # process_single_fn will use the cached image if
+                        # prefetch_fn populated the thread-local cache
+                        status = process_single_fn(job)
+                        with lock:
+                            stats[status] = stats.get(status, 0) + 1
+                        advance_fn(1)
 
-                prod_t.join(timeout=5)
+                    prod_t.join(timeout=5)
 
-            for mod in modules:
-                t = threading.Thread(
-                    target=_drain_module,
-                    args=(mod,),
-                    daemon=True,
-                    name=f"gpu-{mod}",
-                )
-                gpu_threads.append(t)
-                t.start()
+                for mod in modules:
+                    t = threading.Thread(
+                        target=_drain_module,
+                        args=(mod,),
+                        daemon=True,
+                        name=f"gpu-{mod}",
+                    )
+                    gpu_threads.append(t)
+                    t.start()
 
-            # While GPU threads work, keep submitting and reaping IO jobs
-            alive = True
-            while alive and not self.is_shutdown:
-                new_io = submit_io_fn(local_pool, cloud_pool)
-                pending_futures.update(new_io)
+                # While GPU threads work, keep submitting and reaping IO jobs
+                alive = True
+                while alive and not self.is_shutdown:
+                    new_io = submit_io_fn(local_pool, cloud_pool)
+                    pending_futures.update(new_io)
 
-                done_futs = {f: pending_futures.pop(f) for f in list(pending_futures) if f.done()}
-                if done_futs:
-                    collect_fn(done_futs)
+                    done_futs = {f: pending_futures.pop(f) for f in list(pending_futures) if f.done()}
+                    if done_futs:
+                        collect_fn(done_futs)
 
-                flush_fn()
+                    flush_fn()
 
-                alive = any(t.is_alive() for t in gpu_threads)
-                if alive:
-                    # Brief sleep to avoid busy-waiting
-                    self._shutdown.wait(timeout=0.1)
+                    alive = any(t.is_alive() for t in gpu_threads)
+                    if alive:
+                        # Brief sleep to avoid busy-waiting
+                        self._shutdown.wait(timeout=0.1)
 
-            # Join all GPU threads
-            for t in gpu_threads:
-                t.join(timeout=5)
+                # Join all GPU threads
+                for t in gpu_threads:
+                    t.join(timeout=5)
 
-        # Collect remaining IO futures
-        collect_fn(pending_futures)
-
-        # Unload all models from this phase
-        for mod in modules:
-            unload_fn(mod)
-            self.vram.release(mod)
+            # Collect remaining IO futures
+            collect_fn(pending_futures)
+        finally:
+            # Unload all models reserved in this phase.
+            for mod in reserved_modules:
+                try:
+                    unload_fn(mod)
+                finally:
+                    self.vram.release(mod)
 
     def run_io_drain(
         self,

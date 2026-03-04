@@ -5,7 +5,7 @@ import threading
 import pytest
 
 from imganalyzer.pipeline.vram_budget import VRAMBudget, _MODULE_VRAM_GB, _EXCLUSIVE_MODULES
-from imganalyzer.pipeline.scheduler import ResourceScheduler, _GPU_PHASES, _PREREQUISITES
+from imganalyzer.pipeline.scheduler import ResourceScheduler, _GPU_PHASES
 
 
 # ── VRAMBudget tests ──────────────────────────────────────────────────────────
@@ -49,11 +49,20 @@ class TestVRAMBudget:
         vram = self._make()
         assert vram.can_fit("blip2")
         vram.reserve("blip2")
-        assert vram.used_gb == pytest.approx(6.0)
+        assert vram.used_gb == pytest.approx(_MODULE_VRAM_GB["blip2"])
         # Nothing else can load while blip2 is loaded
         assert not vram.can_fit("faces")
         assert not vram.can_fit("embedding")
         assert not vram.can_fit("objects")
+
+    def test_blip2_fits_on_8gb_budget(self):
+        """BLIP-2 phase should be runnable on 8 GB cards at 70% budget."""
+        vram = self._make(total=8.0, fraction=0.70)  # 5.6 GB budget
+        assert vram.can_fit("blip2")
+
+    def test_blip2_does_not_fit_below_physical_requirement(self):
+        vram = self._make(total=4.0, fraction=0.70)
+        assert not vram.can_fit("blip2")
 
     def test_exclusive_blocked_by_existing(self):
         vram = self._make()

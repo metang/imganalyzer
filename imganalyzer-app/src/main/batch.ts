@@ -447,6 +447,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           cloudProvider,
           noXmp: true,
           verbose: true,
+          staleTimeout: 0,
           profile,
         })
       } catch (err) {
@@ -645,6 +646,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           cloudProvider: cloud,
           noXmp: true,
           verbose: true,
+          staleTimeout: 0,
           profile: sessionConfig?.profile ?? false,
         })
       } catch (err) {

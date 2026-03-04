@@ -254,17 +254,21 @@ class Worker:
     def _run_loop(self, batch_size: int) -> dict[str, int]:
         stats = {"done": 0, "failed": 0, "skipped": 0}
 
-        # Cap PyTorch CUDA memory usage to 70% of physical VRAM to leave
-        # headroom for other applications and avoid virtual memory spilling.
+        # Initialize VRAM budget and scheduler
+        vram = VRAMBudget()  # auto-detects GPU VRAM, applies 70% cap
+        # Cap PyTorch CUDA memory usage conservatively, but ensure the BLIP-2
+        # phase is not impossible on smaller cards (e.g. 8 GB).
         try:
             import torch
             if torch.cuda.is_available():
-                torch.cuda.set_per_process_memory_fraction(0.70)
+                fraction = 0.70
+                blip2_need = vram.vram_for("blip2")
+                if vram.total_gb > 0 and blip2_need > (fraction * vram.total_gb):
+                    fraction = min(0.92, (blip2_need + 0.25) / vram.total_gb)
+                torch.cuda.set_per_process_memory_fraction(fraction)
         except Exception:
             pass
 
-        # Initialize VRAM budget and scheduler
-        vram = VRAMBudget()  # auto-detects GPU VRAM, applies 70% cap
         scheduler = ResourceScheduler(
             vram_budget=vram,
             gpu_batch_sizes=self._GPU_BATCH_SIZES,
@@ -457,7 +461,7 @@ class Worker:
         if self._shutdown.is_set():
             console.print("\n[yellow]Paused.[/yellow] Run `imganalyzer run` to resume.")
         else:
-            console.print(f"\n[green]Complete.[/green]")
+            console.print("\n[green]Complete.[/green]")
 
         # Final flush: pick up any FTS5 / XMP work accumulated since the
         # last periodic flush (at most ~60s worth).
@@ -550,7 +554,6 @@ class Worker:
             # Prerequisite check — defer (not skip) so job retries after prereq completes
             prereq = _PREREQUISITES.get(module)
             if prereq and not repo.is_analyzed(image_id, prereq):
-                reason = f"prerequisite not met: {prereq}"
                 queue.mark_pending(job_id)
                 batch_stats["skipped"] += 1
                 continue

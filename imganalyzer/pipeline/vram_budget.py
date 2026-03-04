@@ -18,7 +18,7 @@ from typing import Optional
 # Tuned for the default _GPU_BATCH_SIZES in worker.py.
 _MODULE_VRAM_GB: dict[str, float] = {
     "objects":   2.4,   # GroundingDINO mixed fp16/fp32, batch=4
-    "blip2":     6.0,   # BLIP-2 FlanT5-XL fp16 + beam search
+    "blip2":     6.0,   # BLIP-2 FlanT5-XL fp16 + generation working set
     "ocr":       1.3,   # TrOCR large-printed fp16
     "faces":     1.0,   # InsightFace buffalo_l ONNX (1 GB arena cap)
     "embedding": 0.95,  # CLIP ViT-L/14 fp16, batch=16
@@ -52,6 +52,11 @@ class VRAMBudget:
         return self._budget_gb
 
     @property
+    def total_gb(self) -> float:
+        """Physical VRAM size in GB."""
+        return self._total_gb
+
+    @property
     def used_gb(self) -> float:
         """Currently reserved VRAM in GB."""
         with self._lock:
@@ -61,7 +66,7 @@ class VRAMBudget:
     def free_gb(self) -> float:
         """Remaining VRAM headroom in GB."""
         with self._lock:
-            return self._budget_gb - sum(self._loaded.values())
+            return max(0.0, self._budget_gb - sum(self._loaded.values()))
 
     @property
     def loaded_modules(self) -> list[str]:
@@ -86,6 +91,10 @@ class VRAMBudget:
                 return False
             if self._loaded.keys() & _EXCLUSIVE_MODULES:
                 return False
+            # Allow exclusive modules to use physical VRAM even when they exceed
+            # the conservative scheduler budget fraction.
+            if module in _EXCLUSIVE_MODULES and not self._loaded:
+                return vram <= self._total_gb
             # Already loaded (idempotent)
             if module in self._loaded:
                 return True

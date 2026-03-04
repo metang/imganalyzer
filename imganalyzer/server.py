@@ -41,9 +41,15 @@ Supported methods:
     faces/crop      - Crop a face from source image by occurrence ID (one-shot)
     faces/run-clustering - Run embedding-based face clustering (one-shot)
     shutdown        - Gracefully shut down the server (one-shot)
+
+HTTP coordinator mode:
+    python -m imganalyzer.server --transport http --host 127.0.0.1 --port 8765
+    # Optional bearer token (recommended for LAN):
+    python -m imganalyzer.server --transport http --auth-token <token>
 """
 from __future__ import annotations
 
+import argparse
 import base64
 import io
 import json
@@ -53,6 +59,7 @@ import sqlite3
 import sys
 import threading
 import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -255,7 +262,10 @@ def _handle_run(req_id: int | str, params: dict) -> None:
     detection_prompt = params.get("detectionPrompt")
     detection_threshold = params.get("detectionThreshold")
     face_threshold = params.get("faceThreshold")
-    stale_timeout = params.get("staleTimeout")  # None = use Worker default (10 min)
+    # In Electron/JSON-RPC mode we run a single worker at a time, so any
+    # leftover `running` rows are stale from an interrupted previous run.
+    # Recover them immediately by default unless the caller overrides it.
+    stale_timeout = params.get("staleTimeout", 0)
     profile = params.get("profile", False)
 
     def _run_worker():
@@ -1089,6 +1099,162 @@ _ASYNC_METHODS: dict[str, Any] = {
 }
 
 
+def _graceful_shutdown() -> None:
+    """Signal running workers to stop and wait briefly for shutdown."""
+    _run_cancel.set()
+    if _active_worker is not None:
+        _active_worker._shutdown.set()
+    if _run_thread is not None and _run_thread.is_alive():
+        _run_thread.join(timeout=5)
+
+
+def _dispatch_http_request(msg: Any) -> tuple[dict[str, Any], bool]:
+    """Dispatch a JSON-RPC request for HTTP transport.
+
+    Returns ``(response, should_shutdown_server)``.
+    """
+    req_id = msg.get("id") if isinstance(msg, dict) else None
+    if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32600, "message": "Invalid request"},
+        }, False
+
+    method = msg.get("method", "")
+    params = msg.get("params", {})
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32602, "message": "Invalid params"},
+        }, False
+
+    if method == "shutdown":
+        _graceful_shutdown()
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}}, True
+
+    if method in _SYNC_METHODS:
+        try:
+            result = _SYNC_METHODS[method](params)
+            return {"jsonrpc": "2.0", "id": req_id, "result": result}, False
+        except Exception as exc:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -1, "message": str(exc)},
+            }, False
+
+    if method in _ASYNC_METHODS:
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {
+                "code": -32601,
+                "message": f"Method not available over HTTP transport: {method}",
+            },
+        }, False
+
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
+    }, False
+
+
+def _serve_http_jsonrpc(
+    host: str,
+    port: int,
+    auth_token: str | None = None,
+    rpc_path: str = "/jsonrpc",
+) -> None:
+    """Run the server in HTTP JSON-RPC mode for remote workers."""
+    normalized_path = rpc_path.strip() or "/jsonrpc"
+    if not normalized_path.startswith("/"):
+        normalized_path = f"/{normalized_path}"
+
+    class _JsonRpcHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _write_json(self, status_code: int, payload: dict[str, Any]) -> None:
+            data = json.dumps(payload, default=str, separators=(",", ":")).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _check_auth(self) -> bool:
+            if not auth_token:
+                return True
+            auth_header = self.headers.get("Authorization", "")
+            expected = f"Bearer {auth_token}"
+            if auth_header == expected:
+                return True
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+
+        def do_POST(self) -> None:
+            req_path = self.path.split("?", 1)[0].rstrip("/") or "/"
+            expected_path = normalized_path.rstrip("/") or "/"
+            if req_path != expected_path:
+                self.send_error(404, "Not Found")
+                return
+            if not self._check_auth():
+                return
+
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                content_length = 0
+            body = self.rfile.read(max(0, content_length))
+            try:
+                message = json.loads(body.decode("utf-8"))
+            except Exception as exc:
+                self._write_json(
+                    200,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32700, "message": f"Parse error: {exc}"},
+                    },
+                )
+                return
+
+            response, should_shutdown = _dispatch_http_request(message)
+            self._write_json(200, response)
+            if should_shutdown:
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+        def do_GET(self) -> None:
+            if self.path in ("/health", "/healthz"):
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_error(405, "Method Not Allowed")
+
+        def log_message(self, fmt: str, *args: Any) -> None:
+            # Keep logs on stderr, stdout is reserved in stdio mode.
+            sys.stderr.write(f"[server.http] {self.address_string()} - {fmt % args}\n")
+
+    server = ThreadingHTTPServer((host, port), _JsonRpcHandler)
+    sys.stderr.write(
+        f"[server.http] listening on http://{host}:{port}{normalized_path} "
+        f"(auth={'on' if auth_token else 'off'})\n"
+    )
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        sys.stderr.write("[server.http] stopped\n")
+
+
 def _dispatch(msg: dict) -> None:
     """Dispatch a JSON-RPC request."""
     req_id = msg.get("id")
@@ -1096,12 +1262,7 @@ def _dispatch(msg: dict) -> None:
     params = msg.get("params", {})
 
     if method == "shutdown":
-        # Signal the active worker to stop and wait briefly for it to exit
-        _run_cancel.set()
-        if _active_worker is not None:
-            _active_worker._shutdown.set()
-        if _run_thread is not None and _run_thread.is_alive():
-            _run_thread.join(timeout=5)
+        _graceful_shutdown()
         _send_result(req_id, {"ok": True})
         sys.exit(0)
 
@@ -1128,11 +1289,65 @@ def _dispatch(msg: dict) -> None:
 
 # ── Main loop ────────────────────────────────────────────────────────────────
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
+
 def main() -> None:
-    """Read JSON-RPC requests from stdin, dispatch, write responses to stdout."""
+    """Read JSON-RPC requests from stdin (default) or serve HTTP JSON-RPC."""
     # Load dotenv early so all handlers have access to env vars
     from dotenv import load_dotenv
     load_dotenv()
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "http"),
+        default=os.getenv("IMGANALYZER_SERVER_TRANSPORT", "stdio"),
+    )
+    parser.add_argument(
+        "--host",
+        default=os.getenv("IMGANALYZER_COORDINATOR_HOST", "127.0.0.1"),
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=_env_int("IMGANALYZER_COORDINATOR_PORT", 8765),
+    )
+    parser.add_argument(
+        "--auth-token",
+        default=os.getenv("IMGANALYZER_COORDINATOR_TOKEN", ""),
+    )
+    parser.add_argument(
+        "--rpc-path",
+        default=os.getenv("IMGANALYZER_COORDINATOR_RPC_PATH", "/jsonrpc"),
+    )
+    args, _unknown = parser.parse_known_args(sys.argv[1:])
+
+    if args.transport == "http":
+        host_value = str(args.host).strip()
+        host_norm = host_value.lower()
+        token_value = str(args.auth_token).strip()
+        is_loopback = host_norm in {"127.0.0.1", "localhost", "::1"}
+        if not is_loopback and not token_value:
+            sys.stderr.write(
+                "[server.http] --auth-token is required for non-loopback --host values\n"
+            )
+            sys.exit(2)
+        _serve_http_jsonrpc(
+            host=host_value,
+            port=max(1, args.port),
+            auth_token=token_value or None,
+            rpc_path=args.rpc_path,
+        )
+        return
 
     # Signal readiness
     _send_notification("server/ready", {"pid": os.getpid(), "version": "1.0"})
