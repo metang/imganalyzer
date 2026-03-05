@@ -63,6 +63,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from imganalyzer.readers.raw import _suppress_c_stderr
+
 # Redirect stdout early so print() from library imports goes to stderr
 _real_stdout = sys.stdout
 sys.stdout = sys.stderr
@@ -698,7 +700,9 @@ def _handle_thumbnail(params: dict) -> dict:
 
     if ext in RAW_EXTS:
         import rawpy
-        with rawpy.imread(str(path)) as raw:
+        with _suppress_c_stderr():
+            raw_ctx = rawpy.imread(str(path))
+        with raw_ctx as raw:
             rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
         import numpy as np
         img = Image.fromarray(rgb)
@@ -744,7 +748,9 @@ def _handle_fullimage(params: dict) -> dict:
 
     if ext in RAW_EXTS:
         import rawpy
-        with rawpy.imread(str(path)) as raw:
+        with _suppress_c_stderr():
+            raw_ctx = rawpy.imread(str(path))
+        with raw_ctx as raw:
             rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
         import numpy as np
         img = Image.fromarray(rgb)
@@ -965,7 +971,9 @@ def _handle_faces_crop(params: dict) -> dict:
     if ext in RAW_EXTS:
         import rawpy
         import numpy as np
-        with rawpy.imread(str(path)) as raw:
+        with _suppress_c_stderr():
+            raw_ctx = rawpy.imread(str(path))
+        with raw_ctx as raw:
             rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
         img = Image.fromarray(rgb)
     else:

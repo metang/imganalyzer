@@ -181,8 +181,14 @@ export function ensureServerRunning(): Promise<void> {
 
     // Log stderr for debugging but don't parse it
     proc.stderr?.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8').trim()
-      if (text) console.error('[python-rpc stderr]', text)
+      const text = chunk.toString('utf8')
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        // LibRaw writes this spammy corruption message directly to C stderr.
+        if (/unknown file:\s*data corrupted at \d+/i.test(trimmed)) continue
+        console.error('[python-rpc stderr]', trimmed)
+      }
     })
 
     proc.on('error', (err) => {

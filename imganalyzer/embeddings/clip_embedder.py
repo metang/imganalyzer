@@ -23,6 +23,8 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from imganalyzer.readers.raw import _suppress_c_stderr
+
 CACHE_DIR = os.getenv("IMGANALYZER_MODEL_CACHE", str(Path.home() / ".cache" / "imganalyzer"))
 
 # Maximum size (pixels) on the long edge before feeding to CLIP.
@@ -84,7 +86,9 @@ class CLIPEmbedder:
 
         if is_raw:
             import rawpy
-            with rawpy.imread(str(path)) as raw:
+            with _suppress_c_stderr():
+                raw_ctx = rawpy.imread(str(path))
+            with raw_ctx as raw:
                 rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=False, output_bps=8)
             img = Image.fromarray(rgb).convert("RGB")
         else:
