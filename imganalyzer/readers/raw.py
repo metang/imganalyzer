@@ -1,10 +1,36 @@
 """RAW image reader using rawpy (LibRaw bindings)."""
 from __future__ import annotations
 
+import contextlib
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
 import numpy as np
+
+
+@contextlib.contextmanager
+def _suppress_c_stderr() -> Generator[None, None, None]:
+    """Temporarily redirect C-level stderr to devnull.
+
+    LibRaw writes "unknown file: data corrupted at ..." directly to the C
+    file descriptor, bypassing Python's sys.stderr.  This silences those
+    messages so they don't flood the Electron DevTools console.
+    """
+    try:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        old_stderr_fd = os.dup(2)
+        os.dup2(devnull_fd, 2)
+        os.close(devnull_fd)
+    except OSError:
+        # If fd manipulation fails (e.g. on some platforms), just proceed
+        yield
+        return
+    try:
+        yield
+    finally:
+        os.dup2(old_stderr_fd, 2)
+        os.close(old_stderr_fd)
 
 
 def read(path: Path, *, half_size: bool = True) -> dict[str, Any]:
@@ -22,7 +48,8 @@ def read(path: Path, *, half_size: bool = True) -> dict[str, Any]:
         raise ImportError("rawpy is required for RAW files: pip install rawpy")
 
     try:
-        raw_ctx = rawpy.imread(str(path))
+        with _suppress_c_stderr():
+            raw_ctx = rawpy.imread(str(path))
     except Exception as exc:
         raise ValueError(
             f"LibRaw cannot decode {path.name}: {exc}"
@@ -32,7 +59,8 @@ def read(path: Path, *, half_size: bool = True) -> dict[str, Any]:
         # Get raw dimensions first to check size
         raw_h, raw_w = raw.raw_image.shape[:2]
         try:
-            rgb = raw.postprocess(
+            with _suppress_c_stderr():
+                rgb = raw.postprocess(
                 use_camera_wb=True,
                 no_auto_bright=False,
                 output_bps=8,
@@ -105,7 +133,8 @@ def read_headers(path: Path) -> dict[str, Any]:
         raise ImportError("rawpy is required for RAW files: pip install rawpy")
 
     try:
-        raw_ctx = rawpy.imread(str(path))
+        with _suppress_c_stderr():
+            raw_ctx = rawpy.imread(str(path))
     except Exception as exc:
         raise ValueError(
             f"LibRaw cannot decode {path.name}: {exc}"

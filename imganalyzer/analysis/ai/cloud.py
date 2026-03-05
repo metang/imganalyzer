@@ -283,7 +283,8 @@ def _convert_raw_to_jpeg(raw_path: Path) -> Path:
             import rawpy
         except ImportError:
             raise ImportError("rawpy required for RAW conversion: pip install rawpy")
-        with rawpy.imread(str(raw_path)) as raw:
+        from imganalyzer.readers.raw import _suppress_c_stderr
+        with _suppress_c_stderr(), rawpy.imread(str(raw_path)) as raw:
             rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
         img = Image.fromarray(rgb)
     else:
