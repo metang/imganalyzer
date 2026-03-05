@@ -1193,7 +1193,7 @@ class TestFacePersons:
         pid = repo.create_person("Dad")
         repo.link_cluster_to_person(1, pid)
 
-        clusters = repo.list_face_clusters()
+        clusters, total_count = repo.list_face_clusters()
         cluster_map = {c["cluster_id"]: c for c in clusters}
         assert cluster_map[1]["person_id"] == pid
         assert cluster_map[2]["person_id"] is None

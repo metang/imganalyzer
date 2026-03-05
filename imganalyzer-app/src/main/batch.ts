@@ -356,6 +356,10 @@ function setupNotificationListener(): void {
         })
         break
       }
+
+      case 'faces/clustering-done':
+        mainWin?.webContents?.send('faces:clustering-done', p)
+        break
     }
   })
 }

@@ -125,8 +125,8 @@ contextBridge.exposeInMainWorld('api', {
   setFaceAlias: (canonicalName: string, displayName: string, clusterId?: number | null): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('faces:setAlias', canonicalName, displayName, clusterId ?? null),
 
-  listFaceClusters: (): Promise<{ clusters: Array<{ cluster_id: number | null; identity_name: string; display_name: string | null; identity_id: number | null; image_count: number; face_count: number; representative_id: number | null }>; has_occurrences: boolean; error?: string }> =>
-    ipcRenderer.invoke('faces:clusters'),
+  listFaceClusters: (limit?: number, offset?: number): Promise<{ clusters: Array<{ cluster_id: number | null; identity_name: string; display_name: string | null; identity_id: number | null; image_count: number; face_count: number; representative_id: number | null; person_id: number | null }>; has_occurrences: boolean; total_count: number; error?: string }> =>
+    ipcRenderer.invoke('faces:clusters', limit, offset),
 
   getFaceClusterImages: (clusterId: number | null, identityName: string | null, limit?: number): Promise<{ occurrences: Array<{ id: number; image_id: number; file_path: string; face_idx: number; bbox_x1: number; bbox_y1: number; bbox_x2: number; bbox_y2: number; age: number | null; gender: string | null; identity_name: string }>; error?: string }> =>
     ipcRenderer.invoke('faces:clusterImages', clusterId, identityName, limit),
@@ -137,8 +137,14 @@ contextBridge.exposeInMainWorld('api', {
   getFaceCropBatch: (ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }> =>
     ipcRenderer.invoke('faces:cropBatch', ids),
 
-  runFaceClustering: (threshold?: number): Promise<{ num_clusters: number; error?: string }> =>
+  runFaceClustering: (threshold?: number): Promise<{ started: boolean; error?: string }> =>
     ipcRenderer.invoke('faces:runClustering', threshold),
+
+  onClusteringDone: (cb: (result: { num_clusters?: number; error?: string }) => void): (() => void) => {
+    const handler = (_event: unknown, result: { num_clusters?: number; error?: string }): void => { cb(result) }
+    ipcRenderer.on('faces:clustering-done', handler)
+    return () => ipcRenderer.removeListener('faces:clustering-done', handler)
+  },
 
   rebuildFaces: (): Promise<{ enqueued: number; error?: string }> =>
     ipcRenderer.invoke('faces:rebuild'),

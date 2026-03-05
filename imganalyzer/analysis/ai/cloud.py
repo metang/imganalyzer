@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,10 @@ _RAW_EXTENSIONS = frozenset({
 })
 # Non-RAW formats that also need JPEG conversion for the Copilot SDK attachment.
 _NEEDS_JPEG_CONVERSION = _RAW_EXTENSIONS | frozenset({".heic", ".heif", ".avif"})
+
+# Copilot SDK session lifecycle is not safe to run concurrently across
+# multiple worker threads (can raise "cannot schedule new futures after shutdown").
+_COPILOT_LOCK = threading.Lock()
 
 
 def _encode_image(path: Path, max_size_kb: int = 1024) -> tuple[str, str]:
@@ -182,7 +187,7 @@ class CloudAI:
         result: dict[str, Any] = {}
 
         # Labels → description + keywords
-        labels = [l.description for l in response.label_annotations]
+        labels = [label.description for label in response.label_annotations]
         result["keywords"] = labels
         result["description"] = "Scene detected: " + ", ".join(labels[:5]) + "."
 
@@ -223,29 +228,27 @@ class CloudAI:
             raise ImportError(
                 "GitHub Copilot SDK required: pip install github-copilot-sdk"
             )
-
         async def _run(analysis_path: str) -> dict[str, Any]:
+            # Always create a fresh client — asyncio.run() closes its event
+            # loop on return, so any cached client becomes invalid.
             client = CopilotClient()
+            session = await client.create_session({"model": "gpt-4.1"})
             try:
-                session = await client.create_session({"model": "gpt-4.1"})
-                try:
-                    event = await session.send_and_wait(
-                        {
-                            "prompt": "Analyze this image.\n\n" + SYSTEM_PROMPT_WITH_AESTHETIC,
-                            "attachments": [{"type": "file", "path": analysis_path}],
-                        },
-                        timeout=120.0,
-                    )
-                    if event is None:
-                        raise RuntimeError("Copilot returned no response")
-                    content: str = getattr(event.data, "content", "") or ""
-                    if not content:
-                        raise RuntimeError("Copilot returned an empty response")
-                    return _parse_json_response(content)
-                finally:
-                    await session.destroy()
+                event = await session.send_and_wait(
+                    {
+                        "prompt": "Analyze this image.\n\n" + SYSTEM_PROMPT_WITH_AESTHETIC,
+                        "attachments": [{"type": "file", "path": analysis_path}],
+                    },
+                    timeout=120.0,
+                )
+                if event is None:
+                    raise RuntimeError("Copilot returned no response")
+                content: str = getattr(event.data, "content", "") or ""
+                if not content:
+                    raise RuntimeError("Copilot returned an empty response")
+                return _parse_json_response(content)
             finally:
-                await client.stop()
+                await session.destroy()
 
         # RAW and HEIC/HEIF/AVIF files must be converted to JPEG before submission.
         temp_jpeg: Path | None = None
@@ -255,7 +258,8 @@ class CloudAI:
             analysis_path = temp_jpeg
 
         try:
-            return asyncio.run(_run(str(analysis_path)))
+            with _COPILOT_LOCK:
+                return asyncio.run(_run(str(analysis_path)))
         finally:
             if temp_jpeg is not None:
                 try:

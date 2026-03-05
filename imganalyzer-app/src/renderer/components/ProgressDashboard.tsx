@@ -102,6 +102,8 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
   const complete   = totals.done + totals.failed + totals.skipped
   const overallPct = totalJobs > 0 ? Math.round((complete / totalJobs) * 100) : 0
 
+  const jobsPerSec = elapsedMs > 0 ? (complete / (elapsedMs / 1000)) : 0
+
   const isRunning = status === 'running'
   const isPaused  = status === 'paused'
   const hasPending = totals.pending > 0
@@ -129,7 +131,10 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
       {/* ── Overall progress bar ────────────────────────────────────────────── */}
       <div className="flex flex-col gap-1.5">
         <div className="flex justify-between text-xs text-neutral-400">
-          <span>{complete.toLocaleString()} / {totalJobs.toLocaleString()} jobs</span>
+          <span>
+            {complete.toLocaleString()} / {totalJobs.toLocaleString()} jobs
+            {jobsPerSec > 0 && <span className="text-neutral-500 ml-1.5">({jobsPerSec.toFixed(1)}/s)</span>}
+          </span>
           <span>{overallPct}%</span>
         </div>
         <div className="h-2 bg-neutral-800 rounded-full overflow-hidden">

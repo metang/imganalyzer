@@ -847,84 +847,150 @@ class Repository:
                 ],
             )
 
-    def list_face_clusters(self) -> list[dict[str, Any]]:
+    def list_face_clusters(
+        self,
+        limit: int = 0,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
         """Return cluster summaries sorted by face count descending.
 
         If clustering hasn't been run yet (all cluster_id are NULL),
         falls back to grouping by identity_name.
 
-        Each row has: cluster_id, identity_name, display_name, image_count,
-        face_count, representative_id (a face_occurrences.id for thumbnail).
+        Args:
+            limit: Max rows to return. 0 means all (no limit).
+            offset: Number of rows to skip.
+
+        Returns:
+            (clusters, total_count) — list of cluster dicts and the total
+            number of clusters (for pagination).
         """
         # Check if any clustering has been done
         has_clusters = self.conn.execute(
             "SELECT 1 FROM face_occurrences WHERE cluster_id IS NOT NULL LIMIT 1"
         ).fetchone()
 
+        pagination = ""
+        params: list[int] = []
+        if limit > 0:
+            pagination = " LIMIT ? OFFSET ?"
+            params = [limit, offset]
+
         if has_clusters:
+            total_row = self.conn.execute(
+                "SELECT COUNT(DISTINCT cluster_id) AS cnt FROM face_occurrences WHERE cluster_id IS NOT NULL"
+            ).fetchone()
+            total_count = total_row["cnt"] if total_row else 0
+
             rows = self.conn.execute(
-                """
+                f"""
+                WITH cluster_agg AS (
+                    SELECT
+                        cluster_id,
+                        COUNT(DISTINCT image_id) AS image_count,
+                        COUNT(id)                AS face_count
+                    FROM face_occurrences
+                    WHERE cluster_id IS NOT NULL
+                    GROUP BY cluster_id
+                ),
+                cluster_identity AS (
+                    SELECT cluster_id, identity_name,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY cluster_id
+                               ORDER BY COUNT(*) DESC
+                           ) AS rn
+                    FROM face_occurrences
+                    WHERE cluster_id IS NOT NULL
+                    GROUP BY cluster_id, identity_name
+                ),
+                cluster_person AS (
+                    SELECT cluster_id, person_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY cluster_id
+                               ORDER BY COUNT(*) DESC
+                           ) AS rn
+                    FROM face_occurrences
+                    WHERE cluster_id IS NOT NULL AND person_id IS NOT NULL
+                    GROUP BY cluster_id, person_id
+                ),
+                cluster_rep AS (
+                    SELECT cluster_id, id AS representative_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY cluster_id
+                               ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
+                           ) AS rn
+                    FROM face_occurrences
+                    WHERE cluster_id IS NOT NULL
+                )
                 SELECT
-                    fo.cluster_id,
-                    -- Use the most common identity_name in the cluster
-                    (SELECT fo2.identity_name
-                     FROM face_occurrences fo2
-                     WHERE fo2.cluster_id = fo.cluster_id
-                     GROUP BY fo2.identity_name
-                     ORDER BY COUNT(*) DESC LIMIT 1) AS identity_name,
+                    ca.cluster_id,
+                    ci.identity_name,
                     COALESCE(fcl.display_name, fi.display_name) AS display_name,
                     fi.id AS identity_id,
-                    COUNT(DISTINCT fo.image_id) AS image_count,
-                    COUNT(fo.id)                AS face_count,
-                    -- Pick the occurrence with the largest face area as representative
-                    (SELECT fo3.id FROM face_occurrences fo3
-                     WHERE fo3.cluster_id = fo.cluster_id
-                     ORDER BY (fo3.bbox_x2 - fo3.bbox_x1) * (fo3.bbox_y2 - fo3.bbox_y1) DESC
-                     LIMIT 1) AS representative_id,
-                    -- Most common person_id in the cluster (majority vote)
-                    (SELECT fo5.person_id FROM face_occurrences fo5
-                     WHERE fo5.cluster_id = fo.cluster_id AND fo5.person_id IS NOT NULL
-                     GROUP BY fo5.person_id
-                     ORDER BY COUNT(*) DESC LIMIT 1) AS person_id
-                FROM face_occurrences fo
+                    ca.image_count,
+                    ca.face_count,
+                    cr.representative_id,
+                    cp.person_id
+                FROM cluster_agg ca
+                LEFT JOIN cluster_identity ci
+                    ON ci.cluster_id = ca.cluster_id AND ci.rn = 1
+                LEFT JOIN cluster_person cp
+                    ON cp.cluster_id = ca.cluster_id AND cp.rn = 1
+                LEFT JOIN cluster_rep cr
+                    ON cr.cluster_id = ca.cluster_id AND cr.rn = 1
                 LEFT JOIN face_identities fi
-                    ON fi.canonical_name = (
-                        SELECT fo4.identity_name
-                        FROM face_occurrences fo4
-                        WHERE fo4.cluster_id = fo.cluster_id
-                        GROUP BY fo4.identity_name
-                        ORDER BY COUNT(*) DESC LIMIT 1
-                    )
+                    ON fi.canonical_name = ci.identity_name
                 LEFT JOIN face_cluster_labels fcl
-                    ON fcl.cluster_id = fo.cluster_id
-                WHERE fo.cluster_id IS NOT NULL
-                GROUP BY fo.cluster_id
-                ORDER BY face_count DESC
-                """
+                    ON fcl.cluster_id = ca.cluster_id
+                ORDER BY ca.face_count DESC
+                {pagination}
+                """,
+                params,
             ).fetchall()
         else:
-            # No clustering yet — group by identity_name
+            total_row = self.conn.execute(
+                "SELECT COUNT(DISTINCT identity_name) AS cnt FROM face_occurrences"
+            ).fetchone()
+            total_count = total_row["cnt"] if total_row else 0
+
             rows = self.conn.execute(
-                """
+                f"""
+                WITH name_agg AS (
+                    SELECT
+                        identity_name,
+                        COUNT(DISTINCT image_id) AS image_count,
+                        COUNT(id)                AS face_count
+                    FROM face_occurrences
+                    GROUP BY identity_name
+                ),
+                name_rep AS (
+                    SELECT identity_name, id AS representative_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY identity_name
+                               ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
+                           ) AS rn
+                    FROM face_occurrences
+                )
                 SELECT
                     NULL AS cluster_id,
-                    fo.identity_name,
+                    na.identity_name,
                     fi.display_name,
                     fi.id AS identity_id,
-                    COUNT(DISTINCT fo.image_id) AS image_count,
-                    COUNT(fo.id)                AS face_count,
-                    (SELECT fo2.id FROM face_occurrences fo2
-                     WHERE fo2.identity_name = fo.identity_name
-                     ORDER BY (fo2.bbox_x2 - fo2.bbox_x1) * (fo2.bbox_y2 - fo2.bbox_y1) DESC
-                     LIMIT 1) AS representative_id
-                FROM face_occurrences fo
-                LEFT JOIN face_identities fi ON fi.canonical_name = fo.identity_name
-                GROUP BY fo.identity_name
-                ORDER BY face_count DESC
-                """
+                    na.image_count,
+                    na.face_count,
+                    nr.representative_id
+                FROM name_agg na
+                LEFT JOIN name_rep nr
+                    ON nr.identity_name = na.identity_name AND nr.rn = 1
+                LEFT JOIN face_identities fi
+                    ON fi.canonical_name = na.identity_name
+                ORDER BY na.face_count DESC
+                {pagination}
+                """,
+                params,
             ).fetchall()
 
-        return [dict(r) for r in rows]
+        return [dict(r) for r in rows], total_count
 
     def get_cluster_occurrences(
         self, cluster_id: int | None = None, identity_name: str | None = None,
@@ -1004,76 +1070,95 @@ class Repository:
 
         import numpy as _np
 
-        # Parse embeddings
-        items: list[tuple[int, _np.ndarray, str]] = []
-        for r in rows:
+        # Parse all embeddings into a contiguous matrix up front
+        first_blob: bytes = rows[0]["embedding"]
+        dim = len(first_blob) // 4
+        n_items = len(rows)
+
+        all_vecs = _np.empty((n_items, dim), dtype=_np.float32)
+        occ_ids: list[int] = []
+        identities: list[str] = []
+
+        for idx, r in enumerate(rows):
             blob: bytes = r["embedding"]
             n_floats = len(blob) // 4
             vec = _np.array(struct.unpack(f"{n_floats}f", blob), dtype=_np.float32)
             norm = _np.linalg.norm(vec)
             if norm > 0:
-                vec = vec / norm
-            items.append((r["id"], vec, r["identity_name"]))
+                vec /= norm
+            all_vecs[idx] = vec
+            occ_ids.append(r["id"])
+            identities.append(r["identity_name"] or "Unknown")
 
-        # Build centroid matrix for vectorized similarity (O(n·k) instead of O(n²·k))
-        centroids: list[_np.ndarray] = []
+        # Pre-allocated centroid matrix — grows by doubling when full
+        max_clusters = min(n_items, 1024)
+        centroid_mat = _np.empty((max_clusters, dim), dtype=_np.float32)
         cluster_ids: list[int] = []
         cluster_counts: list[int] = []
-        cluster_identity: list[str] = []  # identity of first member
-        assignments: list[tuple[int, int]] = []
+        cluster_identity: list[str] = []
+        assignments = _np.empty(n_items, dtype=_np.int32)
+        n_clusters = 0
         next_cluster_id = 1
 
-        for occ_id, vec, identity in items:
+        for i in range(n_items):
+            vec = all_vecs[i]
+            identity = identities[i]
             matched_idx = -1
 
-            if centroids:
-                # Vectorized cosine similarity against all centroids
-                centroid_mat = _np.stack(centroids)
-                sims = centroid_mat @ vec  # (k,) dot products
+            if n_clusters > 0:
+                # Single matrix-vector multiply against active centroids
+                sims = centroid_mat[:n_clusters] @ vec
 
-                if identity and identity != "Unknown":
+                if identity != "Unknown":
                     # Named: match only clusters with same identity
-                    for i in _np.argsort(-sims):
-                        if sims[i] < threshold:
+                    for j in _np.argsort(-sims):
+                        if sims[j] < threshold:
                             break
-                        if cluster_identity[i] == identity:
-                            matched_idx = i
+                        if cluster_identity[j] == identity:
+                            matched_idx = int(j)
                             break
                 else:
-                    # Unknown: match best cluster above threshold
                     best_idx = int(_np.argmax(sims))
                     if sims[best_idx] >= threshold:
                         matched_idx = best_idx
 
             if matched_idx >= 0:
                 cid = cluster_ids[matched_idx]
-                assignments.append((occ_id, cid))
-                # Update centroid as running average
+                assignments[i] = cid
+                # In-place centroid update (running average)
                 n = cluster_counts[matched_idx] + 1
-                centroids[matched_idx] = (
-                    centroids[matched_idx] * (n - 1) / n + vec / n
+                centroid_mat[matched_idx] = (
+                    centroid_mat[matched_idx] * ((n - 1) / n) + vec * (1.0 / n)
                 )
                 cluster_counts[matched_idx] = n
             else:
+                # Grow centroid matrix if needed
+                if n_clusters >= max_clusters:
+                    max_clusters *= 2
+                    new_mat = _np.empty((max_clusters, dim), dtype=_np.float32)
+                    new_mat[:n_clusters] = centroid_mat[:n_clusters]
+                    centroid_mat = new_mat
+
                 cid = next_cluster_id
                 next_cluster_id += 1
-                centroids.append(vec.copy())
+                centroid_mat[n_clusters] = vec
                 cluster_ids.append(cid)
                 cluster_counts.append(1)
-                cluster_identity.append(identity or "Unknown")
-                assignments.append((occ_id, cid))
+                cluster_identity.append(identity)
+                assignments[i] = cid
+                n_clusters += 1
 
         # Write cluster assignments back to DB
         self.conn.execute("UPDATE face_occurrences SET cluster_id = NULL")
         self.conn.executemany(
             "UPDATE face_occurrences SET cluster_id = ? WHERE id = ?",
-            [(cid, occ_id) for occ_id, cid in assignments],
+            [(int(assignments[i]), occ_ids[i]) for i in range(n_items)],
         )
 
         # Auto-recover person links from previous clustering
         self.auto_assign_persons_after_recluster()
 
-        return len(cluster_ids)
+        return n_clusters
 
     def get_face_occurrences_count(self) -> int:
         """Return total number of face occurrences stored."""

@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 14
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -36,6 +36,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         10: _migrate_v10,
         11: _migrate_v11,
         12: _migrate_v12,
+        13: _migrate_v13,
+        14: _migrate_v14,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -560,5 +562,39 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_profiler_snapshots_run
         ON profiler_snapshots(run_id)
+    """)
+
+
+# ── Migration v13: Corrupt files table ───────────────────────────────────────
+
+def _migrate_v13(conn: sqlite3.Connection) -> None:
+    """Add ``corrupt_files`` table to persist paths of unreadable/corrupt files."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS corrupt_files (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            image_id    INTEGER REFERENCES images(id) ON DELETE CASCADE,
+            file_path   TEXT    NOT NULL,
+            error_msg   TEXT,
+            detected_at TEXT    NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(file_path)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_corrupt_files_image_id
+        ON corrupt_files(image_id)
+    """)
+
+
+# ── Migration v14: Covering indexes for face cluster queries ─────────────────
+
+def _migrate_v14(conn: sqlite3.Connection) -> None:
+    """Add indexes to speed up face cluster aggregation queries."""
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_face_occ_cluster_identity
+        ON face_occurrences(cluster_id, identity_name)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_face_occ_cluster_person
+        ON face_occurrences(cluster_id, person_id)
     """)
 

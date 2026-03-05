@@ -117,16 +117,30 @@ export function registerFaceHandlers(): void {
 
   ipcMain.handle(
     'faces:clusters',
-    async (): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; error?: string }> => {
+    async (
+      _evt,
+      limit?: number,
+      offset?: number
+    ): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; total_count: number; error?: string }> => {
       try {
         await ensureServerRunning()
-        const result = await rpc.call('faces/clusters', {}) as {
+        const params: Record<string, number> = {}
+        if (limit != null && limit > 0) {
+          params.limit = limit
+          params.offset = offset ?? 0
+        }
+        const result = await rpc.call('faces/clusters', params) as {
           clusters: FaceCluster[]
           has_occurrences: boolean
+          total_count: number
         }
-        return { clusters: result.clusters, has_occurrences: result.has_occurrences }
+        return {
+          clusters: result.clusters,
+          has_occurrences: result.has_occurrences,
+          total_count: result.total_count,
+        }
       } catch (err) {
-        return { clusters: [], has_occurrences: false, error: String(err) }
+        return { clusters: [], has_occurrences: false, total_count: 0, error: String(err) }
       }
     }
   )
@@ -188,15 +202,15 @@ export function registerFaceHandlers(): void {
 
   ipcMain.handle(
     'faces:runClustering',
-    async (_evt, threshold?: number): Promise<{ num_clusters: number; error?: string }> => {
+    async (_evt, threshold?: number): Promise<{ started: boolean; error?: string }> => {
       try {
         await ensureServerRunning()
-        const result = await rpc.call('faces/run-clustering', {
+        await rpc.call('faces/run-clustering', {
           threshold: threshold ?? 0.55,
-        }, undefined, 300_000) as { num_clusters: number }
-        return { num_clusters: result.num_clusters }
+        }, undefined, 300_000)
+        return { started: true }
       } catch (err) {
-        return { num_clusters: 0, error: String(err) }
+        return { started: false, error: String(err) }
       }
     }
   )

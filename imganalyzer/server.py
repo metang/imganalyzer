@@ -823,9 +823,15 @@ def _handle_faces_clusters(params: dict) -> dict:
 
     conn = _get_db()
     repo = Repository(conn)
-    clusters = repo.list_face_clusters()
+    limit = params.get("limit", 0)
+    offset = params.get("offset", 0)
+    clusters, total_count = repo.list_face_clusters(limit=limit, offset=offset)
     has_occurrences = repo.get_face_occurrences_count() > 0
-    return {"clusters": clusters, "has_occurrences": has_occurrences}
+    return {
+        "clusters": clusters,
+        "has_occurrences": has_occurrences,
+        "total_count": total_count,
+    }
 
 
 # ── Person (cross-age identity grouping) ─────────────────────────────────
@@ -1008,16 +1014,32 @@ def _handle_faces_crop(params: dict) -> dict:
     return {"data": base64.b64encode(buf.getvalue()).decode("ascii")}
 
 
-def _handle_faces_run_clustering(params: dict) -> dict:
-    """Run face clustering on all stored occurrences."""
+def _handle_faces_run_clustering(req_id: int | str, params: dict) -> None:
+    """Run face clustering in a background thread to avoid blocking the RPC loop."""
+    import sqlite3
+    from imganalyzer.db.connection import get_db_path
     from imganalyzer.db.repository import Repository
 
-    conn = _get_db()
-    repo = Repository(conn)
     threshold = params.get("threshold", 0.55)
-    num_clusters = repo.cluster_faces(threshold=threshold)
-    conn.commit()
-    return {"num_clusters": num_clusters}
+
+    _send_result(req_id, {"started": True})
+
+    def _run_clustering() -> None:
+        try:
+            db_path = get_db_path()
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.row_factory = sqlite3.Row
+            repo = Repository(conn)
+            num_clusters = repo.cluster_faces(threshold=threshold)
+            conn.commit()
+            conn.close()
+            _send_notification("faces/clustering-done", {"num_clusters": num_clusters})
+        except Exception as exc:
+            _send_notification("faces/clustering-done", {"error": str(exc)})
+
+    t = threading.Thread(target=_run_clustering, daemon=True)
+    t.start()
 
 
 def _handle_faces_crop_batch(params: dict) -> dict:
@@ -1079,7 +1101,6 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/cluster-images": _handle_faces_cluster_images,
     "faces/crop": _handle_faces_crop,
     "faces/crop-batch": _handle_faces_crop_batch,
-    "faces/run-clustering": _handle_faces_run_clustering,
     "faces/persons": _handle_faces_persons,
     "faces/person-create": _handle_faces_person_create,
     "faces/person-rename": _handle_faces_person_rename,
@@ -1096,6 +1117,7 @@ _ASYNC_METHODS: dict[str, Any] = {
     "ingest": _handle_ingest,
     "run": _handle_run,
     "analyze": _handle_analyze,
+    "faces/run-clustering": _handle_faces_run_clustering,
 }
 
 

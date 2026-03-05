@@ -269,12 +269,20 @@ class Worker:
         except Exception:
             pass
 
+        effective_cloud_workers = self.cloud_workers
+        if self.cloud_provider == "copilot" and effective_cloud_workers > 1:
+            effective_cloud_workers = 1
+            if self.verbose:
+                console.print(
+                    "[dim]Cloud AI provider 'copilot' running with 1 worker for stability[/dim]"
+                )
+
         scheduler = ResourceScheduler(
             vram_budget=vram,
             gpu_batch_sizes=self._GPU_BATCH_SIZES,
             default_batch_size=batch_size,
             cpu_workers=self.workers,
-            cloud_workers=self.cloud_workers,
+            cloud_workers=effective_cloud_workers,
             shutdown_event=self._shutdown,
         )
 
@@ -419,7 +427,7 @@ class Worker:
                 with (
                     self.profiler.span("gpu_phase", phase=phase_idx),
                     ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
-                    ThreadPoolExecutor(max_workers=self.cloud_workers) as cloud_pool,
+                    ThreadPoolExecutor(max_workers=effective_cloud_workers) as cloud_pool,
                 ):
                     scheduler.run_gpu_phase(
                         phase_idx,
@@ -441,7 +449,10 @@ class Worker:
             # IO drain: remaining cloud/IO jobs with boosted cloud pool
             # ════════════════════════════════════════════════════════════════
             if not self._shutdown.is_set():
-                boosted_cloud = scheduler.boosted_cloud_workers()
+                boosted_cloud = (
+                    1 if self.cloud_provider == "copilot"
+                    else scheduler.boosted_cloud_workers()
+                )
                 with (
                     self.profiler.span("io_drain"),
                     ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
@@ -722,6 +733,27 @@ class Worker:
                     self._fts_dirty.add(image_id)
 
             return "done"
+
+        except ValueError as exc:
+            err_lower = str(exc).lower()
+            if "libraw cannot decode" in err_lower or "libraw postprocess failed" in err_lower:
+                elapsed = int(time.time() * 1000) - start_ms
+                queue.mark_skipped(job_id, "corrupt_file")
+                _emit_result(path, module, "skipped", elapsed, f"corrupt file: {exc}")
+                # Persist corrupt file path for later handling
+                conn, _, _, _ = self._get_thread_db()
+                conn.execute(
+                    "INSERT OR IGNORE INTO corrupt_files (image_id, file_path, error_msg)"
+                    " VALUES (?, ?, ?)",
+                    [image_id, path, str(exc)],
+                )
+                conn.commit()
+                if self.verbose:
+                    console.print(
+                        f"  [yellow]Skipped:[/yellow] {path} module={module}: corrupt file"
+                    )
+                return "skipped"
+            raise
 
         except Exception as exc:
             elapsed = int(time.time() * 1000) - start_ms

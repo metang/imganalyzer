@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, memo } from 'react'
+import { useState, useEffect, useCallback, useRef, memo, useMemo } from 'react'
 import type { FaceCluster, FaceOccurrence, FaceSummary, FaceImage, FacePerson, PersonCluster } from '../global'
 
 // ── Thumbnail cache & batch fetcher ───────────────────────────────────────────
@@ -253,6 +253,7 @@ export function FacesView() {
   // Cluster mode (Phase 2 — face_occurrences exist)
   const [clusters, setClusters] = useState<FaceCluster[]>([])
   const [hasOccurrences, setHasOccurrences] = useState(false)
+  const [totalClusterCount, setTotalClusterCount] = useState(0)
 
   // Legacy mode (Phase 1 — no face_occurrences, fallback to identity names)
   const [legacyFaces, setLegacyFaces] = useState<FaceSummary[]>([])
@@ -284,6 +285,7 @@ export function FacesView() {
   // Rebuild state
   const [rebuilding, setRebuilding] = useState(false)
   const [showRebuildConfirm, setShowRebuildConfirm] = useState(false)
+  const [rebuildConfirmText, setRebuildConfirmText] = useState('')
 
   // Lightbox state (in-app image viewer)
   const [lightboxPath, setLightboxPath] = useState<string | null>(null)
@@ -315,13 +317,15 @@ export function FacesView() {
 
   // ── Load data ─────────────────────────────────────────────────────────────
 
+  const CLUSTER_PAGE_SIZE = 200
+
   const loadData = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      // Load clusters + persons in parallel
+      // Load first page of clusters + persons in parallel
       const [clusterResult, personsResult] = await Promise.all([
-        window.api.listFaceClusters(),
+        window.api.listFaceClusters(CLUSTER_PAGE_SIZE, 0),
         window.api.listPersons(),
       ])
 
@@ -329,6 +333,8 @@ export function FacesView() {
         setError(clusterResult.error)
         return
       }
+
+      setTotalClusterCount(clusterResult.total_count)
 
       if (clusterResult.has_occurrences && clusterResult.clusters.length > 0) {
         setHasOccurrences(true)
@@ -361,11 +367,40 @@ export function FacesView() {
     }
   }, [])
 
+  const loadMoreClusters = useCallback(async () => {
+    try {
+      const result = await window.api.listFaceClusters(CLUSTER_PAGE_SIZE, clusters.length)
+      if (result.error) {
+        setError(result.error)
+        return
+      }
+      setClusters((prev) => [...prev, ...result.clusters])
+      setTotalClusterCount(result.total_count)
+    } catch (err) {
+      setError(String(err))
+    }
+  }, [clusters.length])
+
+  const hasMoreClusters = clusters.length < totalClusterCount
+
   useEffect(() => {
     loadData()
   }, [loadData])
 
   // ── Clustering ────────────────────────────────────────────────────────────
+
+  // Listen for clustering-done notification
+  useEffect(() => {
+    const unsub = window.api.onClusteringDone((result) => {
+      if (result.error) {
+        setError(result.error)
+      } else {
+        void loadData()
+      }
+      setClustering(false)
+    })
+    return unsub
+  }, [loadData])
 
   const handleCluster = useCallback(async () => {
     setClustering(true)
@@ -373,19 +408,18 @@ export function FacesView() {
       const result = await window.api.runFaceClustering()
       if (result.error) {
         setError(result.error)
-      } else {
-        // Reload data after clustering
-        await loadData()
+        setClustering(false)
       }
+      // Clustering is now async — completion handled by onClusteringDone listener
     } catch (err) {
       setError(String(err))
-    } finally {
       setClustering(false)
     }
-  }, [loadData])
+  }, [])
 
   const handleRebuild = useCallback(async () => {
     setShowRebuildConfirm(false)
+    setRebuildConfirmText('')
     setRebuilding(true)
     try {
       const result = await window.api.rebuildFaces()
@@ -652,14 +686,24 @@ export function FacesView() {
   // ── Render helpers ────────────────────────────────────────────────────────
 
   const totalEntries = hasOccurrences ? clusters.length : legacyFaces.length
-  const totalFaceCount = hasOccurrences
-    ? clusters.reduce((sum, c) => sum + c.face_count, 0)
-    : legacyFaces.reduce((sum, f) => sum + f.image_count, 0)
-
-  // For people view: clusters not assigned to any person
-  const unlinkedClusters = clusters.filter(
-    (c) => c.cluster_id !== null && !c.person_id
+  const totalFaceCount = useMemo(
+    () => hasOccurrences
+      ? clusters.reduce((sum, c) => sum + c.face_count, 0)
+      : legacyFaces.reduce((sum, f) => sum + f.image_count, 0),
+    [hasOccurrences, clusters, legacyFaces],
   )
+
+  const unlinkedClusters = useMemo(
+    () => clusters.filter((c) => c.cluster_id !== null && !c.person_id),
+    [clusters],
+  )
+
+  const filteredPersons = useMemo(() => {
+    const lowerFilter = linkSearchFilter.toLowerCase()
+    return lowerFilter
+      ? persons.filter((p) => p.name.toLowerCase().includes(lowerFilter))
+      : persons
+  }, [persons, linkSearchFilter])
 
   // ── Link-to-Person dropdown ────────────────────────────────────────────
 
@@ -683,14 +727,9 @@ export function FacesView() {
       )
     }
 
-    const lowerFilter = linkSearchFilter.toLowerCase()
-    const filteredPersons = lowerFilter
-      ? persons.filter((p) => p.name.toLowerCase().includes(lowerFilter))
-      : persons
-
     return (
       <div
-        className="absolute right-4 top-full mt-1 z-40 bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl
+        className="absolute left-0 top-full mt-1 z-40 bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl
                     min-w-[220px] py-1 text-sm"
         onClick={(e) => e.stopPropagation()}
       >
@@ -1005,7 +1044,7 @@ export function FacesView() {
             </button>
           )}
           <button
-            onClick={() => setShowRebuildConfirm(true)}
+            onClick={() => { setRebuildConfirmText(''); setShowRebuildConfirm(true) }}
             disabled={rebuilding}
             className="px-3 py-1 text-xs rounded-md bg-amber-900/50 text-amber-300 hover:bg-amber-800/60
                        disabled:opacity-50 transition-colors border border-amber-700/40"
@@ -1044,14 +1083,28 @@ export function FacesView() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div className="bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl p-6 max-w-sm mx-4">
             <h3 className="text-sm font-semibold text-neutral-200 mb-2">Rebuild Face Analysis?</h3>
-            <p className="text-xs text-neutral-400 mb-4">
+            <p className="text-xs text-neutral-400 mb-3">
               This will re-enqueue face detection jobs for <strong>all images</strong>.
               Existing face data will be replaced when the batch runs.
-              You&apos;ll need to start a batch run afterwards to process the queue.
             </p>
+            <p className="text-xs text-neutral-400 mb-2">
+              Type <code className="px-1.5 py-0.5 rounded bg-neutral-800 text-amber-400 font-mono">REBUILD</code> to confirm:
+            </p>
+            <input
+              value={rebuildConfirmText}
+              onChange={(e) => setRebuildConfirmText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && rebuildConfirmText === 'REBUILD') handleRebuild()
+                if (e.key === 'Escape') { setShowRebuildConfirm(false); setRebuildConfirmText('') }
+              }}
+              placeholder="REBUILD"
+              className="w-full px-3 py-1.5 text-sm rounded-md bg-neutral-800 border border-neutral-600
+                         text-neutral-100 placeholder-neutral-600 font-mono outline-none focus:border-amber-500 mb-4"
+              autoFocus
+            />
             <div className="flex justify-end gap-2">
               <button
-                onClick={() => setShowRebuildConfirm(false)}
+                onClick={() => { setShowRebuildConfirm(false); setRebuildConfirmText('') }}
                 className="px-3 py-1.5 text-xs rounded-md bg-neutral-800 text-neutral-300 hover:bg-neutral-700
                            transition-colors border border-neutral-600"
               >
@@ -1059,8 +1112,9 @@ export function FacesView() {
               </button>
               <button
                 onClick={handleRebuild}
+                disabled={rebuildConfirmText !== 'REBUILD'}
                 className="px-3 py-1.5 text-xs rounded-md bg-amber-700 text-white hover:bg-amber-600
-                           transition-colors"
+                           transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Rebuild All Faces
               </button>
@@ -1198,6 +1252,19 @@ export function FacesView() {
               </div>
             )
           })}
+
+          {/* Load more button */}
+          {hasMoreClusters && (
+            <div className="px-5 py-3 flex justify-center">
+              <button
+                onClick={loadMoreClusters}
+                className="px-4 py-1.5 text-xs rounded-md bg-neutral-800 text-neutral-300
+                           hover:bg-neutral-700 transition-colors border border-neutral-700"
+              >
+                Load more ({totalClusterCount - clusters.length} remaining)
+              </button>
+            </div>
+          )}
         </div>
       )}
 
