@@ -87,8 +87,8 @@ const INTENT_COPY: Record<SearchIntent, { title: string; hint: string; placehold
   },
   people: {
     title: 'People',
-    hint: 'Layer person, place, recurring date, and time-of-day constraints.',
-    placeholder: 'Alice in the US every Feb 1 morning playing basketball',
+    hint: 'Layer a person name or alias with place, recurring date, and time-of-day constraints.',
+    placeholder: 'wyy in the US every Feb 1 morning playing basketball',
   },
   wildlife: {
     title: 'Wildlife',
@@ -508,6 +508,7 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
   const [draft, setDraft] = useState<SearchDraft>(defaultDraft())
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [planning, setPlanning] = useState(false)
+  const [resolvingFace, setResolvingFace] = useState(false)
   const [plannerSummary, setPlannerSummary] = useState<string | null>(null)
   const [plannerError, setPlannerError] = useState<string | null>(null)
   const promptRef = useRef<HTMLInputElement>(null)
@@ -518,6 +519,7 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
 
   const setDraftValue = useCallback(<K extends keyof SearchDraft>(key: K, value: SearchDraft[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }))
+    setPlannerSummary(null)
     setPlannerError(null)
   }, [])
 
@@ -560,14 +562,39 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
     onSearch(filters, contextLabel)
   }, [onSearch])
 
-  const handleSearch = useCallback(() => {
-    executeSearch(draft, plannerSummary)
-  }, [draft, executeSearch, plannerSummary])
+  const resolvePromptFace = useCallback(async (sourceDraft: SearchDraft): Promise<SearchDraft> => {
+    if (sourceDraft.face.trim() || !sourceDraft.prompt.trim()) {
+      return sourceDraft
+    }
+
+    setResolvingFace(true)
+    try {
+      const resolution = await window.api.resolveSearchFaceQuery(sourceDraft.prompt)
+      if (resolution.error || !resolution.face) {
+        return sourceDraft
+      }
+
+      const nextDraft: SearchDraft = {
+        ...sourceDraft,
+        face: resolution.face,
+        prompt: resolution.remainingQuery,
+      }
+      setDraft(nextDraft)
+      return nextDraft
+    } finally {
+      setResolvingFace(false)
+    }
+  }, [])
+
+  const handleSearch = useCallback(async () => {
+    const nextDraft = await resolvePromptFace(draft)
+    executeSearch(nextDraft, plannerSummary)
+  }, [draft, executeSearch, plannerSummary, resolvePromptFace])
 
   const handlePromptKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') {
       event.preventDefault()
-      handleSearch()
+      void handleSearch()
     }
   }, [handleSearch])
 
@@ -700,12 +727,12 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.25em] text-neutral-500">Search experience</p>
-            <h2 className="text-2xl font-semibold text-white">Search by intent, not by database columns</h2>
-            <p className="mt-1 max-w-3xl text-sm text-neutral-400">
-              Start with a natural-language request, then refine it with visible chips and the workflow tools below.
-            </p>
-          </div>
+             <p className="text-xs uppercase tracking-[0.25em] text-neutral-500">Search experience</p>
+             <h2 className="text-2xl font-semibold text-white">Search by intent, not by database columns</h2>
+             <p className="mt-1 max-w-3xl text-sm text-neutral-400">
+               Start with a natural-language request, including person names or aliases, then refine it with visible chips and the workflow tools below.
+             </p>
+           </div>
           {resultSummary && (
             <div className="rounded-full border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-300">
               {resultSummary}
@@ -761,10 +788,10 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
                   <button
                     type="button"
                     onClick={handleSearch}
-                    disabled={loading}
+                    disabled={loading || resolvingFace}
                     className="inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60"
                   >
-                    {loading ? 'Searching…' : 'Search'}
+                    {loading || resolvingFace ? 'Searching…' : 'Search'}
                   </button>
                   <button
                     type="button"
@@ -854,7 +881,7 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
                 <TextField
                   label="Person"
                   value={draft.face}
-                  placeholder="Alice, Bob…"
+                  placeholder="Alice, wyy, Bob…"
                   onChange={(value) => setDraftValue('face', value)}
                 />
                 <TextField

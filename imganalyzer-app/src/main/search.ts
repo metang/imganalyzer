@@ -110,6 +110,12 @@ export interface SearchResponse {
   error?: string
 }
 
+export interface SearchFaceResolution {
+  face: string | null
+  remainingQuery: string
+  error?: string
+}
+
 export interface SearchPlanRequest {
   prompt: string
   model?: string
@@ -171,5 +177,19 @@ export function registerSearchHandlers(): void {
 
   ipcMain.handle('search:plan', async (_evt, request: SearchPlanRequest): Promise<SearchPlanResponse> => {
     return planSearchWithCopilot(request)
+  })
+
+  ipcMain.handle('search:resolve-face-query', async (_evt, query: string): Promise<SearchFaceResolution> => {
+    try {
+      await ensureServerRunning()
+      const result = await rpc.call('search/resolveFaceQuery', { query }) as SearchFaceResolution
+      return result
+    } catch (err) {
+      return {
+        face: null,
+        remainingQuery: query,
+        error: String(err),
+      }
+    }
   })
 }

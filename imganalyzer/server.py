@@ -468,6 +468,14 @@ def _handle_search(params: dict) -> dict:
             seen_terms.add(lowered)
             expanded_terms.append(clean)
 
+    if not face and query:
+        resolve_face_query = getattr(engine, "resolve_face_query", None)
+        if callable(resolve_face_query):
+            resolved_face, remaining_query = resolve_face_query(str(query))
+            if resolved_face:
+                face = resolved_face
+                query = remaining_query
+
     has_text_query = bool(query and query.strip())
     base_conditions: list[str] = []
     base_params: list[Any] = []
@@ -800,6 +808,29 @@ def _handle_search(params: dict) -> dict:
             )[:candidate_limit]
         ]
 
+    def _combine_face_and_text_terms(candidate_limit: int) -> tuple[list[dict[str, Any]], bool]:
+        face_results = engine.search_face(face, limit=candidate_limit)
+        text_results = _search_text_terms(candidate_limit)
+        if not face_results or not text_results:
+            return [], len(face_results) < candidate_limit and len(text_results) < candidate_limit
+
+        face_scores = {
+            int(result["image_id"]): float(result["score"])
+            for result in face_results
+        }
+        combined_results: list[dict[str, Any]] = []
+        for result in text_results:
+            image_id = int(result["image_id"])
+            if image_id not in face_scores:
+                continue
+            combined_results.append({
+                **result,
+                "score": float(result["score"]) + face_scores[image_id],
+            })
+
+        search_exhausted = len(face_results) < candidate_limit and len(text_results) < candidate_limit
+        return combined_results, search_exhausted
+
     if similar_to_image_id is not None:
         try:
             similar_to_image_id = int(similar_to_image_id)
@@ -816,13 +847,21 @@ def _handle_search(params: dict) -> dict:
         while True:
             if similar_to_image_id is not None:
                 search_results = engine.search_similar_image(similar_to_image_id, limit=candidate_limit)
+                search_exhausted = len(search_results) < candidate_limit
+            elif face and (has_text_query or expanded_terms):
+                search_results, search_exhausted = _combine_face_and_text_terms(candidate_limit)
             elif face:
                 search_results = engine.search_face(face, limit=candidate_limit)
+                search_exhausted = len(search_results) < candidate_limit
             else:
                 search_results = _search_text_terms(candidate_limit)
+                search_exhausted = len(search_results) < candidate_limit
 
             candidate_ids = [int(result["image_id"]) for result in search_results]
             if not candidate_ids:
+                if not search_exhausted and candidate_limit < max_candidate_limit:
+                    candidate_limit = min(max_candidate_limit, candidate_limit * 2)
+                    continue
                 return {"results": [], "total": 0, "hasMore": False}
 
             score_map = {
@@ -831,7 +870,6 @@ def _handle_search(params: dict) -> dict:
             }
             records = _fetch_records(candidate_ids, score_map)
             records = _sort_records(records)
-            search_exhausted = len(search_results) < candidate_limit
             enough_for_page = len(records) > page_end
             if search_exhausted or enough_for_page or candidate_limit >= max_candidate_limit:
                 break
@@ -858,6 +896,19 @@ def _handle_search(params: dict) -> dict:
     records = _rows_to_records(rows, None)
     has_more = offset + len(records) < total
     return {"results": records, "total": total, "hasMore": has_more}
+
+
+def _handle_search_resolve_face_query(params: dict) -> dict[str, Any]:
+    from imganalyzer.db.search import SearchEngine
+
+    query = params.get("query", "")
+    if not isinstance(query, str):
+        raise ValueError("query must be a string")
+
+    conn = _get_db()
+    engine = SearchEngine(conn)
+    face, remaining_query = engine.resolve_face_query(query)
+    return {"face": face, "remainingQuery": remaining_query}
 
 
 def _processed_exists_clause(alias: str = "i") -> str:
@@ -1642,6 +1693,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "queue_clear": _handle_queue_clear,
     "rebuild": _handle_rebuild,
     "search": _handle_search,
+    "search/resolveFaceQuery": _handle_search_resolve_face_query,
     "gallery/listFolders": _handle_gallery_list_folders,
     "gallery/listImagesChunk": _handle_gallery_list_images_chunk,
     "thumbnail": _handle_thumbnail,

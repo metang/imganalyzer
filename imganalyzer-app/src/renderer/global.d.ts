@@ -161,6 +161,12 @@ export interface SearchResponse {
   error?: string
 }
 
+export interface SearchFaceResolution {
+  face: string | null
+  remainingQuery: string
+  error?: string
+}
+
 export interface SearchPlanRequest {
   prompt: string
   model?: string
@@ -349,6 +355,7 @@ declare global {
 
       // Search
       searchImages(filters: SearchFilters): Promise<SearchResponse>
+      resolveSearchFaceQuery(query: string): Promise<SearchFaceResolution>
       planSearchQuery(request: SearchPlanRequest): Promise<SearchPlanResponse>
       galleryListFolders(): Promise<{ folders: GalleryFolderNode[]; totalImages: number; error?: string }>
       galleryListImagesChunk(params: GalleryChunkParams): Promise<GalleryChunkResponse>

@@ -63,6 +63,7 @@ query, the matrix is rebuilt.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -236,6 +237,30 @@ class SearchEngine:
                     })
 
         return results[:limit]
+
+    def resolve_face_query(self, query: str) -> tuple[str | None, str]:
+        """Extract the longest alias/name span from a freeform query, if any."""
+        normalized = " ".join(query.split())
+        if not normalized:
+            return None, ""
+
+        if self.repo.find_face_by_alias(normalized) is not None:
+            return normalized, ""
+
+        tokens = list(re.finditer(r"\S+", normalized))
+        for span_len in range(len(tokens), 0, -1):
+            for start_idx in range(len(tokens) - span_len + 1):
+                start = tokens[start_idx].start()
+                end = tokens[start_idx + span_len - 1].end()
+                candidate = normalized[start:end].strip(" ,.;:!?()[]{}\"'")
+                if not candidate:
+                    continue
+                if self.repo.find_face_by_alias(candidate) is None:
+                    continue
+                remainder = f"{normalized[:start]} {normalized[end:]}"
+                return candidate, " ".join(remainder.split())
+
+        return None, normalized
 
     def search_exif(
         self,

@@ -60,7 +60,7 @@ Convert the user's natural-language request into a JSON object with this exact s
 Rules:
 - Only use supported fields; never invent new keys.
 - "Best photo", "best shot", or "best picture" should usually set intent="best-shot" and sortBy="best".
-- Named people should go into face when the request clearly identifies a person.
+- Named people, display names, and aliases should go into face when the request clearly identifies a person.
 - Geographic constraints like "in the US" should use country when possible; broader place details can go into location.
 - Requests like "every Feb 1" should use recurringMonthDay="02-01".
 - Time buckets should be one of morning / afternoon / evening / night.

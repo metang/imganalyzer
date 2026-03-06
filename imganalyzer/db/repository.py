@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 
@@ -712,7 +711,7 @@ class Repository:
         """
         # Check canonical_name / display_name first (indexed)
         row = self.conn.execute(
-            "SELECT * FROM face_identities WHERE canonical_name = ? OR display_name = ?",
+            "SELECT * FROM face_identities WHERE canonical_name = ? COLLATE NOCASE OR display_name = ? COLLATE NOCASE",
             [name, name],
         ).fetchone()
         if row:
@@ -722,7 +721,7 @@ class Repository:
             row = self.conn.execute(
                 """SELECT fi.* FROM face_identities fi
                    JOIN face_aliases fa ON fi.id = fa.identity_id
-                   WHERE fa.alias = ?""",
+                   WHERE fa.alias = ? COLLATE NOCASE""",
                 [name],
             ).fetchone()
             if row:
@@ -732,7 +731,7 @@ class Repository:
             rows = self.conn.execute("SELECT * FROM face_identities").fetchall()
             for r in rows:
                 aliases = json.loads(r["aliases"] or "[]")
-                if name in aliases:
+                if any(name.casefold() == alias.casefold() for alias in aliases):
                     return dict(r)
         return None
 

@@ -1,6 +1,7 @@
 """Regression tests for gallery SQL filtering in JSON-RPC server handlers."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from collections.abc import Generator
@@ -90,6 +91,17 @@ CREATE TABLE analysis_faces (
     face_count INTEGER,
     face_identities TEXT
 );
+CREATE TABLE face_identities (
+    id INTEGER PRIMARY KEY,
+    canonical_name TEXT NOT NULL,
+    display_name TEXT,
+    aliases TEXT,
+    updated_at TEXT
+);
+CREATE TABLE face_aliases (
+    identity_id INTEGER NOT NULL,
+    alias TEXT NOT NULL
+);
 CREATE TABLE analysis_cloud_ai (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     image_id INTEGER,
@@ -127,6 +139,27 @@ def _insert_processed_image(conn: sqlite3.Connection, image_id: int, file_path: 
         (image_id, file_path, 100, 100, 12345),
     )
     conn.execute("INSERT INTO analysis_metadata (image_id) VALUES (?)", (image_id,))
+
+
+def _insert_face_identity(
+    conn: sqlite3.Connection,
+    *,
+    identity_id: int,
+    canonical_name: str,
+    display_name: str,
+    aliases: list[str],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO face_identities (id, canonical_name, display_name, aliases, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (identity_id, canonical_name, display_name, json.dumps(aliases), "2026-01-01T00:00:00"),
+    )
+    conn.executemany(
+        "INSERT INTO face_aliases (identity_id, alias) VALUES (?, ?)",
+        [(identity_id, alias) for alias in aliases],
+    )
 
 
 def test_gallery_chunk_folder_filter_works_for_windows_paths(
@@ -349,6 +382,90 @@ def test_search_people_filters_support_country_recurring_day_and_time_of_day(
     assert result["total"] == 1
     assert result["hasMore"] is False
     assert [item["image_id"] for item in result["results"]] == [1]
+
+
+def test_search_alias_prompt_routes_to_face_search(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\wyy.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\people\other.jpg")
+    _insert_face_identity(
+        gallery_db,
+        identity_id=1,
+        canonical_name="wang_yy",
+        display_name="Wang YY",
+        aliases=["wyy"],
+    )
+    gallery_db.executemany(
+        """
+        INSERT INTO analysis_local_ai (image_id, description, face_count, face_identities, has_people)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (1, "Portrait of Wang YY smiling outdoors.", 1, '["Wang YY"]', 1),
+            (2, "Portrait of someone else.", 1, '["Other Person"]', 1),
+        ],
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({"query": "WYY", "mode": "hybrid", "limit": 10, "offset": 0})
+
+    assert result["total"] == 1
+    assert result["hasMore"] is False
+    assert [item["image_id"] for item in result["results"]] == [1]
+
+
+def test_search_alias_prompt_combines_face_and_activity_terms(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for image_id in range(1, 5):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\people\img{image_id}.jpg")
+
+    class FakeSearchEngine:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+
+        def resolve_face_query(self, query: str) -> tuple[str | None, str]:
+            if query == "wyy playing basketball":
+                return "wyy", "playing basketball"
+            return None, query
+
+        def search_face(self, name: str, limit: int = 50) -> list[dict[str, object]]:
+            assert name == "wyy"
+            return [
+                {"image_id": 1, "score": 1.0},
+                {"image_id": 2, "score": 1.0},
+                {"image_id": 4, "score": 1.0},
+            ][:limit]
+
+        def search(
+            self,
+            query: str,
+            limit: int,
+            semantic_weight: float = 0.5,
+            mode: str = "hybrid",
+        ) -> list[dict[str, object]]:
+            if query != "playing basketball":
+                return []
+            return [
+                {"image_id": 3, "score": 0.95},
+                {"image_id": 2, "score": 0.90},
+                {"image_id": 4, "score": 0.88},
+            ][:limit]
+
+    import imganalyzer.db.search as search_module
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    monkeypatch.setattr(search_module, "SearchEngine", FakeSearchEngine)
+    result = server._handle_search(
+        {"query": "wyy playing basketball", "mode": "hybrid", "limit": 10, "offset": 0}
+    )
+
+    assert result["total"] == 2
+    assert result["hasMore"] is False
+    assert [item["image_id"] for item in result["results"]] == [2, 4]
 
 
 def test_search_best_sort_uses_quality_ranking(
