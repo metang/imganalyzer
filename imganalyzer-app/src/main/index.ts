@@ -2,13 +2,14 @@ import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } from 'elect
 import { join } from 'path'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
-import { listImages, getThumbnail, getFullImage } from './images'
+import { listImages, getThumbnail, getFullImage, getThumbnailCacheConfig, setThumbnailCacheConfig } from './images'
 import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
 import { registerBatchHandlers, killAllBatchProcesses } from './batch'
 import { registerSearchHandlers } from './search'
 import { registerFaceHandlers } from './faces'
+import { registerGalleryHandlers } from './gallery'
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -50,6 +51,7 @@ app.whenReady().then(() => {
   const win = createWindow()
   registerBatchHandlers(win)
   registerSearchHandlers()
+  registerGalleryHandlers()
   registerFaceHandlers()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -95,6 +97,15 @@ ipcMain.handle('fs:listImages', async (_evt, folderPath: string) => {
 // ─── IPC: Get thumbnail ───────────────────────────────────────────────────────
 ipcMain.handle('fs:getThumbnail', async (_evt, imagePath: string) => {
   return getThumbnail(imagePath)
+})
+
+// ─── IPC: Thumbnail cache config ─────────────────────────────────────────────
+ipcMain.handle('cache:thumbnail:getConfig', async () => {
+  return getThumbnailCacheConfig()
+})
+
+ipcMain.handle('cache:thumbnail:setConfig', async (_evt, config: { directory?: string; maxGB?: number }) => {
+  return setThumbnailCacheConfig(config)
 })
 
 // ─── IPC: Get full-resolution image for lightbox ──────────────────────────────

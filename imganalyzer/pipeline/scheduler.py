@@ -397,8 +397,6 @@ class ResourceScheduler:
                 for t in gpu_threads:
                     t.join(timeout=5)
 
-            # Collect remaining IO futures
-            collect_fn(pending_futures)
         finally:
             # Unload all models reserved in this phase.
             for mod in reserved_modules:
@@ -406,6 +404,13 @@ class ResourceScheduler:
                     unload_fn(mod)
                 finally:
                     self.vram.release(mod)
+            # Force allocator cleanup now so large model memory is released
+            # before we wait on outstanding IO/cloud futures.
+            self._force_cuda_cleanup()
+            # Collect remaining IO futures after unload so cloud/IO drain does
+            # not keep GPU-heavy models resident longer than needed.
+            if pending_futures:
+                collect_fn(pending_futures)
 
     def run_io_drain(
         self,

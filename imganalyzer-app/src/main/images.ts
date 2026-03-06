@@ -1,5 +1,9 @@
-import { readdir, readFile, stat, access } from 'fs/promises'
-import { join, extname, basename } from 'path'
+import { access, mkdir, readdir, readFile, stat, unlink, utimes, writeFile } from 'fs/promises'
+import type { Dirent } from 'fs'
+import { app } from 'electron'
+import { createHash } from 'crypto'
+import { basename, dirname, extname, join, resolve } from 'path'
+import { homedir } from 'os'
 import { rpc } from './python-rpc'
 
 export const IMAGE_EXTENSIONS = new Set([
@@ -25,6 +29,20 @@ export interface ImageFile {
   hasXmp: boolean
   size: number
   mtime: number
+}
+
+export interface ThumbnailCacheConfigInput {
+  directory?: string
+  maxGB?: number
+}
+
+export interface ThumbnailCacheConfig {
+  directory: string
+  maxGB: number
+  source: {
+    directory: 'default' | 'env' | 'settings'
+    maxGB: 'default' | 'env' | 'settings'
+  }
 }
 
 export async function listImages(folderPath: string): Promise<ImageFile[]> {
@@ -64,6 +82,135 @@ export async function listImages(folderPath: string): Promise<ImageFile[]> {
   }
 
   return images.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+// ── Persistent thumbnail cache config ─────────────────────────────────────────
+
+const THUMB_CACHE_DIR_ENV = 'IMGANALYZER_THUMB_CACHE_DIR'
+const THUMB_CACHE_MAX_GB_ENV = 'IMGANALYZER_THUMB_CACHE_MAX_GB'
+const THUMB_CACHE_SETTINGS_FILE = 'thumbnail-cache-settings.json'
+const DEFAULT_THUMB_CACHE_GB = 300
+
+interface ThumbnailCacheSettings {
+  directory?: string
+  maxGB?: number
+}
+
+let resolvedThumbConfig: ThumbnailCacheConfig | null = null
+
+function isErrnoCode(err: unknown, code: string): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: string }).code === code
+}
+
+function parsePositiveNumber(raw: string | undefined): number | null {
+  if (!raw) return null
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+
+function expandHomePath(value: string): string {
+  if (!value.startsWith('~')) return value
+  if (value === '~') return homedir()
+  if (value.startsWith('~/') || value.startsWith('~\\')) {
+    return join(homedir(), value.slice(2))
+  }
+  return value
+}
+
+function getThumbnailSettingsPath(): string {
+  return join(app.getPath('userData'), THUMB_CACHE_SETTINGS_FILE)
+}
+
+async function readThumbnailSettings(): Promise<ThumbnailCacheSettings> {
+  try {
+    const raw = await readFile(getThumbnailSettingsPath(), 'utf-8')
+    const parsed = JSON.parse(raw) as ThumbnailCacheSettings
+    const out: ThumbnailCacheSettings = {}
+    if (typeof parsed.directory === 'string' && parsed.directory.trim()) {
+      out.directory = parsed.directory.trim()
+    }
+    if (typeof parsed.maxGB === 'number' && Number.isFinite(parsed.maxGB) && parsed.maxGB > 0) {
+      out.maxGB = parsed.maxGB
+    }
+    return out
+  } catch (err) {
+    if (isErrnoCode(err, 'ENOENT')) return {}
+    throw err
+  }
+}
+
+async function writeThumbnailSettings(settings: ThumbnailCacheSettings): Promise<void> {
+  const path = getThumbnailSettingsPath()
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, JSON.stringify(settings, null, 2), 'utf-8')
+}
+
+async function resolveThumbnailCacheConfig(force = false): Promise<ThumbnailCacheConfig> {
+  if (resolvedThumbConfig && !force) return resolvedThumbConfig
+
+  const settings = await readThumbnailSettings()
+  const envDir = process.env[THUMB_CACHE_DIR_ENV]?.trim()
+  const envMaxGB = parsePositiveNumber(process.env[THUMB_CACHE_MAX_GB_ENV])
+
+  let directorySource: ThumbnailCacheConfig['source']['directory'] = 'default'
+  let directory: string
+  if (envDir) {
+    directory = resolve(expandHomePath(envDir))
+    directorySource = 'env'
+  } else if (settings.directory) {
+    directory = resolve(expandHomePath(settings.directory))
+    directorySource = 'settings'
+  } else {
+    directory = resolve(join(homedir(), '.cache', 'imganalyzer', 'thumbs'))
+  }
+
+  let maxGBSource: ThumbnailCacheConfig['source']['maxGB'] = 'default'
+  let maxGB = DEFAULT_THUMB_CACHE_GB
+  if (envMaxGB !== null) {
+    maxGB = envMaxGB
+    maxGBSource = 'env'
+  } else if (typeof settings.maxGB === 'number' && settings.maxGB > 0) {
+    maxGB = settings.maxGB
+    maxGBSource = 'settings'
+  }
+
+  await mkdir(directory, { recursive: true })
+  resolvedThumbConfig = {
+    directory,
+    maxGB,
+    source: {
+      directory: directorySource,
+      maxGB: maxGBSource,
+    },
+  }
+  return resolvedThumbConfig
+}
+
+export async function getThumbnailCacheConfig(): Promise<ThumbnailCacheConfig> {
+  return resolveThumbnailCacheConfig()
+}
+
+export async function setThumbnailCacheConfig(config: ThumbnailCacheConfigInput): Promise<ThumbnailCacheConfig> {
+  const settings = await readThumbnailSettings()
+  const next: ThumbnailCacheSettings = { ...settings }
+
+  if (config.directory !== undefined) {
+    const trimmed = config.directory.trim()
+    if (!trimmed) throw new Error('Thumbnail cache directory cannot be empty')
+    next.directory = trimmed
+  }
+  if (config.maxGB !== undefined) {
+    if (!Number.isFinite(config.maxGB) || config.maxGB <= 0) {
+      throw new Error('Thumbnail cache maxGB must be a positive number')
+    }
+    next.maxGB = Number(config.maxGB)
+  }
+
+  await writeThumbnailSettings(next)
+  resolvedThumbConfig = null
+  const resolved = await resolveThumbnailCacheConfig(true)
+  void triggerThumbnailCacheCleanup()
+  return resolved
 }
 
 // ── Bounded LRU thumbnail cache ──────────────────────────────────────────────
@@ -118,6 +265,117 @@ function releaseSlot(): void {
   }
 }
 
+// ── Persistent on-disk thumbnail cache ───────────────────────────────────────
+
+interface CachedThumbFile {
+  path: string
+  size: number
+  mtimeMs: number
+}
+
+let writesSinceCleanup = 0
+let cleanupPromise: Promise<void> | null = null
+const CLEANUP_WRITE_INTERVAL = 64
+
+async function thumbnailCacheFilePath(imagePath: string): Promise<string> {
+  const sourceStat = await stat(imagePath)
+  const cfg = await resolveThumbnailCacheConfig()
+  const material = `${imagePath}|${sourceStat.size}|${sourceStat.mtimeMs}|thumb-v1|400x300|q80`
+  const hash = createHash('sha1').update(material).digest('hex')
+  return join(cfg.directory, hash.slice(0, 2), `${hash}.jpg`)
+}
+
+async function readThumbnailFromDisk(imagePath: string): Promise<string | null> {
+  try {
+    const cachePath = await thumbnailCacheFilePath(imagePath)
+    const buf = await readFile(cachePath)
+    const now = new Date()
+    void utimes(cachePath, now, now)
+    return `data:image/jpeg;base64,${buf.toString('base64')}`
+  } catch (err) {
+    if (isErrnoCode(err, 'ENOENT') || isErrnoCode(err, 'ENOTDIR')) {
+      return null
+    }
+    console.warn('Disk thumbnail cache read failed for', imagePath, err)
+    return null
+  }
+}
+
+async function writeThumbnailToDisk(imagePath: string, base64Jpeg: string): Promise<void> {
+  try {
+    const cachePath = await thumbnailCacheFilePath(imagePath)
+    await mkdir(dirname(cachePath), { recursive: true })
+    await writeFile(cachePath, Buffer.from(base64Jpeg, 'base64'))
+    writesSinceCleanup += 1
+    if (writesSinceCleanup >= CLEANUP_WRITE_INTERVAL) {
+      writesSinceCleanup = 0
+      void triggerThumbnailCacheCleanup()
+    }
+  } catch (err) {
+    console.warn('Disk thumbnail cache write failed for', imagePath, err)
+  }
+}
+
+async function collectCachedThumbFiles(dirPath: string): Promise<CachedThumbFile[]> {
+  let entries: Dirent[]
+  try {
+    entries = await readdir(dirPath, { withFileTypes: true })
+  } catch (err) {
+    if (isErrnoCode(err, 'ENOENT')) return []
+    throw err
+  }
+
+  const files: CachedThumbFile[] = []
+  for (const entry of entries) {
+    const fullPath = join(dirPath, entry.name)
+    if (entry.isDirectory()) {
+      files.push(...(await collectCachedThumbFiles(fullPath)))
+      continue
+    }
+    if (!entry.isFile() || !entry.name.endsWith('.jpg')) continue
+    try {
+      const fileStat = await stat(fullPath)
+      files.push({ path: fullPath, size: fileStat.size, mtimeMs: fileStat.mtimeMs })
+    } catch (err) {
+      if (!isErrnoCode(err, 'ENOENT')) throw err
+    }
+  }
+  return files
+}
+
+async function runThumbnailCacheCleanup(): Promise<void> {
+  const cfg = await resolveThumbnailCacheConfig()
+  const maxBytes = cfg.maxGB * 1024 * 1024 * 1024
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) return
+
+  const files = await collectCachedThumbFiles(cfg.directory)
+  let totalBytes = files.reduce((sum, f) => sum + f.size, 0)
+  if (totalBytes <= maxBytes) return
+
+  files.sort((a, b) => a.mtimeMs - b.mtimeMs)
+  for (const file of files) {
+    if (totalBytes <= maxBytes) break
+    try {
+      await unlink(file.path)
+      totalBytes -= file.size
+    } catch (err) {
+      if (!isErrnoCode(err, 'ENOENT')) throw err
+    }
+  }
+}
+
+function triggerThumbnailCacheCleanup(): Promise<void> {
+  if (cleanupPromise) return cleanupPromise
+  cleanupPromise = runThumbnailCacheCleanup()
+    .catch((err) => {
+      console.warn('Thumbnail cache cleanup failed:', err)
+    })
+    .finally(() => {
+      cleanupPromise = null
+    })
+  return cleanupPromise
+}
+
 export async function getThumbnail(imagePath: string): Promise<string> {
   const cached = thumbCacheGet(imagePath)
   if (cached !== undefined) return cached
@@ -126,9 +384,16 @@ export async function getThumbnail(imagePath: string): Promise<string> {
   const promise = (async () => {
     await acquireSlot()
     try {
+      const diskCached = await readThumbnailFromDisk(imagePath)
+      if (diskCached) {
+        thumbCacheSet(imagePath, diskCached)
+        return diskCached
+      }
+
       const result = await rpc.call('thumbnail', { imagePath }) as { data: string }
       const dataUrl = `data:image/jpeg;base64,${result.data}`
       thumbCacheSet(imagePath, dataUrl)
+      void writeThumbnailToDisk(imagePath, result.data)
       return dataUrl
     } catch (err) {
       console.error('Thumbnail error for', imagePath, err)

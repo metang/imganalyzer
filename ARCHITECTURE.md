@@ -377,6 +377,10 @@ Importable by Adobe Lightroom Classic, Lightroom CC, Bridge, and Camera Raw with
 | `listImages(path)` | `fs:listImages` | Returns `ImageFile[]` for a directory |
 | `getThumbnail(path)` | `fs:getThumbnail` | 400x300 JPEG via RPC, LRU cached (1000) |
 | `getFullImage(path)` | `fs:getFullImage` | Full-res via RPC (RAW/HEIC) or direct read, LRU (2) |
+| `galleryListFolders()` | `gallery:list-folders` | Folder tree nodes (processed DB images only) |
+| `galleryListImagesChunk(params)` | `gallery:list-images-chunk` | Progressive gallery chunk with cursor |
+| `getThumbnailCacheConfig()` | `cache:thumbnail:getConfig` | Read thumbnail cache dir/size config |
+| `setThumbnailCacheConfig(config)` | `cache:thumbnail:setConfig` | Update thumbnail cache dir/size config |
 | `readXmp(path)` | `fs:readXmp` | Parses XMP sidecar → `XmpData` or null |
 | `runAnalysis(path, backend)` | `analyze:run` | Single-image analysis via RPC (5min timeout) |
 | `cancelAnalysis(path)` | `analyze:cancel` | Cancel single-image analysis |
@@ -416,13 +420,10 @@ App (5-tab layout)
 ├── TabButton (Gallery / Batch / Running / Search / Faces)
 │
 ├── [Gallery tab]
-│   ├── FolderPicker
-│   ├── Gallery
-│   │   └── Thumbnail (per image, lazy-loaded)
-│   └── Lightbox
-│       ├── CloudSidebar (left, Copilot gpt-4.1)
-│       ├── Image area (blur placeholder → full-res, zoom/pan)
-│       └── Sidebar (right, local analysis)
+│   └── DbGalleryView
+│       ├── FolderSidebar (folder tree + cache settings)
+│       ├── VirtualGrid (processed DB images, progressive chunk loading)
+│       └── SearchLightbox (zoom/pan + analysis sidebar)
 │
 ├── [Batch tab]
 │   └── BatchConfigView
@@ -454,6 +455,7 @@ App (5-tab layout)
 **Thumbnails** (`getThumbnail` → `rpc.call('thumbnail')`):
 - Python server decodes and resizes to 400x300 JPEG
 - LRU cache in main process: 1000 entries, evicts oldest on overflow
+- Persistent on-disk cache in `~/.cache/imganalyzer/thumbs` (configurable dir/size)
 - Concurrency limited to 4 simultaneous RPC calls (queue in `images.ts`)
 - In-flight deduplication prevents duplicate requests for the same path
 

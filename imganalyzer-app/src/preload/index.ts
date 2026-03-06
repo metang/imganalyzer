@@ -4,6 +4,8 @@ import type { ImageFile } from '../main/images'
 import type { AnalysisProgress } from '../main/analyzer'
 import type { BatchStats, BatchResult, BatchIngestProgress } from '../main/batch'
 import type { SearchFilters, SearchResponse } from '../main/search'
+import type { GalleryChunkParams, GalleryChunkResponse, GalleryFoldersResponse } from '../main/gallery'
+import type { ThumbnailCacheConfig, ThumbnailCacheConfigInput } from '../main/images'
 
 contextBridge.exposeInMainWorld('api', {
   openFolder: (): Promise<string | null> =>
@@ -113,6 +115,18 @@ contextBridge.exposeInMainWorld('api', {
 
   searchImages: (filters: SearchFilters): Promise<SearchResponse> =>
     ipcRenderer.invoke('search:run', filters),
+
+  galleryListFolders: (): Promise<GalleryFoldersResponse> =>
+    ipcRenderer.invoke('gallery:list-folders'),
+
+  galleryListImagesChunk: (params: GalleryChunkParams): Promise<GalleryChunkResponse> =>
+    ipcRenderer.invoke('gallery:list-images-chunk', params),
+
+  getThumbnailCacheConfig: (): Promise<ThumbnailCacheConfig> =>
+    ipcRenderer.invoke('cache:thumbnail:getConfig'),
+
+  setThumbnailCacheConfig: (config: ThumbnailCacheConfigInput): Promise<ThumbnailCacheConfig> =>
+    ipcRenderer.invoke('cache:thumbnail:setConfig', config),
 
   // ── Face management ────────────────────────────────────────────────────────
 

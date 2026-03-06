@@ -142,6 +142,44 @@ export interface SearchResponse {
   error?: string
 }
 
+export interface GalleryFolderNode {
+  path: string
+  name: string
+  parent_path: string | null
+  depth: number
+  image_count: number
+  child_count: number
+}
+
+export interface GalleryChunkParams {
+  folderPath?: string | null
+  recursive?: boolean
+  chunkSize?: number
+  cursor?: string | null
+}
+
+export interface GalleryChunkResponse {
+  items: SearchResult[]
+  nextCursor: string | null
+  hasMore: boolean
+  total: number | null
+  error?: string
+}
+
+export interface ThumbnailCacheConfigInput {
+  directory?: string
+  maxGB?: number
+}
+
+export interface ThumbnailCacheConfig {
+  directory: string
+  maxGB: number
+  source: {
+    directory: 'default' | 'env' | 'settings'
+    maxGB: 'default' | 'env' | 'settings'
+  }
+}
+
 // ── Batch processing types ────────────────────────────────────────────────────
 
 export type BatchModuleKey =
@@ -278,6 +316,10 @@ declare global {
 
       // Search
       searchImages(filters: SearchFilters): Promise<SearchResponse>
+      galleryListFolders(): Promise<{ folders: GalleryFolderNode[]; totalImages: number; error?: string }>
+      galleryListImagesChunk(params: GalleryChunkParams): Promise<GalleryChunkResponse>
+      getThumbnailCacheConfig(): Promise<ThumbnailCacheConfig>
+      setThumbnailCacheConfig(config: ThumbnailCacheConfigInput): Promise<ThumbnailCacheConfig>
 
       // Face management
       listFaces(): Promise<{ faces: FaceSummary[]; error?: string }>

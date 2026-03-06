@@ -25,6 +25,7 @@ interface VirtualGridProps {
   items: SearchResult[]
   selectedId: number | null
   onSelect: (item: SearchResult) => void
+  onEndReached?: () => void
 }
 
 // ── GridCell ─────────────────────────────────────────────────────────────────
@@ -179,11 +180,12 @@ const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellPro
 
 // ── VirtualGrid ───────────────────────────────────────────────────────────────
 
-export function VirtualGrid({ items, selectedId, onSelect }: VirtualGridProps) {
+export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: VirtualGridProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [containerWidth, setContainerWidth] = useState(800)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(600)
+  const endReachedLatchRef = useRef(false)
 
   // ── Measure container ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -223,6 +225,19 @@ export function VirtualGrid({ items, selectedId, onSelect }: VirtualGridProps) {
     Math.ceil((scrollTop + viewportHeight - PADDING) / rowHeight) + OVERSCAN_ROWS
   )
 
+  useEffect(() => {
+    if (!onEndReached || rowCount <= 0) return
+    const nearEnd = lastVisibleRow >= Math.max(0, rowCount - 1 - OVERSCAN_ROWS)
+    if (nearEnd && !endReachedLatchRef.current) {
+      endReachedLatchRef.current = true
+      onEndReached()
+      return
+    }
+    if (!nearEnd) {
+      endReachedLatchRef.current = false
+    }
+  }, [lastVisibleRow, onEndReached, rowCount])
+
   // ── Scroll handler ────────────────────────────────────────────────────────
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     setScrollTop((e.target as HTMLDivElement).scrollTop)
@@ -240,7 +255,7 @@ export function VirtualGrid({ items, selectedId, onSelect }: VirtualGridProps) {
   return (
     <div
       ref={containerRef}
-      className="flex-1 overflow-y-auto"
+      className="flex-1 min-h-0 overflow-y-auto"
       onScroll={handleScroll}
       style={{ position: 'relative' }}
     >

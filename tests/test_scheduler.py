@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any
+
 import pytest
 
 from imganalyzer.pipeline.vram_budget import VRAMBudget, _MODULE_VRAM_GB, _EXCLUSIVE_MODULES
@@ -207,6 +210,69 @@ class TestResourceScheduler:
         s = self._make()
         assert s.modules_for_phase(99) == []
         assert not s.is_co_resident_phase(99)
+
+    def test_unload_happens_before_final_io_collect(self):
+        """GPU models should unload before draining trailing IO futures."""
+        s = self._make()
+
+        claim_calls = 0
+        submit_calls = 0
+        call_order: list[str] = []
+        pending_future: Future[Any] = Future()
+
+        def _claim_fn(_batch_size: int, module: str) -> list[dict[str, Any]]:
+            nonlocal claim_calls
+            claim_calls += 1
+            if claim_calls == 1:
+                return [{"id": 1, "image_id": 1, "module": module}]
+            return []
+
+        def _process_batch_fn(
+            jobs: list[dict[str, Any]],
+            _module: str,
+        ) -> dict[str, int]:
+            return {"done": len(jobs), "failed": 0, "skipped": 0}
+
+        def _submit_io_fn(
+            _local_pool: ThreadPoolExecutor,
+            _cloud_pool: ThreadPoolExecutor,
+        ) -> dict[Future[Any], dict[str, Any]]:
+            nonlocal submit_calls
+            submit_calls += 1
+            if submit_calls == 1:
+                return {pending_future: {"id": 99, "image_id": 99, "module": "cloud_ai"}}
+            return {}
+
+        def _collect_fn(futures: dict[Future[Any], dict[str, Any]]) -> None:
+            if futures:
+                call_order.append("collect")
+
+        def _unload_fn(module: str) -> None:
+            call_order.append(f"unload:{module}")
+
+        with (
+            ThreadPoolExecutor(max_workers=1) as local_pool,
+            ThreadPoolExecutor(max_workers=1) as cloud_pool,
+        ):
+            s.run_gpu_phase(
+                1,  # Phase 1 => ["blip2"]
+                claim_fn=_claim_fn,
+                process_batch_fn=_process_batch_fn,
+                process_single_fn=lambda _job: "done",
+                submit_io_fn=_submit_io_fn,
+                collect_fn=_collect_fn,
+                advance_fn=lambda _n: None,
+                flush_fn=lambda: None,
+                local_pool=local_pool,
+                cloud_pool=cloud_pool,
+                stats={"done": 0, "failed": 0, "skipped": 0},
+                unload_fn=_unload_fn,
+            )
+
+        assert "unload:blip2" in call_order
+        assert "collect" in call_order
+        assert call_order.index("unload:blip2") < call_order.index("collect")
+        assert s.vram.loaded_modules == []
 
 
 # ── Integration: co-residency fits within VRAM ────────────────────────────────

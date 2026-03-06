@@ -28,6 +28,8 @@ Supported methods:
     queue_clear     - Clear jobs from queue (one-shot)
     rebuild         - Re-enqueue module jobs (one-shot)
     search          - Search the image database (one-shot)
+    gallery/listFolders - List folder tree nodes for DB-backed gallery (one-shot)
+    gallery/listImagesChunk - List progressive gallery image chunk (one-shot)
     analyze         - Analyze a single image (streaming)
     thumbnail       - Generate thumbnail JPEG (one-shot, base64)
     fullimage       - Generate full-res JPEG for RAW/HEIC (one-shot, base64)
@@ -607,6 +609,274 @@ def _handle_search(params: dict) -> dict:
     return {"results": records, "total": total}
 
 
+def _processed_exists_clause(alias: str = "i") -> str:
+    """SQL predicate: image has at least one processed analysis record."""
+    return f"""(
+        EXISTS(SELECT 1 FROM analysis_metadata m  WHERE m.image_id  = {alias}.id) OR
+        EXISTS(SELECT 1 FROM analysis_technical t WHERE t.image_id  = {alias}.id) OR
+        EXISTS(SELECT 1 FROM analysis_local_ai la WHERE la.image_id = {alias}.id) OR
+        EXISTS(SELECT 1 FROM analysis_blip2 b2 WHERE b2.image_id    = {alias}.id) OR
+        EXISTS(SELECT 1 FROM analysis_objects ob WHERE ob.image_id   = {alias}.id) OR
+        EXISTS(SELECT 1 FROM analysis_ocr ocr WHERE ocr.image_id     = {alias}.id) OR
+        EXISTS(SELECT 1 FROM analysis_faces af WHERE af.image_id     = {alias}.id) OR
+        EXISTS(SELECT 1 FROM analysis_cloud_ai ca WHERE ca.image_id  = {alias}.id) OR
+        EXISTS(SELECT 1 FROM analysis_aesthetic ae WHERE ae.image_id = {alias}.id) OR
+        EXISTS(SELECT 1 FROM embeddings em WHERE em.image_id         = {alias}.id)
+    )"""
+
+
+def _escape_like(value: str) -> str:
+    """Escape a value for SQLite LIKE with ESCAPE '\\'."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _encode_gallery_cursor(path: str, image_id: int) -> str:
+    payload = json.dumps({"path": path, "id": image_id}, separators=(",", ":")).encode("utf-8")
+    token = base64.urlsafe_b64encode(payload).decode("ascii")
+    return token.rstrip("=")
+
+
+def _decode_gallery_cursor(token: str) -> tuple[str, int]:
+    padded = token + ("=" * (-len(token) % 4))
+    payload = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    decoded = json.loads(payload)
+    if not isinstance(decoded, dict):
+        raise ValueError("Invalid gallery cursor payload")
+    path = decoded.get("path")
+    image_id = decoded.get("id")
+    if not isinstance(path, str) or not isinstance(image_id, int):
+        raise ValueError("Invalid gallery cursor fields")
+    return path, image_id
+
+
+def _handle_gallery_list_folders(params: dict) -> dict:
+    """List processed-image folders for the gallery sidebar tree."""
+    conn = _get_db()
+    processed = _processed_exists_clause("i")
+    rows = conn.execute(
+        f"""
+        SELECT i.file_path
+        FROM images i
+        WHERE {processed}
+        ORDER BY i.file_path COLLATE NOCASE
+        """
+    ).fetchall()
+
+    total_images = len(rows)
+    folder_counts: dict[str, int] = {}
+    parent_of: dict[str, str | None] = {}
+    children_by_parent: dict[str | None, set[str]] = {}
+
+    for row in rows:
+        norm_path = str(row["file_path"]).replace("\\", "/")
+        if "/" not in norm_path:
+            continue
+        folder = norm_path.rsplit("/", 1)[0].rstrip("/")
+        if not folder:
+            continue
+        parts = [p for p in folder.split("/") if p]
+        if not parts:
+            continue
+
+        parent: str | None = None
+        current = ""
+        for part in parts:
+            current = part if not current else f"{current}/{part}"
+            folder_counts[current] = folder_counts.get(current, 0) + 1
+            if current not in parent_of:
+                parent_of[current] = parent
+            children_by_parent.setdefault(parent, set()).add(current)
+            parent = current
+
+    folders = []
+    for path, image_count in folder_counts.items():
+        folders.append({
+            "path": path,
+            "name": path.rsplit("/", 1)[-1],
+            "parent_path": parent_of.get(path),
+            "depth": path.count("/"),
+            "image_count": image_count,
+            "child_count": len(children_by_parent.get(path, set())),
+        })
+
+    folders.sort(key=lambda f: str(f["path"]).lower())
+    return {"folders": folders, "totalImages": total_images}
+
+
+def _handle_gallery_list_images_chunk(params: dict) -> dict:
+    """Return a progressive chunk of processed images for gallery browsing."""
+    import json as _json
+
+    conn = _get_db()
+    path_expr = "REPLACE(i.file_path, '\\', '/')"
+
+    try:
+        chunk_size = int(params.get("chunkSize", 300))
+    except (TypeError, ValueError):
+        raise ValueError("chunkSize must be an integer")
+    chunk_size = max(50, min(chunk_size, 2000))
+
+    recursive = bool(params.get("recursive", True))
+    folder_path = params.get("folderPath")
+    cursor = params.get("cursor")
+
+    conditions: list[str] = [_processed_exists_clause("i")]
+    sql_params: list[Any] = []
+
+    if folder_path is not None:
+        if not isinstance(folder_path, str):
+            raise ValueError("folderPath must be a string")
+        folder_norm = folder_path.replace("\\", "/").rstrip("/")
+        if folder_norm:
+            escaped = _escape_like(folder_norm)
+            conditions.append(f"{path_expr} LIKE ? ESCAPE '\\'")
+            sql_params.append(f"{escaped}/%")
+            if not recursive:
+                conditions.append(f"INSTR(SUBSTR({path_expr}, LENGTH(?) + 2), '/') = 0")
+                sql_params.append(folder_norm)
+
+    base_conditions = list(conditions)
+    base_params = list(sql_params)
+
+    if cursor is not None:
+        if not isinstance(cursor, str):
+            raise ValueError("cursor must be a string")
+        cursor_path, cursor_id = _decode_gallery_cursor(cursor)
+        conditions.append(
+            f"({path_expr} COLLATE NOCASE > ? COLLATE NOCASE OR "
+            f"({path_expr} COLLATE NOCASE = ? COLLATE NOCASE AND i.id > ?))"
+        )
+        sql_params.extend([cursor_path, cursor_path, cursor_id])
+
+    where_clause = " AND ".join(conditions)
+    base_where_clause = " AND ".join(base_conditions)
+
+    select_cols = f"""
+        i.id AS image_id, i.file_path, {path_expr} AS normalized_path, i.width, i.height, i.file_size,
+        m.camera_make, m.camera_model, m.lens_model, m.focal_length,
+        m.f_number, m.exposure_time, m.iso, m.date_time_original,
+        m.gps_latitude, m.gps_longitude, m.location_city, m.location_state,
+        m.location_country,
+        t.sharpness_score, t.sharpness_label, t.exposure_ev, t.exposure_label,
+        t.noise_level, t.noise_label, t.snr_db, t.dynamic_range_stops,
+        t.highlight_clipping_pct, t.shadow_clipping_pct, t.avg_saturation,
+        t.dominant_colors,
+        la.description, la.scene_type, la.main_subject, la.lighting, la.mood,
+        la.keywords, la.detected_objects, la.face_count, la.face_identities,
+        la.has_people, la.ocr_text,
+        ae.aesthetic_score, ae.aesthetic_label, ae.aesthetic_reason
+    """
+
+    joins = """
+        FROM images i
+        LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
+        LEFT JOIN analysis_technical t  ON t.image_id  = i.id
+        LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
+        LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
+    """
+
+    rows = conn.execute(
+        f"""
+        SELECT {select_cols}
+        {joins}
+        WHERE {where_clause}
+        ORDER BY {path_expr} COLLATE NOCASE, i.id
+        LIMIT ?
+        """,
+        [*sql_params, chunk_size + 1],
+    ).fetchall()
+
+    total = None
+    if cursor is None:
+        total_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS cnt
+            FROM images i
+            WHERE {base_where_clause}
+            """,
+            base_params,
+        ).fetchone()
+        total = int(total_row["cnt"]) if total_row else 0
+
+    has_more = len(rows) > chunk_size
+    if has_more:
+        rows = rows[:chunk_size]
+
+    def _json_field(val: Any) -> Any:
+        if val is None:
+            return None
+        try:
+            return _json.loads(val)
+        except (TypeError, ValueError):
+            return val
+
+    items = []
+    for row in rows:
+        items.append({
+            "image_id": row["image_id"],
+            "file_path": row["file_path"],
+            "score": None,
+            "width": row["width"],
+            "height": row["height"],
+            "file_size": row["file_size"],
+            "camera_make": row["camera_make"],
+            "camera_model": row["camera_model"],
+            "lens_model": row["lens_model"],
+            "focal_length": row["focal_length"],
+            "f_number": row["f_number"],
+            "exposure_time": row["exposure_time"],
+            "iso": row["iso"],
+            "date_time_original": row["date_time_original"],
+            "gps_latitude": row["gps_latitude"],
+            "gps_longitude": row["gps_longitude"],
+            "location_city": row["location_city"],
+            "location_state": row["location_state"],
+            "location_country": row["location_country"],
+            "sharpness_score": row["sharpness_score"],
+            "sharpness_label": row["sharpness_label"],
+            "exposure_ev": row["exposure_ev"],
+            "exposure_label": row["exposure_label"],
+            "noise_level": row["noise_level"],
+            "noise_label": row["noise_label"],
+            "snr_db": row["snr_db"],
+            "dynamic_range_stops": row["dynamic_range_stops"],
+            "highlight_clipping_pct": row["highlight_clipping_pct"],
+            "shadow_clipping_pct": row["shadow_clipping_pct"],
+            "avg_saturation": row["avg_saturation"],
+            "dominant_colors": _json_field(row["dominant_colors"]),
+            "description": row["description"],
+            "scene_type": row["scene_type"],
+            "main_subject": row["main_subject"],
+            "lighting": row["lighting"],
+            "mood": row["mood"],
+            "keywords": _json_field(row["keywords"]),
+            "detected_objects": _json_field(row["detected_objects"]),
+            "face_count": row["face_count"],
+            "face_identities": _json_field(row["face_identities"]),
+            "has_people": bool(row["has_people"]) if row["has_people"] is not None else None,
+            "ocr_text": row["ocr_text"],
+            "aesthetic_score": row["aesthetic_score"],
+            "aesthetic_label": row["aesthetic_label"],
+            "aesthetic_reason": row["aesthetic_reason"],
+            "_normalized_path": row["normalized_path"],
+        })
+
+    next_cursor = None
+    if has_more and items:
+        last = items[-1]
+        next_cursor = _encode_gallery_cursor(last["_normalized_path"], int(last["image_id"]))
+
+    for item in items:
+        item.pop("_normalized_path", None)
+
+    return {
+        "items": items,
+        "nextCursor": next_cursor,
+        "hasMore": has_more,
+        "total": total,
+    }
+
+
 def _handle_analyze(req_id: int | str, params: dict) -> None:
     """Analyze a single image — streaming progress, then result."""
     from imganalyzer.analyzer import Analyzer
@@ -1098,6 +1368,8 @@ _SYNC_METHODS: dict[str, Any] = {
     "queue_clear": _handle_queue_clear,
     "rebuild": _handle_rebuild,
     "search": _handle_search,
+    "gallery/listFolders": _handle_gallery_list_folders,
+    "gallery/listImagesChunk": _handle_gallery_list_images_chunk,
     "thumbnail": _handle_thumbnail,
     "fullimage": _handle_fullimage,
     "cancel_run": _handle_cancel_run,

@@ -105,13 +105,15 @@ function AnalysisSidebar({ item }: { item: SearchResult }) {
 
         {/* AI Analysis */}
         {(item.description || item.scene_type || item.main_subject || item.lighting || item.mood ||
-          item.detected_objects?.length || item.keywords?.length || item.ocr_text) && (
+          item.detected_objects?.length || item.keywords?.length || item.ocr_text ||
+          item.has_people !== null) && (
           <Section title="AI Analysis">
             {item.description && <Row label="Description" value={item.description} />}
             {item.scene_type && <Row label="Scene" value={item.scene_type} />}
             {item.main_subject && <Row label="Subject" value={item.main_subject} />}
             {item.lighting && <Row label="Lighting" value={item.lighting} />}
             {item.mood && <Row label="Mood" value={item.mood} />}
+            {item.has_people !== null && <Row label="Has People" value={item.has_people ? 'Yes' : 'No'} />}
             {item.ocr_text && <Row label="OCR Text" value={item.ocr_text} />}
             {item.detected_objects && item.detected_objects.length > 0 && (
               <div className="py-1 border-b border-neutral-800">
@@ -191,8 +193,11 @@ function AnalysisSidebar({ item }: { item: SearchResult }) {
         )}
 
         {/* Camera / EXIF */}
-        {(item.camera_make || item.camera_model || item.f_number || item.exposure_time ||
-          item.focal_length || item.iso || item.date_time_original) && (
+        {(item.camera_make || item.camera_model || item.lens_model || item.f_number || item.exposure_time ||
+          item.focal_length || item.iso || item.date_time_original ||
+          item.width !== null || item.height !== null ||
+          item.gps_latitude !== null || item.gps_longitude !== null ||
+          item.location_city || item.location_state || item.location_country) && (
           <Section title="Camera">
             {(item.camera_make || item.camera_model) && (
               <Row label="Camera" value={[item.camera_make, item.camera_model].filter(Boolean).join(' ')} />
@@ -202,11 +207,11 @@ function AnalysisSidebar({ item }: { item: SearchResult }) {
             {item.exposure_time && <Row label="Shutter" value={item.exposure_time} />}
             {item.focal_length && <Row label="Focal Length" value={`${item.focal_length} mm`} />}
             {item.iso && <Row label="ISO" value={item.iso} />}
-            {item.date_time_original && <Row label="Date" value={item.date_time_original.split('T')[0]} />}
-            {(item.width || item.height) && (
+            {item.date_time_original && <Row label="Date" value={item.date_time_original} />}
+            {(item.width !== null || item.height !== null) && (
               <Row label="Dimensions" value={`${item.width ?? '?'} × ${item.height ?? '?'}`} />
             )}
-            {(item.gps_latitude || item.gps_longitude) && (
+            {(item.gps_latitude !== null || item.gps_longitude !== null) && (
               <Row label="GPS" value={`${item.gps_latitude}, ${item.gps_longitude}`} />
             )}
             {(item.location_city || item.location_country) && (
@@ -217,10 +222,17 @@ function AnalysisSidebar({ item }: { item: SearchResult }) {
 
         {/* File info */}
         <Section title="File">
+          <Row label="Image ID" value={item.image_id} />
           <Row label="Path" value={<span className="break-all text-[10px]">{item.file_path}</span>} />
-          {item.file_size && (
+          {item.file_size !== null && (
             <Row label="Size" value={`${(item.file_size / 1024 / 1024).toFixed(1)} MB`} />
           )}
+        </Section>
+
+        <Section title="All analyzed fields">
+          <pre className="text-[10px] text-neutral-400 bg-neutral-950 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+            {JSON.stringify(item, null, 2)}
+          </pre>
         </Section>
       </div>
     </div>
