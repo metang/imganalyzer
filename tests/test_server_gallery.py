@@ -66,11 +66,35 @@ CREATE TABLE analysis_local_ai (
     has_people INTEGER,
     ocr_text TEXT
 );
-CREATE TABLE analysis_blip2 (image_id INTEGER PRIMARY KEY);
-CREATE TABLE analysis_objects (image_id INTEGER PRIMARY KEY);
-CREATE TABLE analysis_ocr (image_id INTEGER PRIMARY KEY);
-CREATE TABLE analysis_faces (image_id INTEGER PRIMARY KEY);
-CREATE TABLE analysis_cloud_ai (image_id INTEGER PRIMARY KEY);
+CREATE TABLE analysis_blip2 (
+    image_id INTEGER PRIMARY KEY,
+    description TEXT,
+    scene_type TEXT,
+    main_subject TEXT,
+    lighting TEXT,
+    mood TEXT,
+    keywords TEXT
+);
+CREATE TABLE analysis_objects (
+    image_id INTEGER PRIMARY KEY,
+    detected_objects TEXT,
+    has_person INTEGER
+);
+CREATE TABLE analysis_ocr (
+    image_id INTEGER PRIMARY KEY,
+    ocr_text TEXT
+);
+CREATE TABLE analysis_faces (
+    image_id INTEGER PRIMARY KEY,
+    face_count INTEGER,
+    face_identities TEXT
+);
+CREATE TABLE analysis_cloud_ai (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    image_id INTEGER,
+    description TEXT,
+    analyzed_at TEXT
+);
 CREATE TABLE analysis_aesthetic (
     image_id INTEGER PRIMARY KEY,
     aesthetic_score REAL,
@@ -141,3 +165,64 @@ def test_gallery_chunk_folder_filter_escapes_like_wildcards(
     assert result["total"] == 1
     assert len(result["items"]) == 1
     assert result["items"][0]["file_path"] == r"E:\Pic\2006\100%_done\img1.jpg"
+
+
+def test_gallery_chunk_falls_back_to_split_tables_when_local_ai_missing(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gallery_db.execute(
+        "INSERT INTO images (id, file_path, width, height, file_size) VALUES (?, ?, ?, ?, ?)",
+        (1, r"E:\Pic\2006\01\img1.jpg", 6000, 4000, 24681012),
+    )
+    gallery_db.execute(
+        """
+        INSERT INTO analysis_blip2
+            (image_id, description, scene_type, main_subject, lighting, mood, keywords)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            1,
+            "A serene mountain lake at sunset.",
+            "landscape",
+            "mountain lake",
+            "golden hour",
+            "calm",
+            '["mountain", "lake"]',
+        ),
+    )
+    gallery_db.execute(
+        "INSERT INTO analysis_objects (image_id, detected_objects, has_person) VALUES (?, ?, ?)",
+        (1, '["mountain", "person"]', 1),
+    )
+    gallery_db.execute(
+        "INSERT INTO analysis_ocr (image_id, ocr_text) VALUES (?, ?)",
+        (1, "Trailhead"),
+    )
+    gallery_db.execute(
+        "INSERT INTO analysis_faces (image_id, face_count, face_identities) VALUES (?, ?, ?)",
+        (1, 2, '["alice", "bob"]'),
+    )
+    gallery_db.execute(
+        "INSERT INTO analysis_cloud_ai (image_id, description, analyzed_at) VALUES (?, ?, ?)",
+        (1, "Cloud view: dramatic mountain range over water.", "2026-01-01T10:00:00"),
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_gallery_list_images_chunk(
+        {"folderPath": r"E:\Pic\2006", "recursive": True, "chunkSize": 300, "cursor": None}
+    )
+
+    assert result["total"] == 1
+    assert len(result["items"]) == 1
+    item = result["items"][0]
+    assert item["description"] == "A serene mountain lake at sunset."
+    assert item["scene_type"] == "landscape"
+    assert item["main_subject"] == "mountain lake"
+    assert item["keywords"] == ["mountain", "lake"]
+    assert item["detected_objects"] == ["mountain", "person"]
+    assert item["face_count"] == 2
+    assert item["face_identities"] == ["alice", "bob"]
+    assert item["has_people"] is True
+    assert item["ocr_text"] == "Trailhead"
+    assert item["cloud_description"] == "Cloud view: dramatic mountain range over water."

@@ -131,6 +131,7 @@ export interface SearchResult {
   face_identities: string[] | null
   has_people: boolean | null
   ocr_text: string | null
+  cloud_description: string | null
   aesthetic_score: number | null
   aesthetic_label: string | null
   aesthetic_reason: string | null

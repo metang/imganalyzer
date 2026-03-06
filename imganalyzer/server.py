@@ -495,15 +495,18 @@ def _handle_search(params: dict) -> dict:
         conditions.append("t.noise_level <= ?")
         sql_params.append(noise_max)
     if faces_min is not None:
-        conditions.append("la.face_count >= ?")
+        conditions.append("COALESCE(la.face_count, af.face_count) >= ?")
         sql_params.append(faces_min)
     if faces_max is not None:
-        conditions.append("la.face_count <= ?")
+        conditions.append("COALESCE(la.face_count, af.face_count) <= ?")
         sql_params.append(faces_max)
     if has_people is True:
-        conditions.append("la.has_people = 1")
+        conditions.append("COALESCE(la.has_people, ob.has_person) = 1")
     elif has_people is False:
-        conditions.append("(la.has_people = 0 OR la.has_people IS NULL)")
+        conditions.append(
+            "(COALESCE(la.has_people, ob.has_person) = 0 OR "
+            "COALESCE(la.has_people, ob.has_person) IS NULL)"
+        )
 
     where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
@@ -517,9 +520,26 @@ def _handle_search(params: dict) -> dict:
         t.noise_level, t.noise_label, t.snr_db, t.dynamic_range_stops,
         t.highlight_clipping_pct, t.shadow_clipping_pct, t.avg_saturation,
         t.dominant_colors,
-        la.description, la.scene_type, la.main_subject, la.lighting, la.mood,
-        la.keywords, la.detected_objects, la.face_count, la.face_identities,
-        la.has_people, la.ocr_text,
+        COALESCE(la.description, b2.description) AS description,
+        COALESCE(la.scene_type, b2.scene_type) AS scene_type,
+        COALESCE(la.main_subject, b2.main_subject) AS main_subject,
+        COALESCE(la.lighting, b2.lighting) AS lighting,
+        COALESCE(la.mood, b2.mood) AS mood,
+        COALESCE(la.keywords, b2.keywords) AS keywords,
+        COALESCE(la.detected_objects, ob.detected_objects) AS detected_objects,
+        COALESCE(la.face_count, af.face_count) AS face_count,
+        COALESCE(la.face_identities, af.face_identities) AS face_identities,
+        COALESCE(la.has_people, ob.has_person) AS has_people,
+        COALESCE(la.ocr_text, ocr.ocr_text) AS ocr_text,
+        (
+            SELECT ca.description
+            FROM analysis_cloud_ai ca
+            WHERE ca.image_id = i.id
+              AND ca.description IS NOT NULL
+              AND TRIM(ca.description) != ''
+            ORDER BY ca.analyzed_at DESC, ca.id DESC
+            LIMIT 1
+        ) AS cloud_description,
         ae.aesthetic_score, ae.aesthetic_label, ae.aesthetic_reason
     """
 
@@ -528,6 +548,10 @@ def _handle_search(params: dict) -> dict:
         LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
         LEFT JOIN analysis_technical t  ON t.image_id  = i.id
         LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
+        LEFT JOIN analysis_blip2     b2 ON b2.image_id = i.id
+        LEFT JOIN analysis_objects   ob ON ob.image_id = i.id
+        LEFT JOIN analysis_ocr      ocr ON ocr.image_id = i.id
+        LEFT JOIN analysis_faces     af ON af.image_id = i.id
         LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
     """
 
@@ -594,6 +618,7 @@ def _handle_search(params: dict) -> dict:
             "face_identities": _json_field(row["face_identities"]),
             "has_people": bool(row["has_people"]) if row["has_people"] is not None else None,
             "ocr_text": row["ocr_text"],
+            "cloud_description": row["cloud_description"],
             "aesthetic_score": row["aesthetic_score"],
             "aesthetic_label": row["aesthetic_label"],
             "aesthetic_reason": row["aesthetic_reason"],
@@ -761,9 +786,26 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
         t.noise_level, t.noise_label, t.snr_db, t.dynamic_range_stops,
         t.highlight_clipping_pct, t.shadow_clipping_pct, t.avg_saturation,
         t.dominant_colors,
-        la.description, la.scene_type, la.main_subject, la.lighting, la.mood,
-        la.keywords, la.detected_objects, la.face_count, la.face_identities,
-        la.has_people, la.ocr_text,
+        COALESCE(la.description, b2.description) AS description,
+        COALESCE(la.scene_type, b2.scene_type) AS scene_type,
+        COALESCE(la.main_subject, b2.main_subject) AS main_subject,
+        COALESCE(la.lighting, b2.lighting) AS lighting,
+        COALESCE(la.mood, b2.mood) AS mood,
+        COALESCE(la.keywords, b2.keywords) AS keywords,
+        COALESCE(la.detected_objects, ob.detected_objects) AS detected_objects,
+        COALESCE(la.face_count, af.face_count) AS face_count,
+        COALESCE(la.face_identities, af.face_identities) AS face_identities,
+        COALESCE(la.has_people, ob.has_person) AS has_people,
+        COALESCE(la.ocr_text, ocr.ocr_text) AS ocr_text,
+        (
+            SELECT ca.description
+            FROM analysis_cloud_ai ca
+            WHERE ca.image_id = i.id
+              AND ca.description IS NOT NULL
+              AND TRIM(ca.description) != ''
+            ORDER BY ca.analyzed_at DESC, ca.id DESC
+            LIMIT 1
+        ) AS cloud_description,
         ae.aesthetic_score, ae.aesthetic_label, ae.aesthetic_reason
     """
 
@@ -772,6 +814,10 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
         LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
         LEFT JOIN analysis_technical t  ON t.image_id  = i.id
         LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
+        LEFT JOIN analysis_blip2     b2 ON b2.image_id = i.id
+        LEFT JOIN analysis_objects   ob ON ob.image_id = i.id
+        LEFT JOIN analysis_ocr      ocr ON ocr.image_id = i.id
+        LEFT JOIN analysis_faces     af ON af.image_id = i.id
         LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
     """
 
@@ -855,6 +901,7 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
             "face_identities": _json_field(row["face_identities"]),
             "has_people": bool(row["has_people"]) if row["has_people"] is not None else None,
             "ocr_text": row["ocr_text"],
+            "cloud_description": row["cloud_description"],
             "aesthetic_score": row["aesthetic_score"],
             "aesthetic_label": row["aesthetic_label"],
             "aesthetic_reason": row["aesthetic_reason"],

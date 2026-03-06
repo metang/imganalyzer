@@ -106,9 +106,11 @@ function AnalysisSidebar({ item }: { item: SearchResult }) {
         {/* AI Analysis */}
         {(item.description || item.scene_type || item.main_subject || item.lighting || item.mood ||
           item.detected_objects?.length || item.keywords?.length || item.ocr_text ||
+          item.cloud_description ||
           item.has_people !== null) && (
           <Section title="AI Analysis">
             {item.description && <Row label="Description" value={item.description} />}
+            {item.cloud_description && <Row label="Cloud Description" value={item.cloud_description} />}
             {item.scene_type && <Row label="Scene" value={item.scene_type} />}
             {item.main_subject && <Row label="Subject" value={item.main_subject} />}
             {item.lighting && <Row label="Lighting" value={item.lighting} />}
