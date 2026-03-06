@@ -8,13 +8,25 @@
 
 import { ipcMain } from 'electron'
 import { rpc, ensureServerRunning } from './python-rpc'
+import { planSearchWithCopilot } from './search-planner'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+export type SearchIntent = 'people' | 'wildlife' | 'best-shot' | 'general'
+export type SearchTimeOfDay = 'morning' | 'afternoon' | 'evening' | 'night'
+export type SearchSortBy = 'relevance' | 'best' | 'aesthetic' | 'sharpness' | 'cleanest' | 'newest'
 
 export interface SearchFilters {
   query?: string
   mode?: 'text' | 'semantic' | 'hybrid' | 'browse'
   semanticWeight?: number
+  intent?: SearchIntent
+  similarToImageId?: number
+  country?: string
+  recurringMonthDay?: string
+  timeOfDay?: SearchTimeOfDay
+  sortBy?: SearchSortBy
+  expandedTerms?: string[]
   // text filters
   face?: string
   camera?: string
@@ -93,7 +105,22 @@ export interface SearchResult {
 
 export interface SearchResponse {
   results: SearchResult[]
-  total: number
+  total: number | null
+  hasMore: boolean
+  error?: string
+}
+
+export interface SearchPlanRequest {
+  prompt: string
+  model?: string
+  intent?: SearchIntent
+}
+
+export interface SearchPlanResponse {
+  intent: SearchIntent
+  filters: SearchFilters
+  summary: string
+  model: string
   error?: string
 }
 
@@ -109,6 +136,13 @@ export function registerSearchHandlers(): void {
         query: filters.query?.trim() || '',
         mode: filters.mode,
         semanticWeight: filters.semanticWeight,
+        intent: filters.intent,
+        similarToImageId: filters.similarToImageId,
+        country: filters.country,
+        recurringMonthDay: filters.recurringMonthDay,
+        timeOfDay: filters.timeOfDay,
+        sortBy: filters.sortBy,
+        expandedTerms: filters.expandedTerms,
         face: filters.face,
         camera: filters.camera,
         lens: filters.lens,
@@ -127,11 +161,15 @@ export function registerSearchHandlers(): void {
         hasPeople: filters.hasPeople,
         limit: filters.limit,
         offset: filters.offset,
-      }) as { results: SearchResult[]; total: number }
+         }) as { results: SearchResult[]; total: number | null; hasMore: boolean }
 
-      return { results: result.results, total: result.total }
+        return { results: result.results, total: result.total, hasMore: result.hasMore }
     } catch (err) {
-      return { results: [], total: 0, error: String(err) }
+      return { results: [], total: 0, hasMore: false, error: String(err) }
     }
+  })
+
+  ipcMain.handle('search:plan', async (_evt, request: SearchPlanRequest): Promise<SearchPlanResponse> => {
+    return planSearchWithCopilot(request)
   })
 }

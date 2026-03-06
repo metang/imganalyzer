@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { XmpData, AnalysisProgress } from '../global'
+import type { XmpData, AnalysisProgress, AnalysisRunResult } from '../global'
 
 export type AnalysisState =
   | { status: 'idle' }
@@ -7,6 +7,23 @@ export type AnalysisState =
   | { status: 'analyzing'; stage: string; pct: number }
   | { status: 'done'; xmp: XmpData }
   | { status: 'error'; message: string }
+
+function getErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function applyAnalysisResult(result: AnalysisRunResult): AnalysisState {
+  if (result.cancelled) {
+    return { status: 'idle' }
+  }
+  if (result.error) {
+    return { status: 'error', message: result.error }
+  }
+  if (result.xmp) {
+    return { status: 'done', xmp: result.xmp }
+  }
+  return { status: 'error', message: 'Analysis returned no data' }
+}
 
 export function useAnalysis(imagePath: string | null) {
   const [state, setState] = useState<AnalysisState>({ status: 'idle' })
@@ -34,25 +51,24 @@ export function useAnalysis(imagePath: string | null) {
     const epoch = ++epochRef.current
 
     async function init() {
-      const cached = await window.api.readXmp(imagePath!)
-      if (epochRef.current !== epoch) return
-      if (cached) {
-        setState({ status: 'cached', xmp: cached })
-      } else {
-        setState({ status: 'analyzing', stage: 'Starting…', pct: 0 })
-        const result = await window.api.runAnalysis(imagePath!, 'local')
+      try {
+        const cached = await window.api.readXmp(imagePath)
         if (epochRef.current !== epoch) return
-        if (result.error) {
-          setState({ status: 'error', message: result.error })
-        } else if (result.xmp) {
-          setState({ status: 'done', xmp: result.xmp })
+        if (cached) {
+          setState({ status: 'cached', xmp: cached })
         } else {
-          setState({ status: 'error', message: 'Analysis returned no data' })
+          setState({ status: 'analyzing', stage: 'Starting…', pct: 0 })
+          const result = await window.api.runAnalysis(imagePath, 'local')
+          if (epochRef.current !== epoch) return
+          setState(applyAnalysisResult(result))
         }
+      } catch (err) {
+        if (epochRef.current !== epoch) return
+        setState({ status: 'error', message: getErrorMessage(err) })
       }
     }
 
-    init()
+    void init()
     // No cleanup needed — epoch guards stale results
   }, [imagePath])
 
@@ -60,14 +76,13 @@ export function useAnalysis(imagePath: string | null) {
     if (!imagePath) return
     const epoch = ++epochRef.current
     setState({ status: 'analyzing', stage: 'Starting…', pct: 0 })
-    const result = await window.api.runAnalysis(imagePath, 'local')
-    if (epochRef.current !== epoch) return
-    if (result.error) {
-      setState({ status: 'error', message: result.error })
-    } else if (result.xmp) {
-      setState({ status: 'done', xmp: result.xmp })
-    } else {
-      setState({ status: 'error', message: 'Analysis returned no data' })
+    try {
+      const result = await window.api.runAnalysis(imagePath, 'local')
+      if (epochRef.current !== epoch) return
+      setState(applyAnalysisResult(result))
+    } catch (err) {
+      if (epochRef.current !== epoch) return
+      setState({ status: 'error', message: getErrorMessage(err) })
     }
   }, [imagePath])
 

@@ -5,6 +5,7 @@ import sqlite3
 import sys
 from collections.abc import Generator
 
+import numpy as np
 import pytest
 
 import imganalyzer.server as server
@@ -101,7 +102,11 @@ CREATE TABLE analysis_aesthetic (
     aesthetic_label TEXT,
     aesthetic_reason TEXT
 );
-CREATE TABLE embeddings (image_id INTEGER PRIMARY KEY);
+CREATE TABLE embeddings (
+    image_id INTEGER,
+    embedding_type TEXT,
+    vector BLOB
+);
 """
 
 
@@ -226,3 +231,202 @@ def test_gallery_chunk_falls_back_to_split_tables_when_local_ai_missing(
     assert item["has_people"] is True
     assert item["ocr_text"] == "Trailhead"
     assert item["cloud_description"] == "Cloud view: dramatic mountain range over water."
+
+
+def test_search_browse_reports_total_and_has_more(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\2006\01\img1.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\2006\01\img2.jpg")
+    _insert_processed_image(gallery_db, 3, r"E:\Pic\2006\01\img3.jpg")
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({"mode": "browse", "limit": 2, "offset": 0})
+
+    assert result["total"] == 3
+    assert result["hasMore"] is True
+    assert [item["image_id"] for item in result["results"]] == [1, 2]
+
+
+def test_search_ranked_pagination_returns_later_page(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for image_id in range(1, 7):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\search\img{image_id}.jpg")
+
+    class FakeSearchEngine:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+
+        def search(
+            self,
+            query: str,
+            limit: int,
+            semantic_weight: float = 0.5,
+            mode: str = "hybrid",
+        ) -> list[dict[str, object]]:
+            ranked = [
+                {"image_id": 1, "score": 0.96},
+                {"image_id": 2, "score": 0.91},
+                {"image_id": 3, "score": 0.84},
+                {"image_id": 4, "score": 0.79},
+                {"image_id": 5, "score": 0.71},
+                {"image_id": 6, "score": 0.62},
+            ]
+            return ranked[:limit]
+
+    import imganalyzer.db.search as search_module
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    monkeypatch.setattr(search_module, "SearchEngine", FakeSearchEngine)
+    result = server._handle_search({"query": "mountain", "mode": "hybrid", "limit": 2, "offset": 2})
+
+    assert result["total"] == 6
+    assert result["hasMore"] is True
+    assert [item["image_id"] for item in result["results"]] == [3, 4]
+
+
+def test_search_similar_image_returns_ranked_matches(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for image_id in range(1, 4):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\similar\img{image_id}.jpg")
+
+    gallery_db.executemany(
+        "INSERT INTO embeddings (image_id, embedding_type, vector) VALUES (?, ?, ?)",
+        [
+            (1, "image_clip", np.array([1.0, 0.0], dtype=np.float32).tobytes()),
+            (2, "image_clip", np.array([0.9, 0.1], dtype=np.float32).tobytes()),
+            (3, "image_clip", np.array([0.0, 1.0], dtype=np.float32).tobytes()),
+        ],
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({"similarToImageId": 1, "limit": 2, "offset": 0})
+
+    assert result["total"] == 2
+    assert result["hasMore"] is False
+    assert [item["image_id"] for item in result["results"]] == [2, 3]
+    assert result["results"][0]["score"] > result["results"][1]["score"]
+
+
+def test_search_people_filters_support_country_recurring_day_and_time_of_day(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\img1.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\people\img2.jpg")
+    _insert_processed_image(gallery_db, 3, r"E:\Pic\people\img3.jpg")
+
+    gallery_db.execute(
+        "UPDATE analysis_metadata SET location_country = ?, date_time_original = ? WHERE image_id = ?",
+        ("US", "2024-02-01T08:15:00", 1),
+    )
+    gallery_db.execute(
+        "UPDATE analysis_metadata SET location_country = ?, date_time_original = ? WHERE image_id = ?",
+        ("US", "2025-02-01T18:45:00", 2),
+    )
+    gallery_db.execute(
+        "UPDATE analysis_metadata SET location_country = ?, date_time_original = ? WHERE image_id = ?",
+        ("CA", "2025-02-01T08:20:00", 3),
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search(
+        {
+            "mode": "browse",
+            "country": "US",
+            "recurringMonthDay": "02-01",
+            "timeOfDay": "morning",
+            "limit": 10,
+            "offset": 0,
+        }
+    )
+
+    assert result["total"] == 1
+    assert result["hasMore"] is False
+    assert [item["image_id"] for item in result["results"]] == [1]
+
+
+def test_search_best_sort_uses_quality_ranking(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for image_id in range(1, 4):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\best\img{image_id}.jpg")
+
+    gallery_db.executemany(
+        """
+        INSERT INTO analysis_technical (image_id, sharpness_score, noise_level)
+        VALUES (?, ?, ?)
+        """,
+        [
+            (1, 80.0, 0.02),
+            (2, 50.0, 0.30),
+            (3, 95.0, 0.01),
+        ],
+    )
+    gallery_db.executemany(
+        """
+        INSERT INTO analysis_aesthetic (image_id, aesthetic_score, aesthetic_label, aesthetic_reason)
+        VALUES (?, ?, ?, ?)
+        """,
+        [
+            (1, 8.5, "Excellent", "Balanced composition"),
+            (2, 9.0, "Excellent", "Beautiful light"),
+            (3, 7.5, "Good", "Sharp with cleaner detail"),
+        ],
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({"mode": "browse", "sortBy": "best", "limit": 3, "offset": 0})
+
+    assert result["total"] == 3
+    assert [item["image_id"] for item in result["results"]] == [1, 3, 2]
+
+
+def test_search_expanded_terms_merge_ranked_results(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for image_id in range(1, 4):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\wildlife\img{image_id}.jpg")
+
+    class FakeSearchEngine:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+
+        def search(
+            self,
+            query: str,
+            limit: int,
+            semantic_weight: float = 0.5,
+            mode: str = "hybrid",
+        ) -> list[dict[str, object]]:
+            if query == "duck":
+                return [{"image_id": 1, "score": 0.9}, {"image_id": 2, "score": 0.8}][:limit]
+            if query == "mallard":
+                return [{"image_id": 2, "score": 0.95}][:limit]
+            if query == "teal":
+                return [{"image_id": 3, "score": 0.88}][:limit]
+            return []
+
+    import imganalyzer.db.search as search_module
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    monkeypatch.setattr(search_module, "SearchEngine", FakeSearchEngine)
+    result = server._handle_search(
+        {
+            "query": "duck",
+            "expandedTerms": ["mallard", "teal"],
+            "mode": "hybrid",
+            "limit": 3,
+            "offset": 0,
+        }
+    )
+
+    assert result["total"] == 3
+    assert [item["image_id"] for item in result["results"]] == [2, 1, 3]

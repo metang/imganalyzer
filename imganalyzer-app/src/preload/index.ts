@@ -3,7 +3,7 @@ import type { XmpData } from '../main/xmp'
 import type { ImageFile } from '../main/images'
 import type { AnalysisProgress } from '../main/analyzer'
 import type { BatchStats, BatchResult, BatchIngestProgress } from '../main/batch'
-import type { SearchFilters, SearchResponse } from '../main/search'
+import type { SearchFilters, SearchPlanRequest, SearchPlanResponse, SearchResponse } from '../main/search'
 import type { GalleryChunkParams, GalleryChunkResponse, GalleryFoldersResponse } from '../main/gallery'
 import type { ThumbnailCacheConfig, ThumbnailCacheConfigInput } from '../main/images'
 
@@ -26,7 +26,7 @@ contextBridge.exposeInMainWorld('api', {
   readXmp: (imagePath: string): Promise<XmpData | null> =>
     ipcRenderer.invoke('fs:readXmp', imagePath),
 
-  runAnalysis: (imagePath: string, aiBackend: string): Promise<{ xmp: XmpData | null; error?: string }> =>
+  runAnalysis: (imagePath: string, aiBackend: string): Promise<{ xmp: XmpData | null; error?: string; cancelled?: boolean }> =>
     ipcRenderer.invoke('analyze:run', imagePath, aiBackend),
 
   cancelAnalysis: (imagePath: string): Promise<void> =>
@@ -115,6 +115,9 @@ contextBridge.exposeInMainWorld('api', {
 
   searchImages: (filters: SearchFilters): Promise<SearchResponse> =>
     ipcRenderer.invoke('search:run', filters),
+
+  planSearchQuery: (request: SearchPlanRequest): Promise<SearchPlanResponse> =>
+    ipcRenderer.invoke('search:plan', request),
 
   galleryListFolders: (): Promise<GalleryFoldersResponse> =>
     ipcRenderer.invoke('gallery:list-folders'),

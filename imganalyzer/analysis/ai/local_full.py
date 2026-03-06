@@ -8,6 +8,8 @@ Pipeline per image:
 """
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from typing import Any
 
 
@@ -26,6 +28,24 @@ def _empty_cache() -> None:
         pass
 
 
+def _raise_cancelled() -> None:
+    from imganalyzer.analyzer import AnalysisCancelled
+
+    raise AnalysisCancelled("Analysis cancelled")
+
+
+def _check_cancel(cancel_event: threading.Event | None) -> None:
+    """Raise when cancellation has been requested."""
+    if cancel_event is not None and cancel_event.is_set():
+        _raise_cancelled()
+
+
+def _emit_progress(progress_cb: Callable[[str], None] | None, stage: str) -> None:
+    """Emit a plain-text progress stage to the optional callback."""
+    if progress_cb is not None:
+        progress_cb(stage)
+
+
 class LocalAIFull:
     """Full local AI pipeline for image analysis.
 
@@ -40,11 +60,15 @@ class LocalAIFull:
         detection_prompt: str | None = None,
         detection_threshold: float | None = None,
         face_match_threshold: float | None = None,
+        cancel_event: threading.Event | None = None,
+        progress_cb: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         from rich.console import Console
         _con = Console()
 
         # ── Stage 1: BLIP-2 captioning ────────────────────────────────────
+        _check_cancel(cancel_event)
+        _emit_progress(progress_cb, "[1/4] Captioning...")
         _con.print("[dim]  [1/4] Captioning...[/dim]")
 
         blip_result: dict[str, Any] = {}
@@ -57,11 +81,13 @@ class LocalAIFull:
             blip_result = _run_blip()
         except Exception as exc:
             _con.print(f"[yellow]  BLIP-2 warning: {exc}[/yellow]")
+        _check_cancel(cancel_event)
 
         # Release BLIP-2 activation tensors (2–3 GB) before GroundingDINO runs.
         _empty_cache()
 
         # ── Stage 2: Object detection ──────────────────────────────────────
+        _emit_progress(progress_cb, "[2/4] Object detection...")
         _con.print("[dim]  [2/4] Object detection...[/dim]")
         object_result: dict[str, Any] = {}
         try:
@@ -80,10 +106,12 @@ class LocalAIFull:
 
         # Release GroundingDINO activation tensors before OCR/face stages.
         _empty_cache()
+        _check_cancel(cancel_event)
 
         # ── Stage 3: OCR (gated on has_text) ──────────────────────────────
         ocr_result: dict[str, Any] = {}
         if has_text:
+            _emit_progress(progress_cb, "[3/4] OCR — reading text...")
             _con.print("[dim]  [3/4] OCR — reading text...[/dim]")
             try:
                 from imganalyzer.analysis.ai.ocr import OCRAnalyzer
@@ -93,11 +121,14 @@ class LocalAIFull:
             # Release TrOCR beam-search tensors before face analysis.
             _empty_cache()
         else:
+            _emit_progress(progress_cb, "[3/4] No text detected — skipping OCR.")
             _con.print("[dim]  [3/4] No text detected — skipping OCR.[/dim]")
+        _check_cancel(cancel_event)
 
         # ── Stage 4: Face analysis (gated on has_person) ───────────────────
         face_result: dict[str, Any] = {}
         if has_person:
+            _emit_progress(progress_cb, "[4/4] Face detection & recognition...")
             _con.print("[dim]  [4/4] Face detection & recognition...[/dim]")
             try:
                 from imganalyzer.analysis.ai.faces import FaceAnalyzer
@@ -111,7 +142,9 @@ class LocalAIFull:
             except Exception as exc:
                 _con.print(f"[yellow]  Face analysis warning: {exc}[/yellow]")
         else:
+            _emit_progress(progress_cb, "[4/4] No people detected — skipping face analysis.")
             _con.print("[dim]  [4/4] No people detected — skipping face analysis.[/dim]")
+        _check_cancel(cancel_event)
 
         # ── Merge results ──────────────────────────────────────────────────
         merged: dict[str, Any] = {}

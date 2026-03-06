@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 import numpy as np
 import pytest
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 
@@ -113,6 +114,124 @@ class TestMetadataExtractor:
         from imganalyzer.analysis.metadata import MetadataExtractor
         result = MetadataExtractor(img_path, synthetic_image_data).extract()
         assert isinstance(result, dict)
+
+
+# ── Analyzer control path ─────────────────────────────────────────────────────
+
+class TestAnalyzer:
+    def test_cancel_event_stops_before_local_ai(self, tmp_path):
+        from imganalyzer.analyzer import AnalysisCancelled, Analyzer
+
+        image_path = tmp_path / "cancel.jpg"
+        cancel_event = threading.Event()
+        local_ai_calls = {"n": 0}
+        image_data = {
+            "format": "JPEG",
+            "width": 64,
+            "height": 64,
+            "rgb_array": np.zeros((64, 64, 3), dtype=np.uint8),
+            "is_raw": False,
+        }
+
+        class FakeReader:
+            def __init__(self, path):
+                self.path = path
+
+            def read(self):
+                return image_data
+
+        class FakeMetadataExtractor:
+            def __init__(self, path, data):
+                self.path = path
+                self.data = data
+
+            def extract(self):
+                return {}
+
+        class FakeTechnicalAnalyzer:
+            def __init__(self, data):
+                self.data = data
+
+            def analyze(self):
+                cancel_event.set()
+                return {}
+
+        class FakeLocalAIFull:
+            def analyze(self, *args, **kwargs):
+                local_ai_calls["n"] += 1
+                return {"description": "should not run"}
+
+        import imganalyzer.readers.standard as standard_module
+        import imganalyzer.analysis.metadata as metadata_module
+        import imganalyzer.analysis.technical as technical_module
+        import imganalyzer.analysis.ai.local_full as local_full_module
+
+        with patch.object(standard_module, "StandardReader", FakeReader), \
+             patch.object(metadata_module, "MetadataExtractor", FakeMetadataExtractor), \
+             patch.object(technical_module, "TechnicalAnalyzer", FakeTechnicalAnalyzer), \
+             patch.object(local_full_module, "LocalAIFull", FakeLocalAIFull):
+
+            with pytest.raises(AnalysisCancelled):
+                Analyzer(ai_backend="local", run_technical=True).analyze(
+                    image_path,
+                    cancel_event=cancel_event,
+                )
+
+        assert local_ai_calls["n"] == 0
+
+    def test_db_has_people_uses_fresh_connection_from_background_thread(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from imganalyzer.analyzer import Analyzer
+        from imganalyzer.db.connection import close_db, get_db
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.schema import ensure_schema
+
+        db_path = tmp_path / "imganalyzer.db"
+        image_path = tmp_path / "person.jpg"
+        image_path.write_bytes(b"stub")
+
+        close_db()
+        monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+
+        conn = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        ensure_schema(conn)
+
+        try:
+            repo = Repository(conn)
+            image_id = repo.register_image(str(image_path.resolve()))
+            repo.upsert_local_ai(image_id, {"has_people": True})
+            conn.commit()
+
+            # Prime the global singleton on the main thread so the background
+            # lookup would fail if it tried to reuse this same connection.
+            get_db()
+
+            result_box: dict[str, bool] = {}
+            error_box: list[Exception] = []
+
+            def _lookup() -> None:
+                try:
+                    result_box["value"] = Analyzer(ai_backend="openai")._db_has_people(image_path)
+                except Exception as exc:  # pragma: no cover - diagnostic only
+                    error_box.append(exc)
+
+            thread = threading.Thread(target=_lookup)
+            thread.start()
+            thread.join()
+
+            assert not error_box
+            assert result_box["value"] is True
+        finally:
+            close_db()
+            conn.close()
 
 
 # ── FaceDatabase ──────────────────────────────────────────────────────────────
@@ -542,6 +661,81 @@ class TestLocalAIFull:
         assert "tree" in keywords
         assert "sky" in keywords
         assert "nature" in keywords  # original BLIP keyword preserved
+
+    def test_progress_callback_emits_stage_messages(self):
+        """Progress callback should receive plain stage messages in order."""
+        from imganalyzer.analysis.ai.local_full import LocalAIFull
+
+        progress: list[str] = []
+        blip_out = {
+            "description": "Outdoors.",
+            "keywords": ["nature"],
+            "scene_type": "outdoor",
+            "main_subject": "tree",
+            "lighting": "daylight",
+            "mood": "peaceful",
+        }
+        object_out = {
+            "detected_objects": ["tree:75%", "sky:80%"],
+            "has_person": False,
+            "has_text": False,
+        }
+
+        class FakeBlip:
+            def analyze(self, *a, **kw):
+                return blip_out
+
+        class FakeObjects:
+            def analyze(self, *a, **kw):
+                return object_out
+
+        import imganalyzer.analysis.ai.local as local_module
+        import imganalyzer.analysis.ai.objects as objects_module
+
+        with patch.object(local_module, "LocalAI", FakeBlip), \
+             patch.object(objects_module, "ObjectDetector", FakeObjects):
+
+            LocalAIFull().analyze(self._make_image_data(), progress_cb=progress.append)
+
+        assert progress[0] == "[1/4] Captioning..."
+        assert progress[1] == "[2/4] Object detection..."
+        assert progress[2].startswith("[3/4] No text detected")
+        assert progress[3].startswith("[4/4] No people detected")
+
+    def test_cancel_event_raises_between_stages(self):
+        """Cancellation should stop the pipeline before the next stage begins."""
+        from imganalyzer.analysis.ai.local_full import LocalAIFull
+        from imganalyzer.analyzer import AnalysisCancelled
+
+        cancel_event = threading.Event()
+        progress: list[str] = []
+
+        class FakeBlip:
+            def analyze(self, *a, **kw):
+                return {"description": "Outdoors.", "keywords": ["nature"]}
+
+        class FakeObjects:
+            def analyze(self, *a, **kw):
+                cancel_event.set()
+                return {"detected_objects": ["tree:75%"], "has_person": False, "has_text": False}
+
+        import imganalyzer.analysis.ai.local as local_module
+        import imganalyzer.analysis.ai.objects as objects_module
+
+        with patch.object(local_module, "LocalAI", FakeBlip), \
+             patch.object(objects_module, "ObjectDetector", FakeObjects):
+
+            with pytest.raises(AnalysisCancelled):
+                LocalAIFull().analyze(
+                    self._make_image_data(),
+                    cancel_event=cancel_event,
+                    progress_cb=progress.append,
+                )
+
+        assert progress == [
+            "[1/4] Captioning...",
+            "[2/4] Object detection...",
+        ]
 
 
 # ── ObjectDetector (mocked) ───────────────────────────────────────────────────

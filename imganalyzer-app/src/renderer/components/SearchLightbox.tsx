@@ -15,6 +15,7 @@ interface SearchLightboxProps {
   item: SearchResult
   items: SearchResult[]
   onClose: () => void
+  onFindSimilar: (item: SearchResult) => void
   onNavigate: (item: SearchResult) => void
 }
 
@@ -71,7 +72,13 @@ function TagList({ items }: { items: string[] }) {
   )
 }
 
-function AnalysisSidebar({ item }: { item: SearchResult }) {
+function AnalysisSidebar({
+  item,
+  onFindSimilar,
+}: {
+  item: SearchResult
+  onFindSimilar: () => void
+}) {
   const filename = item.file_path.split(/[/\\]/).pop() ?? ''
 
   return (
@@ -82,6 +89,13 @@ function AnalysisSidebar({ item }: { item: SearchResult }) {
         {item.score !== null && (
           <span className="text-xs text-neutral-500">Match: {(item.score * 100).toFixed(0)}%</span>
         )}
+        <button
+          type="button"
+          onClick={onFindSimilar}
+          className="mt-3 w-full rounded-md border border-neutral-700 px-3 py-2 text-xs font-medium text-neutral-200 hover:border-neutral-500 hover:bg-neutral-800 transition-colors"
+        >
+          Find similar photos
+        </button>
       </div>
 
       {/* Scrollable content */}
@@ -243,7 +257,7 @@ function AnalysisSidebar({ item }: { item: SearchResult }) {
 
 // ── Main lightbox ─────────────────────────────────────────────────────────────
 
-export function SearchLightbox({ item, items, onClose, onNavigate }: SearchLightboxProps) {
+export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate }: SearchLightboxProps) {
   const [thumb, setThumb] = useState<string>('')
   const [src, setSrc] = useState<string>('')
   const [loadError, setLoadError] = useState(false)
@@ -489,7 +503,7 @@ export function SearchLightbox({ item, items, onClose, onNavigate }: SearchLight
       </div>
 
       {/* ── Analysis sidebar (right) ────────────────────────────────────────── */}
-      <AnalysisSidebar item={item} />
+      <AnalysisSidebar item={item} onFindSimilar={() => onFindSimilar(item)} />
     </div>
   )
 }

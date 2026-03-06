@@ -312,6 +312,55 @@ class SearchEngine:
             })
         return results
 
+    def search_similar_image(self, image_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        """Search for images visually similar to an existing image."""
+        seed_row = self.conn.execute(
+            """SELECT embedding_type, vector
+               FROM embeddings
+               WHERE image_id = ?
+                 AND embedding_type IN ('image_clip', 'description_clip')
+               ORDER BY CASE embedding_type
+                   WHEN 'image_clip' THEN 0
+                   WHEN 'description_clip' THEN 1
+                   ELSE 2
+               END
+               LIMIT 1""",
+            [image_id],
+        ).fetchone()
+        if seed_row is None:
+            return []
+
+        embedding_type = str(seed_row["embedding_type"])
+        query_vec = np.frombuffer(seed_row["vector"], dtype=np.float32)
+        cache = self._image_clip_cache if embedding_type == "image_clip" else self._desc_clip_cache
+        matrix, image_ids = cache.get(self.conn, embedding_type)
+        if matrix.size == 0:
+            return []
+
+        scores = matrix @ query_vec
+        scored = [
+            (candidate_image_id, float(scores[idx]))
+            for idx, candidate_image_id in enumerate(image_ids)
+            if candidate_image_id != image_id
+        ]
+        scored.sort(key=lambda item: -item[1])
+
+        results: list[dict[str, Any]] = []
+        for candidate_image_id, score in scored[:limit]:
+            image = self.repo.get_image(candidate_image_id)
+            if image is None:
+                continue
+            results.append(
+                {
+                    "image_id": candidate_image_id,
+                    "file_path": image["file_path"],
+                    "score": score,
+                    "match_type": "similar",
+                    "snippet": "Similar photo",
+                }
+            )
+        return results
+
     # ── Internal search methods ────────────────────────────────────────────
 
     def _fts_search(self, query: str, limit: int) -> list[dict[str, Any]]:

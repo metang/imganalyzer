@@ -8,12 +8,18 @@
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { parseXmp, XmpData } from './xmp'
-import { rpc, ensureServerRunning, setNotificationListener } from './python-rpc'
+import { rpc, ensureServerRunning } from './python-rpc'
 
 export interface AnalysisProgress {
   imagePath: string
   stage: string
   pct: number
+}
+
+export interface AnalysisRunResult {
+  xmp: XmpData | null
+  error?: string
+  cancelled?: boolean
 }
 
 // Stage keywords from progress notifications -> progress %
@@ -33,14 +39,12 @@ export async function runAnalysis(
   imagePath: string,
   aiBackend: string,
   onProgress: (p: AnalysisProgress) => void
-): Promise<{ xmp: XmpData | null; error?: string }> {
+): Promise<AnalysisRunResult> {
   try {
     await ensureServerRunning()
 
     let lastPct = 0
 
-    // Set up a temporary notification listener for progress
-    const prevListener = null
     const progressHandler = (notif: { method: string; params: unknown }) => {
       if (notif.method === 'analyze/progress') {
         const p = notif.params as { imagePath: string; stage: string }
@@ -57,13 +61,6 @@ export async function runAnalysis(
       }
     }
 
-    // The notification listener is global via python-rpc.ts.
-    // We rely on the batch handler's global listener setup.
-    // For analyze, we add a temporary one that also handles analyze/progress.
-    const origSetup = setNotificationListener
-    // We need to hook into the notification stream. Since setNotificationListener
-    // is a global setter, we chain it with the existing listener.
-    // For simplicity, we use the call's notification callback parameter.
     const result = await rpc.call(
       'analyze',
       {
@@ -74,7 +71,11 @@ export async function runAnalysis(
       },
       progressHandler,
       300_000, // 5 min timeout for full analysis
-    ) as { ok?: boolean; xmpPath?: string; error?: string }
+    ) as { ok?: boolean; xmpPath?: string; error?: string; cancelled?: boolean }
+
+    if (result.cancelled) {
+      return { xmp: null, cancelled: true }
+    }
 
     if (result.error) {
       return { xmp: null, error: result.error }

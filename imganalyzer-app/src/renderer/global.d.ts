@@ -62,12 +62,25 @@ export interface AnalysisProgress {
   pct: number
 }
 
+export interface AnalysisRunResult {
+  xmp: XmpData | null
+  error?: string
+  cancelled?: boolean
+}
+
 // ── Search types ──────────────────────────────────────────────────────────────
 
 export interface SearchFilters {
   query?: string
   mode?: 'text' | 'semantic' | 'hybrid' | 'browse'
   semanticWeight?: number
+  intent?: SearchIntent
+  similarToImageId?: number
+  country?: string
+  recurringMonthDay?: string
+  timeOfDay?: SearchTimeOfDay
+  sortBy?: SearchSortBy
+  expandedTerms?: string[]
   face?: string
   camera?: string
   lens?: string
@@ -87,6 +100,10 @@ export interface SearchFilters {
   limit?: number
   offset?: number
 }
+
+export type SearchIntent = 'people' | 'wildlife' | 'best-shot' | 'general'
+export type SearchTimeOfDay = 'morning' | 'afternoon' | 'evening' | 'night'
+export type SearchSortBy = 'relevance' | 'best' | 'aesthetic' | 'sharpness' | 'cleanest' | 'newest'
 
 export interface SearchResult {
   image_id: number
@@ -139,7 +156,22 @@ export interface SearchResult {
 
 export interface SearchResponse {
   results: SearchResult[]
-  total: number
+  total: number | null
+  hasMore: boolean
+  error?: string
+}
+
+export interface SearchPlanRequest {
+  prompt: string
+  model?: string
+  intent?: SearchIntent
+}
+
+export interface SearchPlanResponse {
+  intent: SearchIntent
+  filters: SearchFilters
+  summary: string
+  model: string
   error?: string
 }
 
@@ -310,13 +342,14 @@ declare global {
       getFullImage(imagePath: string): Promise<string>
       openPath(filePath: string): Promise<string>
       readXmp(imagePath: string): Promise<XmpData | null>
-      runAnalysis(imagePath: string, aiBackend: string): Promise<{ xmp: XmpData | null; error?: string }>
+      runAnalysis(imagePath: string, aiBackend: string): Promise<AnalysisRunResult>
       cancelAnalysis(imagePath: string): Promise<void>
       runCopilotAnalysis(imagePath: string): Promise<{ xmp: XmpData | null; error?: string }>
       onAnalysisProgress(cb: (p: AnalysisProgress) => void): () => void
 
       // Search
       searchImages(filters: SearchFilters): Promise<SearchResponse>
+      planSearchQuery(request: SearchPlanRequest): Promise<SearchPlanResponse>
       galleryListFolders(): Promise<{ folders: GalleryFolderNode[]; totalImages: number; error?: string }>
       galleryListImagesChunk(params: GalleryChunkParams): Promise<GalleryChunkResponse>
       getThumbnailCacheConfig(): Promise<ThumbnailCacheConfig>
