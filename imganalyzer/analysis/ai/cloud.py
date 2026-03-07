@@ -52,6 +52,27 @@ _NEEDS_JPEG_CONVERSION = _RAW_EXTENSIONS | frozenset({".heic", ".heif", ".avif"}
 _COPILOT_LOCK = threading.Lock()
 
 
+async def _stop_copilot_client(client: Any) -> None:
+    """Shut down a Copilot client and its spawned CLI process."""
+    stop = getattr(client, "stop", None)
+    if not callable(stop):
+        return
+
+    try:
+        errors = await asyncio.wait_for(stop(), timeout=5.0)
+        if errors:
+            log.warning("Copilot client stop reported cleanup errors: %s", errors)
+    except asyncio.TimeoutError:
+        force_stop = getattr(client, "force_stop", None)
+        if callable(force_stop):
+            log.warning("Copilot client stop timed out; forcing shutdown")
+            await force_stop()
+        else:
+            log.warning("Copilot client stop timed out and force_stop is unavailable")
+    except Exception:
+        log.exception("Failed to stop Copilot client cleanly")
+
+
 def _encode_image(path: Path, max_size_kb: int = 1024) -> tuple[str, str]:
     """Return base64-encoded image and MIME type, resized if needed."""
     from PIL import Image
@@ -232,8 +253,8 @@ class CloudAI:
             # Always create a fresh client — asyncio.run() closes its event
             # loop on return, so any cached client becomes invalid.
             client = CopilotClient()
-            session = await client.create_session({"model": "gpt-4.1"})
             try:
+                session = await client.create_session({"model": "gpt-4.1"})
                 event = await session.send_and_wait(
                     {
                         "prompt": "Analyze this image.\n\n" + SYSTEM_PROMPT_WITH_AESTHETIC,
@@ -248,7 +269,7 @@ class CloudAI:
                     raise RuntimeError("Copilot returned an empty response")
                 return _parse_json_response(content)
             finally:
-                await session.destroy()
+                await _stop_copilot_client(client)
 
         # RAW and HEIC/HEIF/AVIF files must be converted to JPEG before submission.
         temp_jpeg: Path | None = None

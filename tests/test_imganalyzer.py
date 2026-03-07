@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import threading
+import types
 import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
@@ -232,6 +234,76 @@ class TestAnalyzer:
         finally:
             close_db()
             conn.close()
+
+
+# ── CloudAI cleanup ─────────────────────────────────────────────────────────────
+
+class TestCloudAI:
+    def test_copilot_backend_stops_client_after_success(self, tmp_path, monkeypatch):
+        from imganalyzer.analysis.ai.cloud import CloudAI
+
+        image_path = tmp_path / "copilot.jpg"
+        image_path.write_bytes(b"stub")
+        created_clients: list[FakeCopilotClient] = []
+
+        class FakeSession:
+            async def send_and_wait(self, payload, timeout):
+                class _Data:
+                    content = json.dumps({"description": "ok", "keywords": ["tag"]})
+
+                class _Event:
+                    data = _Data()
+
+                return _Event()
+
+        class FakeCopilotClient:
+            def __init__(self):
+                self.stop_calls = 0
+                created_clients.append(self)
+
+            async def create_session(self, config):
+                return FakeSession()
+
+            async def stop(self):
+                self.stop_calls += 1
+                return []
+
+        monkeypatch.setitem(sys.modules, "copilot", types.SimpleNamespace(CopilotClient=FakeCopilotClient))
+
+        result = CloudAI("copilot")._copilot(image_path, {})
+
+        assert result["description"] == "ok"
+        assert created_clients[0].stop_calls == 1
+
+    def test_copilot_backend_stops_client_after_failure(self, tmp_path, monkeypatch):
+        from imganalyzer.analysis.ai.cloud import CloudAI
+
+        image_path = tmp_path / "copilot.jpg"
+        image_path.write_bytes(b"stub")
+        created_clients: list[FakeCopilotClient] = []
+
+        class FakeSession:
+            async def send_and_wait(self, payload, timeout):
+                raise RuntimeError("boom")
+
+        class FakeCopilotClient:
+            def __init__(self):
+                self.stop_calls = 0
+                created_clients.append(self)
+
+            async def create_session(self, config):
+                return FakeSession()
+
+            async def stop(self):
+                self.stop_calls += 1
+                return []
+
+        monkeypatch.setitem(sys.modules, "copilot", types.SimpleNamespace(CopilotClient=FakeCopilotClient))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            CloudAI("copilot")._copilot(image_path, {})
+
+        assert created_clients[0].stop_calls == 1
 
 
 # ── FaceDatabase ──────────────────────────────────────────────────────────────
