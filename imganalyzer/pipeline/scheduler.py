@@ -234,6 +234,7 @@ class ResourceScheduler:
         stats: dict[str, int],
         unload_fn: Callable[[str], None],
         prefetch_fn: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
+        cancel_futures_fn: Optional[Callable[[dict[Future, dict[str, Any]]], None]] = None,
     ) -> None:
         """Execute one GPU phase, potentially with co-resident models.
 
@@ -409,6 +410,8 @@ class ResourceScheduler:
             self._force_cuda_cleanup()
             # Collect remaining IO futures after unload so cloud/IO drain does
             # not keep GPU-heavy models resident longer than needed.
+            if self.is_shutdown and pending_futures and cancel_futures_fn is not None:
+                cancel_futures_fn(pending_futures)
             if pending_futures:
                 collect_fn(pending_futures)
 
@@ -423,11 +426,34 @@ class ResourceScheduler:
         flush_fn: Callable[[], None],
         local_pool: ThreadPoolExecutor,
         cloud_pool: ThreadPoolExecutor,
+        cancel_futures_fn: Optional[Callable[[dict[Future, dict[str, Any]]], None]] = None,
     ) -> None:
         """Drain remaining IO/cloud jobs after GPU work finishes."""
-        while not self.is_shutdown:
-            io_futures = submit_io_fn(local_pool, cloud_pool)
-            if not io_futures:
-                break
-            collect_fn(io_futures)
+        pending_futures: dict[Future, dict[str, Any]] = {}
+
+        while True:
+            if self.is_shutdown and pending_futures and cancel_futures_fn is not None:
+                cancel_futures_fn(pending_futures)
+
+            done_futs = {f: pending_futures.pop(f) for f in list(pending_futures) if f.done()}
+            if done_futs:
+                collect_fn(done_futs)
+                flush_fn()
+                continue
+
+            if not pending_futures:
+                if self.is_shutdown:
+                    break
+                new_futures = submit_io_fn(local_pool, cloud_pool)
+                if not new_futures:
+                    break
+                pending_futures.update(new_futures)
+                continue
+
+            self._shutdown.wait(timeout=0.1)
+
+        if self.is_shutdown and pending_futures and cancel_futures_fn is not None:
+            cancel_futures_fn(pending_futures)
+        if pending_futures:
+            collect_fn(pending_futures)
             flush_fn()

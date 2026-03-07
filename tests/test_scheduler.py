@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
@@ -273,6 +274,175 @@ class TestResourceScheduler:
         assert "collect" in call_order
         assert call_order.index("unload:blip2") < call_order.index("collect")
         assert s.vram.loaded_modules == []
+
+    def test_run_gpu_phase_cancels_queued_io_futures_on_shutdown(self):
+        """Pause should cancel queued IO futures instead of running the whole backlog."""
+        shutdown = threading.Event()
+        s = self._make(shutdown_event=shutdown)
+
+        claim_calls = 0
+        submit_calls = 0
+        started = threading.Event()
+        release = threading.Event()
+        cancelled_jobs: list[int] = []
+        collected_jobs: list[int] = []
+        executed_jobs: list[int] = []
+
+        def _claim_fn(_batch_size: int, module: str) -> list[dict[str, Any]]:
+            nonlocal claim_calls
+            claim_calls += 1
+            if claim_calls == 1:
+                return [{"id": 1, "image_id": 1, "module": module}]
+            return []
+
+        def _process_batch_fn(
+            jobs: list[dict[str, Any]],
+            _module: str,
+        ) -> dict[str, int]:
+            return {"done": len(jobs), "failed": 0, "skipped": 0}
+
+        def _slow(job_id: int) -> str:
+            started.set()
+            release.wait(timeout=5)
+            executed_jobs.append(job_id)
+            return "done"
+
+        def _submit_io_fn(
+            _local_pool: ThreadPoolExecutor,
+            cloud_pool: ThreadPoolExecutor,
+        ) -> dict[Future[Any], dict[str, Any]]:
+            nonlocal submit_calls
+            submit_calls += 1
+            if submit_calls > 1:
+                return {}
+            fut1 = cloud_pool.submit(_slow, 1)
+            fut2 = cloud_pool.submit(_slow, 2)
+            assert started.wait(timeout=5)
+            shutdown.set()
+            return {
+                fut1: {"id": 11, "image_id": 11, "module": "cloud_ai"},
+                fut2: {"id": 12, "image_id": 12, "module": "aesthetic"},
+            }
+
+        def _collect_fn(futures: dict[Future[Any], dict[str, Any]]) -> None:
+            for fut, job in futures.items():
+                assert not fut.cancelled()
+                assert fut.result(timeout=5) == "done"
+                collected_jobs.append(job["id"])
+
+        def _cancel_futures_fn(futures: dict[Future[Any], dict[str, Any]]) -> None:
+            for fut, job in list(futures.items()):
+                if fut.cancel():
+                    cancelled_jobs.append(job["id"])
+                    futures.pop(fut, None)
+
+        def _release_after_cancel() -> None:
+            deadline = time.time() + 5
+            while time.time() < deadline and not cancelled_jobs:
+                time.sleep(0.01)
+            release.set()
+
+        releaser = threading.Thread(target=_release_after_cancel, daemon=True)
+        releaser.start()
+
+        with (
+            ThreadPoolExecutor(max_workers=1) as local_pool,
+            ThreadPoolExecutor(max_workers=1) as cloud_pool,
+        ):
+            s.run_gpu_phase(
+                1,  # Phase 1 => ["blip2"]
+                claim_fn=_claim_fn,
+                process_batch_fn=_process_batch_fn,
+                process_single_fn=lambda _job: "done",
+                submit_io_fn=_submit_io_fn,
+                collect_fn=_collect_fn,
+                advance_fn=lambda _n: None,
+                flush_fn=lambda: None,
+                local_pool=local_pool,
+                cloud_pool=cloud_pool,
+                stats={"done": 0, "failed": 0, "skipped": 0},
+                unload_fn=lambda _module: None,
+                cancel_futures_fn=_cancel_futures_fn,
+            )
+
+        releaser.join(timeout=5)
+        assert cancelled_jobs == [12]
+        assert collected_jobs == [11]
+        assert executed_jobs == [1]
+
+    def test_run_io_drain_cancels_queued_futures_on_shutdown(self):
+        """IO drain should stop queued work promptly when pause is requested."""
+        shutdown = threading.Event()
+        s = self._make(shutdown_event=shutdown)
+
+        submit_calls = 0
+        started = threading.Event()
+        release = threading.Event()
+        cancelled_jobs: list[int] = []
+        collected_jobs: list[int] = []
+        executed_jobs: list[int] = []
+
+        def _slow(job_id: int) -> str:
+            started.set()
+            release.wait(timeout=5)
+            executed_jobs.append(job_id)
+            return "done"
+
+        def _submit_io_fn(
+            _local_pool: ThreadPoolExecutor,
+            cloud_pool: ThreadPoolExecutor,
+        ) -> dict[Future[Any], dict[str, Any]]:
+            nonlocal submit_calls
+            submit_calls += 1
+            if submit_calls > 1:
+                return {}
+            fut1 = cloud_pool.submit(_slow, 1)
+            fut2 = cloud_pool.submit(_slow, 2)
+            assert started.wait(timeout=5)
+            shutdown.set()
+            return {
+                fut1: {"id": 21, "image_id": 21, "module": "cloud_ai"},
+                fut2: {"id": 22, "image_id": 22, "module": "aesthetic"},
+            }
+
+        def _collect_fn(futures: dict[Future[Any], dict[str, Any]]) -> None:
+            for fut, job in futures.items():
+                assert not fut.cancelled()
+                assert fut.result(timeout=5) == "done"
+                collected_jobs.append(job["id"])
+
+        def _cancel_futures_fn(futures: dict[Future[Any], dict[str, Any]]) -> None:
+            for fut, job in list(futures.items()):
+                if fut.cancel():
+                    cancelled_jobs.append(job["id"])
+                    futures.pop(fut, None)
+
+        def _release_after_cancel() -> None:
+            deadline = time.time() + 5
+            while time.time() < deadline and not cancelled_jobs:
+                time.sleep(0.01)
+            release.set()
+
+        releaser = threading.Thread(target=_release_after_cancel, daemon=True)
+        releaser.start()
+
+        with (
+            ThreadPoolExecutor(max_workers=1) as local_pool,
+            ThreadPoolExecutor(max_workers=1) as cloud_pool,
+        ):
+            s.run_io_drain(
+                submit_io_fn=_submit_io_fn,
+                collect_fn=_collect_fn,
+                flush_fn=lambda: None,
+                local_pool=local_pool,
+                cloud_pool=cloud_pool,
+                cancel_futures_fn=_cancel_futures_fn,
+            )
+
+        releaser.join(timeout=5)
+        assert cancelled_jobs == [22]
+        assert collected_jobs == [21]
+        assert executed_jobs == [1]
 
 
 # ── Integration: co-residency fits within VRAM ────────────────────────────────

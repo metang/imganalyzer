@@ -200,41 +200,55 @@ class SearchEngine:
 
     def search_face(self, name: str, limit: int = 50) -> list[dict[str, Any]]:
         """Search for images containing a face identity (by name or alias)."""
-        # Resolve identity (canonical, display, or alias)
-        identity = self.repo.find_face_by_alias(name)
-        if identity is None:
+        identities = self.repo.find_face_identities_by_alias(name)
+        persons = self.repo.find_persons_by_name(name)
+        clusters = self.repo.find_clusters_by_label(name)
+        if not identities and not persons and not clusters:
             # Fall back to FTS text search
             return self._fts_search(name, limit)
-
-        # Search all name variants in face_identities JSON
-        search_names = [identity["canonical_name"]]
-        if identity.get("display_name"):
-            search_names.append(identity["display_name"])
-        aliases = json.loads(identity.get("aliases") or "[]")
-        search_names.extend(aliases)
 
         results: list[dict[str, Any]] = []
         seen: set[int] = set()
 
-        for search_name in search_names:
-            rows = self.conn.execute(
-                """SELECT la.image_id, i.file_path, la.face_identities
-                   FROM analysis_local_ai la
-                   JOIN images i ON i.id = la.image_id
-                   WHERE la.face_identities LIKE ?
-                   LIMIT ?""",
-                [f"%{search_name}%", limit],
-            ).fetchall()
-            for r in rows:
-                if r["image_id"] not in seen:
-                    seen.add(r["image_id"])
-                    results.append({
-                        "image_id": r["image_id"],
-                        "file_path": r["file_path"],
-                        "score": 1.0,
-                        "match_type": "face",
-                        "snippet": f"Face: {search_name}",
-                    })
+        def add_rows(rows: list[dict[str, Any]], snippet: str) -> None:
+            for row in rows:
+                image_id = int(row["image_id"])
+                if image_id in seen:
+                    continue
+                seen.add(image_id)
+                results.append({
+                    "image_id": image_id,
+                    "file_path": row["file_path"],
+                    "score": 1.0,
+                    "match_type": "face",
+                    "snippet": snippet,
+                })
+
+        for person in persons:
+            add_rows(
+                self.repo.get_images_for_person(int(person["id"]), limit=limit),
+                f"Person: {person['name']}",
+            )
+
+        for cluster in clusters:
+            add_rows(
+                self.repo.get_images_for_cluster(int(cluster["cluster_id"]), limit=limit),
+                f"Face: {cluster['display_name']}",
+            )
+
+        for identity in identities:
+            search_names = [identity["canonical_name"]]
+            if identity.get("display_name"):
+                search_names.append(identity["display_name"])
+            aliases = json.loads(identity.get("aliases") or "[]")
+            search_names.extend(aliases)
+            snippet_name = identity.get("display_name") or identity["canonical_name"]
+
+            for search_name in dict.fromkeys(search_names):
+                add_rows(
+                    self.repo.get_images_for_face(search_name, limit=limit),
+                    f"Face: {snippet_name}",
+                )
 
         return results[:limit]
 
@@ -244,7 +258,7 @@ class SearchEngine:
         if not normalized:
             return None, ""
 
-        if self.repo.find_face_by_alias(normalized) is not None:
+        if self._matches_face_query(normalized):
             return normalized, ""
 
         tokens = list(re.finditer(r"\S+", normalized))
@@ -255,12 +269,19 @@ class SearchEngine:
                 candidate = normalized[start:end].strip(" ,.;:!?()[]{}\"'")
                 if not candidate:
                     continue
-                if self.repo.find_face_by_alias(candidate) is None:
+                if not self._matches_face_query(candidate):
                     continue
                 remainder = f"{normalized[:start]} {normalized[end:]}"
                 return candidate, " ".join(remainder.split())
 
         return None, normalized
+
+    def _matches_face_query(self, candidate: str) -> bool:
+        return bool(
+            self.repo.find_face_identities_by_alias(candidate)
+            or self.repo.find_persons_by_name(candidate)
+            or self.repo.find_clusters_by_label(candidate)
+        )
 
     def search_exif(
         self,

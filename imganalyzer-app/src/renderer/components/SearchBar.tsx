@@ -1,8 +1,5 @@
 /**
- * SearchBar.tsx — intent-first search workspace.
- *
- * Replaces the old dense left rail with an AI-first omnibox, workflow-specific
- * intent controls, visible search chips, and a collapsible advanced drawer.
+ * SearchBar.tsx — compact search controls for the left search sidebar.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SearchFilters, SearchIntent, SearchSortBy, SearchTimeOfDay } from '../global'
@@ -10,7 +7,6 @@ import type { SearchFilters, SearchIntent, SearchSortBy, SearchTimeOfDay } from 
 interface SearchBarProps {
   onSearch: (filters: SearchFilters, contextLabel: string | null) => void
   loading: boolean
-  resultSummary: string | null
 }
 
 interface ParsedQuery {
@@ -79,46 +75,23 @@ const TIME_LABELS: Record<SearchTimeOfDay, string> = {
   night: 'Night',
 }
 
-const INTENT_COPY: Record<SearchIntent, { title: string; hint: string; placeholder: string }> = {
+const INTENT_COPY: Record<SearchIntent, { title: string; placeholder: string }> = {
   general: {
     title: 'General',
-    hint: 'Use the omnibox for broad semantic or text search.',
     placeholder: 'Search anything: golden gate sunset, portrait with backlight, snowy owl...',
   },
   people: {
     title: 'People',
-    hint: 'Layer a person name or alias with place, recurring date, and time-of-day constraints.',
     placeholder: 'wyy in the US every Feb 1 morning playing basketball',
   },
   wildlife: {
     title: 'Wildlife',
-    hint: 'Search by species and optionally expand to related bird species.',
     placeholder: 'ducks in flight over water',
   },
   'best-shot': {
     title: 'Best Shot',
-    hint: 'Find a scene, then rank the best candidate automatically.',
     placeholder: 'best photo of the sunset scene from Yosemite',
   },
-}
-
-const QUICK_PRESETS: Record<SearchIntent, Array<{ label: string; prompt: string }>> = {
-  general: [
-    { label: 'Golden hour landscape', prompt: 'golden hour mountain lake' },
-    { label: 'Street portrait', prompt: 'street portrait with dramatic shadows' },
-  ],
-  people: [
-    { label: 'Morning basketball', prompt: 'Alice in the US every Feb 1 morning playing basketball' },
-    { label: 'Family beach portraits', prompt: 'family portraits on the beach at sunset' },
-  ],
-  wildlife: [
-    { label: 'Duck species', prompt: 'duck on water' },
-    { label: 'Owls at night', prompt: 'owl perched at night' },
-  ],
-  'best-shot': [
-    { label: 'Best sunset frame', prompt: 'best photo of the sunset scene' },
-    { label: 'Best action frame', prompt: 'best basketball action photo' },
-  ],
 }
 
 const WILDLIFE_EXPANSIONS: Record<string, string[]> = {
@@ -504,14 +477,14 @@ function SearchChip({ chip, onRemove }: { chip: ChipDescriptor; onRemove: (chipI
   )
 }
 
-export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) {
+export function SearchBar({ onSearch, loading }: SearchBarProps) {
   const [draft, setDraft] = useState<SearchDraft>(defaultDraft())
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [planning, setPlanning] = useState(false)
   const [resolvingFace, setResolvingFace] = useState(false)
   const [plannerSummary, setPlannerSummary] = useState<string | null>(null)
   const [plannerError, setPlannerError] = useState<string | null>(null)
-  const promptRef = useRef<HTMLInputElement>(null)
+  const promptRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
     promptRef.current?.focus()
@@ -591,8 +564,8 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
     executeSearch(nextDraft, plannerSummary)
   }, [draft, executeSearch, plannerSummary, resolvePromptFace])
 
-  const handlePromptKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Enter') {
+  const handlePromptKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       void handleSearch()
     }
@@ -603,16 +576,6 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
     setPlannerSummary(null)
     setPlannerError(null)
     setShowAdvanced(false)
-  }, [])
-
-  const handlePreset = useCallback((prompt: string) => {
-    setDraft((prev) => ({
-      ...prev,
-      prompt,
-      sortBy: prev.intent === 'best-shot' ? 'best' : prev.sortBy,
-    }))
-    setPlannerSummary(null)
-    setPlannerError(null)
   }, [])
 
   const handleRemoveChip = useCallback((chipId: string) => {
@@ -723,165 +686,96 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
   }, [applyPlannerResult, draft])
 
   return (
-    <div className="shrink-0 border-b border-neutral-800 bg-neutral-950 px-5 py-4">
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-          <div>
-             <p className="text-xs uppercase tracking-[0.25em] text-neutral-500">Search experience</p>
-             <h2 className="text-2xl font-semibold text-white">Search by intent, not by database columns</h2>
-             <p className="mt-1 max-w-3xl text-sm text-neutral-400">
-               Start with a natural-language request, including person names or aliases, then refine it with visible chips and the workflow tools below.
-             </p>
-           </div>
-          {resultSummary && (
-            <div className="rounded-full border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-300">
-              {resultSummary}
-            </div>
-          )}
-        </div>
+    <div className="flex h-full min-h-0 flex-col bg-neutral-950">
+      <div className="border-b border-neutral-800 px-4 py-4">
+        <div className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
+          <FieldLabel>Search type</FieldLabel>
+          <div className="flex flex-wrap gap-2">
+            {(Object.keys(INTENT_COPY) as SearchIntent[]).map((intent) => (
+              <ChoicePill
+                key={intent}
+                active={draft.intent === intent}
+                label={INTENT_COPY[intent].title}
+                onClick={() => {
+                  setDraft((prev) => ({
+                    ...prev,
+                    intent,
+                    sortBy: intent === 'best-shot' ? 'best' : prev.sortBy,
+                  }))
+                  setPlannerSummary(null)
+                  setPlannerError(null)
+                }}
+              />
+            ))}
+          </div>
 
-        <div className="grid gap-4 xl:grid-cols-[1.45fr_0.95fr]">
-          <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-medium text-white">AI-first omnibox</p>
-                <p className="text-sm text-neutral-400">{INTENT_COPY[draft.intent].hint}</p>
-              </div>
-              <div className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-400">
-                {INTENT_COPY[draft.intent].title}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-neutral-800 bg-neutral-900 p-3">
-              <input
+          <div className="mt-4">
+            <FieldLabel>Search</FieldLabel>
+            <div className="rounded-2xl border border-neutral-800 bg-neutral-900 px-3 py-3">
+              <textarea
                 ref={promptRef}
-                type="text"
                 value={draft.prompt}
                 onChange={(event) => setDraftValue('prompt', event.target.value)}
                 onKeyDown={handlePromptKeyDown}
                 placeholder={INTENT_COPY[draft.intent].placeholder}
-                className="w-full bg-transparent text-base text-neutral-100 placeholder-neutral-500 focus:outline-none"
+                rows={4}
+                className="min-h-28 w-full resize-y bg-transparent text-base text-neutral-100 placeholder-neutral-500 focus:outline-none"
               />
-              <div className="mt-3 flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-400">
-                  <span className="uppercase tracking-[0.2em] text-neutral-500">AI model</span>
-                  <select
-                    value={draft.aiModel}
-                    onChange={(event) => setDraftValue('aiModel', event.target.value as SearchDraft['aiModel'])}
-                    className="rounded-full border border-neutral-700 bg-neutral-950 px-3 py-1.5 text-sm text-neutral-100 focus:border-blue-500 focus:outline-none"
-                  >
-                    {AI_MODELS.map((model) => (
-                      <option key={model} value={model}>{model}</option>
-                    ))}
-                  </select>
-                  <span className="text-neutral-500">Use Search to run immediately, or Interpret to let AI structure the request.</span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={handlePlanWithAI}
-                    disabled={planning}
-                    className="inline-flex items-center gap-2 rounded-full border border-blue-500/40 bg-blue-500/10 px-4 py-2 text-sm font-medium text-blue-100 transition-colors hover:bg-blue-500/20 disabled:opacity-60"
-                  >
-                    {planning ? 'Interpreting…' : 'Interpret with AI'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleSearch}
-                    disabled={loading || resolvingFace}
-                    className="inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60"
-                  >
-                    {loading || resolvingFace ? 'Searching…' : 'Search'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleClear}
-                    className="rounded-full border border-neutral-700 px-4 py-2 text-sm text-neutral-300 transition-colors hover:border-neutral-500 hover:text-white"
-                  >
-                    Reset
-                  </button>
-                </div>
-              </div>
             </div>
+          </div>
 
-            {(plannerSummary || plannerError) && (
-              <div className={`mt-3 rounded-2xl border px-4 py-3 text-sm ${plannerError ? 'border-red-900/60 bg-red-950/40 text-red-200' : 'border-blue-900/40 bg-blue-950/30 text-blue-100'}`}>
-                {plannerError ?? plannerSummary}
-              </div>
-            )}
-
-            {chips.length > 0 && (
-              <div className="mt-4 flex flex-wrap gap-2">
-                {chips.map((chip) => (
-                  <SearchChip key={chip.id} chip={chip} onRemove={handleRemoveChip} />
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
-            <p className="text-sm font-medium text-white">Intent presets</p>
-            <p className="mt-1 text-sm text-neutral-400">Choose the workflow first, then refine with the right controls.</p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {(Object.keys(INTENT_COPY) as SearchIntent[]).map((intent) => (
-                <ChoicePill
-                  key={intent}
-                  active={draft.intent === intent}
-                  label={INTENT_COPY[intent].title}
-                  onClick={() => {
-                    setDraft((prev) => ({
-                      ...prev,
-                      intent,
-                      sortBy: intent === 'best-shot' ? 'best' : prev.sortBy,
-                    }))
-                    setPlannerSummary(null)
-                  }}
-                />
-              ))}
-            </div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {QUICK_PRESETS[draft.intent].map((preset) => (
-                <button
-                  key={preset.label}
-                  type="button"
-                  onClick={() => handlePreset(preset.prompt)}
-                  className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:text-white"
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-          </section>
-        </div>
-
-        <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <p className="text-sm font-medium text-white">{INTENT_COPY[draft.intent].title} workflow</p>
-              <p className="text-sm text-neutral-400">{INTENT_COPY[draft.intent].hint}</p>
-            </div>
+          <div className="mt-4 flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => setShowAdvanced((prev) => !prev)}
-              className="rounded-full border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-500 hover:text-white"
+              onClick={handleSearch}
+              disabled={loading || resolvingFace}
+              className="inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60"
             >
-              {showAdvanced ? 'Hide advanced filters' : 'Show advanced filters'}
+              {loading || resolvingFace ? 'Searching…' : 'Search'}
+            </button>
+            <button
+              type="button"
+              onClick={handlePlanWithAI}
+              disabled={planning}
+              className="inline-flex items-center gap-2 rounded-full border border-blue-500/40 bg-blue-500/10 px-4 py-2 text-sm font-medium text-blue-100 transition-colors hover:bg-blue-500/20 disabled:opacity-60"
+            >
+              {planning ? 'Interpreting…' : 'Interpret with AI'}
+            </button>
+            <button
+              type="button"
+              onClick={handleClear}
+              className="rounded-full border border-neutral-700 px-4 py-2 text-sm text-neutral-300 transition-colors hover:border-neutral-500 hover:text-white"
+            >
+              Reset
             </button>
           </div>
 
-          <div className="mt-4 grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
-            {draft.intent === 'general' && (
-              <div className="rounded-2xl border border-neutral-800 bg-neutral-900 p-4 text-sm text-neutral-300 lg:col-span-2 xl:col-span-4">
-                Use the omnibox for general retrieval, then open advanced filters if you want to constrain camera gear, date ranges, or quality thresholds.
-              </div>
-            )}
+          {(plannerSummary || plannerError) && (
+            <div className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${plannerError ? 'border-red-900/60 bg-red-950/40 text-red-200' : 'border-blue-900/40 bg-blue-950/30 text-blue-100'}`}>
+              {plannerError ?? plannerSummary}
+            </div>
+          )}
 
-            {draft.intent === 'people' && (
-              <>
+          {chips.length > 0 && (
+            <div className="mt-4 flex flex-wrap gap-2">
+              {chips.map((chip) => (
+                <SearchChip key={chip.id} chip={chip} onRemove={handleRemoveChip} />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <div className="space-y-4">
+          {draft.intent === 'people' && (
+            <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
+              <p className="text-sm font-medium text-white">People filters</p>
+              <div className="mt-4 grid gap-4">
                 <TextField
-                  label="Person"
+                  label="Person or alias"
                   value={draft.face}
-                  placeholder="Alice, wyy, Bob…"
+                  placeholder="Alice, cxc, Bob…"
                   onChange={(value) => setDraftValue('face', value)}
                 />
                 <TextField
@@ -906,7 +800,7 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
                   />
                   <p className="mt-1 text-xs text-neutral-500">The year is ignored; only the month and day are used.</p>
                 </div>
-                <div className="lg:col-span-2 xl:col-span-4">
+                <div>
                   <FieldLabel>Time of day</FieldLabel>
                   <div className="flex flex-wrap gap-2">
                     <ChoicePill active={draft.timeOfDay === 'any'} label="Any time" onClick={() => setDraftValue('timeOfDay', 'any')} />
@@ -920,29 +814,32 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
                     ))}
                   </div>
                 </div>
-              </>
-            )}
+              </div>
+            </section>
+          )}
 
-            {draft.intent === 'wildlife' && (
-              <>
+          {draft.intent === 'wildlife' && (
+            <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
+              <p className="text-sm font-medium text-white">Wildlife filters</p>
+              <div className="mt-4 grid gap-4">
                 <TextField
                   label="Species or group"
                   value={draft.species}
                   placeholder="duck, mallard, snowy owl…"
                   onChange={(value) => setDraftValue('species', value)}
                 />
-                <div className="rounded-2xl border border-neutral-800 bg-neutral-900 p-4 lg:col-span-2 xl:col-span-3">
+                <div className="rounded-2xl border border-neutral-800 bg-neutral-900 p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-sm font-medium text-white">Broaden to related bird species</p>
-                      <p className="text-sm text-neutral-400">Useful for high-level terms like duck, goose, owl, or hawk.</p>
+                      <p className="text-sm font-medium text-white">Related species</p>
+                      <p className="text-sm text-neutral-400">Expand broad bird terms like duck, goose, owl, or hawk.</p>
                     </div>
                     <button
                       type="button"
                       onClick={() => setDraftValue('includeRelatedSpecies', !draft.includeRelatedSpecies)}
                       className={`rounded-full px-3 py-1.5 text-sm transition-colors ${draft.includeRelatedSpecies ? 'bg-blue-600 text-white' : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'}`}
                     >
-                      {draft.includeRelatedSpecies ? 'Related on' : 'Related off'}
+                      {draft.includeRelatedSpecies ? 'On' : 'Off'}
                     </button>
                   </div>
                   {draft.includeRelatedSpecies && derivedFilters.expandedTerms && derivedFilters.expandedTerms.length > 0 && (
@@ -951,143 +848,172 @@ export function SearchBar({ onSearch, loading, resultSummary }: SearchBarProps) 
                     </p>
                   )}
                 </div>
-              </>
-            )}
-
-            {draft.intent === 'best-shot' && (
-              <div className="lg:col-span-2 xl:col-span-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-4">
-                <FieldLabel>Rank the result set by</FieldLabel>
-                <div className="flex flex-wrap gap-2">
-                  {(Object.keys(SORT_LABELS) as SearchSortBy[]).map((sortBy) => (
-                    <ChoicePill
-                      key={sortBy}
-                      active={draft.sortBy === sortBy || (sortBy === 'best' && draft.sortBy === 'relevance')}
-                      label={SORT_LABELS[sortBy]}
-                      onClick={() => setDraftValue('sortBy', sortBy)}
-                    />
-                  ))}
-                </div>
-                <p className="mt-3 text-sm text-neutral-400">
-                  “Best overall” combines aesthetic score, sharpness, and noise so you can surface the strongest frame after matching the scene.
-                </p>
               </div>
-            )}
-          </div>
-
-          {showAdvanced && (
-            <div className="mt-5 grid gap-4 border-t border-neutral-800 pt-5 lg:grid-cols-2 xl:grid-cols-4">
-              <div className="xl:col-span-2">
-                <FieldLabel>Search mode</FieldLabel>
-                <div className="flex flex-wrap gap-2">
-                  {(['hybrid', 'semantic', 'text'] as const).map((mode) => (
-                    <ChoicePill
-                      key={mode}
-                      active={draft.mode === mode}
-                      label={mode}
-                      onClick={() => setDraftValue('mode', mode)}
-                    />
-                  ))}
-                </div>
-                {draft.mode === 'hybrid' && (
-                  <div className="mt-3">
-                    <FieldLabel>Semantic weight ({draft.semanticWeight})</FieldLabel>
-                    <input
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.05"
-                      value={draft.semanticWeight}
-                      onChange={(event) => setDraftValue('semanticWeight', event.target.value)}
-                      className="w-full accent-blue-500"
-                    />
-                  </div>
-                )}
-              </div>
-
-              <TextField label="Camera" value={draft.camera} placeholder="Sony, Canon R5…" onChange={(value) => setDraftValue('camera', value)} />
-              <TextField label="Lens" value={draft.lens} placeholder="85mm, Sigma…" onChange={(value) => setDraftValue('lens', value)} />
-              <TextField label="Location" value={draft.location} placeholder="Yosemite, Paris…" onChange={(value) => setDraftValue('location', value)} />
-              <TextField label="Date from" value={draft.dateFrom} type="date" placeholder="" onChange={(value) => setDraftValue('dateFrom', value)} />
-              <TextField label="Date to" value={draft.dateTo} type="date" placeholder="" onChange={(value) => setDraftValue('dateTo', value)} />
-
-              <RangeInput
-                label="Aesthetic score"
-                minVal={draft.aestheticMin}
-                maxVal={draft.aestheticMax}
-                onMin={(value) => setDraftValue('aestheticMin', value)}
-                onMax={(value) => setDraftValue('aestheticMax', value)}
-                minPlaceholder="min"
-                maxPlaceholder="max"
-                step={0.5}
-                min={0}
-                max={10}
-              />
-              <RangeInput
-                label="Sharpness"
-                minVal={draft.sharpnessMin}
-                maxVal={draft.sharpnessMax}
-                onMin={(value) => setDraftValue('sharpnessMin', value)}
-                onMax={(value) => setDraftValue('sharpnessMax', value)}
-                minPlaceholder="min"
-                maxPlaceholder="max"
-                step={1}
-                min={0}
-                max={100}
-              />
-              <RangeInput
-                label="ISO range"
-                minVal={draft.isoMin}
-                maxVal={draft.isoMax}
-                onMin={(value) => setDraftValue('isoMin', value)}
-                onMax={(value) => setDraftValue('isoMax', value)}
-                minPlaceholder="min"
-                maxPlaceholder="max"
-                step={100}
-                min={50}
-                max={204800}
-              />
-              <RangeInput
-                label="Face count"
-                minVal={draft.facesMin}
-                maxVal={draft.facesMax}
-                onMin={(value) => setDraftValue('facesMin', value)}
-                onMax={(value) => setDraftValue('facesMax', value)}
-                minPlaceholder="min"
-                maxPlaceholder="max"
-                step={1}
-                min={0}
-                max={100}
-              />
-
-              <div>
-                <FieldLabel>Max noise level</FieldLabel>
-                <input
-                  type="number"
-                  value={draft.noiseMax}
-                  onChange={(event) => setDraftValue('noiseMax', event.target.value)}
-                  placeholder="e.g. 0.05"
-                  step="0.01"
-                  min="0"
-                  className="w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 focus:border-blue-500 focus:outline-none"
-                />
-              </div>
-
-              <div className="xl:col-span-2">
-                <FieldLabel>People filter</FieldLabel>
-                <div className="flex flex-wrap gap-2">
-                  {(['any', 'yes', 'no'] as const).map((value) => (
-                    <ChoicePill
-                      key={value}
-                      active={draft.hasPeople === value}
-                      label={value === 'any' ? 'Any people state' : value === 'yes' ? 'Only with people' : 'Only without people'}
-                      onClick={() => setDraftValue('hasPeople', value)}
-                    />
-                  ))}
-                </div>
-              </div>
-            </div>
+            </section>
           )}
-        </section>
+
+          {draft.intent === 'best-shot' && (
+            <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
+              <p className="text-sm font-medium text-white">Ranking</p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {(Object.keys(SORT_LABELS) as SearchSortBy[]).map((sortBy) => (
+                  <ChoicePill
+                    key={sortBy}
+                    active={draft.sortBy === sortBy || (sortBy === 'best' && draft.sortBy === 'relevance')}
+                    label={SORT_LABELS[sortBy]}
+                    onClick={() => setDraftValue('sortBy', sortBy)}
+                  />
+                ))}
+              </div>
+              <p className="mt-3 text-sm text-neutral-400">
+                Best overall combines aesthetic score, sharpness, and noise to surface the strongest frame after the scene matches.
+              </p>
+            </section>
+          )}
+
+          <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium text-white">Advanced filters</p>
+                <p className="text-sm text-neutral-400">Use these only when you need to narrow the result set.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAdvanced((prev) => !prev)}
+                className="rounded-full border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-500 hover:text-white"
+              >
+                {showAdvanced ? 'Hide' : 'Show'}
+              </button>
+            </div>
+
+            {showAdvanced && (
+              <div className="mt-4 grid gap-4 border-t border-neutral-800 pt-4">
+                <div>
+                  <FieldLabel>Search mode</FieldLabel>
+                  <div className="flex flex-wrap gap-2">
+                    {(['hybrid', 'semantic', 'text'] as const).map((mode) => (
+                      <ChoicePill
+                        key={mode}
+                        active={draft.mode === mode}
+                        label={mode}
+                        onClick={() => setDraftValue('mode', mode)}
+                      />
+                    ))}
+                  </div>
+                  {draft.mode === 'hybrid' && (
+                    <div className="mt-3">
+                      <FieldLabel>Semantic weight ({draft.semanticWeight})</FieldLabel>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={draft.semanticWeight}
+                        onChange={(event) => setDraftValue('semanticWeight', event.target.value)}
+                        className="w-full accent-blue-500"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <FieldLabel>AI model</FieldLabel>
+                  <select
+                    value={draft.aiModel}
+                    onChange={(event) => setDraftValue('aiModel', event.target.value as SearchDraft['aiModel'])}
+                    className="w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 focus:border-blue-500 focus:outline-none"
+                  >
+                    {AI_MODELS.map((model) => (
+                      <option key={model} value={model}>{model}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <TextField label="Camera" value={draft.camera} placeholder="Sony, Canon R5…" onChange={(value) => setDraftValue('camera', value)} />
+                <TextField label="Lens" value={draft.lens} placeholder="85mm, Sigma…" onChange={(value) => setDraftValue('lens', value)} />
+                <TextField label="Location" value={draft.location} placeholder="Yosemite, Paris…" onChange={(value) => setDraftValue('location', value)} />
+                <TextField label="Date from" value={draft.dateFrom} type="date" placeholder="" onChange={(value) => setDraftValue('dateFrom', value)} />
+                <TextField label="Date to" value={draft.dateTo} type="date" placeholder="" onChange={(value) => setDraftValue('dateTo', value)} />
+
+                <RangeInput
+                  label="Aesthetic score"
+                  minVal={draft.aestheticMin}
+                  maxVal={draft.aestheticMax}
+                  onMin={(value) => setDraftValue('aestheticMin', value)}
+                  onMax={(value) => setDraftValue('aestheticMax', value)}
+                  minPlaceholder="min"
+                  maxPlaceholder="max"
+                  step={0.5}
+                  min={0}
+                  max={10}
+                />
+                <RangeInput
+                  label="Sharpness"
+                  minVal={draft.sharpnessMin}
+                  maxVal={draft.sharpnessMax}
+                  onMin={(value) => setDraftValue('sharpnessMin', value)}
+                  onMax={(value) => setDraftValue('sharpnessMax', value)}
+                  minPlaceholder="min"
+                  maxPlaceholder="max"
+                  step={1}
+                  min={0}
+                  max={100}
+                />
+                <RangeInput
+                  label="ISO range"
+                  minVal={draft.isoMin}
+                  maxVal={draft.isoMax}
+                  onMin={(value) => setDraftValue('isoMin', value)}
+                  onMax={(value) => setDraftValue('isoMax', value)}
+                  minPlaceholder="min"
+                  maxPlaceholder="max"
+                  step={100}
+                  min={50}
+                  max={204800}
+                />
+                <RangeInput
+                  label="Face count"
+                  minVal={draft.facesMin}
+                  maxVal={draft.facesMax}
+                  onMin={(value) => setDraftValue('facesMin', value)}
+                  onMax={(value) => setDraftValue('facesMax', value)}
+                  minPlaceholder="min"
+                  maxPlaceholder="max"
+                  step={1}
+                  min={0}
+                  max={100}
+                />
+
+                <div>
+                  <FieldLabel>Max noise level</FieldLabel>
+                  <input
+                    type="number"
+                    value={draft.noiseMax}
+                    onChange={(event) => setDraftValue('noiseMax', event.target.value)}
+                    placeholder="e.g. 0.05"
+                    step="0.01"
+                    min="0"
+                    className="w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <FieldLabel>People filter</FieldLabel>
+                  <div className="flex flex-wrap gap-2">
+                    {(['any', 'yes', 'no'] as const).map((value) => (
+                      <ChoicePill
+                        key={value}
+                        active={draft.hasPeople === value}
+                        label={value === 'any' ? 'Any people state' : value === 'yes' ? 'Only with people' : 'Only without people'}
+                        onClick={() => setDraftValue('hasPeople', value)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
       </div>
     </div>
   )

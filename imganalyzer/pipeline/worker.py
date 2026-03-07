@@ -43,7 +43,7 @@ import os
 import signal
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor, Future, CancelledError
 from pathlib import Path
 from typing import Any
 
@@ -353,6 +353,8 @@ class Worker:
                     try:
                         result_status = fut.result()
                         stats[result_status] = stats.get(result_status, 0) + 1
+                    except CancelledError:
+                        self.queue.mark_pending(job["id"])
                     except Exception as exc:
                         error_msg = f"{type(exc).__name__}: {exc}"
                         self.queue.mark_failed(job["id"], error_msg)
@@ -361,6 +363,14 @@ class Worker:
                         path = image_row["file_path"] if image_row else f"id={job['image_id']}"
                         _emit_result(path, job["module"], "failed", 0, error_msg)
                     progress.advance(task)
+
+            def _cancel_futures(futures: dict[Future, dict[str, Any]]) -> None:
+                for fut, job in list(futures.items()):
+                    if fut.done():
+                        continue
+                    if fut.cancel():
+                        self.queue.mark_pending(job["id"])
+                        futures.pop(fut, None)
 
             # ── Helper: claim jobs from queue ─────────────────────────────────
             def _claim_fn(batch_sz: int, module: str) -> list[dict[str, Any]]:
@@ -443,6 +453,7 @@ class Worker:
                         stats=stats,
                         unload_fn=unload_gpu_model,
                         prefetch_fn=_prefetch_image,
+                        cancel_futures_fn=_cancel_futures,
                     )
 
             # ════════════════════════════════════════════════════════════════
@@ -467,6 +478,7 @@ class Worker:
                         flush_fn=self._maybe_periodic_flush,
                         local_pool=local_pool,
                         cloud_pool=cloud_pool,
+                        cancel_futures_fn=_cancel_futures,
                     )
 
         if self._shutdown.is_set():

@@ -102,6 +102,22 @@ CREATE TABLE face_aliases (
     identity_id INTEGER NOT NULL,
     alias TEXT NOT NULL
 );
+CREATE TABLE face_persons (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    notes TEXT
+);
+CREATE TABLE face_cluster_labels (
+    cluster_id INTEGER PRIMARY KEY,
+    display_name TEXT
+);
+CREATE TABLE face_occurrences (
+    id INTEGER PRIMARY KEY,
+    image_id INTEGER NOT NULL,
+    identity_name TEXT,
+    cluster_id INTEGER,
+    person_id INTEGER
+);
 CREATE TABLE analysis_cloud_ai (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     image_id INTEGER,
@@ -159,6 +175,24 @@ def _insert_face_identity(
     conn.executemany(
         "INSERT INTO face_aliases (identity_id, alias) VALUES (?, ?)",
         [(identity_id, alias) for alias in aliases],
+    )
+
+
+def _insert_face_occurrence(
+    conn: sqlite3.Connection,
+    *,
+    occurrence_id: int,
+    image_id: int,
+    identity_name: str,
+    cluster_id: int | None = None,
+    person_id: int | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO face_occurrences (id, image_id, identity_name, cluster_id, person_id)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (occurrence_id, image_id, identity_name, cluster_id, person_id),
     )
 
 
@@ -414,6 +448,118 @@ def test_search_alias_prompt_routes_to_face_search(
     assert result["total"] == 1
     assert result["hasMore"] is False
     assert [item["image_id"] for item in result["results"]] == [1]
+
+
+def test_search_face_filter_uses_aliases_from_faces_table(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\cxc.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\people\other.jpg")
+    _insert_face_identity(
+        gallery_db,
+        identity_id=1,
+        canonical_name="chen_xc",
+        display_name="Chen XC",
+        aliases=["cxc"],
+    )
+    gallery_db.executemany(
+        "INSERT INTO analysis_faces (image_id, face_count, face_identities) VALUES (?, ?, ?)",
+        [
+            (1, 1, '["chen_xc"]'),
+            (2, 1, '["someone_else"]'),
+        ],
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({"query": "CXC", "mode": "hybrid", "limit": 10, "offset": 0})
+
+    assert result["total"] == 1
+    assert result["hasMore"] is False
+    assert [item["image_id"] for item in result["results"]] == [1]
+
+
+def test_search_face_filter_matches_alias_across_multiple_identity_rows(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\cxc-child.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\people\cxc-adult.jpg")
+    _insert_processed_image(gallery_db, 3, r"E:\Pic\people\other.jpg")
+    _insert_face_identity(
+        gallery_db,
+        identity_id=1,
+        canonical_name="chen_xc_child",
+        display_name="Chen XC Child",
+        aliases=["cxc"],
+    )
+    _insert_face_identity(
+        gallery_db,
+        identity_id=2,
+        canonical_name="chen_xc_adult",
+        display_name="Chen XC Adult",
+        aliases=["cxc"],
+    )
+    gallery_db.executemany(
+        "INSERT INTO analysis_faces (image_id, face_count, face_identities) VALUES (?, ?, ?)",
+        [
+            (1, 1, '["chen_xc_child"]'),
+            (2, 1, '["chen_xc_adult"]'),
+            (3, 1, '["someone_else"]'),
+        ],
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({"query": "CXC", "mode": "hybrid", "limit": 10, "offset": 0})
+
+    assert result["total"] == 2
+    assert result["hasMore"] is False
+    assert sorted(item["image_id"] for item in result["results"]) == [1, 2]
+
+
+def test_search_face_filter_matches_person_name_across_multiple_clusters(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\cxc-cluster-a.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\people\cxc-cluster-b.jpg")
+    _insert_processed_image(gallery_db, 3, r"E:\Pic\people\other.jpg")
+    gallery_db.execute("INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)", (1, "cxc", None))
+    gallery_db.executemany(
+        "INSERT INTO face_cluster_labels (cluster_id, display_name) VALUES (?, ?)",
+        [(10, "CXC"), (20, "CXC")],
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=1,
+        image_id=1,
+        identity_name="chen_xc_child",
+        cluster_id=10,
+        person_id=1,
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=2,
+        image_id=2,
+        identity_name="chen_xc_adult",
+        cluster_id=20,
+        person_id=1,
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=3,
+        image_id=3,
+        identity_name="someone_else",
+        cluster_id=30,
+        person_id=None,
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({"query": "CXC", "mode": "hybrid", "limit": 10, "offset": 0})
+
+    assert result["total"] == 2
+    assert result["hasMore"] is False
+    assert sorted(item["image_id"] for item in result["results"]) == [1, 2]
 
 
 def test_search_alias_prompt_combines_face_and_activity_terms(

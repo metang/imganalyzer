@@ -702,6 +702,63 @@ class Repository:
         ).fetchone()
         return dict(row) if row else None
 
+    def find_face_identities_by_alias(self, name: str) -> list[dict[str, Any]]:
+        """Return all face identities matching *name* by canonical, display, or alias."""
+        if not name:
+            return []
+
+        if self._table_exists("face_aliases"):
+            rows = self.conn.execute(
+                """
+                SELECT DISTINCT fi.*
+                FROM face_identities fi
+                LEFT JOIN face_aliases fa ON fi.id = fa.identity_id
+                WHERE fi.canonical_name = ? COLLATE NOCASE
+                   OR fi.display_name = ? COLLATE NOCASE
+                   OR fa.alias = ? COLLATE NOCASE
+                ORDER BY fi.id
+                """,
+                [name, name, name],
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+        rows = self.conn.execute("SELECT * FROM face_identities ORDER BY id").fetchall()
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            aliases = json.loads(row["aliases"] or "[]")
+            if (
+                row["canonical_name"].casefold() == name.casefold()
+                or (row["display_name"] and row["display_name"].casefold() == name.casefold())
+                or any(name.casefold() == alias.casefold() for alias in aliases)
+            ):
+                matches.append(dict(row))
+        return matches
+
+    def find_persons_by_name(self, name: str) -> list[dict[str, Any]]:
+        """Return all person groups matching *name* case-insensitively."""
+        if not name or not self._table_exists("face_persons"):
+            return []
+        rows = self.conn.execute(
+            "SELECT * FROM face_persons WHERE name = ? COLLATE NOCASE ORDER BY id",
+            [name],
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def find_clusters_by_label(self, name: str) -> list[dict[str, Any]]:
+        """Return all face clusters whose display label matches *name*."""
+        if not name or not self._table_exists("face_cluster_labels"):
+            return []
+        rows = self.conn.execute(
+            """
+            SELECT cluster_id, display_name
+            FROM face_cluster_labels
+            WHERE display_name = ? COLLATE NOCASE
+            ORDER BY cluster_id
+            """,
+            [name],
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def find_face_by_alias(self, name: str) -> dict[str, Any] | None:
         """Find a face identity by canonical name, display name, or alias.
 
@@ -709,31 +766,8 @@ class Repository:
         scanning every row and parsing JSON.  Falls back to the legacy JSON
         scan when the table has not been created yet.
         """
-        # Check canonical_name / display_name first (indexed)
-        row = self.conn.execute(
-            "SELECT * FROM face_identities WHERE canonical_name = ? COLLATE NOCASE OR display_name = ? COLLATE NOCASE",
-            [name, name],
-        ).fetchone()
-        if row:
-            return dict(row)
-        # Query indexed face_aliases table (O(log N) via idx_face_aliases_alias)
-        if self._table_exists("face_aliases"):
-            row = self.conn.execute(
-                """SELECT fi.* FROM face_identities fi
-                   JOIN face_aliases fa ON fi.id = fa.identity_id
-                   WHERE fa.alias = ? COLLATE NOCASE""",
-                [name],
-            ).fetchone()
-            if row:
-                return dict(row)
-        else:
-            # Legacy fallback: full table scan + JSON parsing
-            rows = self.conn.execute("SELECT * FROM face_identities").fetchall()
-            for r in rows:
-                aliases = json.loads(r["aliases"] or "[]")
-                if any(name.casefold() == alias.casefold() for alias in aliases):
-                    return dict(r)
-        return None
+        matches = self.find_face_identities_by_alias(name)
+        return matches[0] if matches else None
 
     def remove_face_identity(self, canonical_name: str) -> bool:
         cur = self.conn.execute(
@@ -811,6 +845,58 @@ class Repository:
             [name, name, limit],
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_images_for_person(self, person_id: int, limit: int = 100) -> list[dict[str, Any]]:
+        """Return images containing any face occurrence linked to *person_id*."""
+        if not self._table_exists("face_occurrences"):
+            return []
+        rows = self.conn.execute(
+            """
+            WITH matched AS (
+                SELECT DISTINCT fo.image_id
+                FROM face_occurrences fo
+                WHERE fo.person_id = ?
+            )
+            SELECT
+                m.image_id,
+                i.file_path,
+                COALESCE(af.face_count, la.face_count, 0) AS face_count
+            FROM matched m
+            JOIN images i ON i.id = m.image_id
+            LEFT JOIN analysis_faces af ON af.image_id = m.image_id
+            LEFT JOIN analysis_local_ai la ON la.image_id = m.image_id
+            ORDER BY i.file_path
+            LIMIT ?
+            """,
+            [person_id, limit],
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_images_for_cluster(self, cluster_id: int, limit: int = 100) -> list[dict[str, Any]]:
+        """Return images containing any face occurrence belonging to *cluster_id*."""
+        if not self._table_exists("face_occurrences"):
+            return []
+        rows = self.conn.execute(
+            """
+            WITH matched AS (
+                SELECT DISTINCT fo.image_id
+                FROM face_occurrences fo
+                WHERE fo.cluster_id = ?
+            )
+            SELECT
+                m.image_id,
+                i.file_path,
+                COALESCE(af.face_count, la.face_count, 0) AS face_count
+            FROM matched m
+            JOIN images i ON i.id = m.image_id
+            LEFT JOIN analysis_faces af ON af.image_id = m.image_id
+            LEFT JOIN analysis_local_ai la ON la.image_id = m.image_id
+            ORDER BY i.file_path
+            LIMIT ?
+            """,
+            [cluster_id, limit],
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # ── Face occurrences & clustering ──────────────────────────────────────
 
@@ -1263,6 +1349,37 @@ class Repository:
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        if self._table_exists("face_occurrences"):
+            person_name_select = "fp.name AS person_name" if self._table_exists("face_persons") else "NULL AS person_name"
+            person_join = "LEFT JOIN face_persons fp ON fp.id = fo.person_id" if self._table_exists("face_persons") else ""
+            cluster_label_select = (
+                "fcl.display_name AS cluster_label"
+                if self._table_exists("face_cluster_labels")
+                else "NULL AS cluster_label"
+            )
+            cluster_join = (
+                "LEFT JOIN face_cluster_labels fcl ON fcl.cluster_id = fo.cluster_id"
+                if self._table_exists("face_cluster_labels")
+                else ""
+            )
+            occurrence_rows = self.conn.execute(
+                f"""
+                SELECT DISTINCT
+                    {person_name_select},
+                    {cluster_label_select}
+                FROM face_occurrences fo
+                {person_join}
+                {cluster_join}
+                WHERE fo.image_id = ?
+                """,
+                [image_id],
+            ).fetchall()
+            for occurrence in occurrence_rows:
+                if occurrence["person_name"]:
+                    faces_parts.append(occurrence["person_name"])
+                if occurrence["cluster_label"]:
+                    faces_parts.append(occurrence["cluster_label"])
+
         # Cloud AI (all providers)
         cloud_rows = self.conn.execute(
             "SELECT * FROM analysis_cloud_ai WHERE image_id = ?", [image_id]
@@ -1292,8 +1409,7 @@ class Repository:
 
         # Face aliases
         for face_name in faces_parts[:]:
-            identity = self.find_face_by_alias(face_name)
-            if identity:
+            for identity in self.find_face_identities_by_alias(face_name):
                 if identity.get("display_name"):
                     faces_parts.append(identity["display_name"])
                 aliases = json.loads(identity.get("aliases") or "[]")

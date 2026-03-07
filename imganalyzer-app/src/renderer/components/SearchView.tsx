@@ -143,39 +143,59 @@ export function SearchView() {
   }, [hasMore, loading, loadingMore])
 
   return (
-    <div className="flex-1 flex min-h-0 flex-col overflow-hidden">
-      <SearchBar
-        onSearch={handleSearch}
-        loading={loading}
-        resultSummary={resultSummary}
-      />
+    <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div className="w-[420px] min-w-[360px] shrink-0 border-r border-neutral-800 bg-neutral-950/80">
+        <SearchBar
+          onSearch={handleSearch}
+          loading={loading}
+        />
+      </div>
 
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {(hasSearched || loading || resultSummary || searchContextLabel || error) && (
+          <div className="shrink-0 border-b border-neutral-800 bg-neutral-950/40 px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="min-w-0 truncate text-sm text-neutral-300">
+                {searchContextLabel ?? (loading ? 'Searching…' : hasSearched ? 'Search results' : 'Results')}
+              </p>
+              {resultSummary && (
+                <div className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-300">
+                  {resultSummary}
+                </div>
+              )}
+            </div>
+            {error && results.length > 0 && (
+              <div className="mt-3 rounded-xl border border-red-900/40 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+                {error}
+              </div>
+            )}
+          </div>
+        )}
 
         {loading && (
-          <div className="flex-1 flex items-center justify-center text-neutral-600 text-sm gap-2">
-            <div className="w-4 h-4 border-2 border-neutral-700 border-t-neutral-400 rounded-full animate-spin" />
+          <div className="flex flex-1 items-center justify-center gap-2 text-sm text-neutral-600">
+            <div className="h-4 w-4 rounded-full border-2 border-neutral-700 border-t-neutral-400 animate-spin" />
             Searching…
           </div>
         )}
 
         {!loading && error && results.length === 0 && (
-          <div className="flex-1 flex flex-col items-center justify-center gap-3 px-8">
-            <svg className="w-10 h-10 text-red-500/50" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8">
+            <svg className="h-10 w-10 text-red-500/50" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round"
                 d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
             </svg>
-            <p className="text-sm text-red-400 text-center max-w-lg">{error}</p>
+            <p className="max-w-lg text-center text-sm text-red-400">{error}</p>
           </div>
         )}
 
         {!loading && !error && !hasSearched && (
-          <div className="flex-1 flex flex-col items-center justify-center text-neutral-600 gap-3">
-            <svg className="w-16 h-16 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-neutral-600">
+            <svg className="h-16 w-16 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
               <path strokeLinecap="round" strokeLinejoin="round"
                 d="M21 21l-4.35-4.35M17 11A6 6 0 115 11a6 6 0 0112 0z" />
             </svg>
-            <p className="text-sm">Start with a prompt or pick an intent above to search your image library.</p>
+            <p className="text-sm">Use the search panel to find images in your library.</p>
             <p className="text-xs text-neutral-700">
               Try: <code className="text-neutral-600">Alice in the US every Feb 1 morning</code>,{' '}
               <code className="text-neutral-600">duck on water</code>,{' '}
@@ -185,8 +205,8 @@ export function SearchView() {
         )}
 
         {!loading && !error && hasSearched && results.length === 0 && (
-          <div className="flex-1 flex flex-col items-center justify-center text-neutral-600 gap-3 px-8">
-            <svg className="w-16 h-16 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-neutral-600">
+            <svg className="h-16 w-16 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 15l6 6m-11-4a7 7 0 110-14 7 7 0 010 14z" />
             </svg>
             <p className="text-sm">No images matched this search.</p>
@@ -195,17 +215,7 @@ export function SearchView() {
         )}
 
         {results.length > 0 && (
-          <div className="flex-1 min-h-0 relative overflow-hidden flex flex-col">
-            {searchContextLabel && (
-              <div className="shrink-0 px-4 py-2 border-b border-neutral-800 text-xs text-neutral-400">
-                {searchContextLabel}
-              </div>
-            )}
-            {error && (
-              <div className="shrink-0 px-4 py-2 border-b border-red-900/40 bg-red-950/40 text-xs text-red-300">
-                {error}
-              </div>
-            )}
+          <div className="relative flex flex-1 min-h-0 flex-col overflow-hidden">
             <VirtualGrid
               items={results}
               selectedId={selectedItem?.image_id ?? null}
@@ -213,17 +223,15 @@ export function SearchView() {
               onEndReached={hasMore ? loadMore : undefined}
             />
             {loadingMore && (
-              <div className="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-black/60 text-neutral-300 text-xs flex items-center gap-2">
-                <div className="w-3 h-3 border border-neutral-500 border-t-neutral-300 rounded-full animate-spin" />
+              <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full bg-black/60 px-3 py-1.5 text-xs text-neutral-300">
+                <div className="h-3 w-3 rounded-full border border-neutral-500 border-t-neutral-300 animate-spin" />
                 Loading more...
               </div>
             )}
           </div>
         )}
-
       </div>
 
-      {/* ── Lightbox ─────────────────────────────────────────────────────────── */}
       {selectedItem && (
         <SearchLightbox
           item={selectedItem}
