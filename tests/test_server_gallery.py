@@ -135,6 +135,16 @@ CREATE TABLE embeddings (
     embedding_type TEXT,
     vector BLOB
 );
+CREATE VIRTUAL TABLE search_index USING fts5(
+    image_id,
+    description_text,
+    subjects_text,
+    keywords_text,
+    faces_text,
+    exif_text,
+    content='',
+    tokenize='porter unicode61'
+);
 """
 
 
@@ -193,6 +203,26 @@ def _insert_face_occurrence(
         VALUES (?, ?, ?, ?, ?)
         """,
         (occurrence_id, image_id, identity_name, cluster_id, person_id),
+    )
+
+
+def _insert_search_index_row(
+    conn: sqlite3.Connection,
+    *,
+    image_id: int,
+    description_text: str = "",
+    subjects_text: str = "",
+    keywords_text: str = "",
+    faces_text: str = "",
+    exif_text: str = "",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO search_index
+            (image_id, description_text, subjects_text, keywords_text, faces_text, exif_text)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (str(image_id), description_text, subjects_text, keywords_text, faces_text, exif_text),
     )
 
 
@@ -678,6 +708,80 @@ def test_search_resolve_face_query_returns_multiple_faces_and_remaining_text(
     }
 
 
+def test_search_resolve_face_query_strips_picture_filler_phrase(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gallery_db.executemany(
+        "INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)",
+        [(1, "cxc", None), (2, "meng", None)],
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search_resolve_face_query(
+        {"query": "group picture 10 or more people. cxc and meng are in the picture"}
+    )
+
+    assert result == {
+        "face": "cxc",
+        "faces": ["cxc", "meng"],
+        "faceMatch": "all",
+        "remainingQuery": "group picture 10 or more people.",
+    }
+
+
+def test_fts_match_query_handles_periods_and_boolean_words() -> None:
+    from imganalyzer.db.search import _build_fts_match_query
+
+    gallery_db = sqlite3.connect(":memory:")
+    try:
+        gallery_db.execute(
+            """
+            CREATE VIRTUAL TABLE search_index USING fts5(
+                image_id,
+                description_text,
+                subjects_text,
+                keywords_text,
+                faces_text,
+                exif_text,
+                content='',
+                tokenize='porter unicode61'
+            )
+            """
+        )
+        match_query = _build_fts_match_query(
+            "group picture 10 or more people. cxc and meng are in the picture"
+        )
+        gallery_db.execute(
+            """
+            INSERT INTO search_index
+                (image_id, description_text, subjects_text, keywords_text, faces_text, exif_text)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "1",
+                "group picture 10 or more people cxc and meng are in the picture",
+                "",
+                "",
+                "",
+                "",
+            ),
+        )
+        rows = gallery_db.execute(
+            "SELECT rowid FROM search_index WHERE search_index MATCH ?",
+            [match_query],
+        ).fetchall()
+
+        assert match_query == (
+            '"group" AND "picture" AND "10" AND "or" AND "more" '
+            'AND "people" AND "cxc" AND "and" AND "meng" AND "are" '
+            'AND "in" AND "the" AND "picture"'
+        )
+        assert len(rows) == 1
+    finally:
+        gallery_db.close()
+
+
 def test_search_alias_prompt_combines_face_and_activity_terms(
     gallery_db: sqlite3.Connection,
     monkeypatch: pytest.MonkeyPatch,
@@ -793,6 +897,63 @@ def test_search_multi_face_prompt_combines_people_and_activity_terms(
     assert result["total"] == 2
     assert result["hasMore"] is False
     assert [item["image_id"] for item in result["results"]] == [1, 4]
+
+
+def test_search_aesthetic_sort_uses_broader_candidate_pool(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for image_id in range(1, 251):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\birds\img{image_id}.jpg")
+        gallery_db.execute(
+            """
+            INSERT INTO analysis_aesthetic (image_id, aesthetic_score, aesthetic_label, aesthetic_reason)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                image_id,
+                9.8 if image_id == 250 else 1.0,
+                "high" if image_id == 250 else "low",
+                "seeded for ranking test",
+            ),
+        )
+
+    search_limits: list[int] = []
+
+    class FakeSearchEngine:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+
+        def search(
+            self,
+            query: str,
+            limit: int,
+            semantic_weight: float = 0.5,
+            mode: str = "hybrid",
+        ) -> list[dict[str, object]]:
+            assert query == "flock of birds"
+            search_limits.append(limit)
+            return [
+                {
+                    "image_id": image_id,
+                    "file_path": fr"E:\Pic\birds\img{image_id}.jpg",
+                    "score": float(251 - image_id),
+                }
+                for image_id in range(1, 251)
+            ][:limit]
+
+    import imganalyzer.db.search as search_module
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    monkeypatch.setattr(search_module, "SearchEngine", FakeSearchEngine)
+    result = server._handle_search(
+        {"query": "flock of birds", "mode": "hybrid", "sortBy": "aesthetic", "limit": 1, "offset": 0}
+    )
+
+    assert search_limits == [400]
+    assert result["total"] == 250
+    assert result["hasMore"] is True
+    assert [item["image_id"] for item in result["results"]] == [250]
 
 
 def test_search_best_sort_uses_quality_ranking(

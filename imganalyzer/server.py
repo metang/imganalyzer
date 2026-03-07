@@ -912,7 +912,8 @@ def _handle_search(params: dict) -> dict:
 
     if similar_to_image_id is not None or faces or ((has_text_query or expanded_terms) and mode != "browse"):
         page_end = offset + limit
-        candidate_limit = max((page_end + 1) * 4, 200)
+        quality_sort_floor = 400 if sort_by in {"best", "aesthetic", "sharpness", "cleanest"} else 200
+        candidate_limit = max((page_end + 1) * 4, quality_sort_floor)
         max_candidate_limit = max(candidate_limit, 5000)
         search_exhausted = True
         records: list[dict[str, Any]] = []

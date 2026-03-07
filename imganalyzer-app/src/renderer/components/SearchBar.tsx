@@ -17,7 +17,6 @@ interface ParsedQuery {
 interface SearchDraft {
   intent: SearchIntent
   prompt: string
-  aiModel: string
   activity: string
   species: string
   faces: string[]
@@ -52,13 +51,6 @@ interface ChipDescriptor {
   label: string
   tone?: 'accent' | 'neutral'
 }
-
-const AI_MODELS = [
-  'gpt-5.4',
-  'claude-opus-4.5',
-  'claude-sonnet-4.6',
-  'gpt-5-mini',
-] as const
 
 const SORT_LABELS: Record<SearchSortBy, string> = {
   relevance: 'Relevance',
@@ -96,6 +88,7 @@ const INTENT_COPY: Record<SearchIntent, { title: string; placeholder: string }> 
 }
 
 const WILDLIFE_EXPANSIONS: Record<string, string[]> = {
+  bird: ['birds in flight', 'flying birds', 'flock of birds'],
   duck: ['mallard', 'teal', 'pintail', 'wigeon', 'gadwall', 'shoveler', 'wood duck', 'merganser'],
   goose: ['canada goose', 'snow goose', 'greylag goose', 'barnacle goose'],
   owl: ['barn owl', 'snowy owl', 'great horned owl', 'eagle owl'],
@@ -103,6 +96,7 @@ const WILDLIFE_EXPANSIONS: Record<string, string[]> = {
   eagle: ['bald eagle', 'golden eagle', 'white-tailed eagle'],
   heron: ['grey heron', 'great blue heron', 'egret', 'bittern'],
   gull: ['herring gull', 'tern', 'kittiwake', 'black-headed gull'],
+  flock: ['flock of birds', 'birds in flight', 'flying birds'],
 }
 
 function dedupeStrings(values: string[]): string[] {
@@ -145,6 +139,20 @@ function parseQuery(raw: string): ParsedQuery {
     text = text.replace(/\bface:(?:"[^"]+"|'[^']+'|[^\s,]+)/gi, '').trim()
   }
 
+  const aestheticRankingPhrase = strip(
+    /^\s*(?:show|find)\s+(?:me\s+)?(?:the\s+)?(?:most\s+)?(?:beautiful|gorgeous|stunning|aesthetic|prettiest)\s+(?:photos?|pictures?|shots?|images?)\s+of\b/i
+  ) ?? strip(
+    /^\s*(?:most\s+)?(?:beautiful|gorgeous|stunning|aesthetic|prettiest)\s+(?:photos?|pictures?|shots?|images?)\s+of\b/i
+  )
+  if (aestheticRankingPhrase) patches.sortBy = patches.sortBy ?? 'aesthetic'
+
+  const bestRankingPhrase = strip(
+    /^\s*(?:show|find)\s+(?:me\s+)?(?:the\s+)?(?:best|top)\s+(?:photos?|pictures?|shots?|images?)\s+of\b/i
+  ) ?? strip(
+    /^\s*(?:best|top)\s+(?:photos?|pictures?|shots?|images?)\s+of\b/i
+  )
+  if (bestRankingPhrase) patches.sortBy = patches.sortBy ?? 'best'
+
   const scoreGte = strip(/\bscore\s*>=?\s*(\d+(?:\.\d+)?)/i)
   if (scoreGte) patches.aestheticMin = parseFloat(scoreGte[1])
   const scoreLte = strip(/\bscore\s*<=?\s*(\d+(?:\.\d+)?)/i)
@@ -179,6 +187,10 @@ function parseQuery(raw: string): ParsedQuery {
   }
 
   applyPeopleCountPatch(
+    strip(/\b(?:with\s+)?(\d+)\s+or\s+more\s+people\b/i),
+    (count) => { patches.facesMin = count },
+  )
+  applyPeopleCountPatch(
     strip(/\b(?:with\s+)?more than\s+(\d+)\s+people\b/i),
     (count) => { patches.facesMin = count + 1 },
   )
@@ -205,6 +217,7 @@ function parseQuery(raw: string): ParsedQuery {
   if (/\b(group photo|crowd|crowded|large group|many people)\b/i.test(text)) {
     patches.hasPeople = true
   }
+  text = text.replace(/\b(?:is|are)\s+in\s+the\s+(?:picture|photo)\b/gi, ' ')
 
   const camM = strip(/\bcamera:(\S+)/i)
   if (camM) patches.camera = camM[1].replace(/^["']|["']$/g, '')
@@ -255,10 +268,6 @@ function toRecurringMonthDay(value: string): string | undefined {
   return undefined
 }
 
-function recurringDateForInput(value: string | undefined): string {
-  return value ? `2000-${value}` : ''
-}
-
 function formatRecurringLabel(value: string): string {
   const monthDay = toRecurringMonthDay(value)
   if (!monthDay) return value
@@ -287,7 +296,6 @@ function defaultDraft(): SearchDraft {
   return {
     intent: 'general',
     prompt: '',
-    aiModel: AI_MODELS[0],
     activity: '',
     species: '',
     faces: [],
@@ -418,8 +426,7 @@ function buildFilters(draft: SearchDraft): SearchFilters {
   return filters
 }
 
-function buildContextLabel(intent: SearchIntent, filters: SearchFilters, plannerSummary: string | null): string {
-  if (plannerSummary) return plannerSummary
+function buildContextLabel(intent: SearchIntent, filters: SearchFilters): string {
   const title = INTENT_COPY[intent].title
   const parts: string[] = []
   if (filters.faces && filters.faces.length > 0) {
@@ -560,10 +567,7 @@ function SearchChip({ chip, onRemove }: { chip: ChipDescriptor; onRemove: (chipI
 export function SearchBar({ onSearch, loading }: SearchBarProps) {
   const [draft, setDraft] = useState<SearchDraft>(defaultDraft())
   const [showAdvanced, setShowAdvanced] = useState(false)
-  const [planning, setPlanning] = useState(false)
   const [resolvingFace, setResolvingFace] = useState(false)
-  const [plannerSummary, setPlannerSummary] = useState<string | null>(null)
-  const [plannerError, setPlannerError] = useState<string | null>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
@@ -572,8 +576,6 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
 
   const setDraftValue = useCallback(<K extends keyof SearchDraft>(key: K, value: SearchDraft[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }))
-    setPlannerSummary(null)
-    setPlannerError(null)
   }, [])
 
   const derivedFilters = useMemo(() => buildFilters(draft), [draft])
@@ -617,9 +619,9 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
     return items
   }, [draft, derivedFilters])
 
-  const executeSearch = useCallback((nextDraft: SearchDraft, summaryOverride: string | null = null) => {
+  const executeSearch = useCallback((nextDraft: SearchDraft) => {
     const filters = buildFilters(nextDraft)
-    const contextLabel = buildContextLabel(nextDraft.intent, filters, summaryOverride)
+    const contextLabel = buildContextLabel(nextDraft.intent, filters)
     onSearch(filters, contextLabel)
   }, [onSearch])
 
@@ -655,8 +657,8 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
 
   const handleSearch = useCallback(async () => {
     const nextDraft = await resolvePromptFace(draft)
-    executeSearch(nextDraft, plannerSummary)
-  }, [draft, executeSearch, plannerSummary, resolvePromptFace])
+    executeSearch(nextDraft)
+  }, [draft, executeSearch, resolvePromptFace])
 
   const handlePromptKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -667,8 +669,6 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
 
   const handleClear = useCallback(() => {
     setDraft(defaultDraft())
-    setPlannerSummary(null)
-    setPlannerError(null)
     setShowAdvanced(false)
   }, [])
 
@@ -725,74 +725,7 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
           return prev
       }
     })
-    setPlannerSummary(null)
   }, [])
-
-  const applyPlannerResult = useCallback((response: { intent: SearchIntent; filters: SearchFilters; summary: string }) => {
-    const plannedFaces = dedupeStrings([
-      ...(response.filters.faces ?? []),
-      ...(response.filters.face ? [response.filters.face] : []),
-    ])
-    const nextDraft: SearchDraft = {
-      ...draft,
-      intent: response.intent,
-      prompt: response.filters.query ?? draft.prompt,
-      faces: plannedFaces.length > 0 ? plannedFaces : draft.faces,
-      faceMatch: response.filters.faceMatch ?? draft.faceMatch,
-      country: response.filters.country ?? draft.country,
-      location: response.filters.location ?? draft.location,
-      recurringDate: recurringDateForInput(response.filters.recurringMonthDay) || draft.recurringDate,
-      timeOfDay: response.filters.timeOfDay ?? draft.timeOfDay,
-      sortBy: response.filters.sortBy ?? (response.intent === 'best-shot' ? 'best' : draft.sortBy),
-      mode: response.filters.mode === 'browse' ? draft.mode : (response.filters.mode ?? draft.mode),
-      hasPeople: response.filters.hasPeople === undefined
-        ? draft.hasPeople
-        : response.filters.hasPeople ? 'yes' : 'no',
-      includeRelatedSpecies: Boolean(response.filters.expandedTerms?.length) || draft.includeRelatedSpecies,
-      expandedTerms: response.filters.expandedTerms ?? draft.expandedTerms,
-    }
-    setDraft(nextDraft)
-    setPlannerSummary(response.summary)
-    setPlannerError(null)
-    executeSearch(nextDraft, response.summary)
-  }, [draft, executeSearch])
-
-  const handlePlanWithAI = useCallback(async () => {
-    const plannerPrompt = joinUniqueParts([
-      draft.prompt,
-      draft.intent === 'people' ? draft.activity : undefined,
-      draft.intent === 'wildlife' ? draft.species : undefined,
-      draft.faces.length > 0 ? `people ${draft.faces.join(', ')}` : undefined,
-      draft.country ? `in ${draft.country}` : undefined,
-      draft.recurringDate ? `every ${formatRecurringLabel(draft.recurringDate)}` : undefined,
-      draft.timeOfDay !== 'any' ? draft.timeOfDay : undefined,
-      draft.intent === 'best-shot' ? 'find the best shot' : undefined,
-    ])
-
-    if (!plannerPrompt) {
-      setPlannerError('Enter a prompt to interpret first.')
-      return
-    }
-
-    setPlanning(true)
-    setPlannerError(null)
-    try {
-      const response = await window.api.planSearchQuery({
-        prompt: plannerPrompt,
-        model: draft.aiModel,
-        intent: draft.intent,
-      })
-      if (response.error) {
-        setPlannerError(response.error)
-        return
-      }
-      applyPlannerResult(response)
-    } catch (error) {
-      setPlannerError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setPlanning(false)
-    }
-  }, [applyPlannerResult, draft])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-neutral-950">
@@ -811,8 +744,6 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                     intent,
                     sortBy: intent === 'best-shot' ? 'best' : prev.sortBy,
                   }))
-                  setPlannerSummary(null)
-                  setPlannerError(null)
                 }}
               />
             ))}
@@ -844,26 +775,12 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
             </button>
             <button
               type="button"
-              onClick={handlePlanWithAI}
-              disabled={planning}
-              className="inline-flex items-center gap-2 rounded-full border border-blue-500/40 bg-blue-500/10 px-4 py-2 text-sm font-medium text-blue-100 transition-colors hover:bg-blue-500/20 disabled:opacity-60"
-            >
-              {planning ? 'Interpreting…' : 'Interpret with AI'}
-            </button>
-            <button
-              type="button"
               onClick={handleClear}
               className="rounded-full border border-neutral-700 px-4 py-2 text-sm text-neutral-300 transition-colors hover:border-neutral-500 hover:text-white"
             >
               Reset
             </button>
           </div>
-
-          {(plannerSummary || plannerError) && (
-            <div className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${plannerError ? 'border-red-900/60 bg-red-950/40 text-red-200' : 'border-blue-900/40 bg-blue-950/30 text-blue-100'}`}>
-              {plannerError ?? plannerSummary}
-            </div>
-          )}
 
           {chips.length > 0 && (
             <div className="mt-4 flex flex-wrap gap-2">
@@ -892,8 +809,6 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                       faces,
                       faceMatch: faces.length > 1 ? prev.faceMatch : 'all',
                     }))
-                    setPlannerSummary(null)
-                    setPlannerError(null)
                   }}
                 />
                 {draft.faces.length > 1 && (
@@ -1049,19 +964,6 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                       />
                     </div>
                   )}
-                </div>
-
-                <div>
-                  <FieldLabel>AI model</FieldLabel>
-                  <select
-                    value={draft.aiModel}
-                    onChange={(event) => setDraftValue('aiModel', event.target.value as SearchDraft['aiModel'])}
-                    className="w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 focus:border-blue-500 focus:outline-none"
-                  >
-                    {AI_MODELS.map((model) => (
-                      <option key={model} value={model}>{model}</option>
-                    ))}
-                  </select>
                 </div>
 
                 <TextField label="Camera" value={draft.camera} placeholder="Sony, Canon R5…" onChange={(value) => setDraftValue('camera', value)} />

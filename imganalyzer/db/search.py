@@ -98,6 +98,7 @@ _DESC_WEIGHT = 0.25
 # We filter these to only those whose cosine is at least this many standard
 # deviations above the population mean, to suppress noisy low-signal results.
 _DESC_ONLY_ZSCORE_MIN = 1.5
+_FTS_TOKEN_RE = re.compile(r"\w+", flags=re.UNICODE)
 
 
 def _rrf_score(rank: int, k: int = _RRF_K) -> float:
@@ -111,6 +112,13 @@ def _rank_results(
     """Return {image_id: zero_based_rank} for a list sorted best-first."""
     scored_sorted = sorted(scored, key=lambda x: -x[1])
     return {image_id: rank for rank, (image_id, _) in enumerate(scored_sorted)}
+
+
+def _build_fts_match_query(query: str) -> str:
+    """Convert freeform user text into a safe FTS5 MATCH query."""
+    tokens = [token.strip("_") for token in _FTS_TOKEN_RE.findall(query)]
+    quoted_tokens = [f'"{token.replace("\"", "\"\"")}"' for token in tokens if token]
+    return " AND ".join(quoted_tokens)
 
 
 class _EmbeddingMatrix:
@@ -364,6 +372,12 @@ class SearchEngine:
     def _cleanup_face_query_remainder(self, remainder: str) -> str:
         cleaned = re.sub(r"[,&]+", " ", remainder)
         cleaned = re.sub(r"\b(with|and|together)\b", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"\b(?:is|are)\s+in\s+the\s+(?:picture|photo)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         return " ".join(cleaned.split())
 
     def _matches_face_query(self, candidate: str) -> bool:
@@ -501,6 +515,9 @@ class SearchEngine:
 
     def _fts_search(self, query: str, limit: int) -> list[dict[str, Any]]:
         """Full-text search via FTS5 with BM25 ranking."""
+        match_query = _build_fts_match_query(query)
+        if not match_query:
+            return []
         rows = self.conn.execute(
             """SELECT si.image_id,
                       i.file_path,
@@ -511,7 +528,7 @@ class SearchEngine:
                WHERE search_index MATCH ?
                ORDER BY rank
                LIMIT ?""",
-            [query, limit],
+            [match_query, limit],
         ).fetchall()
 
         return [
