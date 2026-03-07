@@ -71,6 +71,7 @@ import re
 import sqlite3
 import sys
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -87,13 +88,23 @@ sys.stdout = sys.stderr
 # interleave partial JSON lines.
 _send_lock = threading.Lock()
 
+# Set to True when serving over HTTP; _send() becomes a no-op because
+# the Electron stdout pipe isn't used for communication in that mode and
+# writing to it can block indefinitely if the pipe buffer fills.
+_http_transport = False
+
 
 def _send(obj: dict[str, Any]) -> None:
     """Write a JSON-RPC message to the real stdout (one line, thread-safe)."""
+    if _http_transport:
+        return
     line = json.dumps(obj, default=str, separators=(",", ":"))
     with _send_lock:
-        _real_stdout.write(line + "\n")
-        _real_stdout.flush()
+        try:
+            _real_stdout.write(line + "\n")
+            _real_stdout.flush()
+        except (BrokenPipeError, OSError):
+            pass
 
 
 def _send_result(req_id: int | str, result: Any) -> None:
@@ -2348,6 +2359,9 @@ def _serve_http_jsonrpc(
     rpc_path: str = "/jsonrpc",
 ) -> None:
     """Run the server in HTTP JSON-RPC mode for remote workers."""
+    global _http_transport
+    _http_transport = True
+
     normalized_path = rpc_path.strip() or "/jsonrpc"
     if not normalized_path.startswith("/"):
         normalized_path = f"/{normalized_path}"
@@ -2420,7 +2434,36 @@ def _serve_http_jsonrpc(
             # Keep logs on stderr, stdout is reserved in stdio mode.
             sys.stderr.write(f"[server.http] {self.address_string()} - {fmt % args}\n")
 
-    server = ThreadingHTTPServer((host, port), _JsonRpcHandler)
+    class _WatchdogHTTPServer(ThreadingHTTPServer):
+        """ThreadingHTTPServer with handler error logging and stale-thread cleanup."""
+
+        _cleanup_interval = 120  # seconds between thread-list cleanups
+        _last_cleanup = 0.0
+
+        def handle_error(self, request: Any, client_address: Any) -> None:
+            sys.stderr.write(
+                f"[server.http] handler error for {client_address}: "
+                f"{traceback.format_exc()}\n"
+            )
+
+        def service_actions(self) -> None:
+            now = time.monotonic()
+            if now - self._last_cleanup < self._cleanup_interval:
+                return
+            self._last_cleanup = now
+            threads = self._threads
+            if not isinstance(threads, list) or len(threads) <= 50:
+                return
+            alive = [t for t in threads if t.is_alive()]
+            self._threads = alive
+            pruned = len(threads) - len(alive)
+            if pruned:
+                sys.stderr.write(
+                    f"[server.http] pruned {pruned} finished handler threads "
+                    f"({len(alive)} still alive)\n"
+                )
+
+    server = _WatchdogHTTPServer((host, port), _JsonRpcHandler)
     sys.stderr.write(
         f"[server.http] listening on http://{host}:{port}{normalized_path} "
         f"(auth={'on' if auth_token else 'off'})\n"
