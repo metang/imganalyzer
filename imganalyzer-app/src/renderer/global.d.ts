@@ -1,6 +1,17 @@
 // Shared type declarations for renderer — mirrors main-process interfaces
 // without importing across the process boundary.
 
+import type {
+  AppSettings,
+  AppSettingsBundle,
+  AppSettingsInput,
+  CoordinatorStatus,
+  ThumbnailCacheConfig,
+  ThumbnailCacheConfigInput,
+  WorkerPathMapping,
+  WorkerSetupInfo,
+} from '../main/settings'
+
 export interface XmpData {
   description?: string
   sceneType?: string
@@ -44,6 +55,17 @@ export interface XmpData {
   locationState?: string
   locationCountry?: string
 }
+
+export type {
+  AppSettings,
+  AppSettingsBundle,
+  AppSettingsInput,
+  CoordinatorStatus,
+  ThumbnailCacheConfig,
+  ThumbnailCacheConfigInput,
+  WorkerPathMapping,
+  WorkerSetupInfo,
+} from '../main/settings'
 
 export interface ImageFile {
   path: string
@@ -210,20 +232,6 @@ export interface GalleryChunkResponse {
   error?: string
 }
 
-export interface ThumbnailCacheConfigInput {
-  directory?: string
-  maxGB?: number
-}
-
-export interface ThumbnailCacheConfig {
-  directory: string
-  maxGB: number
-  source: {
-    directory: 'default' | 'env' | 'settings'
-    maxGB: 'default' | 'env' | 'settings'
-  }
-}
-
 // ── Batch processing types ────────────────────────────────────────────────────
 
 export type BatchModuleKey =
@@ -366,6 +374,11 @@ declare global {
       galleryListImagesChunk(params: GalleryChunkParams): Promise<GalleryChunkResponse>
       getThumbnailCacheConfig(): Promise<ThumbnailCacheConfig>
       setThumbnailCacheConfig(config: ThumbnailCacheConfigInput): Promise<ThumbnailCacheConfig>
+      getAppSettings(): Promise<AppSettingsBundle>
+      saveAppSettings(input: AppSettingsInput): Promise<AppSettingsBundle>
+      getCoordinatorStatus(): Promise<CoordinatorStatus>
+      startCoordinator(): Promise<CoordinatorStatus>
+      stopCoordinator(): Promise<CoordinatorStatus>
 
       // Face management
       listFaces(): Promise<{ faces: FaceSummary[]; error?: string }>

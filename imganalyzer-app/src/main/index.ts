@@ -10,6 +10,9 @@ import { registerBatchHandlers, killAllBatchProcesses } from './batch'
 import { registerSearchHandlers } from './search'
 import { registerFaceHandlers } from './faces'
 import { registerGalleryHandlers } from './gallery'
+import { applyCoordinatorSettings, getCoordinatorStatus, startCoordinator, startCoordinatorOnLaunch, stopCoordinator } from './coordinator'
+import type { AppSettingsInput } from './settings'
+import { getAppSettings, getAppSettingsBundle, updateAppSettings } from './settings'
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -40,7 +43,7 @@ function createWindow(): BrowserWindow {
   return win
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Register a safe custom protocol for serving local files (e.g. images)
   // without needing webSecurity:false. Usage: local-file:///C:/path/to/file.jpg
   protocol.handle('local-file', (request) => {
@@ -53,6 +56,12 @@ app.whenReady().then(() => {
   registerSearchHandlers()
   registerGalleryHandlers()
   registerFaceHandlers()
+  try {
+    const settings = await getAppSettings()
+    await startCoordinatorOnLaunch(settings.distributed)
+  } catch (err) {
+    console.error('Failed to auto-start distributed job server:', err)
+  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       const w = createWindow()
@@ -73,7 +82,7 @@ app.on('before-quit', (e) => {
   // killAllBatchProcesses is async (shuts down the persistent RPC server), so
   // we prevent the default quit, run cleanup, then quit again.
   e.preventDefault()
-  killAllBatchProcesses().finally(() => {
+  Promise.allSettled([killAllBatchProcesses(), stopCoordinator()]).finally(() => {
     // Remove this handler to avoid infinite loop, then quit
     app.removeAllListeners('before-quit')
     app.quit()
@@ -106,6 +115,34 @@ ipcMain.handle('cache:thumbnail:getConfig', async () => {
 
 ipcMain.handle('cache:thumbnail:setConfig', async (_evt, config: { directory?: string; maxGB?: number }) => {
   return setThumbnailCacheConfig(config)
+})
+
+ipcMain.handle('settings:get', async () => {
+  return getAppSettingsBundle(true)
+})
+
+ipcMain.handle('settings:save', async (_evt, input: AppSettingsInput) => {
+  const bundle = await updateAppSettings(input)
+  await applyCoordinatorSettings(bundle.settings.distributed)
+  return bundle
+})
+
+ipcMain.handle('settings:getCoordinatorStatus', async () => {
+  return getCoordinatorStatus()
+})
+
+ipcMain.handle('settings:startCoordinator', async () => {
+  const settings = await getAppSettings()
+  if (!settings.distributed.enabled) {
+    throw new Error('Enable the distributed job server in Settings before starting it.')
+  }
+  await startCoordinator(settings.distributed)
+  return getCoordinatorStatus()
+})
+
+ipcMain.handle('settings:stopCoordinator', async () => {
+  await stopCoordinator()
+  return getCoordinatorStatus()
 })
 
 // ─── IPC: Get full-resolution image for lightbox ──────────────────────────────

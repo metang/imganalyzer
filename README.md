@@ -63,6 +63,56 @@ imganalyzer analyze photo.jpg --no-ai
 
 ---
 
+## Distributed Coordinator + Workers
+
+The distributed batch prototype uses the existing JSON-RPC server in HTTP mode as
+the coordinator and one or more `run-distributed-worker` agents as workers.
+
+If you use `imganalyzer-app`, you can now manage this from the desktop UI: open
+the new **Settings** page from the gear icon, enable the distributed job server,
+set host/port/auth options, and optionally have the coordinator start
+automatically when the app launches. That page also shows the worker command to
+run on other machines.
+
+### Start the coordinator
+
+```bash
+python -m imganalyzer.server --transport http --host 127.0.0.1 --port 8765
+```
+
+For LAN access, add a bearer token:
+
+```bash
+python -m imganalyzer.server --transport http --host 0.0.0.0 --port 8765 --auth-token YOUR_TOKEN
+```
+
+### Start a worker
+
+```bash
+imganalyzer run-distributed-worker \
+  --coordinator http://127.0.0.1:8765/jsonrpc \
+  --worker-id worker-01 \
+  --db-path ~/.cache/imganalyzer/imganalyzer.db
+```
+
+Useful worker options:
+
+- `--module metadata` to dedicate a worker to a single module
+- `--lease-ttl 300` to request longer job leases
+- `--heartbeat-interval 15` to refresh worker and lease liveness more often
+- `--path-mapping "SOURCE_PREFIX=LOCAL_PREFIX"` to remap shared-NAS paths on a worker with a different mount root
+- `--auth-token YOUR_TOKEN` when the coordinator requires HTTP auth
+
+### Current assumptions
+
+- Workers must point at the same SQLite database file as the coordinator.
+- Workers must either read the image paths stored in that database directly or provide `--path-mapping` rules when their NAS mount root differs.
+- The current implementation has been validated with local HTTP coordinator/worker
+  smoke tests, including two concurrent workers claiming jobs without duplicate
+  execution.
+
+---
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in your API keys:

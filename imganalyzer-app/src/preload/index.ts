@@ -5,7 +5,13 @@ import type { AnalysisProgress } from '../main/analyzer'
 import type { BatchStats, BatchResult, BatchIngestProgress } from '../main/batch'
 import type { SearchFilters, SearchPlanRequest, SearchPlanResponse, SearchResponse } from '../main/search'
 import type { GalleryChunkParams, GalleryChunkResponse, GalleryFoldersResponse } from '../main/gallery'
-import type { ThumbnailCacheConfig, ThumbnailCacheConfigInput } from '../main/images'
+import type {
+  AppSettingsBundle,
+  AppSettingsInput,
+  CoordinatorStatus,
+  ThumbnailCacheConfig,
+  ThumbnailCacheConfigInput,
+} from '../main/settings'
 
 contextBridge.exposeInMainWorld('api', {
   openFolder: (): Promise<string | null> =>
@@ -133,6 +139,21 @@ contextBridge.exposeInMainWorld('api', {
 
   setThumbnailCacheConfig: (config: ThumbnailCacheConfigInput): Promise<ThumbnailCacheConfig> =>
     ipcRenderer.invoke('cache:thumbnail:setConfig', config),
+
+  getAppSettings: (): Promise<AppSettingsBundle> =>
+    ipcRenderer.invoke('settings:get'),
+
+  saveAppSettings: (input: AppSettingsInput): Promise<AppSettingsBundle> =>
+    ipcRenderer.invoke('settings:save', input),
+
+  getCoordinatorStatus: (): Promise<CoordinatorStatus> =>
+    ipcRenderer.invoke('settings:getCoordinatorStatus'),
+
+  startCoordinator: (): Promise<CoordinatorStatus> =>
+    ipcRenderer.invoke('settings:startCoordinator'),
+
+  stopCoordinator: (): Promise<CoordinatorStatus> =>
+    ipcRenderer.invoke('settings:stopCoordinator'),
 
   // ── Face management ────────────────────────────────────────────────────────
 

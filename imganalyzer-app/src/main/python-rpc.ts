@@ -17,15 +17,11 @@
  *   })
  */
 
-import { spawn, execSync, ChildProcess } from 'child_process'
-import { app } from 'electron'
-import { dirname } from 'path'
+import type { ChildProcess } from 'child_process'
+import { killProcessTree, spawnPythonModule } from './python-runtime'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-// app.getAppPath() returns imganalyzer-app/ in dev; the package root is its parent.
-const PKG_ROOT = process.env.IMGANALYZER_PKG_ROOT || dirname(app.getAppPath())
-const CONDA_ENV = 'imganalyzer'
 const STARTUP_TIMEOUT_MS = 30_000
 const CALL_TIMEOUT_MS = 120_000
 
@@ -158,23 +154,7 @@ export function ensureServerRunning(): Promise<void> {
     readyResolve = resolve
     readyReject = reject
 
-    const proc = spawn(
-      'conda',
-      [
-        'run', '-n', CONDA_ENV, '--no-capture-output',
-        'python', '-m', 'imganalyzer.server',
-      ],
-      {
-        cwd: PKG_ROOT,
-        env: {
-          ...process.env,
-          HF_HUB_DISABLE_SYMLINKS_WARNING: '1',
-          PYTHONIOENCODING: 'utf-8',
-          PYTHONUTF8: '1',
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }
-    )
+    const proc = spawnPythonModule('imganalyzer.server')
 
     serverProcess = proc
     attachStdoutParser(proc)
@@ -256,15 +236,9 @@ export async function shutdownServer(): Promise<void> {
   // Give it a moment to exit cleanly, then force kill the entire process tree
   await new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
-      try {
-        if (pid && process.platform === 'win32') {
-          // Tree-kill: conda spawns python as a child process, so we need
-          // to kill the entire tree, not just the conda wrapper.
-          execSync(`taskkill /T /F /PID ${pid}`, { stdio: 'ignore' })
-        } else {
-          serverProcess?.kill()
-        }
-      } catch { /* ignore — process may already be gone */ }
+        try {
+          if (pid) killProcessTree(pid)
+        } catch { /* ignore — process may already be gone */ }
       resolve()
     }, 3000)
 

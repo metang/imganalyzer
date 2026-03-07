@@ -1176,6 +1176,206 @@ class TestJobQueue:
         assert row is not None
         assert row["status"] == "pending"
 
+    def test_claim_leased_creates_job_lease(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["macbook-pro", "MacBook Pro", "darwin", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/leased.jpg")
+        job_id = queue.enqueue(img_id, "objects")
+        assert job_id is not None
+
+        claimed = queue.claim_leased(worker_id="macbook-pro", lease_ttl_seconds=120, batch_size=1)
+        assert len(claimed) == 1
+        assert claimed[0]["id"] == job_id
+        assert claimed[0]["module"] == "objects"
+        assert claimed[0]["lease_token"]
+
+        lease_row = conn.execute(
+            "SELECT worker_id, lease_token FROM job_leases WHERE job_id = ?",
+            [job_id],
+        ).fetchone()
+        assert lease_row is not None
+        assert lease_row["worker_id"] == "macbook-pro"
+        assert lease_row["lease_token"] == claimed[0]["lease_token"]
+
+    def test_release_expired_leases_requeues_jobs(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["macbook-pro", "MacBook Pro", "darwin", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/expired.jpg")
+        job_id = queue.enqueue(img_id, "objects")
+        assert job_id is not None
+
+        claimed = queue.claim_leased(worker_id="macbook-pro", lease_ttl_seconds=1, batch_size=1)
+        assert len(claimed) == 1
+
+        conn.execute(
+            "UPDATE job_leases SET lease_expires_at = datetime('now', '-1 minutes') WHERE job_id = ?",
+            [job_id],
+        )
+        conn.commit()
+
+        released = queue.release_expired_leases()
+        assert released == 1
+
+        row = conn.execute("SELECT status FROM job_queue WHERE id = ?", [job_id]).fetchone()
+        assert row is not None
+        assert row["status"] == "pending"
+        lease_row = conn.execute("SELECT 1 FROM job_leases WHERE job_id = ?", [job_id]).fetchone()
+        assert lease_row is None
+
+    def test_mark_done_leased_requires_matching_token(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["macbook-pro", "MacBook Pro", "darwin", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/complete.jpg")
+        job_id = queue.enqueue(img_id, "objects")
+        assert job_id is not None
+        claimed = queue.claim_leased(worker_id="macbook-pro", lease_ttl_seconds=120, batch_size=1)
+        token = claimed[0]["lease_token"]
+
+        assert queue.mark_done_leased(job_id, "wrong-token") is False
+        assert queue.mark_done_leased(job_id, token) is True
+
+        row = conn.execute("SELECT status FROM job_queue WHERE id = ?", [job_id]).fetchone()
+        assert row is not None
+        assert row["status"] == "done"
+        lease_row = conn.execute("SELECT 1 FROM job_leases WHERE job_id = ?", [job_id]).fetchone()
+        assert lease_row is None
+
+    def test_heartbeat_leased_extends_expiry_and_rejects_bad_token(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["macbook-pro", "MacBook Pro", "darwin", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/heartbeat.jpg")
+        job_id = queue.enqueue(img_id, "objects")
+        assert job_id is not None
+        claimed = queue.claim_leased(worker_id="macbook-pro", lease_ttl_seconds=60, batch_size=1)
+        token = claimed[0]["lease_token"]
+        before = conn.execute(
+            "SELECT heartbeat_at, lease_expires_at FROM job_leases WHERE job_id = ?",
+            [job_id],
+        ).fetchone()
+        assert before is not None
+
+        assert queue.heartbeat_lease(job_id, "wrong-token", extend_ttl_seconds=300) is False
+        assert queue.heartbeat_lease(job_id, token, extend_ttl_seconds=300) is True
+
+        after = conn.execute(
+            "SELECT heartbeat_at, lease_expires_at FROM job_leases WHERE job_id = ?",
+            [job_id],
+        ).fetchone()
+        assert after is not None
+        assert after["heartbeat_at"] >= before["heartbeat_at"]
+        assert after["lease_expires_at"] > before["lease_expires_at"]
+
+    def test_release_and_skip_leased_require_matching_token(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["macbook-pro", "MacBook Pro", "darwin", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/release-and-skip.jpg")
+
+        release_job = queue.enqueue(img_id, "objects")
+        assert release_job is not None
+        release_claim = queue.claim_leased(worker_id="macbook-pro", lease_ttl_seconds=60, batch_size=1)
+        release_token = release_claim[0]["lease_token"]
+        assert queue.release_leased(release_job, "wrong-token") is False
+        assert queue.release_leased(release_job, release_token) is True
+        release_row = conn.execute("SELECT status FROM job_queue WHERE id = ?", [release_job]).fetchone()
+        assert release_row is not None
+        assert release_row["status"] == "pending"
+
+        skip_image_id = repo.register_image(file_path="/photos/skip-only.jpg")
+        skip_job = queue.enqueue(skip_image_id, "faces")
+        assert skip_job is not None
+        skip_claim = queue.claim_leased(
+            worker_id="macbook-pro",
+            lease_ttl_seconds=60,
+            batch_size=1,
+            module="faces",
+        )
+        skip_token = skip_claim[0]["lease_token"]
+        assert queue.mark_skipped_leased(skip_job, "wrong-token", "has_people") is False
+        assert queue.mark_skipped_leased(skip_job, skip_token, "has_people") is True
+        skip_row = conn.execute(
+            "SELECT status, skip_reason FROM job_queue WHERE id = ?",
+            [skip_job],
+        ).fetchone()
+        assert skip_row is not None
+        assert skip_row["status"] == "skipped"
+        assert skip_row["skip_reason"] == "has_people"
+
+    def test_release_worker_leases_requeues_claimed_jobs(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["macbook-pro", "MacBook Pro", "darwin", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/release.jpg")
+        job_id = queue.enqueue(img_id, "objects")
+        assert job_id is not None
+        claimed = queue.claim_leased(worker_id="macbook-pro", lease_ttl_seconds=120, batch_size=1)
+        assert len(claimed) == 1
+
+        released = queue.release_worker_leases("macbook-pro")
+        assert released == 1
+
+        row = conn.execute("SELECT status FROM job_queue WHERE id = ?", [job_id]).fetchone()
+        assert row is not None
+        assert row["status"] == "pending"
+
 
 class TestWorkerFlushRecovery:
     def test_flush_fts_requeues_failed_ids(self, tmp_path):

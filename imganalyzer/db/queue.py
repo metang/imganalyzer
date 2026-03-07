@@ -6,12 +6,17 @@ atomically using UPDATE ... RETURNING to avoid double-processing.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _now_plus(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class JobQueue:
@@ -138,6 +143,254 @@ class JobQueue:
             self.conn.rollback()
             raise
         return [dict(r) for r in rows]
+
+    def claim_leased(
+        self,
+        worker_id: str,
+        lease_ttl_seconds: int = 120,
+        batch_size: int = 1,
+        module: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Atomically claim jobs and create leases for distributed workers."""
+        where = "WHERE status = 'pending'"
+        params: list[Any] = []
+        if module:
+            where += " AND module = ?"
+            params.append(module)
+        params.append(batch_size)
+
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.conn.execute(
+                f"""SELECT id, image_id, module, attempts
+                    FROM job_queue
+                    {where}
+                    ORDER BY priority DESC, queued_at ASC
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+            if not rows:
+                self.conn.rollback()
+                return []
+
+            now = _now()
+            expires_at = _now_plus(max(1, lease_ttl_seconds))
+            job_ids = [r["id"] for r in rows]
+            placeholders = ",".join("?" * len(job_ids))
+            self.conn.execute(
+                f"""UPDATE job_queue
+                    SET status = 'running', started_at = ?
+                    WHERE id IN ({placeholders})""",
+                [now] + job_ids,
+            )
+
+            claimed: list[dict[str, Any]] = []
+            for row in rows:
+                token = str(uuid4())
+                self.conn.execute(
+                    """INSERT INTO job_leases
+                       (job_id, worker_id, lease_token, leased_at, heartbeat_at, lease_expires_at)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(job_id) DO UPDATE SET
+                         worker_id = excluded.worker_id,
+                         lease_token = excluded.lease_token,
+                         leased_at = excluded.leased_at,
+                         heartbeat_at = excluded.heartbeat_at,
+                         lease_expires_at = excluded.lease_expires_at""",
+                    [row["id"], worker_id, token, now, now, expires_at],
+                )
+                item = dict(row)
+                item["lease_token"] = token
+                item["lease_expires_at"] = expires_at
+                claimed.append(item)
+
+            self.conn.commit()
+            return claimed
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def release_expired_leases(self) -> int:
+        """Return expired leased jobs to pending state."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.conn.execute(
+                """SELECT job_id FROM job_leases
+                   WHERE lease_expires_at <= datetime('now')"""
+            ).fetchall()
+            if not rows:
+                self.conn.rollback()
+                return 0
+
+            job_ids = [r["job_id"] for r in rows]
+            placeholders = ",".join("?" * len(job_ids))
+            cur = self.conn.execute(
+                f"""UPDATE job_queue
+                    SET status = 'pending', started_at = NULL, attempts = attempts + 1
+                    WHERE id IN ({placeholders})""",
+                job_ids,
+            )
+            self.conn.execute(
+                f"DELETE FROM job_leases WHERE job_id IN ({placeholders})",
+                job_ids,
+            )
+            self.conn.commit()
+            return cur.rowcount
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def release_worker_leases(self, worker_id: str) -> int:
+        """Return all leases held by a worker to pending state."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.conn.execute(
+                "SELECT job_id FROM job_leases WHERE worker_id = ?",
+                [worker_id],
+            ).fetchall()
+            if not rows:
+                self.conn.rollback()
+                return 0
+            job_ids = [r["job_id"] for r in rows]
+            placeholders = ",".join("?" * len(job_ids))
+            cur = self.conn.execute(
+                f"""UPDATE job_queue
+                    SET status = 'pending', started_at = NULL, attempts = attempts + 1
+                    WHERE id IN ({placeholders})""",
+                job_ids,
+            )
+            self.conn.execute(
+                f"DELETE FROM job_leases WHERE job_id IN ({placeholders})",
+                job_ids,
+            )
+            self.conn.commit()
+            return cur.rowcount
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def heartbeat_lease(
+        self,
+        job_id: int,
+        lease_token: str,
+        extend_ttl_seconds: int = 120,
+    ) -> bool:
+        """Refresh a lease heartbeat and extend its expiry if the token matches."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                [job_id, lease_token],
+            ).fetchone()
+            if row is None:
+                self.conn.rollback()
+                return False
+            now = _now()
+            expires_at = _now_plus(max(5, extend_ttl_seconds))
+            self.conn.execute(
+                """UPDATE job_leases
+                   SET heartbeat_at = ?, lease_expires_at = ?
+                   WHERE job_id = ?""",
+                [now, expires_at, job_id],
+            )
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def release_leased(self, job_id: int, lease_token: str) -> bool:
+        """Return a claimed leased job to pending if the token matches."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                [job_id, lease_token],
+            ).fetchone()
+            if row is None:
+                self.conn.rollback()
+                return False
+            self.conn.execute(
+                "UPDATE job_queue SET status = 'pending', started_at = NULL WHERE id = ?",
+                [job_id],
+            )
+            self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def mark_done_leased(self, job_id: int, lease_token: str) -> bool:
+        """Mark a leased job done if the lease token matches."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                [job_id, lease_token],
+            ).fetchone()
+            if row is None:
+                self.conn.rollback()
+                return False
+            self.conn.execute(
+                "UPDATE job_queue SET status = 'done', completed_at = ? WHERE id = ?",
+                [_now(), job_id],
+            )
+            self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def mark_failed_leased(self, job_id: int, lease_token: str, error: str) -> bool:
+        """Mark a leased job failed if the lease token matches."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                [job_id, lease_token],
+            ).fetchone()
+            if row is None:
+                self.conn.rollback()
+                return False
+            self.conn.execute(
+                """UPDATE job_queue
+                   SET status = 'failed', error_message = ?,
+                       attempts = attempts + 1, completed_at = ?
+                   WHERE id = ?""",
+                [error, _now(), job_id],
+            )
+            self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def mark_skipped_leased(self, job_id: int, lease_token: str, reason: str) -> bool:
+        """Mark a leased job skipped if the lease token matches."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                [job_id, lease_token],
+            ).fetchone()
+            if row is None:
+                self.conn.rollback()
+                return False
+            self.conn.execute(
+                """UPDATE job_queue
+                   SET status = 'skipped', skip_reason = ?, completed_at = ?
+                   WHERE id = ?""",
+                [reason, _now(), job_id],
+            )
+            self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
 
     # ── Complete / Fail / Skip ─────────────────────────────────────────────
 

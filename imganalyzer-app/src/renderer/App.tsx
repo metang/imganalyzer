@@ -4,9 +4,10 @@ import { DbGalleryView } from './components/DbGalleryView'
 import { BatchConfigView, BatchRunView } from './components/BatchView'
 import { SearchView } from './components/SearchView'
 import { FacesView } from './components/FacesView'
+import { SettingsView } from './components/SettingsView'
 import { useBatchProcess } from './hooks/useBatchProcess'
 
-type Tab = 'gallery' | 'batch' | 'running' | 'search' | 'faces'
+type Tab = 'gallery' | 'batch' | 'running' | 'search' | 'faces' | 'settings'
 
 // ── Error Boundary ────────────────────────────────────────────────────────────
 
@@ -128,6 +129,19 @@ export default function App() {
         <TabButton active={tab === 'faces'} onClick={() => setTab('faces')}>
           Faces
         </TabButton>
+
+        <div className="ml-auto flex items-center">
+          <IconButton
+            active={tab === 'settings'}
+            title="Settings"
+            onClick={() => setTab('settings')}
+          >
+            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317a1 1 0 0 1 1.35-.936l.83.356a1 1 0 0 0 .76 0l.83-.356a1 1 0 0 1 1.35.936l.115.895a1 1 0 0 0 .474.724l.765.458a1 1 0 0 1 .35 1.357l-.45.776a1 1 0 0 0-.11.735l.195.868a1 1 0 0 1-.824 1.19l-.886.14a1 1 0 0 0-.644.383l-.57.692a1 1 0 0 1-1.401.172l-.702-.548a1 1 0 0 0-.748-.2l-.88.16a1 1 0 0 1-1.154-.873l-.093-.902a1 1 0 0 0-.4-.695l-.721-.543a1 1 0 0 1-.23-1.381l.53-.735a1 1 0 0 0 .157-.724l-.097-.9a1 1 0 0 1 .962-1.094l.906-.024a1 1 0 0 0 .703-.327l.61-.645Z" />
+              <circle cx="12" cy="12" r="2.75" />
+            </svg>
+          </IconButton>
+        </div>
       </div>
 
       {/* ── Gallery tab ───────────────────────────────────────────────────────── */}
@@ -169,6 +183,12 @@ export default function App() {
           <FacesView />
         </div>
       )}
+
+      {tab === 'settings' && (
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          <SettingsView />
+        </div>
+      )}
     </div>
     </ErrorBoundary>
   )
@@ -193,6 +213,35 @@ function TabButton({
         ${active
           ? 'bg-neutral-800 text-neutral-100 border border-b-transparent border-neutral-700'
           : 'text-neutral-500 hover:text-neutral-300'}
+      `}
+    >
+      {children}
+    </button>
+  )
+}
+
+function IconButton({
+  active,
+  onClick,
+  title,
+  children,
+}: {
+  active: boolean
+  onClick(): void
+  title: string
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      className={`
+        p-2 rounded-md transition-colors border
+        ${active
+          ? 'bg-neutral-800 text-neutral-100 border-neutral-700'
+          : 'text-neutral-500 border-transparent hover:text-neutral-300 hover:bg-neutral-900'}
       `}
     >
       {children}

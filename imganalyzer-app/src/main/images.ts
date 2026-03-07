@@ -1,10 +1,10 @@
 import { access, mkdir, readdir, readFile, stat, unlink, utimes, writeFile } from 'fs/promises'
 import type { Dirent } from 'fs'
-import { app } from 'electron'
 import { createHash } from 'crypto'
-import { basename, dirname, extname, join, resolve } from 'path'
-import { homedir } from 'os'
+import { basename, dirname, extname, join } from 'path'
 import { rpc } from './python-rpc'
+import type { ThumbnailCacheConfig, ThumbnailCacheConfigInput } from './settings'
+import { getAppSettings, updateAppSettings } from './settings'
 
 export const IMAGE_EXTENSIONS = new Set([
   '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp', '.bmp',
@@ -29,20 +29,6 @@ export interface ImageFile {
   hasXmp: boolean
   size: number
   mtime: number
-}
-
-export interface ThumbnailCacheConfigInput {
-  directory?: string
-  maxGB?: number
-}
-
-export interface ThumbnailCacheConfig {
-  directory: string
-  maxGB: number
-  source: {
-    directory: 'default' | 'env' | 'settings'
-    maxGB: 'default' | 'env' | 'settings'
-  }
 }
 
 export async function listImages(folderPath: string): Promise<ImageFile[]> {
@@ -84,131 +70,16 @@ export async function listImages(folderPath: string): Promise<ImageFile[]> {
   return images.sort((a, b) => a.name.localeCompare(b.name))
 }
 
-// ── Persistent thumbnail cache config ─────────────────────────────────────────
-
-const THUMB_CACHE_DIR_ENV = 'IMGANALYZER_THUMB_CACHE_DIR'
-const THUMB_CACHE_MAX_GB_ENV = 'IMGANALYZER_THUMB_CACHE_MAX_GB'
-const THUMB_CACHE_SETTINGS_FILE = 'thumbnail-cache-settings.json'
-const DEFAULT_THUMB_CACHE_GB = 300
-
-interface ThumbnailCacheSettings {
-  directory?: string
-  maxGB?: number
-}
-
-let resolvedThumbConfig: ThumbnailCacheConfig | null = null
-
-function isErrnoCode(err: unknown, code: string): boolean {
-  return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: string }).code === code
-}
-
-function parsePositiveNumber(raw: string | undefined): number | null {
-  if (!raw) return null
-  const parsed = Number(raw)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
-}
-
-function expandHomePath(value: string): string {
-  if (!value.startsWith('~')) return value
-  if (value === '~') return homedir()
-  if (value.startsWith('~/') || value.startsWith('~\\')) {
-    return join(homedir(), value.slice(2))
-  }
-  return value
-}
-
-function getThumbnailSettingsPath(): string {
-  return join(app.getPath('userData'), THUMB_CACHE_SETTINGS_FILE)
-}
-
-async function readThumbnailSettings(): Promise<ThumbnailCacheSettings> {
-  try {
-    const raw = await readFile(getThumbnailSettingsPath(), 'utf-8')
-    const parsed = JSON.parse(raw) as ThumbnailCacheSettings
-    const out: ThumbnailCacheSettings = {}
-    if (typeof parsed.directory === 'string' && parsed.directory.trim()) {
-      out.directory = parsed.directory.trim()
-    }
-    if (typeof parsed.maxGB === 'number' && Number.isFinite(parsed.maxGB) && parsed.maxGB > 0) {
-      out.maxGB = parsed.maxGB
-    }
-    return out
-  } catch (err) {
-    if (isErrnoCode(err, 'ENOENT')) return {}
-    throw err
-  }
-}
-
-async function writeThumbnailSettings(settings: ThumbnailCacheSettings): Promise<void> {
-  const path = getThumbnailSettingsPath()
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, JSON.stringify(settings, null, 2), 'utf-8')
-}
-
-async function resolveThumbnailCacheConfig(force = false): Promise<ThumbnailCacheConfig> {
-  if (resolvedThumbConfig && !force) return resolvedThumbConfig
-
-  const settings = await readThumbnailSettings()
-  const envDir = process.env[THUMB_CACHE_DIR_ENV]?.trim()
-  const envMaxGB = parsePositiveNumber(process.env[THUMB_CACHE_MAX_GB_ENV])
-
-  let directorySource: ThumbnailCacheConfig['source']['directory'] = 'default'
-  let directory: string
-  if (envDir) {
-    directory = resolve(expandHomePath(envDir))
-    directorySource = 'env'
-  } else if (settings.directory) {
-    directory = resolve(expandHomePath(settings.directory))
-    directorySource = 'settings'
-  } else {
-    directory = resolve(join(homedir(), '.cache', 'imganalyzer', 'thumbs'))
-  }
-
-  let maxGBSource: ThumbnailCacheConfig['source']['maxGB'] = 'default'
-  let maxGB = DEFAULT_THUMB_CACHE_GB
-  if (envMaxGB !== null) {
-    maxGB = envMaxGB
-    maxGBSource = 'env'
-  } else if (typeof settings.maxGB === 'number' && settings.maxGB > 0) {
-    maxGB = settings.maxGB
-    maxGBSource = 'settings'
-  }
-
-  await mkdir(directory, { recursive: true })
-  resolvedThumbConfig = {
-    directory,
-    maxGB,
-    source: {
-      directory: directorySource,
-      maxGB: maxGBSource,
-    },
-  }
-  return resolvedThumbConfig
-}
-
 export async function getThumbnailCacheConfig(): Promise<ThumbnailCacheConfig> {
-  return resolveThumbnailCacheConfig()
+  const settings = await getAppSettings()
+  await mkdir(settings.thumbnailCache.directory, { recursive: true })
+  return settings.thumbnailCache
 }
 
 export async function setThumbnailCacheConfig(config: ThumbnailCacheConfigInput): Promise<ThumbnailCacheConfig> {
-  const settings = await readThumbnailSettings()
-  const next: ThumbnailCacheSettings = { ...settings }
-
-  if (config.directory !== undefined) {
-    const trimmed = config.directory.trim()
-    if (!trimmed) throw new Error('Thumbnail cache directory cannot be empty')
-    next.directory = trimmed
-  }
-  if (config.maxGB !== undefined) {
-    if (!Number.isFinite(config.maxGB) || config.maxGB <= 0) {
-      throw new Error('Thumbnail cache maxGB must be a positive number')
-    }
-    next.maxGB = Number(config.maxGB)
-  }
-
-  await writeThumbnailSettings(next)
-  resolvedThumbConfig = null
-  const resolved = await resolveThumbnailCacheConfig(true)
+  const bundle = await updateAppSettings({ thumbnailCache: config })
+  const resolved = bundle.settings.thumbnailCache
+  await mkdir(resolved.directory, { recursive: true })
   void triggerThumbnailCacheCleanup()
   return resolved
 }

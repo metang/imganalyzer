@@ -9,6 +9,7 @@ Each module runner:
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,43 @@ def _read_image_headers(path: Path) -> dict[str, Any]:
         return StandardReader(path).read_headers()
 
 
+def _is_windows_style_path(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", value)) or value.startswith("\\\\")
+
+
+def _rewrite_path_with_mappings(original: str, mappings: list[tuple[str, str]]) -> str:
+    """Rewrite *original* using the first matching prefix mapping."""
+    for source_prefix, target_prefix in mappings:
+        source = source_prefix.rstrip("\\/")
+        target = target_prefix.rstrip("\\/")
+        if not source or not target:
+            continue
+
+        if _is_windows_style_path(source):
+            matches = original.casefold().startswith(source.casefold())
+        else:
+            matches = original.startswith(source)
+        if not matches:
+            continue
+
+        remainder = original[len(source):]
+        if remainder and remainder[0] not in ("\\", "/"):
+            continue
+
+        parts = [segment for segment in re.split(r"[\\/]+", remainder.lstrip("\\/")) if segment]
+        separator = "\\" if _is_windows_style_path(target) else "/"
+        mapped = target
+        if parts:
+            mapped = f"{mapped}{separator}{separator.join(parts)}"
+        return mapped
+    return original
+
+
+def _apply_path_mappings(path: Path, mappings: list[tuple[str, str]]) -> Path:
+    """Rewrite *path* using the first matching prefix mapping."""
+    return Path(_rewrite_path_with_mappings(str(path), mappings))
+
+
 # Maximum long-edge pixels for AI modules.  All downstream models
 # (CLIP 224px, GroundingDINO 800px, BLIP-2 364px, TrOCR 384px,
 # InsightFace 640px) internally resize to well below this limit.
@@ -140,6 +178,7 @@ class ModuleRunner:
         face_match_threshold: float | None = None,
         verbose: bool = False,
         profiler: Any = None,
+        path_mappings: list[tuple[str, str]] | None = None,
     ) -> None:
         self.conn = conn
         self.repo = repo
@@ -149,6 +188,7 @@ class ModuleRunner:
         self.detection_threshold = detection_threshold
         self.face_match_threshold = face_match_threshold
         self.verbose = verbose
+        self.path_mappings = path_mappings or []
         from imganalyzer.pipeline.profiler import NullProfiler
         self.profiler: Any = profiler or NullProfiler()
         # Per-image decode cache: avoids re-reading the same image from disk
@@ -224,7 +264,7 @@ class ModuleRunner:
         if image is None:
             raise ValueError(f"Image id={image_id} not found in database")
 
-        path = Path(image["file_path"])
+        path = _apply_path_mappings(Path(image["file_path"]), self.path_mappings)
 
         # For the embedding module, skip the file-existence check when the image
         # already has a description in the DB — the text embedding can be computed

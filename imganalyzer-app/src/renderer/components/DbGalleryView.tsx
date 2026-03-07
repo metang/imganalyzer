@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   GalleryFolderNode,
   SearchResult,
-  ThumbnailCacheConfig,
 } from '../global'
 import { SearchLightbox } from './SearchLightbox'
 import { VirtualGrid } from './VirtualGrid'
@@ -18,14 +17,6 @@ interface FolderSidebarProps {
   onToggleRecursive: (next: boolean) => void
   onToggleExpand: (path: string) => void
   onSelectFolder: (path: string | null) => void
-  cacheConfig: ThumbnailCacheConfig | null
-  cacheDirectory: string
-  cacheMaxGB: string
-  cacheSaving: boolean
-  cacheMessage: string | null
-  onChangeCacheDirectory: (value: string) => void
-  onChangeCacheMaxGB: (value: string) => void
-  onSaveCache: () => void
 }
 
 function FolderSidebar({
@@ -37,14 +28,6 @@ function FolderSidebar({
   onToggleRecursive,
   onToggleExpand,
   onSelectFolder,
-  cacheConfig,
-  cacheDirectory,
-  cacheMaxGB,
-  cacheSaving,
-  cacheMessage,
-  onChangeCacheDirectory,
-  onChangeCacheMaxGB,
-  onSaveCache,
 }: FolderSidebarProps) {
   const childrenByParent = useMemo(() => {
     const map = new Map<string | null, GalleryFolderNode[]>()
@@ -142,40 +125,9 @@ function FolderSidebar({
       </div>
 
       <div className="shrink-0 border-t border-neutral-800 px-3 py-2 flex flex-col gap-2">
-        <p className="text-xs font-medium text-neutral-300">Thumbnail cache</p>
-        <label className="text-[10px] text-neutral-500">Directory</label>
-        <input
-          type="text"
-          value={cacheDirectory}
-          onChange={(e) => onChangeCacheDirectory(e.target.value)}
-          className="w-full px-2 py-1 text-xs bg-neutral-800 border border-neutral-700 rounded text-neutral-200"
-          placeholder="Cache directory"
-        />
-        <label className="text-[10px] text-neutral-500">Max size (GB)</label>
-        <input
-          type="number"
-          min={1}
-          value={cacheMaxGB}
-          onChange={(e) => onChangeCacheMaxGB(e.target.value)}
-          className="w-full px-2 py-1 text-xs bg-neutral-800 border border-neutral-700 rounded text-neutral-200"
-          placeholder="300"
-        />
-        <button
-          type="button"
-          onClick={onSaveCache}
-          disabled={cacheSaving}
-          className="w-full py-1.5 rounded text-xs bg-neutral-800 text-neutral-200 hover:bg-neutral-700 disabled:opacity-50"
-        >
-          {cacheSaving ? 'Saving...' : 'Save cache settings'}
-        </button>
-        {cacheConfig && (
-          <p className="text-[10px] text-neutral-600">
-            Source: dir={cacheConfig.source.directory}, size={cacheConfig.source.maxGB}
-          </p>
-        )}
-        {cacheMessage && (
-          <p className="text-[10px] text-neutral-500">{cacheMessage}</p>
-        )}
+        <p className="text-[10px] text-neutral-500">
+          Thumbnail cache settings moved to the Settings page.
+        </p>
       </div>
     </div>
   )
@@ -201,12 +153,6 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
   const [error, setError] = useState<string | null>(null)
 
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
-
-  const [cacheConfig, setCacheConfig] = useState<ThumbnailCacheConfig | null>(null)
-  const [cacheDirectory, setCacheDirectory] = useState('')
-  const [cacheMaxGB, setCacheMaxGB] = useState('300')
-  const [cacheSaving, setCacheSaving] = useState(false)
-  const [cacheMessage, setCacheMessage] = useState<string | null>(null)
   const chunkRequestTokenRef = useRef(0)
 
   const loadFolders = useCallback(async () => {
@@ -219,13 +165,6 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
       .filter((f) => f.parent_path === null)
       .map((f) => f.path)
     setExpandedFolders(new Set(roots))
-  }, [])
-
-  const loadCacheConfig = useCallback(async () => {
-    const cfg = await window.api.getThumbnailCacheConfig()
-    setCacheConfig(cfg)
-    setCacheDirectory(cfg.directory)
-    setCacheMaxGB(String(cfg.maxGB))
   }, [])
 
   const loadInitialChunk = useCallback(async () => {
@@ -297,11 +236,7 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg)
     })
-    void loadCacheConfig().catch((err) => {
-      const msg = err instanceof Error ? err.message : String(err)
-      setCacheMessage(`Failed to load cache settings: ${msg}`)
-    })
-  }, [loadCacheConfig, loadFolders])
+  }, [loadFolders])
 
   useEffect(() => {
     void loadInitialChunk()
@@ -325,36 +260,6 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
     setMobileSidebarOpen(false)
   }, [])
 
-  const saveCacheConfig = useCallback(async () => {
-    const maxGB = Number(cacheMaxGB)
-    if (!Number.isFinite(maxGB) || maxGB <= 0) {
-      setCacheMessage('Max cache size must be a positive number.')
-      return
-    }
-    if (!cacheDirectory.trim()) {
-      setCacheMessage('Cache directory cannot be empty.')
-      return
-    }
-
-    setCacheSaving(true)
-    setCacheMessage(null)
-    try {
-      const updated = await window.api.setThumbnailCacheConfig({
-        directory: cacheDirectory.trim(),
-        maxGB,
-      })
-      setCacheConfig(updated)
-      setCacheDirectory(updated.directory)
-      setCacheMaxGB(String(updated.maxGB))
-      setCacheMessage('Cache settings saved.')
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setCacheMessage(`Failed to save cache settings: ${msg}`)
-    } finally {
-      setCacheSaving(false)
-    }
-  }, [cacheDirectory, cacheMaxGB])
-
   const selectedFolderLabel = selectedFolderPath ?? 'All processed images'
 
   return (
@@ -369,14 +274,6 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
           onToggleRecursive={setRecursive}
           onToggleExpand={toggleExpanded}
           onSelectFolder={handleSelectFolder}
-          cacheConfig={cacheConfig}
-          cacheDirectory={cacheDirectory}
-          cacheMaxGB={cacheMaxGB}
-          cacheSaving={cacheSaving}
-          cacheMessage={cacheMessage}
-          onChangeCacheDirectory={setCacheDirectory}
-          onChangeCacheMaxGB={setCacheMaxGB}
-          onSaveCache={saveCacheConfig}
         />
       </aside>
 
@@ -398,14 +295,6 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
               onToggleRecursive={setRecursive}
               onToggleExpand={toggleExpanded}
               onSelectFolder={handleSelectFolder}
-              cacheConfig={cacheConfig}
-              cacheDirectory={cacheDirectory}
-              cacheMaxGB={cacheMaxGB}
-              cacheSaving={cacheSaving}
-              cacheMessage={cacheMessage}
-              onChangeCacheDirectory={setCacheDirectory}
-              onChangeCacheMaxGB={setCacheMaxGB}
-              onSaveCache={saveCacheConfig}
             />
           </div>
         </div>

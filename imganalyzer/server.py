@@ -27,6 +27,17 @@ Supported methods:
     run             - Start processing queue (streaming)
     queue_clear     - Clear jobs from queue (one-shot)
     rebuild         - Re-enqueue module jobs (one-shot)
+    workers/register - Register/update distributed worker metadata (one-shot)
+    workers/heartbeat - Refresh worker heartbeat and recover expired leases (one-shot)
+    workers/list    - List known distributed workers (one-shot)
+    jobs/claim      - Lease pending jobs to a worker (one-shot)
+    jobs/release-expired - Return expired leases to pending (one-shot)
+    jobs/heartbeat  - Extend an active job lease (one-shot)
+    jobs/release    - Return a leased job to pending (one-shot)
+    jobs/complete   - Mark leased job complete (one-shot)
+    jobs/fail       - Mark leased job failed (one-shot)
+    jobs/skip       - Mark leased job skipped (one-shot)
+    jobs/release-worker - Release all leases held by a worker (one-shot)
     search          - Search the image database (one-shot)
     gallery/listFolders - List folder tree nodes for DB-backed gallery (one-shot)
     gallery/listImagesChunk - List progressive gallery image chunk (one-shot)
@@ -97,20 +108,58 @@ def _send_notification(method: str, params: Any) -> None:
     _send({"jsonrpc": "2.0", "method": method, "params": params})
 
 
-# ── Lazy singletons ──────────────────────────────────────────────────────────
+# ── Thread-local DB connections ──────────────────────────────────────────────
 
-_db_conn = None
-_db_lock = threading.Lock()
+_db_local = threading.local()
+_schema_init_lock = threading.Lock()
+_schema_ready_paths: set[str] = set()
 
 
-def _get_db():
-    """Get or create the shared DB connection (thread-safe)."""
-    global _db_conn
-    with _db_lock:
-        if _db_conn is None:
-            from imganalyzer.db.connection import get_db
-            _db_conn = get_db()
-        return _db_conn
+def _open_server_db() -> sqlite3.Connection:
+    """Open a fresh SQLite connection for the current server thread."""
+    from imganalyzer.db.connection import get_db_path
+    from imganalyzer.db.schema import ensure_schema
+
+    db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_key = str(db_path.resolve())
+    if db_key not in _schema_ready_paths:
+        with _schema_init_lock:
+            if db_key not in _schema_ready_paths:
+                bootstrap = sqlite3.connect(
+                    str(db_path),
+                    timeout=30,
+                    isolation_level=None,
+                    check_same_thread=False,
+                )
+                bootstrap.row_factory = sqlite3.Row
+                bootstrap.execute("PRAGMA journal_mode=WAL")
+                bootstrap.execute("PRAGMA synchronous=NORMAL")
+                bootstrap.execute("PRAGMA foreign_keys=ON")
+                bootstrap.execute("PRAGMA busy_timeout=5000")
+                ensure_schema(bootstrap)
+                bootstrap.close()
+                _schema_ready_paths.add(db_key)
+    conn = sqlite3.connect(
+        str(db_path),
+        timeout=30,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def _get_db() -> sqlite3.Connection:
+    """Return a thread-local SQLite connection for the current server thread."""
+    conn = getattr(_db_local, "conn", None)
+    if conn is None:
+        conn = _open_server_db()
+        _db_local.conn = conn
+    return conn
 
 
 # ── State for cancellable operations ─────────────────────────────────────────
@@ -371,6 +420,233 @@ def _handle_queue_clear(params: dict) -> dict:
             deleted = queue.clear_all()
 
     return {"deleted": deleted}
+
+
+def _handle_workers_register(params: dict) -> dict:
+    """Register or update a distributed worker node."""
+    from imganalyzer.db.queue import _now
+
+    worker_id = str(params.get("workerId", "")).strip()
+    if not worker_id:
+        raise ValueError("workerId is required")
+    display_name = str(params.get("displayName") or worker_id)
+    platform = str(params.get("platform") or "")
+    capabilities = params.get("capabilities") or {}
+    capabilities_json = json.dumps(capabilities, separators=(",", ":"))
+    now = _now()
+
+    conn = _get_db()
+    conn.execute(
+        """INSERT INTO worker_nodes
+           (id, display_name, platform, capabilities, status, last_heartbeat, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'online', ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             display_name = excluded.display_name,
+             platform = excluded.platform,
+             capabilities = excluded.capabilities,
+             status = 'online',
+             last_heartbeat = excluded.last_heartbeat,
+             updated_at = excluded.updated_at""",
+        [worker_id, display_name, platform, capabilities_json, now, now, now],
+    )
+    conn.commit()
+    return {"workerId": worker_id, "registered": True}
+
+
+def _handle_workers_heartbeat(params: dict) -> dict:
+    """Refresh worker heartbeat timestamp and return basic lease recovery stats."""
+    from imganalyzer.db.queue import JobQueue, _now
+
+    worker_id = str(params.get("workerId", "")).strip()
+    if not worker_id:
+        raise ValueError("workerId is required")
+
+    conn = _get_db()
+    now = _now()
+    cur = conn.execute(
+        """UPDATE worker_nodes
+           SET status = 'online', last_heartbeat = ?, updated_at = ?
+           WHERE id = ?""",
+        [now, now, worker_id],
+    )
+    if cur.rowcount == 0:
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, capabilities, status, last_heartbeat, created_at, updated_at)
+               VALUES (?, ?, '', '{}', 'online', ?, ?, ?)""",
+            [worker_id, worker_id, now, now, now],
+        )
+    conn.commit()
+
+    queue = JobQueue(conn)
+    released = queue.release_expired_leases()
+    return {"workerId": worker_id, "ok": True, "releasedExpired": released}
+
+
+def _handle_workers_list(_params: dict) -> dict:
+    """List registered worker nodes and recent heartbeat metadata."""
+    conn = _get_db()
+    rows = conn.execute(
+        """SELECT id, display_name, platform, capabilities, status, last_heartbeat, created_at, updated_at
+           FROM worker_nodes
+           ORDER BY updated_at DESC, id ASC"""
+    ).fetchall()
+    items = []
+    for row in rows:
+        caps_raw = row["capabilities"] or "{}"
+        try:
+            caps = json.loads(caps_raw)
+        except Exception:
+            caps = {}
+        items.append({
+            "id": row["id"],
+            "displayName": row["display_name"],
+            "platform": row["platform"],
+            "capabilities": caps,
+            "status": row["status"],
+            "lastHeartbeat": row["last_heartbeat"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        })
+    return {"workers": items}
+
+
+def _handle_jobs_claim(params: dict) -> dict:
+    """Lease pending jobs to a worker for distributed execution."""
+    from imganalyzer.db.queue import JobQueue
+    from imganalyzer.db.repository import Repository
+
+    worker_id = str(params.get("workerId", "")).strip()
+    if not worker_id:
+        raise ValueError("workerId is required")
+    batch_size = int(params.get("batchSize", 1))
+    module = params.get("module")
+    lease_ttl_seconds = int(params.get("leaseTtlSeconds", 120))
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    repo = Repository(conn)
+
+    claimed = queue.claim_leased(
+        worker_id=worker_id,
+        lease_ttl_seconds=max(5, lease_ttl_seconds),
+        batch_size=max(1, batch_size),
+        module=str(module) if module is not None else None,
+    )
+    jobs: list[dict[str, Any]] = []
+    for job in claimed:
+        image = repo.get_image(job["image_id"])
+        jobs.append({
+            "id": job["id"],
+            "imageId": job["image_id"],
+            "module": job["module"],
+            "attempts": job["attempts"],
+            "leaseToken": job["lease_token"],
+            "leaseExpiresAt": job["lease_expires_at"],
+            "filePath": image["file_path"] if image is not None else None,
+        })
+    return {"jobs": jobs}
+
+
+def _handle_jobs_release_expired(_params: dict) -> dict:
+    """Requeue expired leases (coordinator safety sweep)."""
+    from imganalyzer.db.queue import JobQueue
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    released = queue.release_expired_leases()
+    return {"released": released}
+
+
+def _handle_jobs_heartbeat(params: dict) -> dict:
+    """Extend the lease for an active distributed job."""
+    from imganalyzer.db.queue import JobQueue
+
+    job_id = int(params.get("jobId", 0))
+    lease_token = str(params.get("leaseToken", "")).strip()
+    extend_ttl_seconds = int(params.get("extendTtlSeconds", 120))
+    if job_id <= 0 or not lease_token:
+        raise ValueError("jobId and leaseToken are required")
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    ok = queue.heartbeat_lease(job_id, lease_token, extend_ttl_seconds)
+    return {"ok": ok}
+
+
+def _handle_jobs_release(params: dict) -> dict:
+    """Return a leased job to pending when a worker defers it."""
+    from imganalyzer.db.queue import JobQueue
+
+    job_id = int(params.get("jobId", 0))
+    lease_token = str(params.get("leaseToken", "")).strip()
+    if job_id <= 0 or not lease_token:
+        raise ValueError("jobId and leaseToken are required")
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    ok = queue.release_leased(job_id, lease_token)
+    return {"ok": ok}
+
+
+def _handle_jobs_complete(params: dict) -> dict:
+    """Mark a leased job as done when worker reports completion."""
+    from imganalyzer.db.queue import JobQueue
+
+    job_id = int(params.get("jobId", 0))
+    lease_token = str(params.get("leaseToken", "")).strip()
+    if job_id <= 0 or not lease_token:
+        raise ValueError("jobId and leaseToken are required")
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    ok = queue.mark_done_leased(job_id, lease_token)
+    return {"ok": ok}
+
+
+def _handle_jobs_fail(params: dict) -> dict:
+    """Mark a leased job as failed when worker reports an error."""
+    from imganalyzer.db.queue import JobQueue
+
+    job_id = int(params.get("jobId", 0))
+    lease_token = str(params.get("leaseToken", "")).strip()
+    error = str(params.get("error", "remote worker error"))
+    if job_id <= 0 or not lease_token:
+        raise ValueError("jobId and leaseToken are required")
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    ok = queue.mark_failed_leased(job_id, lease_token, error)
+    return {"ok": ok}
+
+
+def _handle_jobs_skip(params: dict) -> dict:
+    """Mark a leased job skipped when a worker intentionally bypasses it."""
+    from imganalyzer.db.queue import JobQueue
+
+    job_id = int(params.get("jobId", 0))
+    lease_token = str(params.get("leaseToken", "")).strip()
+    reason = str(params.get("reason", "skipped")).strip()
+    if job_id <= 0 or not lease_token:
+        raise ValueError("jobId and leaseToken are required")
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    ok = queue.mark_skipped_leased(job_id, lease_token, reason)
+    return {"ok": ok}
+
+
+def _handle_jobs_release_worker(params: dict) -> dict:
+    """Release all leases for a worker (disconnect/failover path)."""
+    from imganalyzer.db.queue import JobQueue
+
+    worker_id = str(params.get("workerId", "")).strip()
+    if not worker_id:
+        raise ValueError("workerId is required")
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    released = queue.release_worker_leases(worker_id)
+    return {"released": released}
 
 
 def _handle_rebuild(params: dict) -> dict:
@@ -1802,6 +2078,17 @@ def _handle_faces_crop_batch(params: dict) -> dict:
 _SYNC_METHODS: dict[str, Any] = {
     "status": _handle_status,
     "queue_clear": _handle_queue_clear,
+    "workers/register": _handle_workers_register,
+    "workers/heartbeat": _handle_workers_heartbeat,
+    "workers/list": _handle_workers_list,
+    "jobs/claim": _handle_jobs_claim,
+    "jobs/release-expired": _handle_jobs_release_expired,
+    "jobs/heartbeat": _handle_jobs_heartbeat,
+    "jobs/release": _handle_jobs_release,
+    "jobs/complete": _handle_jobs_complete,
+    "jobs/fail": _handle_jobs_fail,
+    "jobs/skip": _handle_jobs_skip,
+    "jobs/release-worker": _handle_jobs_release_worker,
     "rebuild": _handle_rebuild,
     "search": _handle_search,
     "search/resolveFaceQuery": _handle_search_resolve_face_query,
