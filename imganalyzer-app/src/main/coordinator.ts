@@ -5,6 +5,7 @@ import { getDistributedCoordinatorUrl } from './settings'
 
 const STARTUP_TIMEOUT_MS = 30_000
 const READY_PATTERN = /\[server\.http\] listening on http:/i
+const STARTUP_DIAGNOSTIC_LINE_LIMIT = 25
 
 let coordinatorProcess: ChildProcess | null = null
 let startPromise: Promise<void> | null = null
@@ -51,11 +52,46 @@ function handleCoordinatorLine(
   }
 }
 
+function recordStartupLine(lines: string[], line: string): void {
+  if (!line.trim()) return
+  lines.push(line)
+  if (lines.length > STARTUP_DIAGNOSTIC_LINE_LIMIT) {
+    lines.splice(0, lines.length - STARTUP_DIAGNOSTIC_LINE_LIMIT)
+  }
+}
+
+function selectStartupDiagnostics(lines: string[]): string[] {
+  const filtered = lines.filter((line) => !READY_PATTERN.test(line))
+  const prioritized = filtered.filter((line) =>
+    /traceback|error|exception|failed|required|usage:|no module named|address already in use|permission denied|winerror/i.test(line))
+  if (prioritized.length > 0) return prioritized.slice(-6)
+  return filtered.slice(-6)
+}
+
+function formatStartupFailure(message: string, stderrLines: string[], stdoutLines: string[]): string {
+  const stderrDiagnostics = selectStartupDiagnostics(stderrLines)
+  if (stderrDiagnostics.length > 0) {
+    return `${message}. Startup stderr: ${stderrDiagnostics.join(' | ')}`
+  }
+
+  const stdoutDiagnostics = selectStartupDiagnostics(stdoutLines)
+  if (stdoutDiagnostics.length > 0) {
+    return `${message}. Startup stdout: ${stdoutDiagnostics.join(' | ')}`
+  }
+
+  return message
+}
+
 function attachLineReader(
   stream: NodeJS.ReadableStream | null | undefined,
   onLine: (line: string) => void,
-): void {
+): () => void {
   let buffer = ''
+  const flush = () => {
+    const trailing = buffer.trim()
+    buffer = ''
+    if (trailing) onLine(trailing)
+  }
   stream?.on('data', (chunk: Buffer | string) => {
     buffer += chunk.toString()
     const lines = buffer.split(/\r?\n/)
@@ -64,6 +100,9 @@ function attachLineReader(
       onLine(line.trim())
     }
   })
+  stream?.on('end', flush)
+  stream?.on('close', flush)
+  return flush
 }
 
 export function getCoordinatorStatus(): CoordinatorStatus {
@@ -124,6 +163,8 @@ export async function startCoordinator(settings: DistributedCoordinatorSettings)
 
   startPromise = new Promise<void>((resolve, reject) => {
     let settled = false
+    const startupStdoutLines: string[] = []
+    const startupStderrLines: string[] = []
     const finishResolve = () => {
       if (settled) return
       settled = true
@@ -153,26 +194,42 @@ export async function startCoordinator(settings: DistributedCoordinatorSettings)
         } catch {
           // Ignore shutdown races.
         }
-        finishReject('Distributed job server startup timed out')
+        finishReject(formatStartupFailure('Distributed job server startup timed out', startupStderrLines, startupStdoutLines))
       }
     }, STARTUP_TIMEOUT_MS)
 
-    attachLineReader(proc.stdout, (line) => handleCoordinatorLine(line, settings, () => {
-      clearTimeout(timer)
-      finishResolve()
-    }))
-    attachLineReader(proc.stderr, (line) => handleCoordinatorLine(line, settings, () => {
-      clearTimeout(timer)
-      finishResolve()
-    }))
+    const flushStdout = attachLineReader(proc.stdout, (line) => {
+      recordStartupLine(startupStdoutLines, line)
+      handleCoordinatorLine(line, settings, () => {
+        clearTimeout(timer)
+        finishResolve()
+      })
+    })
+    const flushStderr = attachLineReader(proc.stderr, (line) => {
+      recordStartupLine(startupStderrLines, line)
+      handleCoordinatorLine(line, settings, () => {
+        clearTimeout(timer)
+        finishResolve()
+      })
+    })
 
     proc.on('error', (err) => {
       clearTimeout(timer)
-      finishReject(`Distributed job server failed to start: ${err.message}`)
+      flushStdout()
+      flushStderr()
+      finishReject(
+        formatStartupFailure(
+          `Distributed job server failed to start: ${err.message}`,
+          startupStderrLines,
+          startupStdoutLines,
+        ),
+      )
     })
 
     proc.on('close', (code) => {
       clearTimeout(timer)
+      flushStdout()
+      flushStderr()
       const wasExpected = expectedStopPid !== null && expectedStopPid === proc.pid
       if (wasExpected) {
         expectedStopPid = null
@@ -188,7 +245,11 @@ export async function startCoordinator(settings: DistributedCoordinatorSettings)
         return
       }
 
-      const message = `Distributed job server exited with code ${code ?? 'unknown'}`
+      const message = formatStartupFailure(
+        `Distributed job server exited with code ${code ?? 'unknown'}`,
+        startupStderrLines,
+        startupStdoutLines,
+      )
       if (status.state === 'running') {
         coordinatorProcess = null
         startPromise = null
