@@ -261,8 +261,13 @@ class DistributedWorker:
         job_id = int(job["id"])
         lease_token = str(job["leaseToken"])
         path = str(job.get("filePath") or f"id={image_id}")
+        short_path = Path(path).name
         start_ms = int(time.time() * 1000)
         conn: sqlite3.Connection | None = None
+
+        console.print(
+            f"  [blue]▶[/blue] [bold]{module}[/bold] ← {short_path} [dim](job {job_id})[/dim]"
+        )
 
         try:
             conn, repo, runner = self._open_job_sandbox(job)
@@ -282,6 +287,9 @@ class DistributedWorker:
                 raise RuntimeError(f"Coordinator rejected completion for job {job_id}")
             keywords = result.get("keywords") if module == "cloud_ai" and result else None
             _emit_result(path, module, "done", elapsed, keywords=keywords)
+            console.print(
+                f"  [green]✓[/green] [bold]{module}[/bold] done in {elapsed / 1000:.1f}s ← {short_path}"
+            )
             return "done"
 
         except ValueError as exc:
@@ -300,6 +308,10 @@ class DistributedWorker:
                 if not bool(skipped.get("ok")):
                     raise RuntimeError("Coordinator rejected corrupt_file skip") from exc
                 _emit_result(path, module, "skipped", elapsed, f"corrupt file: {exc}")
+                console.print(
+                    f"  [yellow]⊘[/yellow] [bold]{module}[/bold] skipped (corrupt) in "
+                    f"{elapsed / 1000:.1f}s ← {short_path}"
+                )
                 return "skipped"
             raise
 
@@ -316,8 +328,10 @@ class DistributedWorker:
                     "the lease may have expired.[/yellow]"
                 )
             _emit_result(path, module, "failed", elapsed, error_msg)
-            if self.verbose:
-                console.print(f"  [red]Failed:[/red] {path} module={module}: {error_msg}")
+            console.print(
+                f"  [red]✗[/red] [bold]{module}[/bold] failed in {elapsed / 1000:.1f}s ← "
+                f"{short_path}: {error_msg}"
+            )
             return "failed"
 
         finally:
@@ -412,6 +426,10 @@ class DistributedWorker:
                 if not jobs:
                     self._shutdown.wait(self.poll_interval_seconds)
                     continue
+
+                console.print(
+                    f"[cyan]Claimed {len(jobs)} job(s)[/cyan]"
+                )
                 self._mark_all_active(jobs)
                 for job in jobs:
                     if self._shutdown.is_set():
