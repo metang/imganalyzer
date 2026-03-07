@@ -269,6 +269,58 @@ class JobQueue:
             self.conn.rollback()
             raise
 
+    def heartbeat_lease(
+        self,
+        job_id: int,
+        lease_token: str,
+        extend_ttl_seconds: int = 120,
+    ) -> bool:
+        """Refresh a lease heartbeat and extend its expiry if the token matches."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                [job_id, lease_token],
+            ).fetchone()
+            if row is None:
+                self.conn.rollback()
+                return False
+            now = _now()
+            expires_at = _now_plus(max(5, extend_ttl_seconds))
+            self.conn.execute(
+                """UPDATE job_leases
+                   SET heartbeat_at = ?, lease_expires_at = ?
+                   WHERE job_id = ?""",
+                [now, expires_at, job_id],
+            )
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def release_leased(self, job_id: int, lease_token: str) -> bool:
+        """Return a claimed leased job to pending if the token matches."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                [job_id, lease_token],
+            ).fetchone()
+            if row is None:
+                self.conn.rollback()
+                return False
+            self.conn.execute(
+                "UPDATE job_queue SET status = 'pending', started_at = NULL WHERE id = ?",
+                [job_id],
+            )
+            self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def mark_done_leased(self, job_id: int, lease_token: str) -> bool:
         """Mark a leased job done if the lease token matches."""
         self.conn.execute("BEGIN IMMEDIATE")
@@ -308,6 +360,30 @@ class JobQueue:
                        attempts = attempts + 1, completed_at = ?
                    WHERE id = ?""",
                 [error, _now(), job_id],
+            )
+            self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def mark_skipped_leased(self, job_id: int, lease_token: str, reason: str) -> bool:
+        """Mark a leased job skipped if the lease token matches."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                [job_id, lease_token],
+            ).fetchone()
+            if row is None:
+                self.conn.rollback()
+                return False
+            self.conn.execute(
+                """UPDATE job_queue
+                   SET status = 'skipped', skip_reason = ?, completed_at = ?
+                   WHERE id = ?""",
+                [reason, _now(), job_id],
             )
             self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
             self.conn.commit()

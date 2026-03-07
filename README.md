@@ -63,6 +63,49 @@ imganalyzer analyze photo.jpg --no-ai
 
 ---
 
+## Distributed Coordinator + Workers
+
+The distributed batch prototype uses the existing JSON-RPC server in HTTP mode as
+the coordinator and one or more `run-distributed-worker` agents as workers.
+
+### Start the coordinator
+
+```bash
+python -m imganalyzer.server --transport http --host 127.0.0.1 --port 8765
+```
+
+For LAN access, add a bearer token:
+
+```bash
+python -m imganalyzer.server --transport http --host 0.0.0.0 --port 8765 --auth-token YOUR_TOKEN
+```
+
+### Start a worker
+
+```bash
+imganalyzer run-distributed-worker \
+  --coordinator http://127.0.0.1:8765/jsonrpc \
+  --worker-id worker-01 \
+  --db-path ~/.cache/imganalyzer/imganalyzer.db
+```
+
+Useful worker options:
+
+- `--module metadata` to dedicate a worker to a single module
+- `--lease-ttl 300` to request longer job leases
+- `--heartbeat-interval 15` to refresh worker and lease liveness more often
+- `--auth-token YOUR_TOKEN` when the coordinator requires HTTP auth
+
+### Current assumptions
+
+- Workers must point at the same SQLite database file as the coordinator.
+- Workers must be able to read the image paths stored in that database.
+- The current implementation has been validated with local HTTP coordinator/worker
+  smoke tests, including two concurrent workers claiming jobs without duplicate
+  execution.
+
+---
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in your API keys:

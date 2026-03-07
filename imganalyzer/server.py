@@ -32,8 +32,11 @@ Supported methods:
     workers/list    - List known distributed workers (one-shot)
     jobs/claim      - Lease pending jobs to a worker (one-shot)
     jobs/release-expired - Return expired leases to pending (one-shot)
+    jobs/heartbeat  - Extend an active job lease (one-shot)
+    jobs/release    - Return a leased job to pending (one-shot)
     jobs/complete   - Mark leased job complete (one-shot)
     jobs/fail       - Mark leased job failed (one-shot)
+    jobs/skip       - Mark leased job skipped (one-shot)
     jobs/release-worker - Release all leases held by a worker (one-shot)
     search          - Search the image database (one-shot)
     gallery/listFolders - List folder tree nodes for DB-backed gallery (one-shot)
@@ -105,20 +108,58 @@ def _send_notification(method: str, params: Any) -> None:
     _send({"jsonrpc": "2.0", "method": method, "params": params})
 
 
-# ── Lazy singletons ──────────────────────────────────────────────────────────
+# ── Thread-local DB connections ──────────────────────────────────────────────
 
-_db_conn = None
-_db_lock = threading.Lock()
+_db_local = threading.local()
+_schema_init_lock = threading.Lock()
+_schema_ready_paths: set[str] = set()
 
 
-def _get_db():
-    """Get or create the shared DB connection (thread-safe)."""
-    global _db_conn
-    with _db_lock:
-        if _db_conn is None:
-            from imganalyzer.db.connection import get_db
-            _db_conn = get_db()
-        return _db_conn
+def _open_server_db() -> sqlite3.Connection:
+    """Open a fresh SQLite connection for the current server thread."""
+    from imganalyzer.db.connection import get_db_path
+    from imganalyzer.db.schema import ensure_schema
+
+    db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_key = str(db_path.resolve())
+    if db_key not in _schema_ready_paths:
+        with _schema_init_lock:
+            if db_key not in _schema_ready_paths:
+                bootstrap = sqlite3.connect(
+                    str(db_path),
+                    timeout=30,
+                    isolation_level=None,
+                    check_same_thread=False,
+                )
+                bootstrap.row_factory = sqlite3.Row
+                bootstrap.execute("PRAGMA journal_mode=WAL")
+                bootstrap.execute("PRAGMA synchronous=NORMAL")
+                bootstrap.execute("PRAGMA foreign_keys=ON")
+                bootstrap.execute("PRAGMA busy_timeout=5000")
+                ensure_schema(bootstrap)
+                bootstrap.close()
+                _schema_ready_paths.add(db_key)
+    conn = sqlite3.connect(
+        str(db_path),
+        timeout=30,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def _get_db() -> sqlite3.Connection:
+    """Return a thread-local SQLite connection for the current server thread."""
+    conn = getattr(_db_local, "conn", None)
+    if conn is None:
+        conn = _open_server_db()
+        _db_local.conn = conn
+    return conn
 
 
 # ── State for cancellable operations ─────────────────────────────────────────
@@ -516,6 +557,37 @@ def _handle_jobs_release_expired(_params: dict) -> dict:
     return {"released": released}
 
 
+def _handle_jobs_heartbeat(params: dict) -> dict:
+    """Extend the lease for an active distributed job."""
+    from imganalyzer.db.queue import JobQueue
+
+    job_id = int(params.get("jobId", 0))
+    lease_token = str(params.get("leaseToken", "")).strip()
+    extend_ttl_seconds = int(params.get("extendTtlSeconds", 120))
+    if job_id <= 0 or not lease_token:
+        raise ValueError("jobId and leaseToken are required")
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    ok = queue.heartbeat_lease(job_id, lease_token, extend_ttl_seconds)
+    return {"ok": ok}
+
+
+def _handle_jobs_release(params: dict) -> dict:
+    """Return a leased job to pending when a worker defers it."""
+    from imganalyzer.db.queue import JobQueue
+
+    job_id = int(params.get("jobId", 0))
+    lease_token = str(params.get("leaseToken", "")).strip()
+    if job_id <= 0 or not lease_token:
+        raise ValueError("jobId and leaseToken are required")
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    ok = queue.release_leased(job_id, lease_token)
+    return {"ok": ok}
+
+
 def _handle_jobs_complete(params: dict) -> dict:
     """Mark a leased job as done when worker reports completion."""
     from imganalyzer.db.queue import JobQueue
@@ -544,6 +616,22 @@ def _handle_jobs_fail(params: dict) -> dict:
     conn = _get_db()
     queue = JobQueue(conn)
     ok = queue.mark_failed_leased(job_id, lease_token, error)
+    return {"ok": ok}
+
+
+def _handle_jobs_skip(params: dict) -> dict:
+    """Mark a leased job skipped when a worker intentionally bypasses it."""
+    from imganalyzer.db.queue import JobQueue
+
+    job_id = int(params.get("jobId", 0))
+    lease_token = str(params.get("leaseToken", "")).strip()
+    reason = str(params.get("reason", "skipped")).strip()
+    if job_id <= 0 or not lease_token:
+        raise ValueError("jobId and leaseToken are required")
+
+    conn = _get_db()
+    queue = JobQueue(conn)
+    ok = queue.mark_skipped_leased(job_id, lease_token, reason)
     return {"ok": ok}
 
 
@@ -1995,8 +2083,11 @@ _SYNC_METHODS: dict[str, Any] = {
     "workers/list": _handle_workers_list,
     "jobs/claim": _handle_jobs_claim,
     "jobs/release-expired": _handle_jobs_release_expired,
+    "jobs/heartbeat": _handle_jobs_heartbeat,
+    "jobs/release": _handle_jobs_release,
     "jobs/complete": _handle_jobs_complete,
     "jobs/fail": _handle_jobs_fail,
+    "jobs/skip": _handle_jobs_skip,
     "jobs/release-worker": _handle_jobs_release_worker,
     "rebuild": _handle_rebuild,
     "search": _handle_search,

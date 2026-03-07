@@ -608,6 +608,57 @@ def run_queue(
     worker.run(batch_size=batch_size)
 
 
+@app.command(name="run-distributed-worker")
+def run_distributed_worker(
+    coordinator: str = typer.Option("http://127.0.0.1:8765/", "--coordinator", help="Coordinator JSON-RPC HTTP endpoint"),
+    worker_id: Optional[str] = typer.Option(None, "--worker-id", help="Unique worker identifier (defaults to hostname)"),
+    display_name: Optional[str] = typer.Option(None, "--display-name", help="Human-friendly worker name"),
+    auth_token: Optional[str] = typer.Option(None, "--auth-token", help="Bearer token for coordinator HTTP auth"),
+    batch_size: int = typer.Option(1, "--batch-size", min=1, help="How many leases to claim at a time"),
+    poll_interval: float = typer.Option(5.0, "--poll-interval", min=0.5, help="Seconds to wait between empty claim polls"),
+    heartbeat_interval: float = typer.Option(30.0, "--heartbeat-interval", min=1.0, help="Seconds between worker and lease heartbeats"),
+    lease_ttl: int = typer.Option(120, "--lease-ttl", min=5, help="Lease TTL in seconds requested from the coordinator"),
+    module: Optional[str] = typer.Option(None, "--module", help="Optional single-module filter when claiming jobs"),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", help="Path to the shared SQLite database used for local writes"),
+    force: bool = typer.Option(False, "--force", help="Ignore cache and re-run analyzed modules"),
+    cloud_provider: str = typer.Option("openai", "--cloud", help="Cloud AI provider for cloud_ai/aesthetic modules"),
+    no_xmp: bool = typer.Option(False, "--no-xmp", help="Skip XMP sidecar generation on the worker"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose worker logging"),
+    detection_prompt: Optional[str] = typer.Option(None, "--detection-prompt"),
+    detection_threshold: Optional[float] = typer.Option(None, "--detection-threshold", min=0.0, max=1.0),
+    face_threshold: Optional[float] = typer.Option(None, "--face-threshold", min=0.0, max=1.0),
+) -> None:
+    """Run a distributed worker that claims leased jobs from a coordinator."""
+    import os
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    if db_path is not None:
+        os.environ["IMGANALYZER_DB_PATH"] = str(db_path)
+
+    from imganalyzer.pipeline.distributed_worker import DistributedWorker
+
+    worker = DistributedWorker(
+        coordinator_url=coordinator,
+        worker_id=worker_id,
+        display_name=display_name,
+        auth_token=auth_token,
+        batch_size=batch_size,
+        poll_interval_seconds=poll_interval,
+        heartbeat_interval_seconds=heartbeat_interval,
+        lease_ttl_seconds=lease_ttl,
+        module_filter=module,
+        force=force,
+        cloud_provider=cloud_provider,
+        detection_prompt=detection_prompt,
+        detection_threshold=detection_threshold,
+        face_match_threshold=face_threshold,
+        verbose=verbose,
+        write_xmp=not no_xmp,
+    )
+    worker.run_forever()
+
+
 @app.command()
 def status(
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON instead of a table"),
