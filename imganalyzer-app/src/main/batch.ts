@@ -56,6 +56,7 @@ export interface BatchModuleStats {
 
 export interface BatchStats {
   status: BatchStatus
+  monitorOnly: boolean
   totalImages: number
   modules: Partial<Record<string, BatchModuleStats>>
   totals: { pending: number; running: number; done: number; failed: number; skipped: number }
@@ -102,6 +103,7 @@ let sessionStartMs = 0
 let isRunActive = false
 let currentRunId = 0
 let idleTimer: ReturnType<typeof setTimeout> | null = null
+let monitorOnly = false
 
 // Sliding window of { timestamp, durationMs, module } for avg-per-image computation
 const completionWindow: Array<{ ts: number; durationMs: number; module: string }> = []
@@ -219,8 +221,24 @@ async function doPoll(): Promise<void> {
     const workers = sessionConfig?.workers ?? 1
     const cloudWorkers = sessionConfig?.cloudWorkers ?? 4
     const pending = data.totals.pending ?? 0
+    const running = data.totals.running ?? 0
+    const activeJobs = pending + running
     const metrics = computeMetrics(pending, workers, cloudWorkers)
     const moduleMetrics = computeModuleMetrics()
+
+    if (monitorOnly) {
+      if (activeJobs > 0) {
+        batchStatus = 'running'
+      } else if (batchStatus === 'running' || batchStatus === 'paused') {
+        batchStatus = 'done'
+        stopPolling()
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => {
+          batchStatus = 'idle'
+          monitorOnly = false
+        }, 3000)
+      }
+    }
 
     // Merge per-module speed into each module's stats
     const modulesWithSpeed: Partial<Record<string, BatchModuleStats>> = {}
@@ -234,6 +252,7 @@ async function doPoll(): Promise<void> {
 
     const stats: BatchStats = {
       status: batchStatus,
+      monitorOnly,
       totalImages: data.total_images,
       modules: modulesWithSpeed,
       totals: {
@@ -317,7 +336,10 @@ function setupNotificationListener(): void {
           } else {
             batchStatus = 'done'
             if (idleTimer) clearTimeout(idleTimer)
-            idleTimer = setTimeout(() => { batchStatus = 'idle' }, 3000)
+            idleTimer = setTimeout(() => {
+              batchStatus = 'idle'
+              monitorOnly = false
+            }, 3000)
           }
           void doPoll()
         }).catch(() => {
@@ -325,7 +347,10 @@ function setupNotificationListener(): void {
           batchStatus = 'done'
           void doPoll()
           if (idleTimer) clearTimeout(idleTimer)
-          idleTimer = setTimeout(() => { batchStatus = 'idle' }, 3000)
+          idleTimer = setTimeout(() => {
+            batchStatus = 'idle'
+            monitorOnly = false
+          }, 3000)
         })
         break
       }
@@ -344,7 +369,10 @@ function setupNotificationListener(): void {
           } else {
             batchStatus = 'error'
             if (idleTimer) clearTimeout(idleTimer)
-            idleTimer = setTimeout(() => { batchStatus = 'idle' }, 3000)
+            idleTimer = setTimeout(() => {
+              batchStatus = 'idle'
+              monitorOnly = false
+            }, 3000)
           }
           void doPoll()
         }).catch(() => {
@@ -352,7 +380,10 @@ function setupNotificationListener(): void {
           batchStatus = 'error'
           void doPoll()
           if (idleTimer) clearTimeout(idleTimer)
-          idleTimer = setTimeout(() => { batchStatus = 'idle' }, 3000)
+          idleTimer = setTimeout(() => {
+            batchStatus = 'idle'
+            monitorOnly = false
+          }, 3000)
         })
         break
       }
@@ -367,6 +398,7 @@ function setupNotificationListener(): void {
 /** Kill all background work and stop polling. Called on app quit. */
 export async function killAllBatchProcesses(): Promise<void> {
   stopPolling()
+  monitorOnly = false
   if (isRunActive) {
     try {
       await rpc.call('cancel_run', {})
@@ -398,6 +430,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       noHash: boolean
     ): Promise<{ registered: number; enqueued: number; skipped: number }> => {
       batchStatus = 'ingesting'
+      monitorOnly = false
       // Reset counters for a fresh session
       resetSessionCounters()
       sessionStartMs = 0
@@ -441,6 +474,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       currentRunId++
       if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
       batchStatus = 'running'
+      monitorOnly = false
       isRunActive = true
 
       try {
@@ -458,7 +492,10 @@ export function registerBatchHandlers(win: BrowserWindow): void {
         isRunActive = false
         batchStatus = 'error'
         if (idleTimer) clearTimeout(idleTimer)
-        idleTimer = setTimeout(() => { batchStatus = 'idle' }, 5000)
+        idleTimer = setTimeout(() => {
+          batchStatus = 'idle'
+          monitorOnly = false
+        }, 5000)
         return
       }
 
@@ -474,6 +511,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     isRunActive = false
     stopPolling()
     batchStatus = 'paused'
+    monitorOnly = false
     // Emit one tick so the UI updates immediately
     void doPoll()
   })
@@ -489,6 +527,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     currentRunId++
     if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
     batchStatus = 'running'
+    monitorOnly = false
     isRunActive = true
 
     try {
@@ -509,7 +548,10 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       isRunActive = false
       batchStatus = 'error'
       if (idleTimer) clearTimeout(idleTimer)
-      idleTimer = setTimeout(() => { batchStatus = 'idle' }, 5000)
+      idleTimer = setTimeout(() => {
+        batchStatus = 'idle'
+        monitorOnly = false
+      }, 5000)
       return
     }
 
@@ -525,6 +567,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     isRunActive = false
     stopPolling()
     batchStatus = 'stopped'
+    monitorOnly = false
 
     // Clear pending + running jobs for this folder from the DB
     try {
@@ -547,9 +590,9 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   // ── batch:check-pending ───────────────────────────────────────────────────
   ipcMain.handle('batch:check-pending', async (): Promise<{ pending: number; running: number }> => {
     try {
-      await ensureServerRunning()
-      const data = await rpc.call('status', {}) as {
-        totals: Record<string, number>
+        await ensureServerRunning()
+        const data = await rpc.call('status', {}) as {
+          totals: Record<string, number>
       }
       return {
         pending: data.totals.pending ?? 0,
@@ -590,6 +633,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       currentRunId++
       if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
       batchStatus = 'running'
+      monitorOnly = false
       isRunActive = true
 
       try {
@@ -609,13 +653,41 @@ export function registerBatchHandlers(win: BrowserWindow): void {
         isRunActive = false
         batchStatus = 'error'
         if (idleTimer) clearTimeout(idleTimer)
-        idleTimer = setTimeout(() => { batchStatus = 'idle' }, 5000)
+        idleTimer = setTimeout(() => {
+          batchStatus = 'idle'
+          monitorOnly = false
+        }, 5000)
         return
       }
 
       startPolling()
     }
   )
+
+  // ── batch:monitor-existing ────────────────────────────────────────────────
+  ipcMain.handle('batch:monitor-existing', async (): Promise<boolean> => {
+    try {
+      await ensureServerRunning()
+      const data = await rpc.call('status', {}) as {
+        totals: Record<string, number>
+      }
+      const running = data.totals.running ?? 0
+      if (running <= 0) return false
+
+      sessionStartMs = Date.now()
+      resetSessionCounters()
+      currentRunId++
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
+      batchStatus = 'running'
+      monitorOnly = true
+      isRunActive = false
+      startPolling()
+      void doPoll()
+      return true
+    } catch {
+      return false
+    }
+  })
 
   // ── batch:retry-failed ────────────────────────────────────────────────────
   ipcMain.handle(
@@ -640,6 +712,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       currentRunId++
       if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
       batchStatus = 'running'
+      monitorOnly = false
       isRunActive = true
 
       try {
@@ -657,7 +730,10 @@ export function registerBatchHandlers(win: BrowserWindow): void {
         isRunActive = false
         batchStatus = 'error'
         if (idleTimer) clearTimeout(idleTimer)
-        idleTimer = setTimeout(() => { batchStatus = 'idle' }, 5000)
+        idleTimer = setTimeout(() => {
+          batchStatus = 'idle'
+          monitorOnly = false
+        }, 5000)
         return
       }
 
@@ -686,6 +762,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     resetSessionCounters()
     sessionStartMs = 0
     batchStatus = 'idle'
+    monitorOnly = false
 
     // Emit one final poll tick so the renderer resets its counters
     void doPoll()

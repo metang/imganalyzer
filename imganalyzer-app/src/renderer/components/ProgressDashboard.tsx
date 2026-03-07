@@ -96,7 +96,7 @@ function ModuleTableRow({ name, stats }: { name: string; stats: BatchModuleStats
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFailed, onClearQueue, onClearCompleted }: Props) {
-  const { status, totals, modules, imagesPerSec, avgMsPerImage, estimatedMs, elapsedMs } = stats
+  const { status, monitorOnly, totals, modules, imagesPerSec, avgMsPerImage, estimatedMs, elapsedMs } = stats
 
   const totalJobs  = totals.pending + totals.running + totals.done + totals.failed + totals.skipped
   const complete   = totals.done + totals.failed + totals.skipped
@@ -117,9 +117,9 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
     .filter(([, s]) => s && s.failed > 0)
     .map(([mod]) => mod)
 
-  const canRetry      = failedModules.length > 0 && !isRunning
-  const canClearQueue = !isRunning && !isPaused && totalJobs > 0
-  const canClearCompleted = (totals.done + totals.skipped) > 0
+  const canRetry      = !monitorOnly && failedModules.length > 0 && !isRunning
+  const canClearQueue = !monitorOnly && !isRunning && !isPaused && totalJobs > 0
+  const canClearCompleted = !monitorOnly && (totals.done + totals.skipped) > 0
 
   const moduleEntries = Object.entries(modules).filter(
     (entry): entry is [string, BatchModuleStats] => entry[1] != null
@@ -173,7 +173,7 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
       )}
 
       {/* ── Stats row ────────────────────────────────────────────────────────── */}
-        <div className="grid grid-cols-4 gap-2 text-xs">
+      <div className="grid grid-cols-4 gap-2 text-xs">
         {[
           { label: 'Done rate', value: imagesPerSec > 0 ? fmtRate(imagesPerSec) + ' img/s' : '—' },
           { label: 'Avg/img', value: fmtMs(avgMsPerImage) },
@@ -187,7 +187,14 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
         ))}
       </div>
 
+      {monitorOnly && (
+        <p className="text-xs text-blue-300 bg-blue-900/20 border border-blue-800 rounded-lg px-3 py-2">
+          Monitoring progress from an existing distributed worker. Control buttons are disabled in monitor-only mode.
+        </p>
+      )}
+
       {/* ── Control buttons ──────────────────────────────────────────────────── */}
+      {!monitorOnly && (
       <div className="flex gap-2 flex-wrap">
         {isRunning && (
           <button
@@ -263,6 +270,7 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
           </button>
         )}
       </div>
+      )}
     </div>
   )
 }

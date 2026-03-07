@@ -60,6 +60,12 @@ export default function App() {
     if (didCheckRef.current) return
     didCheckRef.current = true
     ;(async () => {
+      const monitoring = await batch.monitorExisting()
+      if (monitoring) {
+        setResumeBanner('Monitoring jobs already being processed by a distributed worker…')
+        setTab('running')
+        return
+      }
       const resumed = await batch.resumePending()
       if (resumed) {
         setResumeBanner('Resuming unfinished jobs from a previous session…')
@@ -67,6 +73,18 @@ export default function App() {
       }
     })()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (batch.stats.status !== 'idle') return
+    const timer = window.setInterval(() => {
+      void batch.monitorExisting().then((monitoring) => {
+        if (!monitoring) return
+        setResumeBanner('Monitoring jobs already being processed by a distributed worker…')
+        setTab('running')
+      })
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [batch.monitorExisting, batch.stats.status])
 
   // Auto-switch to Running tab whenever the batch transitions to running/paused/done/error
   const prevStatusRef = useRef(batch.stats.status)

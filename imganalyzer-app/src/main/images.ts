@@ -20,6 +20,10 @@ export const RAW_EXTENSIONS = new Set([
   '.sr2', '.srf', '.x3f', '.iiq', '.mos', '.raw'
 ])
 
+function isErrnoCode(err: unknown, code: string): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: string }).code === code
+}
+
 export interface ImageFile {
   path: string
   name: string
@@ -150,7 +154,7 @@ const CLEANUP_WRITE_INTERVAL = 64
 
 async function thumbnailCacheFilePath(imagePath: string): Promise<string> {
   const sourceStat = await stat(imagePath)
-  const cfg = await resolveThumbnailCacheConfig()
+  const cfg = await getThumbnailCacheConfig()
   const material = `${imagePath}|${sourceStat.size}|${sourceStat.mtimeMs}|thumb-v1|400x300|q80`
   const hash = createHash('sha1').update(material).digest('hex')
   return join(cfg.directory, hash.slice(0, 2), `${hash}.jpg`)
@@ -215,7 +219,7 @@ async function collectCachedThumbFiles(dirPath: string): Promise<CachedThumbFile
 }
 
 async function runThumbnailCacheCleanup(): Promise<void> {
-  const cfg = await resolveThumbnailCacheConfig()
+  const cfg = await getThumbnailCacheConfig()
   const maxBytes = cfg.maxGB * 1024 * 1024 * 1024
   if (!Number.isFinite(maxBytes) || maxBytes <= 0) return
 

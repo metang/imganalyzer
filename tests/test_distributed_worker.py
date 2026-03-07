@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from unittest.mock import patch
 
+from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository
 from imganalyzer.db.schema import ensure_schema
 from imganalyzer.pipeline.distributed_worker import DistributedWorker
@@ -33,9 +35,6 @@ def test_process_claimed_job_reports_completion(tmp_path):
     )
 
     class FakeRunner:
-        def should_run(self, _image_id: int, _module: str) -> bool:
-            return True
-
         def run(self, _image_id: int, _module: str):
             return {"description": "ok"}
 
@@ -45,18 +44,22 @@ def test_process_claimed_job_reports_completion(tmp_path):
         recorded.append((method, dict(params)))
         return {"ok": True}
 
-    worker._get_thread_db = lambda: (conn, repo, None, FakeRunner())  # type: ignore[method-assign]
+    worker._open_job_sandbox = lambda _job: (conn, repo, FakeRunner())  # type: ignore[method-assign]
     worker._coordinator_call = fake_call  # type: ignore[method-assign]
 
-    status = worker._process_claimed_job(
-        {
-            "id": 5,
-            "imageId": image_id,
-            "module": "metadata",
-            "leaseToken": "lease-123",
-            "filePath": "/photos/distributed-metadata.jpg",
-        }
-    )
+    with patch(
+        "imganalyzer.pipeline.distributed_worker.extract_result_payload",
+        return_value={"data": {"camera_make": "TestCam"}},
+    ):
+        status = worker._process_claimed_job(
+            {
+                "id": 5,
+                "imageId": image_id,
+                "module": "metadata",
+                "leaseToken": "lease-123",
+                "filePath": "/photos/distributed-metadata.jpg",
+            }
+        )
 
     assert status == "done"
     assert recorded == [
@@ -65,6 +68,8 @@ def test_process_claimed_job_reports_completion(tmp_path):
             {
                 "jobId": 5,
                 "leaseToken": "lease-123",
+                "payload": {"data": {"camera_make": "TestCam"}},
+                "noXmp": True,
             },
         )
     ]
@@ -131,19 +136,132 @@ def test_rewrite_path_with_mappings_no_match_returns_original():
 
 
 def test_distributed_worker_passes_path_mappings_to_module_runner(tmp_path, monkeypatch):
-    conn = _make_test_db(tmp_path)
-    db_path = tmp_path / "distributed-worker.db"
-    conn.close()
-    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
-
     worker = DistributedWorker(
         coordinator_url="http://127.0.0.1:8765/",
         path_mappings=[(r"Z:\photos", "/Volumes/photos")],
     )
 
-    _, _, _, runner = worker._get_thread_db()
+    conn, _, runner = worker._open_job_sandbox(
+        {
+            "imageId": 1,
+            "filePath": r"Z:\photos\trip\image.jpg",
+            "image": {},
+            "context": {},
+        }
+    )
     assert runner.path_mappings == [(r"Z:\photos", "/Volumes/photos")]
-    worker._close_thread_db()
+    conn.close()
+
+
+def test_open_job_sandbox_uses_claim_context_without_shared_db(monkeypatch):
+    monkeypatch.delenv("IMGANALYZER_DB_PATH", raising=False)
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/")
+
+    conn, repo, _runner = worker._open_job_sandbox(
+        {
+            "imageId": 7,
+            "filePath": "/nas/photos/image.jpg",
+            "image": {"width": 640, "height": 480, "format": "jpeg"},
+            "context": {
+                "modules": {
+                    "local_ai": {
+                        "description": "sunset over water",
+                        "scene_type": "landscape",
+                        "main_subject": "harbor",
+                    }
+                }
+            },
+        }
+    )
+
+    assert repo.get_image(7)["file_path"] == "/nas/photos/image.jpg"
+    assert repo.get_analysis(7, "local_ai")["description"] == "sunset over water"
+    conn.close()
+
+
+def test_server_jobs_claim_packages_embedding_context(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-claim.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/nas/photos/image.jpg")
+    repo.upsert_local_ai(image_id, {"description": "red boat", "scene_type": "harbor"})
+    repo.upsert_cloud_ai(image_id, "openai", {"description": "dock at sunset"})
+    queue.enqueue(image_id, "embedding")
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1})
+
+    assert len(result["jobs"]) == 1
+    job = result["jobs"][0]
+    assert job["context"]["modules"]["local_ai"]["description"] == "red boat"
+    assert job["context"]["modules"]["cloud_ai"]["providers"][0]["description"] == "dock at sunset"
+
+
+def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-complete.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/nas/photos/image.jpg")
+    job_id = queue.enqueue(image_id, "embedding")
+    assert job_id is not None
+    claimed = queue.claim_leased("worker-1", batch_size=1)
+    assert claimed
+    lease = claimed[0]
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    result = server._handle_jobs_complete(
+        {
+            "jobId": lease["id"],
+            "leaseToken": lease["lease_token"],
+            "payload": {
+                "image": {"width": 1024, "height": 768, "format": "jpeg"},
+                "embeddings": [
+                    {
+                        "embeddingType": "description_clip",
+                        "vector": "AQIDBA==",
+                        "modelVersion": "clip-test",
+                    }
+                ],
+            },
+            "noXmp": True,
+        }
+    )
+
+    assert result == {"ok": True}
+
+    check_conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    check_conn.row_factory = sqlite3.Row
+    check_repo = Repository(check_conn)
+    image = check_repo.get_image(image_id)
+    assert image["width"] == 1024
+    rows = check_conn.execute(
+        "SELECT embedding_type, vector, model_version FROM embeddings WHERE image_id = ?",
+        [image_id],
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["embedding_type"] == "description_clip"
+    assert rows[0]["vector"] == b"\x01\x02\x03\x04"
+    assert rows[0]["model_version"] == "clip-test"
+    status_row = check_conn.execute("SELECT status FROM job_queue WHERE id = ?", [job_id]).fetchone()
+    assert status_row["status"] == "done"
+    check_conn.close()
 
 
 def test_run_forever_prints_progress_summary(monkeypatch):
@@ -241,4 +359,3 @@ def test_run_forever_retries_claim_after_timeout(monkeypatch):
     assert claim_attempts == 2
     assert any("Coordinator unavailable while claiming jobs" in line for line in printed)
     assert any("Reconnected to coordinator as" in line for line in printed)
-

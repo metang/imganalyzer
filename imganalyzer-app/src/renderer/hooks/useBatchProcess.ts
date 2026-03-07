@@ -23,6 +23,7 @@ export type ModuleKey = (typeof ALL_MODULE_KEYS)[number]
 function emptyStats(): BatchStats {
   return {
     status: 'idle',
+    monitorOnly: false,
     totalImages: 0,
     modules: {},
     totals: { pending: 0, running: 0, done: 0, failed: 0, skipped: 0 },
@@ -63,6 +64,8 @@ export interface UseBatchProcessReturn {
   startBatch(config: BatchConfig): Promise<void>
   /** Resume any pending/running jobs left over from a previous session. */
   resumePending(workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<boolean>
+  /** Monitor existing jobs already being processed elsewhere (for example by a distributed worker). */
+  monitorExisting(): Promise<boolean>
   /** Re-enqueue all failed jobs for the given modules and re-run. */
   retryFailed(modules: string[]): Promise<void>
   /** Wipe the entire job queue and reset to idle. Returns number of deleted jobs. */
@@ -130,7 +133,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
     setIngestSummary(null)
 
     // Update status optimistically so UI shows "ingesting" immediately
-    setStats((prev) => ({ ...prev, status: 'ingesting' as BatchStatus }))
+    setStats((prev) => ({ ...prev, status: 'ingesting' as BatchStatus, monitorOnly: false }))
 
     try {
       const summary = await window.api.batchIngest(
@@ -143,7 +146,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
 
       if (summary.enqueued === 0) {
         // Nothing to run — go back to idle
-        setStats((prev) => ({ ...prev, status: 'idle' as BatchStatus }))
+        setStats((prev) => ({ ...prev, status: 'idle' as BatchStatus, monitorOnly: false }))
         return
       }
 
@@ -159,7 +162,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-      setStats((prev) => ({ ...prev, status: 'error' as BatchStatus }))
+      setStats((prev) => ({ ...prev, status: 'error' as BatchStatus, monitorOnly: false }))
     }
   }, [])
 
@@ -199,7 +202,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
 
       // Optimistically jump to 'running' so the UI phase transitions immediately.
       // The 1-second poll tick will overwrite with real stats.
-      setStats((prev) => ({ ...prev, status: 'running' as BatchStatus }))
+      setStats((prev) => ({ ...prev, status: 'running' as BatchStatus, monitorOnly: false }))
 
       await window.api.batchResumePending(workers, cloudProvider, cloudWorkers)
       return true
@@ -209,14 +212,23 @@ export function useBatchProcess(): UseBatchProcessReturn {
     }
   }, [])
 
+  const monitorExisting = useCallback(async (): Promise<boolean> => {
+    try {
+      return await window.api.batchMonitorExisting()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      return false
+    }
+  }, [])
+
   const retryFailed = useCallback(async (modules: string[]) => {
     try {
       // Optimistically jump to 'running' so the UI stays in the active phase
-      setStats((prev) => ({ ...prev, status: 'running' as BatchStatus }))
+      setStats((prev) => ({ ...prev, status: 'running' as BatchStatus, monitorOnly: false }))
       await window.api.batchRetryFailed(modules)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-      setStats((prev) => ({ ...prev, status: 'error' as BatchStatus }))
+      setStats((prev) => ({ ...prev, status: 'error' as BatchStatus, monitorOnly: false }))
     }
   }, [])
 
@@ -255,6 +267,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
     ingestSummary,
     error,
     startBatch,
+    monitorExisting,
     resumePending,
     retryFailed,
     clearQueue,

@@ -6,6 +6,7 @@ import { getDistributedCoordinatorUrl } from './settings'
 const STARTUP_TIMEOUT_MS = 30_000
 const READY_PATTERN = /\[server\.http\] listening on http:/i
 const STARTUP_DIAGNOSTIC_LINE_LIMIT = 25
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
 let coordinatorProcess: ChildProcess | null = null
 let startPromise: Promise<void> | null = null
@@ -29,6 +30,24 @@ function getSignature(settings: DistributedCoordinatorSettings): string {
 
 function setStatus(next: CoordinatorStatus): void {
   status = next
+}
+
+function setCoordinatorError(settings: DistributedCoordinatorSettings, message: string): void {
+  setStatus({
+    state: 'error',
+    pid: null,
+    url: getDistributedCoordinatorUrl(settings),
+    lastError: message,
+  })
+}
+
+function getCoordinatorConfigError(settings: DistributedCoordinatorSettings): string | null {
+  const bindHost = settings.bindHost.trim().toLowerCase()
+  if (!bindHost || LOOPBACK_HOSTS.has(bindHost) || settings.authToken.trim()) {
+    return null
+  }
+
+  return 'Distributed job server requires an auth token when Bind host is not localhost. Add an auth token or change Bind host to 127.0.0.1.'
 }
 
 function handleCoordinatorLine(
@@ -139,6 +158,15 @@ export async function startCoordinator(settings: DistributedCoordinatorSettings)
   const signature = getSignature(settings)
   if (coordinatorProcess && status.state === 'running' && runningSignature === signature) return
   if (startPromise && startingSignature === signature) return startPromise
+  const configError = getCoordinatorConfigError(settings)
+  if (configError) {
+    if (!coordinatorProcess) {
+      startingSignature = null
+      runningSignature = null
+      setCoordinatorError(settings, configError)
+    }
+    return Promise.reject(new Error(configError))
+  }
   if (coordinatorProcess) await stopCoordinator()
 
   const args = [
@@ -178,12 +206,7 @@ export async function startCoordinator(settings: DistributedCoordinatorSettings)
       startPromise = null
       startingSignature = null
       runningSignature = null
-      setStatus({
-        state: 'error',
-        pid: null,
-        url: getDistributedCoordinatorUrl(settings),
-        lastError: message,
-      })
+      setCoordinatorError(settings, message)
       reject(new Error(message))
     }
 
@@ -255,12 +278,7 @@ export async function startCoordinator(settings: DistributedCoordinatorSettings)
         startPromise = null
         startingSignature = null
         runningSignature = null
-        setStatus({
-          state: 'error',
-          pid: null,
-          url: getDistributedCoordinatorUrl(settings),
-          lastError: message,
-        })
+        setCoordinatorError(settings, message)
         return
       }
       finishReject(message)
@@ -280,5 +298,14 @@ export async function applyCoordinatorSettings(settings: DistributedCoordinatorS
 
 export async function startCoordinatorOnLaunch(settings: DistributedCoordinatorSettings): Promise<void> {
   if (!settings.enabled || !settings.autostart) return
+  const configError = getCoordinatorConfigError(settings)
+  if (configError) {
+    if (!coordinatorProcess) {
+      startingSignature = null
+      runningSignature = null
+      setCoordinatorError(settings, `Auto-start skipped: ${configError}`)
+    }
+    return
+  }
   await startCoordinator(settings)
 }

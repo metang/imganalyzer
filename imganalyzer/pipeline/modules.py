@@ -357,7 +357,7 @@ class ModuleRunner:
 
         # Also populate the individual split tables so callers can query
         # blip2/objects/ocr/faces independently when local_ai was used.
-        self._write_split_tables(image_id, result)
+        write_local_ai_split_tables(self.conn, self.repo, image_id, result)
 
         # Release all local-AI activation tensors (BLIP-2 KV-cache, GDINO/TrOCR
         # feature maps) before the embedding job loads CLIP.  All 4 models stay
@@ -372,65 +372,6 @@ class ModuleRunner:
         if self.verbose:
             console.print(f"  [dim]Local AI analysis done for image {image_id}[/dim]")
         return result
-
-    def _write_split_tables(self, image_id: int, merged: dict[str, Any]) -> None:
-        """Write the 4 individual pass tables from a merged local_ai result dict.
-
-        Called by _run_local_ai after the main analysis_local_ai write so that
-        blip2/objects/ocr/faces can be queried independently.  Failures are
-        silently suppressed — they must not break the existing local_ai path.
-        """
-        import json as _json
-
-        # blip2 fields
-        blip2_data: dict[str, Any] = {}
-        for key in ("description", "scene_type", "main_subject", "lighting", "mood", "keywords"):
-            if key in merged:
-                blip2_data[key] = merged[key]
-        if blip2_data:
-            try:
-                with _transaction(self.conn):
-                    self.repo.upsert_blip2(image_id, blip2_data)
-            except Exception:
-                pass
-
-        # objects fields — reconstruct from merged (local_full strips has_person/has_text
-        # before returning, so we derive from face_count / ocr_text presence)
-        # We only write what we can infer from the merged dict.
-        objects_data: dict[str, Any] = {}
-        if "detected_objects" in merged:
-            objects_data["detected_objects"] = merged["detected_objects"]
-        face_count = merged.get("face_count") or 0
-        objects_data["has_person"] = 1 if int(face_count) > 0 else 0
-        ocr_text = merged.get("ocr_text") or ""
-        objects_data["has_text"] = 1 if ocr_text else 0
-        objects_data["text_boxes"] = _json.dumps([])
-        if objects_data:
-            try:
-                with _transaction(self.conn):
-                    self.repo.upsert_objects(image_id, objects_data)
-            except Exception:
-                pass
-
-        # ocr fields
-        if merged.get("ocr_text"):
-            try:
-                with _transaction(self.conn):
-                    self.repo.upsert_ocr(image_id, {"ocr_text": merged["ocr_text"]})
-            except Exception:
-                pass
-
-        # faces fields
-        faces_data: dict[str, Any] = {}
-        for key in ("face_count", "face_identities", "face_details"):
-            if key in merged:
-                faces_data[key] = merged[key]
-        if faces_data:
-            try:
-                with _transaction(self.conn):
-                    self.repo.upsert_faces(image_id, faces_data)
-            except Exception:
-                pass
 
     def _run_blip2(self, image_id: int, path: Path) -> dict[str, Any]:
         image_data = self._cached_read_image(path, image_id)
@@ -793,6 +734,78 @@ class _transaction:
             self.conn.commit()
         else:
             self.conn.rollback()
+
+
+def write_local_ai_split_tables(
+    conn: sqlite3.Connection,
+    repo: Repository,
+    image_id: int,
+    merged: dict[str, Any],
+    *,
+    wrap_transactions: bool = True,
+) -> None:
+    """Populate split-pass tables from a merged local_ai result dict.
+
+    Failures stay isolated so the primary local_ai write remains the source of
+    truth even when one of the compatibility tables cannot be refreshed.
+    """
+    import json as _json
+
+    blip2_data: dict[str, Any] = {}
+    for key in ("description", "scene_type", "main_subject", "lighting", "mood", "keywords"):
+        if key in merged:
+            blip2_data[key] = merged[key]
+    if blip2_data:
+        try:
+            if wrap_transactions:
+                with _transaction(conn):
+                    repo.upsert_blip2(image_id, blip2_data)
+            else:
+                repo.upsert_blip2(image_id, blip2_data)
+        except Exception:
+            pass
+
+    objects_data: dict[str, Any] = {}
+    if "detected_objects" in merged:
+        objects_data["detected_objects"] = merged["detected_objects"]
+    face_count = merged.get("face_count") or 0
+    objects_data["has_person"] = 1 if int(face_count) > 0 else 0
+    ocr_text = merged.get("ocr_text") or ""
+    objects_data["has_text"] = 1 if ocr_text else 0
+    objects_data["text_boxes"] = _json.dumps([])
+    if objects_data:
+        try:
+            if wrap_transactions:
+                with _transaction(conn):
+                    repo.upsert_objects(image_id, objects_data)
+            else:
+                repo.upsert_objects(image_id, objects_data)
+        except Exception:
+            pass
+
+    if merged.get("ocr_text"):
+        try:
+            if wrap_transactions:
+                with _transaction(conn):
+                    repo.upsert_ocr(image_id, {"ocr_text": merged["ocr_text"]})
+            else:
+                repo.upsert_ocr(image_id, {"ocr_text": merged["ocr_text"]})
+        except Exception:
+            pass
+
+    faces_data: dict[str, Any] = {}
+    for key in ("face_count", "face_identities", "face_details"):
+        if key in merged:
+            faces_data[key] = merged[key]
+    if faces_data:
+        try:
+            if wrap_transactions:
+                with _transaction(conn):
+                    repo.upsert_faces(image_id, faces_data)
+            else:
+                repo.upsert_faces(image_id, faces_data)
+        except Exception:
+            pass
 
 
 def unload_gpu_model(module: str) -> None:

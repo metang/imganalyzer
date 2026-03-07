@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { clipboard, contextBridge, ipcRenderer } from 'electron'
 import type { XmpData } from '../main/xmp'
 import type { ImageFile } from '../main/images'
 import type { AnalysisProgress } from '../main/analyzer'
@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld('api', {
 
   openPath: (filePath: string): Promise<string> =>
     ipcRenderer.invoke('shell:openPath', filePath),
+
+  copyText: (value: string): Promise<void> =>
+    Promise.resolve(clipboard.writeText(value)),
 
   readXmp: (imagePath: string): Promise<XmpData | null> =>
     ipcRenderer.invoke('fs:readXmp', imagePath),
@@ -80,6 +83,9 @@ contextBridge.exposeInMainWorld('api', {
 
   batchCheckPending: (): Promise<{ pending: number; running: number }> =>
     ipcRenderer.invoke('batch:check-pending'),
+
+  batchMonitorExisting: (): Promise<boolean> =>
+    ipcRenderer.invoke('batch:monitor-existing'),
 
   batchResumePending: (workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<void> =>
     ipcRenderer.invoke('batch:resume-pending', workers, cloudProvider, cloudWorkers),

@@ -44,6 +44,7 @@ export function SettingsView() {
   const [saving, setSaving] = useState(false)
   const [busyAction, setBusyAction] = useState<'start' | 'stop' | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  const [copiedField, setCopiedField] = useState<'coordinator-url' | 'worker-command' | null>(null)
 
   const loadSettings = useCallback(async () => {
     const bundle = await window.api.getAppSettings()
@@ -75,6 +76,12 @@ export function SettingsView() {
     }, 2000)
     return () => clearInterval(timer)
   }, [refreshCoordinatorStatus])
+
+  useEffect(() => {
+    if (!copiedField) return
+    const timer = window.setTimeout(() => setCopiedField(null), 1500)
+    return () => window.clearTimeout(timer)
+  }, [copiedField])
 
   const applyBundle = useCallback((bundle: AppSettingsBundle) => {
     setSettings(bundle.settings)
@@ -203,6 +210,23 @@ export function SettingsView() {
   }, [])
 
   const generatedWorkerNotes = useMemo(() => workerSetup?.notes ?? [], [workerSetup])
+
+  const copyWorkerText = useCallback(async (
+    field: 'coordinator-url' | 'worker-command',
+    value: string | null | undefined,
+  ) => {
+    if (!value) {
+      setMessage('Nothing to copy yet.')
+      return
+    }
+    try {
+      await window.api.copyText(value)
+      setCopiedField(field)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setMessage(`Failed to copy worker setup: ${msg}`)
+    }
+  }, [])
 
   if (!settings) {
     return (
@@ -363,7 +387,7 @@ export function SettingsView() {
                   bindHost: value,
                 },
               }))}
-              help="Defaults to the detected LAN IP so other devices on the same network can reach the coordinator."
+              help="Use 127.0.0.1 for local-only access. Set an auth token before using a LAN IP here."
             />
             <Field
               label="Port"
@@ -400,7 +424,7 @@ export function SettingsView() {
                   authToken: value,
                 },
               }))}
-              help="Recommended before exposing the coordinator beyond localhost."
+              help="Required when Bind host is not localhost or 127.0.0.1. If left blank for a LAN bind host, imganalyzer will generate one."
             />
           </div>
 
@@ -499,12 +523,30 @@ export function SettingsView() {
           </div>
 
           <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-4 py-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Coordinator URL</p>
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Coordinator URL</p>
+              <button
+                type="button"
+                onClick={() => void copyWorkerText('coordinator-url', workerSetup?.coordinatorUrl)}
+                className="px-3 py-1.5 rounded-lg bg-neutral-800 text-xs text-neutral-200 hover:bg-neutral-700"
+              >
+                {copiedField === 'coordinator-url' ? 'Copied' : 'Copy'}
+              </button>
+            </div>
             <p className="mt-1 text-sm text-neutral-200">{workerSetup?.coordinatorUrl ?? 'Unavailable'}</p>
           </div>
 
           <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-4 py-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Worker command</p>
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Worker command</p>
+              <button
+                type="button"
+                onClick={() => void copyWorkerText('worker-command', workerSetup?.command)}
+                className="px-3 py-1.5 rounded-lg bg-neutral-800 text-xs text-neutral-200 hover:bg-neutral-700"
+              >
+                {copiedField === 'worker-command' ? 'Copied' : 'Copy'}
+              </button>
+            </div>
             <pre className="mt-2 whitespace-pre-wrap break-words text-sm text-neutral-100">{workerSetup?.command ?? 'Unavailable'}</pre>
           </div>
 

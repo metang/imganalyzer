@@ -510,39 +510,115 @@ def _handle_workers_list(_params: dict) -> dict:
     return {"workers": items}
 
 
+_DISTRIBUTED_CONTEXT_MODULES: dict[str, tuple[str, ...]] = {
+    "ocr": ("objects",),
+    "faces": ("objects",),
+    "cloud_ai": ("objects", "local_ai"),
+    "aesthetic": ("objects", "local_ai"),
+    "embedding": ("local_ai", "cloud_ai"),
+}
+_DISTRIBUTED_SEARCH_MODULES = {"metadata", "local_ai", "blip2", "ocr", "faces", "cloud_ai"}
+
+
+def _distributed_has_people(repo: Any, image_id: int) -> bool:
+    objects_data = repo.get_analysis(image_id, "objects")
+    if objects_data is not None:
+        return bool(objects_data.get("has_person"))
+    local_data = repo.get_analysis(image_id, "local_ai")
+    return bool(local_data and local_data.get("has_people"))
+
+
+def _build_distributed_job_context(repo: Any, image_id: int, module: str) -> dict[str, Any]:
+    modules: dict[str, Any] = {}
+    for context_module in _DISTRIBUTED_CONTEXT_MODULES.get(module, ()):
+        data = repo.get_analysis(image_id, context_module)
+        if data:
+            modules[context_module] = data
+    return {"modules": modules}
+
+
+def _has_active_cloud_ai_job(conn: sqlite3.Connection, image_id: int) -> bool:
+    row = conn.execute(
+        """SELECT 1
+           FROM job_queue
+           WHERE image_id = ? AND module = 'cloud_ai' AND status IN ('pending', 'running')
+           LIMIT 1""",
+        [image_id],
+    ).fetchone()
+    return row is not None
+
+
 def _handle_jobs_claim(params: dict) -> dict:
     """Lease pending jobs to a worker for distributed execution."""
     from imganalyzer.db.queue import JobQueue
     from imganalyzer.db.repository import Repository
+    from imganalyzer.pipeline.worker import _PREREQUISITES
 
     worker_id = str(params.get("workerId", "")).strip()
     if not worker_id:
         raise ValueError("workerId is required")
     batch_size = int(params.get("batchSize", 1))
     module = params.get("module")
+    force = bool(params.get("force", False))
     lease_ttl_seconds = int(params.get("leaseTtlSeconds", 120))
 
     conn = _get_db()
     queue = JobQueue(conn)
     repo = Repository(conn)
 
+    requested = max(1, batch_size)
+    scan_size = min(max(requested * 4, requested), 32)
     claimed = queue.claim_leased(
         worker_id=worker_id,
         lease_ttl_seconds=max(5, lease_ttl_seconds),
-        batch_size=max(1, batch_size),
+        batch_size=scan_size,
         module=str(module) if module is not None else None,
     )
     jobs: list[dict[str, Any]] = []
     for job in claimed:
+        if len(jobs) >= requested:
+            queue.release_leased(job["id"], job["lease_token"])
+            continue
+
         image = repo.get_image(job["image_id"])
+        if image is None:
+            queue.mark_failed_leased(job["id"], job["lease_token"], "image_not_found")
+            continue
+
+        image_id = int(job["image_id"])
+        module_name = str(job["module"])
+
+        if not force and repo.is_analyzed(image_id, module_name):
+            queue.mark_skipped_leased(job["id"], job["lease_token"], "already_analyzed")
+            continue
+
+        prereq = _PREREQUISITES.get(module_name)
+        if prereq and not repo.is_analyzed(image_id, prereq):
+            queue.release_leased(job["id"], job["lease_token"])
+            continue
+
+        if module_name in ("cloud_ai", "aesthetic") and _distributed_has_people(repo, image_id):
+            queue.mark_skipped_leased(job["id"], job["lease_token"], "has_people")
+            continue
+
+        if module_name == "aesthetic" and _has_active_cloud_ai_job(conn, image_id):
+            queue.release_leased(job["id"], job["lease_token"])
+            continue
+
         jobs.append({
             "id": job["id"],
-            "imageId": job["image_id"],
-            "module": job["module"],
+            "imageId": image_id,
+            "module": module_name,
             "attempts": job["attempts"],
             "leaseToken": job["lease_token"],
             "leaseExpiresAt": job["lease_expires_at"],
-            "filePath": image["file_path"] if image is not None else None,
+            "filePath": image["file_path"],
+            "image": {
+                "width": image.get("width"),
+                "height": image.get("height"),
+                "format": image.get("format"),
+            },
+            "context": _build_distributed_job_context(repo, image_id, module_name),
         })
     return {"jobs": jobs}
 
@@ -589,18 +665,78 @@ def _handle_jobs_release(params: dict) -> dict:
 
 
 def _handle_jobs_complete(params: dict) -> dict:
-    """Mark a leased job as done when worker reports completion."""
-    from imganalyzer.db.queue import JobQueue
+    """Persist a worker result payload and mark the leased job complete."""
+    from imganalyzer.db.repository import Repository
+    from imganalyzer.pipeline.distributed_payloads import persist_result_payload
+    from imganalyzer.pipeline.modules import write_xmp_from_db
 
     job_id = int(params.get("jobId", 0))
     lease_token = str(params.get("leaseToken", "")).strip()
+    payload = params.get("payload", {})
+    no_xmp = bool(params.get("noXmp", False))
     if job_id <= 0 or not lease_token:
         raise ValueError("jobId and leaseToken are required")
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
 
     conn = _get_db()
-    queue = JobQueue(conn)
-    ok = queue.mark_done_leased(job_id, lease_token)
-    return {"ok": ok}
+    repo = Repository(conn)
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        lease = conn.execute(
+            "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+            [job_id, lease_token],
+        ).fetchone()
+        if lease is None:
+            conn.rollback()
+            return {"ok": False}
+
+        job_row = conn.execute(
+            "SELECT image_id, module FROM job_queue WHERE id = ?",
+            [job_id],
+        ).fetchone()
+        if job_row is None:
+            conn.rollback()
+            raise ValueError(f"Job {job_id} not found")
+
+        image_id = int(job_row["image_id"])
+        module_name = str(job_row["module"])
+        persist_result_payload(
+            conn,
+            repo,
+            image_id=image_id,
+            module=module_name,
+            payload=payload,
+        )
+        if module_name in _DISTRIBUTED_SEARCH_MODULES:
+            repo.update_search_index(image_id)
+
+        conn.execute(
+            "UPDATE job_queue SET status = 'done', completed_at = datetime('now') WHERE id = ?",
+            [job_id],
+        )
+        conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    if not no_xmp:
+        remaining = conn.execute(
+            """SELECT 1
+               FROM job_queue
+               WHERE image_id = ? AND status IN ('pending', 'running')
+               LIMIT 1""",
+            [image_id],
+        ).fetchone()
+        if remaining is None:
+            try:
+                write_xmp_from_db(repo, image_id)
+            except Exception:
+                pass
+
+    return {"ok": True}
 
 
 def _handle_jobs_fail(params: dict) -> dict:
@@ -622,16 +758,30 @@ def _handle_jobs_fail(params: dict) -> dict:
 def _handle_jobs_skip(params: dict) -> dict:
     """Mark a leased job skipped when a worker intentionally bypasses it."""
     from imganalyzer.db.queue import JobQueue
+    from imganalyzer.db.repository import Repository
 
     job_id = int(params.get("jobId", 0))
     lease_token = str(params.get("leaseToken", "")).strip()
     reason = str(params.get("reason", "skipped")).strip()
+    details = str(params.get("details", "")).strip()
     if job_id <= 0 or not lease_token:
         raise ValueError("jobId and leaseToken are required")
 
     conn = _get_db()
     queue = JobQueue(conn)
     ok = queue.mark_skipped_leased(job_id, lease_token, reason)
+    if ok and reason == "corrupt_file" and details:
+        repo = Repository(conn)
+        job_row = conn.execute("SELECT image_id FROM job_queue WHERE id = ?", [job_id]).fetchone()
+        if job_row is not None:
+            image = repo.get_image(int(job_row["image_id"]))
+            if image is not None:
+                conn.execute(
+                    """INSERT OR IGNORE INTO corrupt_files (image_id, file_path, error_msg)
+                       VALUES (?, ?, ?)""",
+                    [job_row["image_id"], image["file_path"], details],
+                )
+                conn.commit()
     return {"ok": ok}
 
 

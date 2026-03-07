@@ -267,6 +267,7 @@ export interface BatchModuleStats {
 
 export interface BatchStats {
   status: BatchStatus
+  monitorOnly: boolean
   totalImages: number
   modules: Partial<Record<string, BatchModuleStats>>
   totals: { pending: number; running: number; done: number; failed: number; skipped: number }
@@ -360,6 +361,7 @@ declare global {
       getThumbnail(imagePath: string): Promise<string>
       getFullImage(imagePath: string): Promise<string>
       openPath(filePath: string): Promise<string>
+      copyText(value: string): Promise<void>
       readXmp(imagePath: string): Promise<XmpData | null>
       runAnalysis(imagePath: string, aiBackend: string): Promise<AnalysisRunResult>
       cancelAnalysis(imagePath: string): Promise<void>
@@ -423,6 +425,7 @@ declare global {
       batchResume(): Promise<void>
       batchStop(folder: string): Promise<void>
       batchCheckPending(): Promise<{ pending: number; running: number }>
+      batchMonitorExisting(): Promise<boolean>
       batchResumePending(workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<void>
       batchRetryFailed(modules: string[]): Promise<void>
       batchQueueClearAll(): Promise<{ deleted: number }>

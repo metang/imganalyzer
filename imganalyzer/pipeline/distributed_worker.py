@@ -14,11 +14,11 @@ from urllib import error, request
 
 from rich.console import Console
 
-from imganalyzer.db.connection import get_db_path
-from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository
-from imganalyzer.pipeline.modules import ModuleRunner, write_xmp_from_db
-from imganalyzer.pipeline.worker import _FTS_MODULES, _PREREQUISITES, _emit_result
+from imganalyzer.db.schema import ensure_schema
+from imganalyzer.pipeline.distributed_payloads import extract_result_payload, seed_job_context
+from imganalyzer.pipeline.modules import ModuleRunner
+from imganalyzer.pipeline.worker import _emit_result
 
 console = Console()
 
@@ -126,7 +126,6 @@ class DistributedWorker:
         self.write_xmp = write_xmp
         self.path_mappings = path_mappings or []
         self._shutdown = threading.Event()
-        self._local = threading.local()
         self._active_leases: dict[int, str] = {}
         self._active_lock = threading.Lock()
 
@@ -136,24 +135,27 @@ class DistributedWorker:
             console.print("[yellow]Stopping distributed worker after current job(s)...[/yellow]")
             self._shutdown.set()
 
-    def _get_thread_db(self) -> tuple[sqlite3.Connection, Repository, JobQueue, ModuleRunner]:
-        """Return thread-local DB helpers for the current thread."""
-        local = self._local
-        if not hasattr(local, "conn") or local.conn is None:
-            db_path = get_db_path()
-            conn = sqlite3.connect(
-                str(db_path),
-                timeout=30,
-                isolation_level=None,
-                check_same_thread=False,
-            )
+    def _open_job_sandbox(self, job: dict[str, Any]) -> tuple[sqlite3.Connection, Repository, ModuleRunner]:
+        """Build a temporary SQLite sandbox for one claimed job."""
+        image_id = int(job["imageId"])
+        file_path = str(job.get("filePath") or "")
+        if not file_path:
+            raise ValueError("Claimed job is missing filePath")
+
+        conn = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
+        try:
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=30000")
+            ensure_schema(conn)
             repo = Repository(conn)
-            queue = JobQueue(conn)
+            seed_job_context(
+                conn,
+                repo,
+                image_id=image_id,
+                file_path=file_path,
+                image_info=job.get("image") if isinstance(job.get("image"), dict) else None,
+                context=job.get("context") if isinstance(job.get("context"), dict) else None,
+            )
             runner = ModuleRunner(
                 conn=conn,
                 repo=repo,
@@ -165,22 +167,10 @@ class DistributedWorker:
                 verbose=self.verbose,
                 path_mappings=self.path_mappings,
             )
-            local.conn = conn
-            local.repo = repo
-            local.queue = queue
-            local.runner = runner
-        return local.conn, local.repo, local.queue, local.runner
-
-    def _close_thread_db(self) -> None:
-        """Close the current thread-local SQLite connection if present."""
-        local = self._local
-        conn = getattr(local, "conn", None)
-        if conn is not None:
+            return conn, repo, runner
+        except Exception:
             conn.close()
-            local.conn = None
-            local.repo = None
-            local.queue = None
-            local.runner = None
+            raise
 
     def _coordinator_call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Delegate a request to the coordinator client."""
@@ -256,6 +246,7 @@ class DistributedWorker:
             "workerId": self.worker_id,
             "batchSize": self.batch_size,
             "leaseTtlSeconds": self.lease_ttl_seconds,
+            "force": self.force,
         }
         if self.module_filter:
             params["module"] = self.module_filter
@@ -263,102 +254,32 @@ class DistributedWorker:
         jobs = result.get("jobs", [])
         return jobs if isinstance(jobs, list) else []
 
-    def _maybe_finalize_image(self, conn: sqlite3.Connection, repo: Repository, image_id: int, module: str) -> None:
-        """Perform post-success local follow-up writes that the local batch worker defers."""
-        if module in _FTS_MODULES:
-            try:
-                repo.update_search_index(image_id)
-            except Exception as exc:
-                if self.verbose:
-                    console.print(
-                        f"[yellow]Search index update failed for image {image_id}:[/yellow] {exc}"
-                    )
-
-        if not self.write_xmp:
-            return
-        remaining = conn.execute(
-            """SELECT 1
-               FROM job_queue
-               WHERE image_id = ? AND status IN ('pending', 'running')
-               LIMIT 1""",
-            [image_id],
-        ).fetchone()
-        if remaining is None:
-            try:
-                write_xmp_from_db(repo, image_id)
-            except Exception as exc:
-                if self.verbose:
-                    console.print(f"[yellow]XMP write failed for image {image_id}:[/yellow] {exc}")
-
     def _process_claimed_job(self, job: dict[str, Any]) -> str:
         """Process one leased job and report its final state to the coordinator."""
         image_id = int(job["imageId"])
         module = str(job["module"])
         job_id = int(job["id"])
         lease_token = str(job["leaseToken"])
-
-        conn, repo, _queue, runner = self._get_thread_db()
-        image_row = repo.get_image(image_id)
-        path = (
-            image_row["file_path"]
-            if image_row is not None
-            else str(job.get("filePath") or f"id={image_id}")
-        )
+        path = str(job.get("filePath") or f"id={image_id}")
         start_ms = int(time.time() * 1000)
+        conn: sqlite3.Connection | None = None
 
         try:
-            if not runner.should_run(image_id, module):
-                result = self._coordinator_call(
-                    "jobs/skip",
-                    {"jobId": job_id, "leaseToken": lease_token, "reason": "already_analyzed"},
-                )
-                if not bool(result.get("ok")):
-                    raise RuntimeError("Coordinator rejected already_analyzed skip")
-                _emit_result(path, module, "skipped", 0, "already_analyzed")
-                return "skipped"
-
-            prereq = _PREREQUISITES.get(module)
-            if prereq and not repo.is_analyzed(image_id, prereq):
-                result = self._coordinator_call(
-                    "jobs/release",
-                    {"jobId": job_id, "leaseToken": lease_token},
-                )
-                if not bool(result.get("ok")):
-                    raise RuntimeError(f"Coordinator rejected prerequisite release for job {job_id}")
-                if self.verbose:
-                    console.print(
-                        f"[dim]Released job {job_id} back to pending; prerequisite {prereq} is not ready[/dim]"
-                    )
-                return "skipped"
-
-            if module in ("cloud_ai", "aesthetic"):
-                has_people = False
-                objects_data = repo.get_analysis(image_id, "objects")
-                if objects_data is not None:
-                    has_people = bool(objects_data.get("has_person"))
-                else:
-                    local_data = repo.get_analysis(image_id, "local_ai")
-                    if local_data:
-                        has_people = bool(local_data.get("has_people"))
-                if has_people:
-                    result = self._coordinator_call(
-                        "jobs/skip",
-                        {"jobId": job_id, "leaseToken": lease_token, "reason": "has_people"},
-                    )
-                    if not bool(result.get("ok")):
-                        raise RuntimeError("Coordinator rejected has_people skip")
-                    _emit_result(path, module, "skipped", 0, "has_people")
-                    return "skipped"
-
+            conn, repo, runner = self._open_job_sandbox(job)
             result = runner.run(image_id, module)
+            payload = extract_result_payload(conn, repo, image_id=image_id, module=module)
             elapsed = int(time.time() * 1000) - start_ms
             done = self._coordinator_call(
                 "jobs/complete",
-                {"jobId": job_id, "leaseToken": lease_token},
+                {
+                    "jobId": job_id,
+                    "leaseToken": lease_token,
+                    "payload": payload,
+                    "noXmp": not self.write_xmp,
+                },
             )
             if not bool(done.get("ok")):
                 raise RuntimeError(f"Coordinator rejected completion for job {job_id}")
-            self._maybe_finalize_image(conn, repo, image_id, module)
             keywords = result.get("keywords") if module == "cloud_ai" and result else None
             _emit_result(path, module, "done", elapsed, keywords=keywords)
             return "done"
@@ -369,16 +290,15 @@ class DistributedWorker:
                 elapsed = int(time.time() * 1000) - start_ms
                 skipped = self._coordinator_call(
                     "jobs/skip",
-                    {"jobId": job_id, "leaseToken": lease_token, "reason": "corrupt_file"},
+                    {
+                        "jobId": job_id,
+                        "leaseToken": lease_token,
+                        "reason": "corrupt_file",
+                        "details": str(exc),
+                    },
                 )
                 if not bool(skipped.get("ok")):
                     raise RuntimeError("Coordinator rejected corrupt_file skip") from exc
-                conn.execute(
-                    "INSERT OR IGNORE INTO corrupt_files (image_id, file_path, error_msg)"
-                    " VALUES (?, ?, ?)",
-                    [image_id, path, str(exc)],
-                )
-                conn.commit()
                 _emit_result(path, module, "skipped", elapsed, f"corrupt file: {exc}")
                 return "skipped"
             raise
@@ -401,6 +321,8 @@ class DistributedWorker:
             return "failed"
 
         finally:
+            if conn is not None:
+                conn.close()
             self._clear_active(job_id)
 
     def _release_all_active_leases(self) -> None:
@@ -476,6 +398,7 @@ class DistributedWorker:
                     )
                     self._shutdown.wait(self.poll_interval_seconds)
                     continue
+
                 if not jobs:
                     self._shutdown.wait(self.poll_interval_seconds)
                     continue
@@ -487,7 +410,7 @@ class DistributedWorker:
                     stats[status] = stats.get(status, 0) + 1
                     processed = stats.get("done", 0) + stats.get("failed", 0) + stats.get("skipped", 0)
                     console.print(
-                        f"[dim]Progress:[/dim] {processed} processed - "
+                        f"[dim]Progress:[/dim] {processed} processed — "
                         f"{stats.get('done', 0)} done, "
                         f"{stats.get('failed', 0)} failed, "
                         f"{stats.get('skipped', 0)} skipped"
@@ -500,7 +423,6 @@ class DistributedWorker:
             except Exception as exc:
                 if self.verbose:
                     console.print(f"[yellow]Worker lease release failed on shutdown:[/yellow] {exc}")
-            self._close_thread_db()
             if is_main and original_handler is not None:
                 signal.signal(signal.SIGINT, original_handler)
 

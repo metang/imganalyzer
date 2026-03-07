@@ -619,23 +619,19 @@ def run_distributed_worker(
     heartbeat_interval: float = typer.Option(30.0, "--heartbeat-interval", min=1.0, help="Seconds between worker and lease heartbeats"),
     lease_ttl: int = typer.Option(120, "--lease-ttl", min=5, help="Lease TTL in seconds requested from the coordinator"),
     module: Optional[str] = typer.Option(None, "--module", help="Optional single-module filter when claiming jobs"),
-    db_path: Optional[Path] = typer.Option(None, "--db-path", help="Path to the shared SQLite database used for local writes"),
     path_mapping: list[str] | None = typer.Option(None, "--path-mapping", help="Repeatable source-to-local prefix remap rule: SOURCE_PREFIX=LOCAL_PREFIX"),
     force: bool = typer.Option(False, "--force", help="Ignore cache and re-run analyzed modules"),
     cloud_provider: str = typer.Option("openai", "--cloud", help="Cloud AI provider for cloud_ai/aesthetic modules"),
-    no_xmp: bool = typer.Option(False, "--no-xmp", help="Skip XMP sidecar generation on the worker"),
+    no_xmp: bool = typer.Option(False, "--no-xmp", help="Tell the coordinator not to write XMP sidecars for jobs completed by this worker"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose worker logging"),
     detection_prompt: Optional[str] = typer.Option(None, "--detection-prompt"),
     detection_threshold: Optional[float] = typer.Option(None, "--detection-threshold", min=0.0, max=1.0),
     face_threshold: Optional[float] = typer.Option(None, "--face-threshold", min=0.0, max=1.0),
 ) -> None:
     """Run a distributed worker that claims leased jobs from a coordinator."""
-    import os
     from dotenv import load_dotenv
 
     load_dotenv()
-    if db_path is not None:
-        os.environ["IMGANALYZER_DB_PATH"] = str(db_path)
 
     from imganalyzer.pipeline.distributed_worker import DistributedWorker
 
@@ -672,7 +668,13 @@ def run_distributed_worker(
         write_xmp=not no_xmp,
         path_mappings=path_mappings,
     )
-    worker.run_forever()
+    stats = worker.run_forever()
+    console.print(
+        f"[green]Worker stopped.[/green] "
+        f"{stats.get('done', 0)} done, "
+        f"{stats.get('failed', 0)} failed, "
+        f"{stats.get('skipped', 0)} skipped"
+    )
 
 
 @app.command()

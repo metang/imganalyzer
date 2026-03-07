@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'fs/promises'
+import { randomBytes } from 'crypto'
 import { app } from 'electron'
 import { dirname, join, resolve } from 'path'
 import { homedir, hostname, networkInterfaces } from 'os'
@@ -125,6 +126,10 @@ function isLoopbackHost(value: string): boolean {
   return LOOPBACK_HOSTS.has(value.trim())
 }
 
+function generateCoordinatorAuthToken(): string {
+  return randomBytes(24).toString('hex')
+}
+
 function getSettingsPath(): string {
   return join(app.getPath('userData'), SETTINGS_FILE)
 }
@@ -240,6 +245,21 @@ function normalizeDistributedSettings(stored?: Partial<DistributedCoordinatorSet
   }
 }
 
+function maybePopulateCoordinatorAuthToken(stored: StoredAppSettings): StoredAppSettings | null {
+  const normalized = normalizeDistributedSettings(stored.distributed)
+  if (!normalized.enabled || isLoopbackHost(normalized.bindHost) || normalized.authToken) {
+    return null
+  }
+
+  return {
+    ...stored,
+    distributed: {
+      ...(stored.distributed ?? {}),
+      authToken: generateCoordinatorAuthToken(),
+    },
+  }
+}
+
 function getAdvertisedHost(settings: DistributedCoordinatorSettings): string {
   if (settings.publicHost.trim()) return settings.publicHost.trim()
   const bindHost = settings.bindHost.trim()
@@ -271,14 +291,14 @@ function buildWorkerSetupInfo(settings: AppSettings): WorkerSetupInfo {
       'imganalyzer run-distributed-worker',
       `  --coordinator ${coordinatorUrl}`,
       '  --worker-id worker-01',
-      '  --db-path <shared-db-path>',
       ...mappingSegments,
       tokenSegment ? ` ${tokenSegment.trimStart()}` : '',
     ].filter(Boolean).join(' \\\n'),
     notes: [
-      'Workers must use the same shared SQLite database as the coordinator.',
+      'Workers only need coordinator HTTP access plus read-only access to the shared image files; they no longer open the coordinator SQLite database directly.',
       'Workers must either read the stored image paths directly or remap them with --path-mapping when the NAS mount root differs.',
       'Add one --path-mapping SOURCE_PREFIX=LOCAL_PREFIX flag per differing NAS mount root.',
+      'Analysis results are sent back to the coordinator, which remains the only database writer.',
       settings.distributed.authToken
         ? 'Pass the configured auth token to each worker with --auth-token.'
         : 'Auth is currently disabled for the job server; enable a token before exposing it beyond localhost.',
@@ -289,7 +309,12 @@ function buildWorkerSetupInfo(settings: AppSettings): WorkerSetupInfo {
 async function resolveBundle(force = false): Promise<AppSettingsBundle> {
   if (cachedBundle && !force) return cachedBundle
 
-  const stored = await readStoredSettings()
+  let stored = await readStoredSettings()
+  const hydratedStored = maybePopulateCoordinatorAuthToken(stored)
+  if (hydratedStored) {
+    await writeStoredSettings(hydratedStored)
+    stored = hydratedStored
+  }
   const settings: AppSettings = {
     thumbnailCache: resolveThumbnailCacheConfig(stored.thumbnailCache),
     distributed: normalizeDistributedSettings(stored.distributed),
@@ -367,7 +392,8 @@ export async function updateAppSettings(input: AppSettingsInput): Promise<AppSet
     }
   }
 
-  await writeStoredSettings(next)
+  const finalSettings = maybePopulateCoordinatorAuthToken(next) ?? next
+  await writeStoredSettings(finalSettings)
   cachedBundle = null
   return resolveBundle(true)
 }

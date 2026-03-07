@@ -91,8 +91,7 @@ python -m imganalyzer.server --transport http --host 0.0.0.0 --port 8765 --auth-
 ```bash
 imganalyzer run-distributed-worker \
   --coordinator http://127.0.0.1:8765/jsonrpc \
-  --worker-id worker-01 \
-  --db-path ~/.cache/imganalyzer/imganalyzer.db
+  --worker-id worker-01
 ```
 
 Useful worker options:
@@ -105,8 +104,13 @@ Useful worker options:
 
 ### Current assumptions
 
-- Workers must point at the same SQLite database file as the coordinator.
-- Workers must either read the image paths stored in that database directly or provide `--path-mapping` rules when their NAS mount root differs.
+- The coordinator is the only SQLite reader/writer; workers return structured
+  results over HTTP and do not need direct DB access.
+- Workers need read-only access to the shared image files and must either read
+  the stored paths directly or provide `--path-mapping` rules when their NAS
+  mount root differs.
+- XMP sidecar generation, when enabled, happens on the coordinator after the
+  last queued job for an image completes.
 - The current implementation has been validated with local HTTP coordinator/worker
   smoke tests, including two concurrent workers claiming jobs without duplicate
   execution.
