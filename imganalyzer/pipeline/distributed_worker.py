@@ -365,9 +365,19 @@ class DistributedWorker:
                     try:
                         self._register_worker()
                     except Exception as exc:
+                        hint = ""
+                        reason = str(exc).lower()
+                        if "timed out" in reason or "timeout" in reason:
+                            hint = (
+                                "\n[dim]  Hint: if the coordinator is on a remote host, "
+                                "ensure the firewall allows inbound TCP on the coordinator port.\n"
+                                "  On Windows: New-NetFirewallRule -DisplayName 'imganalyzer' "
+                                "-Direction Inbound -Protocol TCP -LocalPort <PORT> -Action Allow\n"
+                                "  On Linux:   sudo ufw allow <PORT>/tcp[/dim]"
+                            )
                         console.print(
                             "[yellow]Coordinator unavailable during registration; "
-                            f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc}"
+                            f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc}{hint}"
                         )
                         self._shutdown.wait(self.poll_interval_seconds)
                         continue
