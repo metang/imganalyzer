@@ -667,12 +667,23 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   // ── batch:monitor-existing ────────────────────────────────────────────────
   ipcMain.handle('batch:monitor-existing', async (): Promise<boolean> => {
     try {
+      if (isRunActive) return false
       await ensureServerRunning()
       const data = await rpc.call('status', {}) as {
         totals: Record<string, number>
       }
       const running = data.totals.running ?? 0
       if (running <= 0) return false
+
+      // Only enter monitor-only mode when a distributed worker is online;
+      // otherwise the running jobs are stale from a crashed local session
+      // and should be resumed locally via resumePending().
+      let hasOnlineWorker = false
+      try {
+        const wl = await rpc.call('workers/list', {}) as { workers?: Array<{ status?: string }> }
+        hasOnlineWorker = (wl.workers ?? []).some((w) => w.status === 'online')
+      } catch { /* workers table may not exist yet */ }
+      if (!hasOnlineWorker) return false
 
       sessionStartMs = Date.now()
       resetSessionCounters()
