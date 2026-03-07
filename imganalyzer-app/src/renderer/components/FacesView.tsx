@@ -260,6 +260,10 @@ type AliasCandidate = {
   representativeId: number | null
 }
 
+function coerceText(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
 // ── Main FacesView component ──────────────────────────────────────────────────
 
 export function FacesView() {
@@ -908,7 +912,7 @@ export function FacesView() {
   const filteredPersons = useMemo(() => {
     const lowerFilter = linkSearchFilter.toLowerCase()
     return lowerFilter
-      ? persons.filter((p) => p.name.toLowerCase().includes(lowerFilter))
+      ? persons.filter((p) => coerceText(p.name).toLowerCase().includes(lowerFilter))
       : persons
   }, [persons, linkSearchFilter])
 
@@ -923,8 +927,8 @@ export function FacesView() {
       .filter((person) => person.id !== relinkingCluster?.person_id)
       .filter((person) =>
         !lowerFilter
-        || person.name.toLowerCase().includes(lowerFilter)
-        || (person.notes ?? '').toLowerCase().includes(lowerFilter)
+        || coerceText(person.name).toLowerCase().includes(lowerFilter)
+        || coerceText(person.notes).toLowerCase().includes(lowerFilter)
       )
       .sort((a, b) => b.face_count - a.face_count)
   }, [relinkPersons, relinkSearch, relinkingCluster])
@@ -932,7 +936,7 @@ export function FacesView() {
   const relinkAliasCandidates = useMemo(() => {
     const lowerFilter = relinkSearch.trim().toLowerCase()
     const currentClusterId = relinkingCluster?.cluster_id ?? null
-    const currentLabel = (relinkingCluster?.display_name ?? '').trim().toLowerCase()
+    const currentLabel = coerceText(relinkingCluster?.display_name).trim().toLowerCase()
     const byLabel = new Map<string, AliasCandidate>()
 
     const addCandidate = (
@@ -941,15 +945,16 @@ export function FacesView() {
       imageCount: number,
       representativeId: number | null
     ): void => {
-      const trimmed = label?.trim()
+      const trimmed = coerceText(label).trim()
       if (!trimmed) {
         return
       }
       const normalized = trimmed.toLowerCase()
+      const normalizedSubtitle = coerceText(subtitle).toLowerCase()
       if (currentLabel && normalized === currentLabel) {
         return
       }
-      if (lowerFilter && !trimmed.toLowerCase().includes(lowerFilter) && !subtitle.toLowerCase().includes(lowerFilter)) {
+      if (lowerFilter && !normalized.includes(lowerFilter) && !normalizedSubtitle.includes(lowerFilter)) {
         return
       }
 
