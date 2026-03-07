@@ -15,6 +15,7 @@ import { planSearchWithCopilot } from './search-planner'
 export type SearchIntent = 'people' | 'wildlife' | 'best-shot' | 'general'
 export type SearchTimeOfDay = 'morning' | 'afternoon' | 'evening' | 'night'
 export type SearchSortBy = 'relevance' | 'best' | 'aesthetic' | 'sharpness' | 'cleanest' | 'newest'
+export type SearchFaceMatch = 'any' | 'all'
 
 export interface SearchFilters {
   query?: string
@@ -29,6 +30,8 @@ export interface SearchFilters {
   expandedTerms?: string[]
   // text filters
   face?: string
+  faces?: string[]
+  faceMatch?: SearchFaceMatch
   camera?: string
   lens?: string
   location?: string
@@ -112,6 +115,8 @@ export interface SearchResponse {
 
 export interface SearchFaceResolution {
   face: string | null
+  faces: string[]
+  faceMatch: SearchFaceMatch
   remainingQuery: string
   error?: string
 }
@@ -150,6 +155,8 @@ export function registerSearchHandlers(): void {
         sortBy: filters.sortBy,
         expandedTerms: filters.expandedTerms,
         face: filters.face,
+        faces: filters.faces,
+        faceMatch: filters.faceMatch,
         camera: filters.camera,
         lens: filters.lens,
         location: filters.location,
@@ -187,6 +194,8 @@ export function registerSearchHandlers(): void {
     } catch (err) {
       return {
         face: null,
+        faces: [],
+        faceMatch: 'all',
         remainingQuery: query,
         error: String(err),
       }

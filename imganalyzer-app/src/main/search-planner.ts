@@ -2,6 +2,7 @@ import { spawn, execSync } from 'child_process'
 import { existsSync } from 'fs'
 import { dirname, join } from 'path'
 import type {
+  SearchFaceMatch,
   SearchFilters,
   SearchIntent,
   SearchPlanRequest,
@@ -40,27 +41,33 @@ const SEARCH_PLANNER_PROMPT = `You are a search planner for a photo library appl
 Convert the user's natural-language request into a JSON object with this exact shape:
 {
   "intent": "people" | "wildlife" | "best-shot" | "general",
-  "summary": "short human-readable summary",
-  "filters": {
-    "query": string | null,
-    "face": string | null,
-    "location": string | null,
-    "country": string | null,
-    "dateFrom": string | null,
-    "dateTo": string | null,
-    "recurringMonthDay": "MM-DD" | null,
-    "timeOfDay": "morning" | "afternoon" | "evening" | "night" | null,
-    "mode": "text" | "semantic" | "hybrid" | "browse" | null,
-    "sortBy": "relevance" | "best" | "aesthetic" | "sharpness" | "cleanest" | "newest" | null,
-    "expandedTerms": string[] | null,
-    "hasPeople": boolean | null
-  }
+    "summary": "short human-readable summary",
+    "filters": {
+      "query": string | null,
+      "face": string | null,
+      "faces": string[] | null,
+      "faceMatch": "any" | "all" | null,
+      "location": string | null,
+      "country": string | null,
+      "dateFrom": string | null,
+      "dateTo": string | null,
+      "recurringMonthDay": "MM-DD" | null,
+      "timeOfDay": "morning" | "afternoon" | "evening" | "night" | null,
+      "mode": "text" | "semantic" | "hybrid" | "browse" | null,
+      "sortBy": "relevance" | "best" | "aesthetic" | "sharpness" | "cleanest" | "newest" | null,
+      "expandedTerms": string[] | null,
+      "hasPeople": boolean | null,
+      "facesMin": number | null,
+      "facesMax": number | null
+    }
 }
 
 Rules:
 - Only use supported fields; never invent new keys.
 - "Best photo", "best shot", or "best picture" should usually set intent="best-shot" and sortBy="best".
-- Named people, display names, and aliases should go into face when the request clearly identifies a person.
+- Named people, display names, and aliases should go into faces when the request clearly identifies one or more people. Use face only for backward-compatible single-person output if needed.
+- When the request clearly wants multiple people in the same image (for example "A and B together"), use faceMatch="all".
+- Requests like "more than 10 people" should use facesMin / facesMax and hasPeople instead of leaving the count in query text.
 - Geographic constraints like "in the US" should use country when possible; broader place details can go into location.
 - Requests like "every Feb 1" should use recurringMonthDay="02-01".
 - Time buckets should be one of morning / afternoon / evening / night.
@@ -81,6 +88,11 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
+function asInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return Math.trunc(value)
+}
+
 function asIntent(value: unknown, fallback: SearchIntent): SearchIntent {
   return typeof value === 'string' && VALID_INTENTS.has(value as SearchIntent)
     ? value as SearchIntent
@@ -91,7 +103,12 @@ function buildFallbackSummary(intent: SearchIntent, filters: SearchFilters, prom
   const parts: string[] = []
   const base = filters.query ?? prompt.trim()
   if (base) parts.push(base)
-  if (filters.face) parts.push(`person: ${filters.face}`)
+  const faces = filters.faces && filters.faces.length > 0
+    ? filters.faces
+    : filters.face
+      ? [filters.face]
+      : []
+  if (faces.length > 0) parts.push(`people: ${faces.join(', ')}`)
   if (filters.country) parts.push(filters.country)
   if (filters.recurringMonthDay) parts.push(`every ${filters.recurringMonthDay}`)
   if (filters.timeOfDay) parts.push(filters.timeOfDay)
@@ -111,6 +128,32 @@ function sanitizeFilters(rawFilters: unknown): SearchFilters {
 
   const face = asString(source.face)
   if (face) filters.face = face
+
+  if (Array.isArray(source.faces)) {
+    const seen = new Set<string>()
+    const faces = source.faces
+      .filter((value): value is string => typeof value === 'string')
+      .map((value) => value.trim())
+      .filter((value) => {
+        const lowered = value.toLowerCase()
+        if (!value || seen.has(lowered)) return false
+        seen.add(lowered)
+        return true
+      })
+    if (faces.length > 0) {
+      filters.faces = faces
+      if (!filters.face) {
+        filters.face = faces[0]
+      }
+    }
+  } else if (face) {
+    filters.faces = [face]
+  }
+
+  const faceMatch = source.faceMatch
+  if (faceMatch === 'any' || faceMatch === 'all') {
+    filters.faceMatch = faceMatch as SearchFaceMatch
+  }
 
   const location = asString(source.location)
   if (location) filters.location = location
@@ -146,6 +189,16 @@ function sanitizeFilters(rawFilters: unknown): SearchFilters {
 
   if (typeof source.hasPeople === 'boolean') {
     filters.hasPeople = source.hasPeople
+  }
+
+  const facesMin = asInteger(source.facesMin)
+  if (facesMin !== undefined && facesMin >= 0) {
+    filters.facesMin = facesMin
+  }
+
+  const facesMax = asInteger(source.facesMax)
+  if (facesMax !== undefined && facesMax >= 0) {
+    filters.facesMax = facesMax
   }
 
   if (Array.isArray(source.expandedTerms)) {

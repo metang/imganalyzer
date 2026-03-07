@@ -151,6 +151,9 @@ contextBridge.exposeInMainWorld('api', {
   getFaceClusterImages: (clusterId: number | null, identityName: string | null, limit?: number): Promise<{ occurrences: Array<{ id: number; image_id: number; file_path: string; face_idx: number; bbox_x1: number; bbox_y1: number; bbox_x2: number; bbox_y2: number; age: number | null; gender: string | null; identity_name: string }>; error?: string }> =>
     ipcRenderer.invoke('faces:clusterImages', clusterId, identityName, limit),
 
+  relinkFaceCluster: (clusterId: number, displayName: string | null, personId?: number | null, updatePerson?: boolean): Promise<{ ok: boolean; updated: number; error?: string }> =>
+    ipcRenderer.invoke('faces:clusterRelink', clusterId, displayName, personId ?? null, updatePerson ?? false),
+
   getFaceCrop: (occurrenceId: number): Promise<{ data?: string; error?: string }> =>
     ipcRenderer.invoke('faces:crop', occurrenceId),
 

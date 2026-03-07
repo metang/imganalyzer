@@ -168,6 +168,30 @@ export function registerFaceHandlers(): void {
   )
 
   ipcMain.handle(
+    'faces:clusterRelink',
+    async (
+      _evt,
+      clusterId: number,
+      displayName: string | null,
+      personId?: number | null,
+      updatePerson?: boolean
+    ): Promise<{ ok: boolean; updated: number; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/cluster-relink', {
+          cluster_id: clusterId,
+          display_name: displayName,
+          person_id: personId ?? null,
+          update_person: updatePerson ?? false,
+        }) as { ok: boolean; updated: number }
+        return { ok: true, updated: result.updated }
+      } catch (err) {
+        return { ok: false, updated: 0, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
     'faces:crop',
     async (_evt, occurrenceId: number): Promise<{ data?: string; error?: string }> => {
       try {

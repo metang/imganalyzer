@@ -247,6 +247,19 @@ function FaceImageLightbox({
   )
 }
 
+type RelinkSelection =
+  | { type: 'person'; personId: number; label: string }
+  | { type: 'alias'; label: string }
+  | null
+
+type AliasCandidate = {
+  key: string
+  label: string
+  subtitle: string
+  imageCount: number
+  representativeId: number | null
+}
+
 // ── Main FacesView component ──────────────────────────────────────────────────
 
 export function FacesView() {
@@ -314,6 +327,18 @@ export function FacesView() {
 
   // Delete person confirmation
   const [deletingPersonId, setDeletingPersonId] = useState<number | null>(null)
+
+  // Cluster relink dialog
+  const [relinkingCluster, setRelinkingCluster] = useState<FaceCluster | null>(null)
+  const [relinkSelection, setRelinkSelection] = useState<RelinkSelection>(null)
+  const [relinkSearch, setRelinkSearch] = useState('')
+  const [relinkLoading, setRelinkLoading] = useState(false)
+  const [relinkSubmitting, setRelinkSubmitting] = useState(false)
+  const [relinkPersons, setRelinkPersons] = useState<FacePerson[]>([])
+  const [relinkFaceTargets, setRelinkFaceTargets] = useState<FaceSummary[]>([])
+  const [relinkClusterTargets, setRelinkClusterTargets] = useState<FaceCluster[]>([])
+  const [unlinkPersonOnAliasRelink, setUnlinkPersonOnAliasRelink] = useState(false)
+  const relinkSearchRef = useRef<HTMLInputElement>(null)
 
   // ── Load data ─────────────────────────────────────────────────────────────
 
@@ -526,6 +551,188 @@ export function FacesView() {
     [loadData]
   )
 
+  const closeRelinkDialog = useCallback(() => {
+    setRelinkingCluster(null)
+    setRelinkSelection(null)
+    setRelinkSearch('')
+    setRelinkLoading(false)
+    setRelinkSubmitting(false)
+    setRelinkPersons([])
+    setRelinkFaceTargets([])
+    setRelinkClusterTargets([])
+    setUnlinkPersonOnAliasRelink(false)
+  }, [])
+
+  const openRelinkDialog = useCallback(async (cluster: FaceCluster) => {
+    if (cluster.cluster_id == null) {
+      return
+    }
+
+    setRelinkingCluster(cluster)
+    setRelinkSelection(null)
+    setRelinkSearch('')
+    setRelinkLoading(true)
+    setRelinkSubmitting(false)
+    setUnlinkPersonOnAliasRelink(false)
+
+    try {
+      const [personsResult, faceResult, clusterResult] = await Promise.all([
+        window.api.listPersons(),
+        window.api.listFaces(),
+        window.api.listFaceClusters(),
+      ])
+      if (personsResult.error) {
+        setError(personsResult.error)
+        closeRelinkDialog()
+        return
+      }
+      if (faceResult.error) {
+        setError(faceResult.error)
+        closeRelinkDialog()
+        return
+      }
+      if (clusterResult.error) {
+        setError(clusterResult.error)
+        closeRelinkDialog()
+        return
+      }
+
+      setRelinkPersons(personsResult.persons)
+      setRelinkFaceTargets(faceResult.faces)
+      setRelinkClusterTargets(clusterResult.clusters)
+    } catch (err) {
+      setError(String(err))
+      closeRelinkDialog()
+    } finally {
+      setRelinkLoading(false)
+      setTimeout(() => relinkSearchRef.current?.focus(), 0)
+    }
+  }, [closeRelinkDialog])
+
+  const applyClusterRelink = useCallback(
+    async (clusterId: number, displayName: string | null, personId: number | null, updatePerson: boolean) => {
+      const result = await window.api.relinkFaceCluster(clusterId, displayName, personId, updatePerson)
+      if (result.error || !result.ok) {
+        throw new Error(result.error ?? 'Failed to relink cluster')
+      }
+    },
+    []
+  )
+
+  const handleApplyRelinkSelection = useCallback(async () => {
+    if (relinkingCluster?.cluster_id == null || relinkSelection == null) {
+      return
+    }
+
+    setRelinkSubmitting(true)
+    try {
+      if (relinkSelection.type === 'person') {
+        await applyClusterRelink(
+          relinkingCluster.cluster_id,
+          relinkSelection.label,
+          relinkSelection.personId,
+          true,
+        )
+      } else {
+        await applyClusterRelink(
+          relinkingCluster.cluster_id,
+          relinkSelection.label,
+          null,
+          unlinkPersonOnAliasRelink,
+        )
+      }
+      setError(null)
+      closeRelinkDialog()
+      await loadData()
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setRelinkSubmitting(false)
+    }
+  }, [applyClusterRelink, closeRelinkDialog, loadData, relinkSelection, relinkingCluster, unlinkPersonOnAliasRelink])
+
+  const handleCreateRelinkPerson = useCallback(async () => {
+    const clusterId = relinkingCluster?.cluster_id
+    const name = relinkSearch.trim()
+    if (clusterId == null || !name) {
+      return
+    }
+
+    setRelinkSubmitting(true)
+    try {
+      const createResult = await window.api.createPerson(name)
+      if (createResult.error) {
+        throw new Error(createResult.error)
+      }
+      await applyClusterRelink(clusterId, name, createResult.id, true)
+      setError(null)
+      closeRelinkDialog()
+      await loadData()
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setRelinkSubmitting(false)
+    }
+  }, [applyClusterRelink, closeRelinkDialog, loadData, relinkSearch, relinkingCluster])
+
+  const handleCreateRelinkAlias = useCallback(async () => {
+    const clusterId = relinkingCluster?.cluster_id
+    const name = relinkSearch.trim()
+    if (clusterId == null || !name) {
+      return
+    }
+
+    setRelinkSubmitting(true)
+    try {
+      await applyClusterRelink(clusterId, name, null, unlinkPersonOnAliasRelink)
+      setError(null)
+      closeRelinkDialog()
+      await loadData()
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setRelinkSubmitting(false)
+    }
+  }, [applyClusterRelink, closeRelinkDialog, loadData, relinkSearch, relinkingCluster, unlinkPersonOnAliasRelink])
+
+  const handleClearRelinkAlias = useCallback(async () => {
+    const clusterId = relinkingCluster?.cluster_id
+    if (clusterId == null) {
+      return
+    }
+
+    setRelinkSubmitting(true)
+    try {
+      await applyClusterRelink(clusterId, null, null, false)
+      setError(null)
+      closeRelinkDialog()
+      await loadData()
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setRelinkSubmitting(false)
+    }
+  }, [applyClusterRelink, closeRelinkDialog, loadData, relinkingCluster])
+
+  const handleRelinkUnlinkPerson = useCallback(async () => {
+    const clusterId = relinkingCluster?.cluster_id
+    if (clusterId == null) {
+      return
+    }
+
+    setRelinkSubmitting(true)
+    try {
+      await applyClusterRelink(clusterId, relinkingCluster.display_name, null, true)
+      setError(null)
+      closeRelinkDialog()
+      await loadData()
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setRelinkSubmitting(false)
+    }
+  }, [applyClusterRelink, closeRelinkDialog, loadData, relinkingCluster])
+
   const togglePersonExpand = useCallback(
     async (personId: number) => {
       if (expandedPersonId === personId) {
@@ -705,6 +912,117 @@ export function FacesView() {
       : persons
   }, [persons, linkSearchFilter])
 
+  const currentRelinkPerson = useMemo(
+    () => relinkPersons.find((person) => person.id === relinkingCluster?.person_id) ?? null,
+    [relinkPersons, relinkingCluster]
+  )
+
+  const filteredRelinkPersons = useMemo(() => {
+    const lowerFilter = relinkSearch.trim().toLowerCase()
+    return relinkPersons
+      .filter((person) => person.id !== relinkingCluster?.person_id)
+      .filter((person) =>
+        !lowerFilter
+        || person.name.toLowerCase().includes(lowerFilter)
+        || (person.notes ?? '').toLowerCase().includes(lowerFilter)
+      )
+      .sort((a, b) => b.face_count - a.face_count)
+  }, [relinkPersons, relinkSearch, relinkingCluster])
+
+  const relinkAliasCandidates = useMemo(() => {
+    const lowerFilter = relinkSearch.trim().toLowerCase()
+    const currentClusterId = relinkingCluster?.cluster_id ?? null
+    const currentLabel = (relinkingCluster?.display_name ?? '').trim().toLowerCase()
+    const byLabel = new Map<string, AliasCandidate>()
+
+    const addCandidate = (
+      label: string | null | undefined,
+      subtitle: string,
+      imageCount: number,
+      representativeId: number | null
+    ): void => {
+      const trimmed = label?.trim()
+      if (!trimmed) {
+        return
+      }
+      const normalized = trimmed.toLowerCase()
+      if (currentLabel && normalized === currentLabel) {
+        return
+      }
+      if (lowerFilter && !trimmed.toLowerCase().includes(lowerFilter) && !subtitle.toLowerCase().includes(lowerFilter)) {
+        return
+      }
+
+      const existing = byLabel.get(normalized)
+      if (existing) {
+        existing.imageCount = Math.max(existing.imageCount, imageCount)
+        existing.representativeId = existing.representativeId ?? representativeId
+        return
+      }
+
+      byLabel.set(normalized, {
+        key: `alias:${normalized}`,
+        label: trimmed,
+        subtitle,
+        imageCount,
+        representativeId,
+      })
+    }
+
+    for (const face of relinkFaceTargets) {
+      const label = face.display_name ?? face.canonical_name
+      const subtitle = face.display_name ? `Identity: ${face.canonical_name}` : 'Identity alias'
+      addCandidate(label, subtitle, face.image_count, null)
+    }
+
+    for (const cluster of relinkClusterTargets) {
+      if (cluster.cluster_id === currentClusterId || !cluster.display_name) {
+        continue
+      }
+      addCandidate(
+        cluster.display_name,
+        `Cluster label · ${cluster.face_count} faces`,
+        cluster.image_count,
+        cluster.representative_id,
+      )
+    }
+
+    return [...byLabel.values()].sort((a, b) =>
+      a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
+    )
+  }, [relinkClusterTargets, relinkFaceTargets, relinkSearch, relinkingCluster])
+
+  const relinkSearchTrimmed = relinkSearch.trim()
+
+  const relinkPreviewText = useMemo(() => {
+    if (!relinkingCluster || !relinkSelection) {
+      return null
+    }
+    const currentLabel = relinkingCluster.display_name || relinkingCluster.identity_name
+    if (relinkSelection.type === 'person') {
+      return `Cluster ${relinkingCluster.cluster_id} will move from "${currentLabel}" to person "${relinkSelection.label}".`
+    }
+    if (unlinkPersonOnAliasRelink && currentRelinkPerson) {
+      return `Cluster ${relinkingCluster.cluster_id} will be relabeled from "${currentLabel}" to "${relinkSelection.label}" and unlinked from ${currentRelinkPerson.name}.`
+    }
+    return `Cluster ${relinkingCluster.cluster_id} will be relabeled from "${currentLabel}" to "${relinkSelection.label}".`
+  }, [currentRelinkPerson, relinkSelection, relinkingCluster, unlinkPersonOnAliasRelink])
+
+  useEffect(() => {
+    if (!relinkingCluster) {
+      return
+    }
+
+    const handleKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && !relinkSubmitting) {
+        closeRelinkDialog()
+      }
+    }
+
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [closeRelinkDialog, relinkingCluster, relinkSubmitting])
+
   // ── Link-to-Person dropdown ────────────────────────────────────────────
 
   const renderLinkDropdown = (clusterId: number) => {
@@ -867,16 +1185,35 @@ export function FacesView() {
     </div>
   )
 
+  const renderRelinkButton = (cluster: FaceCluster) => {
+    if (cluster.cluster_id == null) {
+      return null
+    }
+
+    return (
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          void openRelinkDialog(cluster)
+        }}
+        className="text-xs text-violet-400/80 hover:text-violet-300 transition-colors shrink-0"
+        title="Relink this cluster to another alias or person"
+      >
+        Relink
+      </button>
+    )
+  }
+
   const renderEditButton = (
     key: string,
     displayName: string | null,
     identityName: string
   ) => (
     <button
-      onClick={() => startEditing(key, displayName, identityName)}
-      className="text-neutral-600 hover:text-neutral-300 transition-colors shrink-0"
-      title="Set alias"
-    >
+       onClick={() => startEditing(key, displayName, identityName)}
+       className="text-neutral-600 hover:text-neutral-300 transition-colors shrink-0"
+       title="Rename label"
+     >
       <svg
         className="w-4 h-4"
         fill="none"
@@ -1123,6 +1460,275 @@ export function FacesView() {
         </div>
       )}
 
+      {/* Cluster relink dialog */}
+      {relinkingCluster && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => {
+            if (!relinkSubmitting) {
+              closeRelinkDialog()
+            }
+          }}
+        >
+          <div
+            className="w-full max-w-5xl max-h-[85vh] overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-neutral-800 px-5 py-3">
+              <div>
+                <h3 className="text-sm font-semibold text-neutral-100">Relink Cluster</h3>
+                <p className="text-xs text-neutral-500">
+                  Move this cluster to another alias or person without relying on free-text renaming.
+                </p>
+              </div>
+              <button
+                onClick={closeRelinkDialog}
+                disabled={relinkSubmitting}
+                className="text-neutral-500 hover:text-neutral-300 transition-colors disabled:opacity-50"
+                title="Close"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="grid md:grid-cols-[320px,minmax(0,1fr)] max-h-[calc(85vh-72px)]">
+              <div className="border-r border-neutral-800 p-5 space-y-4 overflow-y-auto">
+                <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+                  <div className="flex items-center gap-3">
+                    {relinkingCluster.representative_id != null ? (
+                      <FaceCropThumbnail occurrenceId={relinkingCluster.representative_id} size="lg" />
+                    ) : (
+                      <div className="w-24 h-24 rounded bg-neutral-800 flex items-center justify-center">
+                        <svg className="w-8 h-8 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                        </svg>
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-neutral-100 truncate">
+                        {relinkingCluster.display_name || relinkingCluster.identity_name}
+                      </p>
+                      <p className="text-xs text-neutral-500 truncate">
+                        {relinkingCluster.identity_name}
+                      </p>
+                      <p className="text-xs text-neutral-500 mt-1">
+                        Cluster {relinkingCluster.cluster_id} · {relinkingCluster.face_count} faces · {relinkingCluster.image_count} images
+                      </p>
+                    </div>
+                  </div>
+                  <div className="text-xs text-neutral-400 space-y-1">
+                    <p>
+                      Current label:{' '}
+                      <span className="text-neutral-200">
+                        {relinkingCluster.display_name || 'None'}
+                      </span>
+                    </p>
+                    <p>
+                      Current person:{' '}
+                      <span className="text-neutral-200">
+                        {currentRelinkPerson?.name ?? 'Unlinked'}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+
+                {relinkPreviewText && (
+                  <div className="rounded-lg border border-violet-800/50 bg-violet-950/30 p-3">
+                    <p className="text-xs font-medium text-violet-200 mb-1">Preview</p>
+                    <p className="text-xs text-violet-100/90">{relinkPreviewText}</p>
+                  </div>
+                )}
+
+                {relinkSelection?.type === 'alias' && currentRelinkPerson && (
+                  <label className="flex items-start gap-2 rounded-lg border border-neutral-800 bg-neutral-950/50 p-3 text-xs text-neutral-300">
+                    <input
+                      type="checkbox"
+                      checked={unlinkPersonOnAliasRelink}
+                      onChange={(e) => setUnlinkPersonOnAliasRelink(e.target.checked)}
+                      className="mt-0.5 rounded border-neutral-600 bg-neutral-800 text-violet-500 focus:ring-violet-500"
+                    />
+                    <span>Also unlink this cluster from {currentRelinkPerson.name}</span>
+                  </label>
+                )}
+
+                <div className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-3 space-y-2">
+                  <p className="text-[11px] uppercase tracking-wide text-neutral-500">Quick actions</p>
+                  <button
+                    onClick={handleClearRelinkAlias}
+                    disabled={relinkSubmitting || !relinkingCluster.display_name}
+                    className="w-full rounded-md border border-neutral-700 px-3 py-2 text-left text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-40"
+                  >
+                    Clear current label
+                  </button>
+                  <button
+                    onClick={handleRelinkUnlinkPerson}
+                    disabled={relinkSubmitting || !currentRelinkPerson}
+                    className="w-full rounded-md border border-neutral-700 px-3 py-2 text-left text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-40"
+                  >
+                    Unlink current person
+                  </button>
+                  {relinkSearchTrimmed && (
+                    <>
+                      <button
+                        onClick={handleCreateRelinkAlias}
+                        disabled={relinkSubmitting}
+                        className="w-full rounded-md border border-violet-700/50 bg-violet-950/30 px-3 py-2 text-left text-xs text-violet-200 hover:bg-violet-900/40 disabled:opacity-40"
+                      >
+                        Create alias "{relinkSearchTrimmed}" for this cluster
+                      </button>
+                      <button
+                        onClick={handleCreateRelinkPerson}
+                        disabled={relinkSubmitting}
+                        className="w-full rounded-md border border-cyan-700/50 bg-cyan-950/20 px-3 py-2 text-left text-xs text-cyan-200 hover:bg-cyan-900/30 disabled:opacity-40"
+                      >
+                        Create person "{relinkSearchTrimmed}" and link this cluster
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className="min-h-0 flex flex-col">
+                <div className="border-b border-neutral-800 px-5 py-4">
+                  <input
+                    ref={relinkSearchRef}
+                    value={relinkSearch}
+                    onChange={(e) => setRelinkSearch(e.target.value)}
+                    placeholder="Search existing alias or person..."
+                    className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 outline-none focus:border-violet-500"
+                    autoFocus
+                  />
+                </div>
+
+                {relinkLoading ? (
+                  <div className="flex-1 flex items-center justify-center gap-2 text-sm text-neutral-500">
+                    <span className="w-4 h-4 border border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
+                    Loading relink targets...
+                  </div>
+                ) : (
+                  <div className="flex-1 overflow-y-auto">
+                    <div className="px-5 pt-4 pb-2 text-[11px] uppercase tracking-wide text-neutral-500">
+                      People
+                    </div>
+                    <div className="px-4 space-y-2">
+                      {filteredRelinkPersons.map((person) => {
+                        const selected = relinkSelection?.type === 'person' && relinkSelection.personId === person.id
+                        return (
+                          <button
+                            key={`person:${person.id}`}
+                            onClick={() => {
+                              setRelinkSelection({ type: 'person', personId: person.id, label: person.name })
+                              setUnlinkPersonOnAliasRelink(false)
+                            }}
+                            className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${
+                              selected
+                                ? 'border-cyan-700 bg-cyan-950/30'
+                                : 'border-neutral-800 bg-neutral-950/40 hover:bg-neutral-800/50'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3">
+                              {person.representative_id != null ? (
+                                <FaceCropThumbnail occurrenceId={person.representative_id} size="sm" />
+                              ) : (
+                                <div className="w-12 h-12 rounded bg-neutral-800" />
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm text-neutral-100 truncate">{person.name}</p>
+                                <p className="text-xs text-neutral-500">
+                                  {person.cluster_count} clusters · {person.image_count} images
+                                </p>
+                              </div>
+                            </div>
+                          </button>
+                        )
+                      })}
+                      {filteredRelinkPersons.length === 0 && (
+                        <div className="rounded-lg border border-dashed border-neutral-800 px-3 py-4 text-xs text-neutral-500">
+                          No people match this search.
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="px-5 pt-5 pb-2 text-[11px] uppercase tracking-wide text-neutral-500">
+                      Aliases
+                    </div>
+                    <div className="px-4 pb-4 space-y-2">
+                      {relinkAliasCandidates.map((candidate) => {
+                        const selected = relinkSelection?.type === 'alias' && relinkSelection.label === candidate.label
+                        return (
+                          <button
+                            key={candidate.key}
+                            onClick={() => {
+                              setRelinkSelection({ type: 'alias', label: candidate.label })
+                            }}
+                            className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${
+                              selected
+                                ? 'border-violet-700 bg-violet-950/30'
+                                : 'border-neutral-800 bg-neutral-950/40 hover:bg-neutral-800/50'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3">
+                              {candidate.representativeId != null ? (
+                                <FaceCropThumbnail occurrenceId={candidate.representativeId} size="sm" />
+                              ) : (
+                                <div className="w-12 h-12 rounded bg-neutral-800 flex items-center justify-center">
+                                  <svg className="w-4 h-4 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 21l-7.5-4.5L4.5 21V5.25A2.25 2.25 0 016.75 3h10.5A2.25 2.25 0 0119.5 5.25V21z" />
+                                  </svg>
+                                </div>
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm text-neutral-100 truncate">{candidate.label}</p>
+                                <p className="text-xs text-neutral-500 truncate">
+                                  {candidate.subtitle} · {candidate.imageCount} images
+                                </p>
+                              </div>
+                            </div>
+                          </button>
+                        )
+                      })}
+                      {relinkAliasCandidates.length === 0 && (
+                        <div className="rounded-lg border border-dashed border-neutral-800 px-3 py-4 text-xs text-neutral-500">
+                          No aliases match this search.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="border-t border-neutral-800 px-5 py-3 flex items-center justify-between gap-3">
+                  <p className="text-xs text-neutral-500">
+                    Pick a person to relink membership, or pick an alias to relabel this cluster.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={closeRelinkDialog}
+                      disabled={relinkSubmitting}
+                      className="px-3 py-1.5 text-xs rounded-md bg-neutral-800 text-neutral-300 hover:bg-neutral-700 border border-neutral-700 disabled:opacity-40"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleApplyRelinkSelection}
+                      disabled={relinkSubmitting || relinkLoading || relinkSelection == null}
+                      className="px-3 py-1.5 text-xs rounded-md bg-violet-700 text-white hover:bg-violet-600 disabled:opacity-40"
+                    >
+                      {relinkSubmitting
+                        ? 'Applying...'
+                        : relinkSelection?.type === 'person'
+                          ? 'Relink to person'
+                          : 'Apply alias'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Error state */}
       {error && (
         <div className="px-5 py-3 bg-red-900/30 border-b border-red-800/50 text-red-300 text-sm">
@@ -1232,6 +1838,9 @@ export function FacesView() {
                   </span>
 
                   {/* Edit button */}
+                  {!isEditing &&
+                    renderRelinkButton(cluster)}
+
                   {!isEditing &&
                     renderEditButton(
                       key,
@@ -1476,22 +2085,26 @@ export function FacesView() {
                   <div className="px-4 py-1.5 text-[10px] text-neutral-500 uppercase tracking-wide">
                     Clusters
                   </div>
-                  {pClusters.map((pc) => (
-                    <div key={pc.cluster_id} className="flex items-center gap-2 px-4 py-1 text-xs hover:bg-neutral-800/30">
-                      {pc.representative_id != null && (
-                        <FaceCropThumbnail occurrenceId={pc.representative_id} size="sm" />
-                      )}
-                      <span className="flex-1 text-neutral-300 truncate">{pc.label}</span>
-                      <span className="text-neutral-500">{pc.face_count} faces</span>
-                      <button
-                        onClick={() => handleUnlinkCluster(pc.cluster_id)}
-                        className="text-neutral-600 hover:text-red-400 transition-colors"
-                        title="Unlink from person"
-                      >
-                        Unlink
-                      </button>
-                    </div>
-                  ))}
+                  {pClusters.map((pc) => {
+                    const sourceCluster = clusters.find((cluster) => cluster.cluster_id === pc.cluster_id)
+                    return (
+                      <div key={pc.cluster_id} className="flex items-center gap-2 px-4 py-1 text-xs hover:bg-neutral-800/30">
+                        {pc.representative_id != null && (
+                          <FaceCropThumbnail occurrenceId={pc.representative_id} size="sm" />
+                        )}
+                        <span className="flex-1 text-neutral-300 truncate">{pc.label}</span>
+                        <span className="text-neutral-500">{pc.face_count} faces</span>
+                        {sourceCluster && renderRelinkButton(sourceCluster)}
+                        <button
+                          onClick={() => handleUnlinkCluster(pc.cluster_id)}
+                          className="text-neutral-600 hover:text-red-400 transition-colors"
+                          title="Unlink from person"
+                        >
+                          Unlink
+                        </button>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -1507,6 +2120,7 @@ export function FacesView() {
             <div className="px-4 py-2 border-b border-neutral-800/60 flex items-center justify-between sticky top-0 bg-neutral-900 z-10">
               <span className="text-xs text-neutral-300 font-medium">{displayLabel}</span>
               <div className="flex items-center gap-3">
+                {cl && renderRelinkButton(cl)}
                 <div className="relative">
                   {renderLinkDropdown(cId)}
                 </div>

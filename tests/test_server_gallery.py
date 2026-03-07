@@ -450,6 +450,48 @@ def test_search_alias_prompt_routes_to_face_search(
     assert [item["image_id"] for item in result["results"]] == [1]
 
 
+def test_faces_cluster_relink_updates_label_and_person(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\cluster-a.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\people\cluster-b.jpg")
+    gallery_db.execute("INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)", (1, "Chen XC", None))
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=1,
+        image_id=1,
+        identity_name="chen_xc_child",
+        cluster_id=10,
+        person_id=None,
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=2,
+        image_id=2,
+        identity_name="chen_xc_child",
+        cluster_id=10,
+        person_id=None,
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_faces_cluster_relink(
+        {"cluster_id": 10, "display_name": "Chen XC", "person_id": 1, "update_person": True}
+    )
+
+    assert result == {"ok": True, "updated": 2}
+    label_row = gallery_db.execute(
+        "SELECT display_name FROM face_cluster_labels WHERE cluster_id = ?",
+        (10,),
+    ).fetchone()
+    assert label_row["display_name"] == "Chen XC"
+    person_ids = gallery_db.execute(
+        "SELECT DISTINCT person_id FROM face_occurrences WHERE cluster_id = ?",
+        (10,),
+    ).fetchall()
+    assert {row["person_id"] for row in person_ids} == {1}
+
+
 def test_search_face_filter_uses_aliases_from_faces_table(
     gallery_db: sqlite3.Connection,
     monkeypatch: pytest.MonkeyPatch,
@@ -562,6 +604,80 @@ def test_search_face_filter_matches_person_name_across_multiple_clusters(
     assert sorted(item["image_id"] for item in result["results"]) == [1, 2]
 
 
+def test_search_multi_face_filter_requires_all_selected_people(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\cxc.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\people\wjj.jpg")
+    _insert_processed_image(gallery_db, 3, r"E:\Pic\people\cxc-wjj.jpg")
+    gallery_db.executemany(
+        "INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)",
+        [(1, "cxc", None), (2, "wjj", None)],
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=1,
+        image_id=1,
+        identity_name="chen_xc",
+        cluster_id=10,
+        person_id=1,
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=2,
+        image_id=2,
+        identity_name="wang_jj",
+        cluster_id=20,
+        person_id=2,
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=3,
+        image_id=3,
+        identity_name="chen_xc",
+        cluster_id=10,
+        person_id=1,
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=4,
+        image_id=3,
+        identity_name="wang_jj",
+        cluster_id=20,
+        person_id=2,
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search(
+        {"faces": ["cxc", "wjj"], "faceMatch": "all", "mode": "hybrid", "limit": 10, "offset": 0}
+    )
+
+    assert result["total"] == 1
+    assert result["hasMore"] is False
+    assert [item["image_id"] for item in result["results"]] == [3]
+
+
+def test_search_resolve_face_query_returns_multiple_faces_and_remaining_text(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gallery_db.executemany(
+        "INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)",
+        [(1, "cxc", None), (2, "wjj", None)],
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search_resolve_face_query({"query": "cxc, wjj together at the beach"})
+
+    assert result == {
+        "face": "cxc",
+        "faces": ["cxc", "wjj"],
+        "faceMatch": "all",
+        "remainingQuery": "at the beach",
+    }
+
+
 def test_search_alias_prompt_combines_face_and_activity_terms(
     gallery_db: sqlite3.Connection,
     monkeypatch: pytest.MonkeyPatch,
@@ -577,6 +693,11 @@ def test_search_alias_prompt_combines_face_and_activity_terms(
             if query == "wyy playing basketball":
                 return "wyy", "playing basketball"
             return None, query
+
+        def resolve_face_queries(self, query: str) -> tuple[list[str], str, str]:
+            if query == "wyy playing basketball":
+                return ["wyy"], "playing basketball", "all"
+            return [], query, "all"
 
         def search_face(self, name: str, limit: int = 50) -> list[dict[str, object]]:
             assert name == "wyy"
@@ -612,6 +733,66 @@ def test_search_alias_prompt_combines_face_and_activity_terms(
     assert result["total"] == 2
     assert result["hasMore"] is False
     assert [item["image_id"] for item in result["results"]] == [2, 4]
+
+
+def test_search_multi_face_prompt_combines_people_and_activity_terms(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for image_id in range(1, 6):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\people\group{image_id}.jpg")
+
+    class FakeSearchEngine:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+
+        def resolve_face_queries(self, query: str) -> tuple[list[str], str, str]:
+            if query == "cxc, wjj together at the beach":
+                return ["cxc", "wjj"], "at the beach", "all"
+            return [], query, "all"
+
+        def resolve_face_query(self, query: str) -> tuple[str | None, str]:
+            return None, query
+
+        def search_faces(
+            self,
+            names: list[str],
+            limit: int = 50,
+            match_mode: str = "all",
+        ) -> list[dict[str, object]]:
+            assert names == ["cxc", "wjj"]
+            assert match_mode == "all"
+            return [
+                {"image_id": 1, "score": 2.0},
+                {"image_id": 4, "score": 1.8},
+            ][:limit]
+
+        def search(
+            self,
+            query: str,
+            limit: int,
+            semantic_weight: float = 0.5,
+            mode: str = "hybrid",
+        ) -> list[dict[str, object]]:
+            if query != "at the beach":
+                return []
+            return [
+                {"image_id": 4, "score": 0.98},
+                {"image_id": 3, "score": 0.95},
+                {"image_id": 1, "score": 0.90},
+            ][:limit]
+
+    import imganalyzer.db.search as search_module
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    monkeypatch.setattr(search_module, "SearchEngine", FakeSearchEngine)
+    result = server._handle_search(
+        {"query": "cxc, wjj together at the beach", "mode": "hybrid", "limit": 10, "offset": 0}
+    )
+
+    assert result["total"] == 2
+    assert result["hasMore"] is False
+    assert [item["image_id"] for item in result["results"]] == [1, 4]
 
 
 def test_search_best_sort_uses_quality_ranking(

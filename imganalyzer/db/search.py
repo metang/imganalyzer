@@ -198,14 +198,13 @@ class SearchEngine:
         else:
             return self._hybrid_search(query, limit, semantic_weight)
 
-    def search_face(self, name: str, limit: int = 50) -> list[dict[str, Any]]:
-        """Search for images containing a face identity (by name or alias)."""
+    def _resolve_face_rows(self, name: str, limit: int | None = 50) -> list[dict[str, Any]]:
+        """Resolve one face/person query into image rows without text fallback."""
         identities = self.repo.find_face_identities_by_alias(name)
         persons = self.repo.find_persons_by_name(name)
         clusters = self.repo.find_clusters_by_label(name)
         if not identities and not persons and not clusters:
-            # Fall back to FTS text search
-            return self._fts_search(name, limit)
+            return []
 
         results: list[dict[str, Any]] = []
         seen: set[int] = set()
@@ -250,16 +249,105 @@ class SearchEngine:
                     f"Face: {snippet_name}",
                 )
 
+        if limit is None or limit <= 0:
+            return results
         return results[:limit]
 
-    def resolve_face_query(self, query: str) -> tuple[str | None, str]:
-        """Extract the longest alias/name span from a freeform query, if any."""
+    def search_face(self, name: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Search for images containing a face identity (by name or alias)."""
+        rows = self._resolve_face_rows(name, limit=limit)
+        if rows:
+            return rows
+        # Fall back to FTS text search
+        return self._fts_search(name, limit)
+
+    def search_faces(
+        self,
+        names: list[str],
+        limit: int = 50,
+        match_mode: str = "all",
+    ) -> list[dict[str, Any]]:
+        """Search for images containing one or more face/person filters."""
+        clean_names: list[str] = []
+        seen_names: set[str] = set()
+        for name in names:
+            clean = str(name).strip()
+            lowered = clean.casefold()
+            if not clean or lowered in seen_names:
+                continue
+            seen_names.add(lowered)
+            clean_names.append(clean)
+
+        if not clean_names:
+            return []
+        if len(clean_names) == 1:
+            return self.search_face(clean_names[0], limit)
+
+        all_results = [self._resolve_face_rows(name, limit=None) for name in clean_names]
+        if match_mode != "any" and any(not rows for rows in all_results):
+            return []
+
+        aggregate: dict[int, dict[str, Any]] = {}
+        for rows in all_results:
+            for row in rows:
+                image_id = int(row["image_id"])
+                entry = aggregate.setdefault(image_id, {
+                    "image_id": image_id,
+                    "file_path": row["file_path"],
+                    "score": 0.0,
+                    "matches": 0,
+                })
+                entry["score"] = float(entry["score"]) + float(row["score"])
+                entry["matches"] = int(entry["matches"]) + 1
+
+        required_matches = len(clean_names) if match_mode == "all" else 1
+        snippet = f"People: {', '.join(clean_names)}"
+        ranked = sorted(
+            (
+                {
+                    "image_id": int(entry["image_id"]),
+                    "file_path": entry["file_path"],
+                    "score": float(entry["score"]),
+                    "match_type": "face",
+                    "snippet": snippet,
+                }
+                for entry in aggregate.values()
+                if int(entry["matches"]) >= required_matches
+            ),
+            key=lambda item: (-float(item["score"]), str(item["file_path"])),
+        )
+        return ranked[:limit]
+
+    def resolve_face_queries(self, query: str) -> tuple[list[str], str, str]:
+        """Extract all face aliases/names from a freeform query."""
         normalized = " ".join(query.split())
         if not normalized:
-            return None, ""
+            return [], "", "all"
 
+        remainder = normalized
+        matches: list[str] = []
+        while remainder:
+            span = self._extract_face_query_span(remainder)
+            if span is None:
+                break
+            candidate, start, end = span
+            if not any(candidate.casefold() == existing.casefold() for existing in matches):
+                matches.append(candidate)
+            remainder = f"{remainder[:start]} {remainder[end:]}"
+            remainder = " ".join(remainder.split())
+
+        cleaned_remainder = self._cleanup_face_query_remainder(remainder) if matches else normalized
+        match_mode = "all" if len(matches) > 1 else "any"
+        return matches, cleaned_remainder, match_mode
+
+    def resolve_face_query(self, query: str) -> tuple[str | None, str]:
+        """Extract the first alias/name span from a freeform query, if any."""
+        faces, remaining_query, _ = self.resolve_face_queries(query)
+        return (faces[0] if faces else None), remaining_query
+
+    def _extract_face_query_span(self, normalized: str) -> tuple[str, int, int] | None:
         if self._matches_face_query(normalized):
-            return normalized, ""
+            return normalized, 0, len(normalized)
 
         tokens = list(re.finditer(r"\S+", normalized))
         for span_len in range(len(tokens), 0, -1):
@@ -269,12 +357,14 @@ class SearchEngine:
                 candidate = normalized[start:end].strip(" ,.;:!?()[]{}\"'")
                 if not candidate:
                     continue
-                if not self._matches_face_query(candidate):
-                    continue
-                remainder = f"{normalized[:start]} {normalized[end:]}"
-                return candidate, " ".join(remainder.split())
+                if self._matches_face_query(candidate):
+                    return candidate, start, end
+        return None
 
-        return None, normalized
+    def _cleanup_face_query_remainder(self, remainder: str) -> str:
+        cleaned = re.sub(r"[,&]+", " ", remainder)
+        cleaned = re.sub(r"\b(with|and|together)\b", " ", cleaned, flags=re.IGNORECASE)
+        return " ".join(cleaned.split())
 
     def _matches_face_query(self, candidate: str) -> bool:
         return bool(

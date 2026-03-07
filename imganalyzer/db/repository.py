@@ -495,6 +495,47 @@ class Repository:
             )
         self.conn.commit()
 
+    def relink_cluster(
+        self,
+        cluster_id: int,
+        display_name: str | None,
+        person_id: int | None = None,
+        *,
+        update_person: bool = False,
+    ) -> int:
+        """Update a cluster label and optionally its linked person in one transaction."""
+        if display_name:
+            self.conn.execute(
+                "INSERT INTO face_cluster_labels (cluster_id, display_name) VALUES (?, ?)"
+                " ON CONFLICT(cluster_id) DO UPDATE SET display_name = excluded.display_name",
+                [cluster_id, display_name],
+            )
+        else:
+            self.conn.execute(
+                "DELETE FROM face_cluster_labels WHERE cluster_id = ?",
+                [cluster_id],
+            )
+
+        updated = 0
+        if update_person:
+            if person_id is not None:
+                if not self._table_exists("face_persons"):
+                    raise ValueError("face_persons table does not exist")
+                person_row = self.conn.execute(
+                    "SELECT 1 FROM face_persons WHERE id = ?",
+                    [person_id],
+                ).fetchone()
+                if person_row is None:
+                    raise ValueError(f"Person {person_id} not found")
+            cur = self.conn.execute(
+                "UPDATE face_occurrences SET person_id = ? WHERE cluster_id = ?",
+                [person_id, cluster_id],
+            )
+            updated = cur.rowcount
+
+        self.conn.commit()
+        return updated
+
     # ── Person (cross-age identity grouping) ─────────────────────────────
 
     def create_person(self, name: str, notes: str | None = None) -> int:
@@ -813,15 +854,19 @@ class Repository:
         return [dict(r) for r in rows]
 
     def get_images_for_face(
-        self, name: str, limit: int = 100
+        self, name: str, limit: int | None = 100
     ) -> list[dict[str, Any]]:
         """Return images containing a specific face identity name.
 
         Queries both ``analysis_faces`` and ``analysis_local_ai`` using
         ``json_each()`` for reliable JSON-array matching.
         """
+        limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
+        params: list[Any] = [name, name]
+        if limit_clause:
+            params.append(limit)
         rows = self.conn.execute(
-            """
+            f"""
             WITH matched AS (
                 SELECT DISTINCT af.image_id
                 FROM analysis_faces af, json_each(af.face_identities) je
@@ -840,18 +885,22 @@ class Repository:
             LEFT JOIN analysis_faces    af2 ON af2.image_id = m.image_id
             LEFT JOIN analysis_local_ai la2 ON la2.image_id = m.image_id
             ORDER BY i.file_path
-            LIMIT ?
+            {limit_clause}
             """,
-            [name, name, limit],
+            params,
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_images_for_person(self, person_id: int, limit: int = 100) -> list[dict[str, Any]]:
+    def get_images_for_person(self, person_id: int, limit: int | None = 100) -> list[dict[str, Any]]:
         """Return images containing any face occurrence linked to *person_id*."""
         if not self._table_exists("face_occurrences"):
             return []
+        limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
+        params: list[Any] = [person_id]
+        if limit_clause:
+            params.append(limit)
         rows = self.conn.execute(
-            """
+            f"""
             WITH matched AS (
                 SELECT DISTINCT fo.image_id
                 FROM face_occurrences fo
@@ -866,18 +915,22 @@ class Repository:
             LEFT JOIN analysis_faces af ON af.image_id = m.image_id
             LEFT JOIN analysis_local_ai la ON la.image_id = m.image_id
             ORDER BY i.file_path
-            LIMIT ?
+            {limit_clause}
             """,
-            [person_id, limit],
+            params,
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_images_for_cluster(self, cluster_id: int, limit: int = 100) -> list[dict[str, Any]]:
+    def get_images_for_cluster(self, cluster_id: int, limit: int | None = 100) -> list[dict[str, Any]]:
         """Return images containing any face occurrence belonging to *cluster_id*."""
         if not self._table_exists("face_occurrences"):
             return []
+        limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
+        params: list[Any] = [cluster_id]
+        if limit_clause:
+            params.append(limit)
         rows = self.conn.execute(
-            """
+            f"""
             WITH matched AS (
                 SELECT DISTINCT fo.image_id
                 FROM face_occurrences fo
@@ -892,9 +945,9 @@ class Repository:
             LEFT JOIN analysis_faces af ON af.image_id = m.image_id
             LEFT JOIN analysis_local_ai la ON la.image_id = m.image_id
             ORDER BY i.file_path
-            LIMIT ?
+            {limit_clause}
             """,
-            [cluster_id, limit],
+            params,
         ).fetchall()
         return [dict(row) for row in rows]
 

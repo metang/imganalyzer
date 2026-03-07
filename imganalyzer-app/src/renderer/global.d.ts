@@ -82,6 +82,8 @@ export interface SearchFilters {
   sortBy?: SearchSortBy
   expandedTerms?: string[]
   face?: string
+  faces?: string[]
+  faceMatch?: SearchFaceMatch
   camera?: string
   lens?: string
   location?: string
@@ -104,6 +106,7 @@ export interface SearchFilters {
 export type SearchIntent = 'people' | 'wildlife' | 'best-shot' | 'general'
 export type SearchTimeOfDay = 'morning' | 'afternoon' | 'evening' | 'night'
 export type SearchSortBy = 'relevance' | 'best' | 'aesthetic' | 'sharpness' | 'cleanest' | 'newest'
+export type SearchFaceMatch = 'any' | 'all'
 
 export interface SearchResult {
   image_id: number
@@ -163,6 +166,8 @@ export interface SearchResponse {
 
 export interface SearchFaceResolution {
   face: string | null
+  faces: string[]
+  faceMatch: SearchFaceMatch
   remainingQuery: string
   error?: string
 }
@@ -368,6 +373,7 @@ declare global {
       setFaceAlias(canonicalName: string, displayName: string, clusterId?: number | null): Promise<{ ok: boolean; error?: string }>
       listFaceClusters(limit?: number, offset?: number): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; total_count: number; error?: string }>
       getFaceClusterImages(clusterId: number | null, identityName: string | null, limit?: number): Promise<{ occurrences: FaceOccurrence[]; error?: string }>
+      relinkFaceCluster(clusterId: number, displayName: string | null, personId?: number | null, updatePerson?: boolean): Promise<{ ok: boolean; updated: number; error?: string }>
       getFaceCrop(occurrenceId: number): Promise<{ data?: string; error?: string }>
       getFaceCropBatch(ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }>
       runFaceClustering(threshold?: number): Promise<{ started: boolean; error?: string }>

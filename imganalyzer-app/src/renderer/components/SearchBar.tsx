@@ -2,7 +2,7 @@
  * SearchBar.tsx — compact search controls for the left search sidebar.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SearchFilters, SearchIntent, SearchSortBy, SearchTimeOfDay } from '../global'
+import type { SearchFaceMatch, SearchFilters, SearchIntent, SearchSortBy, SearchTimeOfDay } from '../global'
 
 interface SearchBarProps {
   onSearch: (filters: SearchFilters, contextLabel: string | null) => void
@@ -20,7 +20,8 @@ interface SearchDraft {
   aiModel: string
   activity: string
   species: string
-  face: string
+  faces: string[]
+  faceMatch: SearchFaceMatch
   country: string
   location: string
   recurringDate: string
@@ -104,6 +105,23 @@ const WILDLIFE_EXPANSIONS: Record<string, string[]> = {
   gull: ['herring gull', 'tern', 'kittiwake', 'black-headed gull'],
 }
 
+function dedupeStrings(values: string[]): string[] {
+  const seen = new Set<string>()
+  const results: string[] = []
+  for (const value of values) {
+    const clean = value.trim()
+    const lowered = clean.toLowerCase()
+    if (!clean || seen.has(lowered)) continue
+    seen.add(lowered)
+    results.push(clean)
+  }
+  return results
+}
+
+function splitFaceInput(value: string): string[] {
+  return dedupeStrings(value.split(/[,\n]/))
+}
+
 function parseQuery(raw: string): ParsedQuery {
   const patches: Partial<SearchFilters> = {}
   let text = raw
@@ -112,6 +130,19 @@ function parseQuery(raw: string): ParsedQuery {
     const match = text.match(re)
     if (match) text = text.replace(match[0], '').trim()
     return match
+  }
+
+  const explicitFaceMatches = [...text.matchAll(/\bface:(?:"([^"]+)"|'([^']+)'|([^\s,]+))/gi)]
+  if (explicitFaceMatches.length > 0) {
+    const faces = dedupeStrings(
+      explicitFaceMatches.map((match) => match[1] || match[2] || match[3] || '')
+    )
+    if (faces.length > 0) {
+      patches.faces = faces
+      patches.face = faces[0]
+      if (faces.length > 1) patches.faceMatch = 'all'
+    }
+    text = text.replace(/\bface:(?:"[^"]+"|'[^']+'|[^\s,]+)/gi, '').trim()
   }
 
   const scoreGte = strip(/\bscore\s*>=?\s*(\d+(?:\.\d+)?)/i)
@@ -139,6 +170,42 @@ function parseQuery(raw: string): ParsedQuery {
   strip(/\bhas:people\b/i) && (patches.hasPeople = true)
   strip(/\bno:people\b/i) && (patches.hasPeople = false)
 
+  const applyPeopleCountPatch = (match: RegExpMatchArray | null, apply: (count: number) => void) => {
+    if (!match) return
+    const count = parseInt(match[1], 10)
+    if (Number.isNaN(count)) return
+    apply(count)
+    patches.hasPeople = true
+  }
+
+  applyPeopleCountPatch(
+    strip(/\b(?:with\s+)?more than\s+(\d+)\s+people\b/i),
+    (count) => { patches.facesMin = count + 1 },
+  )
+  applyPeopleCountPatch(
+    strip(/\b(?:with\s+)?(?:at least|minimum of|no fewer than)\s+(\d+)\s+people\b/i),
+    (count) => { patches.facesMin = count },
+  )
+  applyPeopleCountPatch(
+    strip(/\b(?:with\s+)?less than\s+(\d+)\s+people\b/i),
+    (count) => { patches.facesMax = Math.max(0, count - 1) },
+  )
+  applyPeopleCountPatch(
+    strip(/\b(?:with\s+)?(?:at most|no more than)\s+(\d+)\s+people\b/i),
+    (count) => { patches.facesMax = count },
+  )
+  applyPeopleCountPatch(
+    strip(/\b(?:with\s+)?exactly\s+(\d+)\s+people\b/i),
+    (count) => {
+      patches.facesMin = count
+      patches.facesMax = count
+    },
+  )
+
+  if (/\b(group photo|crowd|crowded|large group|many people)\b/i.test(text)) {
+    patches.hasPeople = true
+  }
+
   const camM = strip(/\bcamera:(\S+)/i)
   if (camM) patches.camera = camM[1].replace(/^["']|["']$/g, '')
 
@@ -150,9 +217,6 @@ function parseQuery(raw: string): ParsedQuery {
 
   const countryM = strip(/\bcountry:(\S+)/i)
   if (countryM) patches.country = countryM[1].replace(/^["']|["']$/g, '')
-
-  const faceM = strip(/\bface:(\S+)/i)
-  if (faceM) patches.face = faceM[1].replace(/^["']|["']$/g, '')
 
   const dayM = strip(/\bday:(\d{2}-\d{2})\b/i)
   if (dayM) patches.recurringMonthDay = dayM[1]
@@ -226,7 +290,8 @@ function defaultDraft(): SearchDraft {
     aiModel: AI_MODELS[0],
     activity: '',
     species: '',
-    face: '',
+    faces: [],
+    faceMatch: 'all',
     country: '',
     location: '',
     recurringDate: '',
@@ -255,6 +320,10 @@ function defaultDraft(): SearchDraft {
 
 function buildFilters(draft: SearchDraft): SearchFilters {
   const { textQuery, patches } = parseQuery(draft.prompt)
+  const faces = dedupeStrings([
+    ...(patches.faces ?? (patches.face ? [patches.face] : [])),
+    ...draft.faces,
+  ])
   const query = joinUniqueParts([
     textQuery,
     draft.intent === 'people' ? draft.activity : undefined,
@@ -269,7 +338,11 @@ function buildFilters(draft: SearchDraft): SearchFilters {
     semanticWeight: parseFloat(draft.semanticWeight) || 0.5,
   }
 
-  if (draft.face.trim()) filters.face = draft.face.trim()
+  if (faces.length > 0) {
+    filters.faces = faces
+    filters.face = faces[0]
+    if (faces.length > 1) filters.faceMatch = draft.faceMatch
+  }
   if (draft.country.trim()) filters.country = draft.country.trim()
   if (draft.location.trim()) filters.location = draft.location.trim()
   if (draft.camera.trim()) filters.camera = draft.camera.trim()
@@ -293,7 +366,7 @@ function buildFilters(draft: SearchDraft): SearchFilters {
 
   if (draft.hasPeople === 'yes') filters.hasPeople = true
   if (draft.hasPeople === 'no') filters.hasPeople = false
-  if (draft.intent === 'people' && filters.hasPeople === undefined && (filters.face || draft.activity.trim())) {
+  if (draft.intent === 'people' && filters.hasPeople === undefined && (faces.length > 0 || draft.activity.trim())) {
     filters.hasPeople = true
   }
 
@@ -315,7 +388,7 @@ function buildFilters(draft: SearchDraft): SearchFilters {
 
   const hasMeaningfulFilter = Boolean(
     filters.query ||
-    filters.face ||
+    filters.faces?.length ||
     filters.country ||
     filters.location ||
     filters.camera ||
@@ -338,7 +411,7 @@ function buildFilters(draft: SearchDraft): SearchFilters {
     filters.sortBy
   )
 
-  if (!hasMeaningfulFilter || (!filters.query && !filters.face && !filters.expandedTerms?.length)) {
+  if (!hasMeaningfulFilter) {
     filters.mode = 'browse'
   }
 
@@ -349,7 +422,14 @@ function buildContextLabel(intent: SearchIntent, filters: SearchFilters, planner
   if (plannerSummary) return plannerSummary
   const title = INTENT_COPY[intent].title
   const parts: string[] = []
-  if (filters.face) parts.push(filters.face)
+  if (filters.faces && filters.faces.length > 0) {
+    parts.push(filters.faces.join(', '))
+    if (filters.faces.length > 1) {
+      parts.push(filters.faceMatch === 'any' ? 'any selected person' : 'all selected people')
+    }
+  } else if (filters.face) {
+    parts.push(filters.face)
+  }
   if (filters.query) parts.push(filters.query)
   if (filters.country) parts.push(filters.country)
   if (filters.location) parts.push(filters.location)
@@ -503,7 +583,15 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
     if (draft.prompt.trim()) items.push({ id: 'prompt', label: `Prompt: ${draft.prompt.trim()}`, tone: 'accent' })
     if (draft.activity.trim()) items.push({ id: 'activity', label: `Activity: ${draft.activity.trim()}` })
     if (draft.species.trim()) items.push({ id: 'species', label: `Species: ${draft.species.trim()}` })
-    if (draft.face.trim()) items.push({ id: 'face', label: `Person: ${draft.face.trim()}` })
+    draft.faces.forEach((face, index) => {
+      items.push({ id: `face:${index}`, label: `Person: ${face}` })
+    })
+    if (draft.faces.length > 1) {
+      items.push({
+        id: 'faceMatch',
+        label: draft.faceMatch === 'any' ? 'Match any selected person' : 'Match all selected people',
+      })
+    }
     if (draft.country.trim()) items.push({ id: 'country', label: `Country: ${draft.country.trim()}` })
     if (draft.location.trim()) items.push({ id: 'location', label: `Location: ${draft.location.trim()}` })
     if (draft.recurringDate) items.push({ id: 'recurringDate', label: `Every ${formatRecurringLabel(draft.recurringDate)}` })
@@ -536,20 +624,26 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
   }, [onSearch])
 
   const resolvePromptFace = useCallback(async (sourceDraft: SearchDraft): Promise<SearchDraft> => {
-    if (sourceDraft.face.trim() || !sourceDraft.prompt.trim()) {
+    if (sourceDraft.faces.length > 0 || !sourceDraft.prompt.trim()) {
       return sourceDraft
     }
 
     setResolvingFace(true)
     try {
       const resolution = await window.api.resolveSearchFaceQuery(sourceDraft.prompt)
-      if (resolution.error || !resolution.face) {
+      const resolvedFaces = resolution.faces.length > 0
+        ? resolution.faces
+        : resolution.face
+          ? [resolution.face]
+          : []
+      if (resolution.error || resolvedFaces.length === 0) {
         return sourceDraft
       }
 
       const nextDraft: SearchDraft = {
         ...sourceDraft,
-        face: resolution.face,
+        faces: resolvedFaces,
+        faceMatch: resolution.faceMatch ?? (resolvedFaces.length > 1 ? 'all' : sourceDraft.faceMatch),
         prompt: resolution.remainingQuery,
       }
       setDraft(nextDraft)
@@ -587,8 +681,8 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
           return { ...prev, activity: '' }
         case 'species':
           return { ...prev, species: '' }
-        case 'face':
-          return { ...prev, face: '' }
+        case 'faceMatch':
+          return { ...prev, faceMatch: 'all' }
         case 'country':
           return { ...prev, country: '' }
         case 'location':
@@ -618,6 +712,16 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
         case 'hasPeople':
           return { ...prev, hasPeople: 'any' }
         default:
+          if (chipId.startsWith('face:')) {
+            const faceIndex = parseInt(chipId.split(':')[1] ?? '', 10)
+            if (Number.isNaN(faceIndex)) return prev
+            const nextFaces = prev.faces.filter((_, index) => index !== faceIndex)
+            return {
+              ...prev,
+              faces: nextFaces,
+              faceMatch: nextFaces.length > 1 ? prev.faceMatch : 'all',
+            }
+          }
           return prev
       }
     })
@@ -625,11 +729,16 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
   }, [])
 
   const applyPlannerResult = useCallback((response: { intent: SearchIntent; filters: SearchFilters; summary: string }) => {
+    const plannedFaces = dedupeStrings([
+      ...(response.filters.faces ?? []),
+      ...(response.filters.face ? [response.filters.face] : []),
+    ])
     const nextDraft: SearchDraft = {
       ...draft,
       intent: response.intent,
       prompt: response.filters.query ?? draft.prompt,
-      face: response.filters.face ?? draft.face,
+      faces: plannedFaces.length > 0 ? plannedFaces : draft.faces,
+      faceMatch: response.filters.faceMatch ?? draft.faceMatch,
       country: response.filters.country ?? draft.country,
       location: response.filters.location ?? draft.location,
       recurringDate: recurringDateForInput(response.filters.recurringMonthDay) || draft.recurringDate,
@@ -653,7 +762,7 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
       draft.prompt,
       draft.intent === 'people' ? draft.activity : undefined,
       draft.intent === 'wildlife' ? draft.species : undefined,
-      draft.face ? `person ${draft.face}` : undefined,
+      draft.faces.length > 0 ? `people ${draft.faces.join(', ')}` : undefined,
       draft.country ? `in ${draft.country}` : undefined,
       draft.recurringDate ? `every ${formatRecurringLabel(draft.recurringDate)}` : undefined,
       draft.timeOfDay !== 'any' ? draft.timeOfDay : undefined,
@@ -773,11 +882,37 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
               <p className="text-sm font-medium text-white">People filters</p>
               <div className="mt-4 grid gap-4">
                 <TextField
-                  label="Person or alias"
-                  value={draft.face}
+                  label="People or aliases"
+                  value={draft.faces.join(', ')}
                   placeholder="Alice, cxc, Bob…"
-                  onChange={(value) => setDraftValue('face', value)}
+                  onChange={(value) => {
+                    const faces = splitFaceInput(value)
+                    setDraft((prev) => ({
+                      ...prev,
+                      faces,
+                      faceMatch: faces.length > 1 ? prev.faceMatch : 'all',
+                    }))
+                    setPlannerSummary(null)
+                    setPlannerError(null)
+                  }}
                 />
+                {draft.faces.length > 1 && (
+                  <div>
+                    <FieldLabel>People matching</FieldLabel>
+                    <div className="flex flex-wrap gap-2">
+                      <ChoicePill
+                        active={draft.faceMatch === 'all'}
+                        label="All selected people"
+                        onClick={() => setDraftValue('faceMatch', 'all')}
+                      />
+                      <ChoicePill
+                        active={draft.faceMatch === 'any'}
+                        label="Any selected person"
+                        onClick={() => setDraftValue('faceMatch', 'any')}
+                      />
+                    </div>
+                  </div>
+                )}
                 <TextField
                   label="Activity / scene"
                   value={draft.activity}

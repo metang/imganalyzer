@@ -1393,6 +1393,50 @@ class TestFacePersons:
         assert cluster_map[2]["person_id"] is None
         assert cluster_map[3]["person_id"] is None
 
+    def test_relink_cluster_updates_label_and_person_together(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        self._seed_clusters(repo, conn)
+
+        pid = repo.create_person("Dad")
+        updated = repo.relink_cluster(1, "Dad Alias", pid, update_person=True)
+
+        assert updated == 2
+        label_row = conn.execute(
+            "SELECT display_name FROM face_cluster_labels WHERE cluster_id = ?",
+            [1],
+        ).fetchone()
+        assert label_row["display_name"] == "Dad Alias"
+        person_ids = conn.execute(
+            "SELECT DISTINCT person_id FROM face_occurrences WHERE cluster_id = ?",
+            [1],
+        ).fetchall()
+        assert {row["person_id"] for row in person_ids} == {pid}
+
+    def test_relink_cluster_can_clear_label_and_unlink_person(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        self._seed_clusters(repo, conn)
+
+        pid = repo.create_person("Dad")
+        repo.relink_cluster(1, "Dad Alias", pid, update_person=True)
+
+        updated = repo.relink_cluster(1, None, None, update_person=True)
+
+        assert updated == 2
+        label_row = conn.execute(
+            "SELECT display_name FROM face_cluster_labels WHERE cluster_id = ?",
+            [1],
+        ).fetchone()
+        assert label_row is None
+        person_ids = conn.execute(
+            "SELECT DISTINCT person_id FROM face_occurrences WHERE cluster_id = ?",
+            [1],
+        ).fetchall()
+        assert {row["person_id"] for row in person_ids} == {None}
+
 
 class TestPersistResultToDB:
     """Test the _persist_result_to_db helper used by the analyze command."""

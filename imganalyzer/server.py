@@ -411,6 +411,8 @@ def _handle_search(params: dict) -> dict:
     mode = params.get("mode", "hybrid")
     semantic_weight = params.get("semanticWeight", 0.5)
     face = params.get("face")
+    faces_raw = params.get("faces")
+    face_match = params.get("faceMatch", "all")
     similar_to_image_id = params.get("similarToImageId")
     camera = params.get("camera")
     lens = params.get("lens")
@@ -468,13 +470,45 @@ def _handle_search(params: dict) -> dict:
             seen_terms.add(lowered)
             expanded_terms.append(clean)
 
-    if not face and query:
-        resolve_face_query = getattr(engine, "resolve_face_query", None)
-        if callable(resolve_face_query):
-            resolved_face, remaining_query = resolve_face_query(str(query))
-            if resolved_face:
-                face = resolved_face
+    if faces_raw is None:
+        faces_raw = []
+    if not isinstance(faces_raw, list):
+        raise ValueError("faces must be an array")
+    if face_match not in {None, "any", "all"}:
+        raise ValueError("faceMatch must be 'any' or 'all'")
+    normalized_faces: list[str] = []
+    seen_faces: set[str] = set()
+    for raw_face in [*faces_raw, face]:
+        if raw_face is None:
+            continue
+        if not isinstance(raw_face, str):
+            raise ValueError("face and faces entries must be strings")
+        clean = raw_face.strip()
+        lowered = clean.casefold()
+        if clean and lowered not in seen_faces:
+            seen_faces.add(lowered)
+            normalized_faces.append(clean)
+    faces = normalized_faces
+    face = faces[0] if faces else None
+    face_match = "all" if face_match is None else face_match
+
+    if not faces and query:
+        resolve_face_queries = getattr(engine, "resolve_face_queries", None)
+        if callable(resolve_face_queries):
+            resolved_faces, remaining_query, resolved_match = resolve_face_queries(str(query))
+            if resolved_faces:
+                faces = resolved_faces
+                face = faces[0]
+                face_match = resolved_match
                 query = remaining_query
+        else:
+            resolve_face_query = getattr(engine, "resolve_face_query", None)
+            if callable(resolve_face_query):
+                resolved_face, remaining_query = resolve_face_query(str(query))
+                if resolved_face:
+                    faces = [resolved_face]
+                    face = resolved_face
+                    query = remaining_query
 
     has_text_query = bool(query and query.strip())
     base_conditions: list[str] = []
@@ -808,8 +842,47 @@ def _handle_search(params: dict) -> dict:
             )[:candidate_limit]
         ]
 
+    def _search_face_terms(candidate_limit: int) -> list[dict[str, Any]]:
+        if not faces:
+            return []
+        if len(faces) == 1:
+            return engine.search_face(faces[0], limit=candidate_limit)
+        search_faces = getattr(engine, "search_faces", None)
+        if callable(search_faces):
+            return search_faces(faces, limit=candidate_limit, match_mode=face_match)
+
+        per_face_results = [engine.search_face(name, limit=candidate_limit) for name in faces]
+        if face_match != "any" and any(not rows for rows in per_face_results):
+            return []
+
+        aggregate: dict[int, dict[str, Any]] = {}
+        for rows in per_face_results:
+            for row in rows:
+                image_id = int(row["image_id"])
+                current = aggregate.setdefault(image_id, {
+                    "image_id": image_id,
+                    "file_path": row.get("file_path", ""),
+                    "score": 0.0,
+                    "matches": 0,
+                })
+                current["score"] = float(current["score"]) + float(row.get("score", 0.0))
+                current["matches"] = int(current["matches"]) + 1
+
+        required_matches = len(faces) if face_match == "all" else 1
+        combined = [
+            {
+                "image_id": int(item["image_id"]),
+                "file_path": item["file_path"],
+                "score": float(item["score"]),
+            }
+            for item in aggregate.values()
+            if int(item["matches"]) >= required_matches
+        ]
+        combined.sort(key=lambda item: (-float(item["score"]), int(item["image_id"])))
+        return combined[:candidate_limit]
+
     def _combine_face_and_text_terms(candidate_limit: int) -> tuple[list[dict[str, Any]], bool]:
-        face_results = engine.search_face(face, limit=candidate_limit)
+        face_results = _search_face_terms(candidate_limit)
         text_results = _search_text_terms(candidate_limit)
         if not face_results or not text_results:
             return [], len(face_results) < candidate_limit and len(text_results) < candidate_limit
@@ -837,7 +910,7 @@ def _handle_search(params: dict) -> dict:
         except (TypeError, ValueError):
             raise ValueError("similarToImageId must be an integer")
 
-    if similar_to_image_id is not None or face or ((has_text_query or expanded_terms) and mode != "browse"):
+    if similar_to_image_id is not None or faces or ((has_text_query or expanded_terms) and mode != "browse"):
         page_end = offset + limit
         candidate_limit = max((page_end + 1) * 4, 200)
         max_candidate_limit = max(candidate_limit, 5000)
@@ -848,10 +921,10 @@ def _handle_search(params: dict) -> dict:
             if similar_to_image_id is not None:
                 search_results = engine.search_similar_image(similar_to_image_id, limit=candidate_limit)
                 search_exhausted = len(search_results) < candidate_limit
-            elif face and (has_text_query or expanded_terms):
+            elif faces and (has_text_query or expanded_terms):
                 search_results, search_exhausted = _combine_face_and_text_terms(candidate_limit)
-            elif face:
-                search_results = engine.search_face(face, limit=candidate_limit)
+            elif faces:
+                search_results = _search_face_terms(candidate_limit)
                 search_exhausted = len(search_results) < candidate_limit
             else:
                 search_results = _search_text_terms(candidate_limit)
@@ -907,8 +980,19 @@ def _handle_search_resolve_face_query(params: dict) -> dict[str, Any]:
 
     conn = _get_db()
     engine = SearchEngine(conn)
-    face, remaining_query = engine.resolve_face_query(query)
-    return {"face": face, "remainingQuery": remaining_query}
+    resolve_face_queries = getattr(engine, "resolve_face_queries", None)
+    if callable(resolve_face_queries):
+        faces, remaining_query, face_match = resolve_face_queries(query)
+    else:
+        face, remaining_query = engine.resolve_face_query(query)
+        faces = [face] if face else []
+        face_match = "all"
+    return {
+        "face": faces[0] if faces else None,
+        "faces": faces,
+        "faceMatch": face_match,
+        "remainingQuery": remaining_query,
+    }
 
 
 def _processed_exists_clause(alias: str = "i") -> str:
@@ -1439,6 +1523,32 @@ def _handle_faces_clusters(params: dict) -> dict:
     }
 
 
+def _handle_faces_cluster_relink(params: dict) -> dict:
+    """Relink a cluster to a label and optionally a person in one transaction."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    display_name = params.get("display_name")
+    if isinstance(display_name, str):
+        display_name = display_name.strip() or None
+    elif display_name is not None:
+        raise ValueError("display_name must be a string or null")
+
+    person_id = params.get("person_id")
+    if person_id is not None:
+        person_id = int(person_id)
+
+    update_person = bool(params.get("update_person", False))
+    updated = repo.relink_cluster(
+        int(params["cluster_id"]),
+        display_name,
+        person_id,
+        update_person=update_person,
+    )
+    return {"ok": True, "updated": updated}
+
+
 # ── Person (cross-age identity grouping) ─────────────────────────────────
 
 
@@ -1704,6 +1814,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/images": _handle_faces_images,
     "faces/set-alias": _handle_faces_set_alias,
     "faces/clusters": _handle_faces_clusters,
+    "faces/cluster-relink": _handle_faces_cluster_relink,
     "faces/cluster-images": _handle_faces_cluster_images,
     "faces/crop": _handle_faces_crop,
     "faces/crop-batch": _handle_faces_crop_batch,
