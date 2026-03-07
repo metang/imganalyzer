@@ -144,3 +144,101 @@ def test_distributed_worker_passes_path_mappings_to_module_runner(tmp_path, monk
     _, _, _, runner = worker._get_thread_db()
     assert runner.path_mappings == [(r"Z:\photos", "/Volumes/photos")]
     worker._close_thread_db()
+
+
+def test_run_forever_prints_progress_summary(monkeypatch):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+
+    printed: list[str] = []
+    monkeypatch.setattr("imganalyzer.pipeline.distributed_worker.console.print", lambda *args, **_kwargs: printed.append(" ".join(str(arg) for arg in args)))
+    monkeypatch.setattr(worker, "_heartbeat_loop", lambda: None)
+    monkeypatch.setattr(worker, "_claim_jobs", lambda: [{
+        "id": 11,
+        "imageId": 5,
+        "module": "metadata",
+        "leaseToken": "lease-11",
+        "filePath": "/photos/job.jpg",
+    }] if not worker._shutdown.is_set() else [])
+
+    def _fake_process(_job: dict[str, object]) -> str:
+        worker._clear_active(11)
+        worker._shutdown.set()
+        return "done"
+
+    monkeypatch.setattr(worker, "_process_claimed_job", _fake_process)
+    monkeypatch.setattr(worker, "_coordinator_call", lambda _method, _params: {"ok": True})
+
+    stats = worker.run_forever()
+
+    assert stats == {"done": 1, "failed": 0, "skipped": 0}
+    assert any("Connected to coordinator as" in line for line in printed)
+    assert any("Progress:" in line and "1 processed" in line for line in printed)
+
+
+def test_run_forever_retries_worker_registration_after_timeout(monkeypatch):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.poll_interval_seconds = 0
+
+    printed: list[str] = []
+    register_attempts = 0
+
+    monkeypatch.setattr("imganalyzer.pipeline.distributed_worker.console.print", lambda *args, **_kwargs: printed.append(" ".join(str(arg) for arg in args)))
+    monkeypatch.setattr(worker, "_heartbeat_loop", lambda: None)
+    monkeypatch.setattr(worker, "_coordinator_call", lambda _method, _params: {"ok": True})
+
+    def _fake_register() -> None:
+        nonlocal register_attempts
+        register_attempts += 1
+        if register_attempts == 1:
+            raise RuntimeError("Coordinator request failed: timed out")
+
+    def _fake_claim_jobs() -> list[dict[str, object]]:
+        worker._shutdown.set()
+        return []
+
+    monkeypatch.setattr(worker, "_register_worker", _fake_register)
+    monkeypatch.setattr(worker, "_claim_jobs", _fake_claim_jobs)
+
+    stats = worker.run_forever()
+
+    assert stats == {"done": 0, "failed": 0, "skipped": 0}
+    assert register_attempts == 2
+    assert any("Coordinator unavailable during registration" in line for line in printed)
+    assert any("Connected to coordinator as" in line for line in printed)
+
+
+def test_run_forever_retries_claim_after_timeout(monkeypatch):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.poll_interval_seconds = 0
+
+    printed: list[str] = []
+    register_attempts = 0
+    claim_attempts = 0
+
+    monkeypatch.setattr("imganalyzer.pipeline.distributed_worker.console.print", lambda *args, **_kwargs: printed.append(" ".join(str(arg) for arg in args)))
+    monkeypatch.setattr(worker, "_heartbeat_loop", lambda: None)
+    monkeypatch.setattr(worker, "_coordinator_call", lambda _method, _params: {"ok": True})
+
+    def _fake_register() -> None:
+        nonlocal register_attempts
+        register_attempts += 1
+
+    def _fake_claim_jobs() -> list[dict[str, object]]:
+        nonlocal claim_attempts
+        claim_attempts += 1
+        if claim_attempts == 1:
+            raise RuntimeError("Coordinator request failed: timed out")
+        worker._shutdown.set()
+        return []
+
+    monkeypatch.setattr(worker, "_register_worker", _fake_register)
+    monkeypatch.setattr(worker, "_claim_jobs", _fake_claim_jobs)
+
+    stats = worker.run_forever()
+
+    assert stats == {"done": 0, "failed": 0, "skipped": 0}
+    assert register_attempts == 2
+    assert claim_attempts == 2
+    assert any("Coordinator unavailable while claiming jobs" in line for line in printed)
+    assert any("Reconnected to coordinator as" in line for line in printed)
+

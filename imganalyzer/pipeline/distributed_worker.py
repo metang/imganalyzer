@@ -186,6 +186,21 @@ class DistributedWorker:
         """Delegate a request to the coordinator client."""
         return self.client.call(method, params)
 
+    def _register_worker(self) -> None:
+        """Register this worker with the coordinator."""
+        self._coordinator_call(
+            "workers/register",
+            {
+                "workerId": self.worker_id,
+                "displayName": self.display_name,
+                "platform": platform.platform(),
+                "capabilities": {
+                    "pid": os.getpid(),
+                    "moduleFilter": self.module_filter,
+                },
+            },
+        )
+
     def _mark_all_active(self, jobs: list[dict[str, Any]]) -> None:
         """Track currently leased jobs so the heartbeat thread can extend them."""
         with self._active_lock:
@@ -408,6 +423,9 @@ class DistributedWorker:
         """Run until interrupted, returning summary stats."""
         stats = {"done": 0, "failed": 0, "skipped": 0}
         original_handler = None
+        registered = False
+        heartbeat_started = False
+        has_connected = False
         is_main = threading.current_thread() is threading.main_thread()
         if is_main:
             original_handler = signal.getsignal(signal.SIGINT)
@@ -420,22 +438,44 @@ class DistributedWorker:
         )
 
         try:
-            self._coordinator_call(
-                "workers/register",
-                {
-                    "workerId": self.worker_id,
-                    "displayName": self.display_name,
-                    "platform": platform.platform(),
-                    "capabilities": {
-                        "pid": os.getpid(),
-                        "moduleFilter": self.module_filter,
-                    },
-                },
-            )
-            heartbeat_thread.start()
-
             while not self._shutdown.is_set():
-                jobs = self._claim_jobs()
+                if not registered:
+                    try:
+                        self._register_worker()
+                    except Exception as exc:
+                        console.print(
+                            "[yellow]Coordinator unavailable during registration; "
+                            f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc}"
+                        )
+                        self._shutdown.wait(self.poll_interval_seconds)
+                        continue
+
+                    registered = True
+                    if not heartbeat_started:
+                        heartbeat_thread.start()
+                        heartbeat_started = True
+                    if has_connected:
+                        console.print(
+                            f"[green]Reconnected to coordinator as[/green] {self.display_name} "
+                            f"[dim]({self.worker_id})[/dim]"
+                        )
+                    else:
+                        console.print(
+                            f"[cyan]Connected to coordinator as[/cyan] {self.display_name} "
+                            f"[dim]({self.worker_id})[/dim]"
+                        )
+                        has_connected = True
+
+                try:
+                    jobs = self._claim_jobs()
+                except Exception as exc:
+                    registered = False
+                    console.print(
+                        "[yellow]Coordinator unavailable while claiming jobs; "
+                        f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc}"
+                    )
+                    self._shutdown.wait(self.poll_interval_seconds)
+                    continue
                 if not jobs:
                     self._shutdown.wait(self.poll_interval_seconds)
                     continue
@@ -445,6 +485,13 @@ class DistributedWorker:
                         break
                     status = self._process_claimed_job(job)
                     stats[status] = stats.get(status, 0) + 1
+                    processed = stats.get("done", 0) + stats.get("failed", 0) + stats.get("skipped", 0)
+                    console.print(
+                        f"[dim]Progress:[/dim] {processed} processed - "
+                        f"{stats.get('done', 0)} done, "
+                        f"{stats.get('failed', 0)} failed, "
+                        f"{stats.get('skipped', 0)} skipped"
+                    )
         finally:
             self._shutdown.set()
             self._release_all_active_leases()
