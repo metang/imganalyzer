@@ -117,9 +117,9 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
     .filter(([, s]) => s && s.failed > 0)
     .map(([mod]) => mod)
 
-  const canRetry      = !monitorOnly && failedModules.length > 0 && !isRunning
-  const canClearQueue = !monitorOnly && !isRunning && !isPaused && totalJobs > 0
-  const canClearCompleted = !monitorOnly && (totals.done + totals.skipped) > 0
+  const canRetry      = failedModules.length > 0 && !isRunning
+  const canClearQueue = !isRunning && !isPaused && totalJobs > 0
+  const canClearCompleted = (totals.done + totals.skipped) > 0
 
   const moduleEntries = Object.entries(modules).filter(
     (entry): entry is [string, BatchModuleStats] => entry[1] != null
@@ -189,14 +189,13 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
 
       {monitorOnly && (
         <p className="text-xs text-blue-300 bg-blue-900/20 border border-blue-800 rounded-lg px-3 py-2">
-          Monitoring progress from an existing distributed worker. Control buttons are disabled in monitor-only mode.
+          Monitoring distributed worker progress. Pause/Resume control the local worker only.
         </p>
       )}
 
       {/* ── Control buttons ──────────────────────────────────────────────────── */}
-      {!monitorOnly && (
       <div className="flex gap-2 flex-wrap">
-        {isRunning && (
+        {!monitorOnly && isRunning && (
           <button
             onClick={onPause}
             className="
@@ -207,7 +206,7 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
             Pause
           </button>
         )}
-        {showResume && (
+        {!monitorOnly && showResume && (
           <button
             onClick={onResume}
             className="
@@ -270,7 +269,6 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
           </button>
         )}
       </div>
-      )}
     </div>
   )
 }
