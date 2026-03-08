@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import os
+
+# Some models (e.g. GroundingDINO) use ops not yet implemented on MPS.
+# Enable automatic CPU fallback so they run instead of crashing.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 import torch
 
 
