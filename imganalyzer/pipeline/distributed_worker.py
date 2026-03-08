@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import platform
 import signal
@@ -10,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib import parse
 from urllib import error, request
 
 from rich.console import Console
@@ -21,6 +23,20 @@ from imganalyzer.pipeline.modules import ModuleRunner
 from imganalyzer.pipeline.worker import _emit_result
 
 console = Console()
+
+
+def _should_bypass_proxy(url: str) -> bool:
+    """Return True when coordinator traffic should bypass environment proxies."""
+    host = parse.urlparse(url).hostname
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return host.endswith(".local")
+    return addr.is_private or addr.is_loopback or addr.is_link_local
 
 
 class CoordinatorClient:
@@ -37,6 +53,9 @@ class CoordinatorClient:
         self.timeout_seconds = timeout_seconds
         self._lock = threading.Lock()
         self._next_id = 1
+        self._opener = request.build_opener(
+            request.ProxyHandler({}) if _should_bypass_proxy(url) else request.ProxyHandler()
+        )
 
     def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Send a JSON-RPC request and return the result object."""
@@ -59,7 +78,7 @@ class CoordinatorClient:
             headers["Authorization"] = f"Bearer {self.auth_token}"
         req = request.Request(self.url, data=payload, headers=headers, method="POST")
         try:
-            with request.urlopen(req, timeout=self.timeout_seconds) as resp:
+            with self._opener.open(req, timeout=self.timeout_seconds) as resp:
                 raw = resp.read()
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")

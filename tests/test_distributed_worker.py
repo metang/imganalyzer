@@ -7,7 +7,11 @@ from unittest.mock import patch
 from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository
 from imganalyzer.db.schema import ensure_schema
-from imganalyzer.pipeline.distributed_worker import DistributedWorker
+from imganalyzer.pipeline.distributed_worker import (
+    CoordinatorClient,
+    DistributedWorker,
+    _should_bypass_proxy,
+)
 from imganalyzer.pipeline.modules import _rewrite_path_with_mappings
 
 
@@ -73,6 +77,35 @@ def test_process_claimed_job_reports_completion(tmp_path):
             },
         )
     ]
+
+
+def test_should_bypass_proxy_for_private_coordinator_urls():
+    assert _should_bypass_proxy("http://10.0.0.215:8765/jsonrpc") is True
+    assert _should_bypass_proxy("http://127.0.0.1:8765/jsonrpc") is True
+    assert _should_bypass_proxy("http://coordinator.local:8765/jsonrpc") is True
+    assert _should_bypass_proxy("https://example.com/jsonrpc") is False
+
+
+def test_coordinator_client_bypasses_env_proxy_for_private_hosts(monkeypatch):
+    built_with: list[object] = []
+
+    def _fake_build_opener(*handlers: object):
+        built_with.extend(handlers)
+
+        class _FakeOpener:
+            def open(self, _req, timeout: float):
+                raise TimeoutError(timeout)
+
+        return _FakeOpener()
+
+    monkeypatch.setattr("imganalyzer.pipeline.distributed_worker.request.build_opener", _fake_build_opener)
+    client = CoordinatorClient("http://10.0.0.215:8765/jsonrpc")
+
+    assert client is not None
+    assert len(built_with) == 1
+    proxy_handler = built_with[0]
+    assert type(proxy_handler).__name__ == "ProxyHandler"
+    assert getattr(proxy_handler, "proxies", None) == {}
 
 
 def test_server_get_db_is_thread_local(tmp_path, monkeypatch):
