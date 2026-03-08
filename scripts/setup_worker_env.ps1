@@ -100,9 +100,24 @@ if torch.cuda.is_available():
     print('CUDA', torch.version.cuda, '/', torch.cuda.get_device_name(0))
 else:
     print('WARNING: CUDA not available - GPU acceleration disabled')
+import transformers
+print('transformers', transformers.__version__)
+import open_clip
+print('open_clip ok')
 import insightface, onnxruntime as ort
 print('insightface', insightface.__version__)
 print('onnxruntime', ort.__version__)
+"@
+
+Write-Host "==> Running capability probe..."
+conda run -n $EnvName python -c @"
+from imganalyzer.pipeline.distributed_worker import _probe_available_modules
+modules = _probe_available_modules('$CloudProvider')
+print('Supported modules:', ', '.join(modules))
+from imganalyzer.db.repository import ALL_MODULES
+missing = sorted(set(ALL_MODULES) - set(modules))
+if missing:
+    print('WARNING: Unavailable modules:', ', '.join(missing))
 "@
 
 Write-Host "==> Verifying cloud provider import ($CloudProvider)..."
@@ -121,6 +136,13 @@ Write-Host @"
 Setup complete.
 
 Start worker with:
+  conda activate $EnvName
+  imganalyzer run-distributed-worker `
+    --coordinator http://<COORDINATOR_IP>:8765/jsonrpc `
+    --worker-id worker-01 `
+    --cloud $CloudProvider
+
+Or without activating:
   conda run -n $EnvName imganalyzer run-distributed-worker `
     --coordinator http://<COORDINATOR_IP>:8765/jsonrpc `
     --worker-id worker-01 `
