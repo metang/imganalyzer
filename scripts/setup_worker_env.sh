@@ -44,6 +44,32 @@ else
   git clone "$REPO_URL" "$REPO_DIR"
 fi
 
+# ── Ensure cache directories are writable ────────────────────────────────────
+# On macOS the system may create ~/.cache owned by root, which blocks
+# HuggingFace model downloads and the imganalyzer model cache.
+echo "==> Checking cache directory permissions..."
+CACHE_BASE="$HOME/.cache"
+if [[ -d "$CACHE_BASE" ]] && [[ ! -w "$CACHE_BASE" ]]; then
+  echo "  ⚠ $CACHE_BASE exists but is not writable by $(whoami)."
+  echo "  Attempting to fix ownership (may require sudo)..."
+  sudo chown "$(whoami)" "$CACHE_BASE" || {
+    echo "  Could not fix $CACHE_BASE ownership."
+    echo "  Falling back to ~/Library/Caches (macOS) or ~/var/cache."
+    if [[ "$OS_NAME" == "Darwin" ]]; then
+      CACHE_BASE="$HOME/Library/Caches"
+    else
+      CACHE_BASE="$HOME/var/cache"
+    fi
+  }
+fi
+mkdir -p "$CACHE_BASE/huggingface" "$CACHE_BASE/imganalyzer"
+
+# Export for downstream pip/torch downloads and the final instructions
+export HF_HOME="$CACHE_BASE/huggingface"
+export IMGANALYZER_MODEL_CACHE="$CACHE_BASE/imganalyzer"
+echo "  HF_HOME=$HF_HOME"
+echo "  IMGANALYZER_MODEL_CACHE=$IMGANALYZER_MODEL_CACHE"
+
 echo "==> Installing worker dependencies in env '$ENV_NAME'..."
 pushd "$REPO_DIR" >/dev/null
 conda run -n "$ENV_NAME" python -m pip install -U pip setuptools wheel
@@ -115,19 +141,26 @@ esac
 
 popd >/dev/null
 
+# ── Write a convenience shell snippet ────────────────────────────────────────
+CONDA_PREFIX="$(conda info --base)/envs/$ENV_NAME"
+
 cat <<EOF
 
 Setup complete.
 
 Start worker with:
   conda activate $ENV_NAME
+  export HF_HOME=$HF_HOME
+  export IMGANALYZER_MODEL_CACHE=$IMGANALYZER_MODEL_CACHE
   imganalyzer run-distributed-worker \\
     --coordinator http://<COORDINATOR_IP>:8765/jsonrpc \\
     --worker-id worker-01 \\
     --cloud $WORKER_CLOUD_PROVIDER
 
-Or without activating:
-  conda run -n $ENV_NAME imganalyzer run-distributed-worker \\
+Or run directly without activating:
+  HF_HOME=$HF_HOME \\
+  IMGANALYZER_MODEL_CACHE=$IMGANALYZER_MODEL_CACHE \\
+  $CONDA_PREFIX/bin/python -m imganalyzer.cli run-distributed-worker \\
     --coordinator http://<COORDINATOR_IP>:8765/jsonrpc \\
     --worker-id worker-01 \\
     --cloud $WORKER_CLOUD_PROVIDER
