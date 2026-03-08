@@ -168,6 +168,7 @@ class DistributedWorker:
         self._active_lock = threading.Lock()
         self._registration_attempts = 0
         self._claim_attempts = 0
+        self._empty_claim_polls = 0
 
     def _proxy_env_summary(self) -> str:
         """Summarize proxy-related environment variables for diagnostics."""
@@ -526,9 +527,20 @@ class DistributedWorker:
 
                 self._claim_attempts = 0
                 if not jobs:
+                    self._empty_claim_polls += 1
+                    poll_interval = max(self.poll_interval_seconds, 0.5)
+                    idle_log_every = max(1, int(30 / poll_interval))
+                    if self._empty_claim_polls % idle_log_every == 0:
+                        console.print(
+                            "[dim]No jobs claimed yet; "
+                            f"still polling every {self.poll_interval_seconds:g}s "
+                            f"(empty polls={self._empty_claim_polls}, "
+                            f"active leases={len(self._snapshot_active())})[/dim]"
+                        )
                     self._shutdown.wait(self.poll_interval_seconds)
                     continue
 
+                self._empty_claim_polls = 0
                 console.print(
                     f"[cyan]Claimed {len(jobs)} job(s)[/cyan]"
                 )
