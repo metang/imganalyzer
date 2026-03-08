@@ -94,6 +94,26 @@ imganalyzer run-distributed-worker \
   --worker-id worker-01
 ```
 
+### Quick worker bootstrap (macOS/Linux with Conda)
+
+If a worker is missing local AI deps (for example `insightface`), run:
+
+```bash
+bash scripts/setup_worker_env.sh ~/imganalyzer-worker
+```
+
+This script creates/uses a Python 3.12 Conda env (`imganalyzer312`), installs
+`imganalyzer[local-ai]` from source, and verifies `torch` + `insightface`
+imports. You can override defaults with:
+- `IMGANALYZER_ENV_NAME`
+- `IMGANALYZER_PYTHON_VERSION`
+- `IMGANALYZER_REPO_URL`
+
+Platform note:
+- macOS uses CPU `onnxruntime` (no `onnxruntime-gpu` wheels available); the
+  setup script pre-installs it from `conda-forge`.
+- Windows/Linux use `onnxruntime-gpu`.
+
 ### Firewall setup for remote workers (Windows coordinator)
 
 If workers are on another machine/LAN, you need both a port rule and a Python

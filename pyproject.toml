@@ -44,7 +44,8 @@ local-ai = [
     "open_clip_torch>=2.24",
     "huggingface_hub>=0.23",
     "insightface>=0.7",
-    "onnxruntime-gpu>=1.18",
+    "onnxruntime>=1.18; platform_system == 'Darwin'",
+    "onnxruntime-gpu>=1.18; platform_system != 'Darwin'",
 ]
 openai = ["openai>=1.30"]
 anthropic = ["anthropic>=0.28"]
