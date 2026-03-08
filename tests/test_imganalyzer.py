@@ -2214,3 +2214,76 @@ class TestProfiler:
         ).fetchone()["c"]
         assert count == 0
         conn.close()
+
+
+class TestProbeAvailableModules:
+    """Tests for _probe_available_modules capability detection."""
+
+    def test_always_includes_metadata_and_technical(self):
+        from imganalyzer.pipeline.distributed_worker import _probe_available_modules
+
+        modules = _probe_available_modules(cloud_provider="copilot")
+        assert "metadata" in modules
+        assert "technical" in modules
+
+    def test_copilot_provider_includes_cloud_modules(self):
+        from imganalyzer.pipeline.distributed_worker import _probe_available_modules
+
+        modules = _probe_available_modules(cloud_provider="copilot")
+        assert "cloud_ai" in modules
+        assert "aesthetic" in modules
+
+    def test_returns_sorted_unique_list(self):
+        from imganalyzer.pipeline.distributed_worker import _probe_available_modules
+
+        modules = _probe_available_modules(cloud_provider="copilot")
+        assert modules == sorted(set(modules))
+
+
+class TestClaimLeasedModulesFilter:
+    """Tests for claim_leased with the new modules list filter."""
+
+    def test_claim_leased_with_modules_list_filter(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["w1", "Worker 1", "darwin", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/test.jpg")
+        queue.enqueue(img_id, "objects")
+        queue.enqueue(img_id, "metadata")
+        queue.enqueue(img_id, "cloud_ai")
+
+        # Only claim metadata and cloud_ai (not objects)
+        claimed = queue.claim_leased(
+            worker_id="w1", lease_ttl_seconds=120, batch_size=10,
+            modules=["metadata", "cloud_ai"],
+        )
+        claimed_modules = {c["module"] for c in claimed}
+        assert "metadata" in claimed_modules
+        assert "cloud_ai" in claimed_modules
+        assert "objects" not in claimed_modules
+
+    def test_pending_count_with_modules_filter(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        img_id = repo.register_image(file_path="/photos/test.jpg")
+        queue.enqueue(img_id, "objects")
+        queue.enqueue(img_id, "metadata")
+        queue.enqueue(img_id, "cloud_ai")
+
+        assert queue.pending_count(modules=["metadata", "cloud_ai"]) == 2
+        assert queue.pending_count(modules=["objects"]) == 1
+        assert queue.pending_count() == 3

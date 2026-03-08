@@ -697,6 +697,7 @@ def _handle_jobs_claim(params: dict) -> dict:
         raise ValueError("workerId is required")
     batch_size = int(params.get("batchSize", 1))
     module = params.get("module")
+    modules_list = params.get("modules")  # list of supported modules
     force = bool(params.get("force", False))
     lease_ttl_seconds = int(params.get("leaseTtlSeconds", 120))
 
@@ -706,8 +707,15 @@ def _handle_jobs_claim(params: dict) -> dict:
 
     requested = max(1, batch_size)
     scan_size = min(max(requested * 4, requested), 32)
-    module_filter = str(module) if module is not None else None
-    pending_candidates = max(requested, queue.pending_count(module_filter))
+    # Single module filter takes precedence; list filter used otherwise.
+    module_filter: str | None = str(module) if module is not None else None
+    modules_filter: list[str] | None = None
+    if module_filter is None and isinstance(modules_list, list) and modules_list:
+        modules_filter = [str(m) for m in modules_list]
+    pending_candidates = max(
+        requested,
+        queue.pending_count(module_filter, modules=modules_filter),
+    )
     # Scan far enough in one request to rotate past large blocked backlogs
     # (for example hundreds of faces/ocr jobs waiting on objects) instead of
     # forcing remote workers to idle through many empty polls.
@@ -724,6 +732,7 @@ def _handle_jobs_claim(params: dict) -> dict:
             lease_ttl_seconds=max(5, lease_ttl_seconds),
             batch_size=claim_size,
             module=module_filter,
+            modules=modules_filter,
         )
         if not claimed:
             break

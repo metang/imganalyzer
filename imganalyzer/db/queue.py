@@ -158,6 +158,7 @@ class JobQueue:
         lease_ttl_seconds: int = 120,
         batch_size: int = 1,
         module: str | None = None,
+        modules: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Atomically claim jobs and create leases for distributed workers."""
         where = "WHERE status = 'pending'"
@@ -165,6 +166,10 @@ class JobQueue:
         if module:
             where += " AND module = ?"
             params.append(module)
+        elif modules:
+            placeholders = ",".join("?" * len(modules))
+            where += f" AND module IN ({placeholders})"
+            params.extend(modules)
         params.append(batch_size)
 
         self.conn.execute("BEGIN IMMEDIATE")
@@ -579,11 +584,21 @@ class JobQueue:
         ).fetchone()
         return int(row["cnt"] if row is not None else 0)
 
-    def pending_count(self, module: str | None = None) -> int:
+    def pending_count(
+        self,
+        module: str | None = None,
+        modules: list[str] | None = None,
+    ) -> int:
         if module:
             row = self.conn.execute(
                 "SELECT COUNT(*) as cnt FROM job_queue WHERE status = 'pending' AND module = ?",
                 [module],
+            ).fetchone()
+        elif modules:
+            placeholders = ",".join("?" * len(modules))
+            row = self.conn.execute(
+                f"SELECT COUNT(*) as cnt FROM job_queue WHERE status = 'pending' AND module IN ({placeholders})",
+                modules,
             ).fetchone()
         else:
             row = self.conn.execute(

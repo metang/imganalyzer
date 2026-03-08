@@ -26,6 +26,83 @@ from imganalyzer.pipeline.worker import _emit_result
 
 console = Console()
 
+# Modules that require local-AI packages (torch, transformers, etc.)
+_LOCAL_AI_MODULES = {"objects", "blip2", "local_ai", "ocr", "faces", "embedding"}
+
+# Modules that always work (pure Python / stdlib)
+_ALWAYS_AVAILABLE_MODULES = {"metadata", "technical"}
+
+# Modules that require a cloud SDK (checked separately per provider)
+_CLOUD_MODULES = {"cloud_ai", "aesthetic"}
+
+
+def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
+    """Probe which analysis modules this worker can actually run.
+
+    Checks for required dependencies at startup so the worker only claims
+    jobs it can execute, avoiding wasteful claim-then-skip cycles.
+    """
+    available = list(_ALWAYS_AVAILABLE_MODULES)
+
+    # Check local-AI deps (torch + transformers)
+    try:
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
+
+        available.extend(["objects", "blip2", "local_ai", "ocr"])
+    except ImportError:
+        pass
+
+    # faces needs insightface
+    try:
+        import insightface  # noqa: F401
+
+        # insightface also needs torch (already checked above)
+        if "objects" in available:
+            available.append("faces")
+    except ImportError:
+        pass
+
+    # embedding needs open_clip + torch
+    try:
+        import open_clip  # noqa: F401
+
+        if "objects" in available:  # implies torch is present
+            available.append("embedding")
+    except ImportError:
+        pass
+
+    # cloud_ai / aesthetic need a cloud SDK
+    provider = (cloud_provider or "").lower()
+    cloud_ok = False
+    if provider == "copilot":
+        cloud_ok = True  # copilot uses CLI subprocess, no extra package needed
+    elif provider == "openai":
+        try:
+            import openai  # noqa: F401
+            cloud_ok = True
+        except ImportError:
+            pass
+    elif provider == "anthropic":
+        try:
+            import anthropic  # noqa: F401
+            cloud_ok = True
+        except ImportError:
+            pass
+    elif provider == "google":
+        try:
+            import google.cloud.vision  # noqa: F401
+            cloud_ok = True
+        except ImportError:
+            pass
+    else:
+        cloud_ok = True  # unknown provider — optimistic, let it fail at runtime
+
+    if cloud_ok:
+        available.extend(["cloud_ai", "aesthetic"])
+
+    return sorted(set(available))
+
 
 def _should_bypass_proxy(url: str) -> bool:
     """Return True when coordinator traffic should bypass environment proxies."""
@@ -164,6 +241,15 @@ class DistributedWorker:
         self.verbose = verbose
         self.write_xmp = write_xmp
         self.path_mappings = path_mappings or []
+
+        # Probe which modules this worker can actually execute.
+        # When a single --module filter is set, trust the user; otherwise
+        # auto-detect to avoid claiming jobs that will always be skipped.
+        if self.module_filter:
+            self.supported_modules: list[str] | None = None  # single-module mode
+        else:
+            self.supported_modules = _probe_available_modules(cloud_provider)
+
         self._shutdown = threading.Event()
         self._active_leases: dict[int, str] = {}
         self._active_lock = threading.Lock()
@@ -271,16 +357,19 @@ class DistributedWorker:
 
     def _register_worker(self) -> None:
         """Register this worker with the coordinator."""
+        capabilities: dict[str, Any] = {
+            "pid": os.getpid(),
+            "moduleFilter": self.module_filter,
+        }
+        if self.supported_modules is not None:
+            capabilities["supportedModules"] = self.supported_modules
         self._coordinator_call(
             "workers/register",
             {
                 "workerId": self.worker_id,
                 "displayName": self.display_name,
                 "platform": platform.platform(),
-                "capabilities": {
-                    "pid": os.getpid(),
-                    "moduleFilter": self.module_filter,
-                },
+                "capabilities": capabilities,
             },
         )
 
@@ -345,6 +434,8 @@ class DistributedWorker:
         }
         if self.module_filter:
             params["module"] = self.module_filter
+        elif self.supported_modules is not None:
+            params["modules"] = self.supported_modules
         result = self._coordinator_call("jobs/claim", params)
         jobs = result.get("jobs", [])
         return jobs if isinstance(jobs, list) else []
@@ -532,6 +623,17 @@ class DistributedWorker:
 
         try:
             self._log_connectivity_context()
+            if self.supported_modules is not None:
+                from imganalyzer.db.repository import ALL_MODULES
+
+                missing = sorted(set(ALL_MODULES) - set(self.supported_modules))
+                console.print(
+                    f"[dim]Supported modules:[/dim] {', '.join(self.supported_modules)}"
+                )
+                if missing:
+                    console.print(
+                        f"[yellow]Unavailable modules (missing deps):[/yellow] {', '.join(missing)}"
+                    )
             while not self._shutdown.is_set():
                 if not registered:
                     self._registration_attempts += 1
