@@ -53,6 +53,22 @@ if ($CloudProvider -notin $ValidProviders) {
     Write-Error "Error: Unsupported cloud provider '$CloudProvider'. Use one of: $($ValidProviders -join ', ')"
 }
 
+# ── Ensure cache directories are writable ────────────────────────────────────
+Write-Host "==> Checking cache directory permissions..."
+$CacheBase = Join-Path $HOME '.cache'
+if (-not (Test-Path $CacheBase)) {
+    New-Item -ItemType Directory -Path $CacheBase -Force | Out-Null
+}
+$HfHome = Join-Path $CacheBase 'huggingface'
+$ModelCache = Join-Path $CacheBase 'imganalyzer'
+New-Item -ItemType Directory -Path $HfHome -Force | Out-Null
+New-Item -ItemType Directory -Path $ModelCache -Force | Out-Null
+
+$env:HF_HOME = $HfHome
+$env:IMGANALYZER_MODEL_CACHE = $ModelCache
+Write-Host "  HF_HOME=$HfHome"
+Write-Host "  IMGANALYZER_MODEL_CACHE=$ModelCache"
+
 # ── Conda environment ───────────────────────────────────────────────────────
 Write-Host "==> Using worker env: $EnvName (python $PythonVersion)"
 $EnvList = conda env list 2>&1 | ForEach-Object { ($_ -split '\s+')[0] }
@@ -131,21 +147,27 @@ switch ($CloudProvider) {
 Pop-Location
 
 # ── Done ─────────────────────────────────────────────────────────────────────
+$CondaPrefix = (conda info --base) + "\envs\$EnvName"
+
 Write-Host @"
 
 Setup complete.
 
 Start worker with:
   conda activate $EnvName
-  imganalyzer run-distributed-worker `
-    --coordinator http://<COORDINATOR_IP>:8765/jsonrpc `
-    --worker-id worker-01 `
+  `$env:HF_HOME = '$HfHome'
+  `$env:IMGANALYZER_MODEL_CACHE = '$ModelCache'
+  imganalyzer run-distributed-worker ``
+    --coordinator http://<COORDINATOR_IP>:8765/jsonrpc ``
+    --worker-id worker-01 ``
     --cloud $CloudProvider
 
-Or without activating:
-  conda run -n $EnvName imganalyzer run-distributed-worker `
-    --coordinator http://<COORDINATOR_IP>:8765/jsonrpc `
-    --worker-id worker-01 `
+Or run directly without activating:
+  `$env:HF_HOME = '$HfHome'
+  `$env:IMGANALYZER_MODEL_CACHE = '$ModelCache'
+  & "$CondaPrefix\python.exe" -m imganalyzer.cli run-distributed-worker ``
+    --coordinator http://<COORDINATOR_IP>:8765/jsonrpc ``
+    --worker-id worker-01 ``
     --cloud $CloudProvider
 
 Then requeue failed jobs on the coordinator:
