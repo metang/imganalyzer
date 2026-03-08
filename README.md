@@ -111,7 +111,17 @@ defaults with:
 - `IMGANALYZER_REPO_URL`
 - `IMGANALYZER_WORKER_CLOUD_PROVIDER` (`copilot`, `openai`, `anthropic`, `google`)
 
-Platform note:
+Platform notes:
+- **macOS**: PyTorch is installed via `conda install -c pytorch` (not pip) because
+  PyPI only hosts older macOS wheels that are incompatible with numpy ≥2. The
+  setup script handles this automatically. If you see errors like
+  *"A module compiled using NumPy 1.x cannot be run in NumPy 2.x"* or
+  *"Symbol not found"* in `libtorch_cpu`, clean-reinstall torch from one source:
+  ```bash
+  pip uninstall torch torchvision torchaudio -y
+  conda install -n imganalyzer312 pytorch torchvision torchaudio -c pytorch --force-reinstall
+  ```
+  **Never mix pip and conda torch packages** — their native libraries conflict.
 - macOS uses CPU `onnxruntime` (no `onnxruntime-gpu` wheels available); the
   setup script pre-installs it from `conda-forge`.
 - Windows/Linux use `onnxruntime-gpu`.

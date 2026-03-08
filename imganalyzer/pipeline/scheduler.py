@@ -159,27 +159,30 @@ class ResourceScheduler:
 
     @staticmethod
     def _cuda_free_gb() -> float | None:
-        """Return currently free CUDA memory in GB, or None when unavailable."""
+        """Return currently free GPU memory in GB, or None when unavailable."""
         try:
             import torch
-            if not torch.cuda.is_available():
+            if torch.cuda.is_available():
+                free_bytes, _total_bytes = torch.cuda.mem_get_info()
+                return free_bytes / (1024 ** 3)
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                # MPS has no free-memory query; return None to skip
+                # memory-based scheduling decisions.
                 return None
-            free_bytes, _total_bytes = torch.cuda.mem_get_info()
-            return free_bytes / (1024 ** 3)
         except Exception:
-            return None
+            pass
+        return None
 
     @staticmethod
     def _force_cuda_cleanup() -> None:
         """Best-effort allocator cleanup before the next GPU phase."""
         gc.collect()
         try:
+            from imganalyzer.device import empty_cache
+            empty_cache()
             import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                # ipc_collect helps release cached blocks held for IPC sharing.
-                if hasattr(torch.cuda, "ipc_collect"):
-                    torch.cuda.ipc_collect()
+            if torch.cuda.is_available() and hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
         except Exception:
             pass
 

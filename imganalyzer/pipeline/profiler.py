@@ -342,6 +342,10 @@ class ProfileCollector:
             if torch.cuda.is_available():
                 props = torch.cuda.get_device_properties(0)
                 return props.name, props.total_memory / (1024 ** 3)
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                import platform
+                chip = platform.processor() or "Apple Silicon"
+                return f"MPS ({chip})", 0.0
         except Exception:
             pass
         return "unknown", 0.0

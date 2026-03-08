@@ -104,9 +104,8 @@ class OCRAnalyzer:
             del cls._processor
             cls._processor = None
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            from imganalyzer.device import empty_cache
+            empty_cache()
         except Exception:
             pass
 
@@ -232,10 +231,11 @@ class OCRAnalyzer:
             "[dim]Loading TrOCR model (first run downloads ~1.3 GB)...[/dim]"
         )
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        # Load in fp16 on CUDA — halves static weight memory (~1.3 GB → ~0.65 GB)
+        from imganalyzer.device import get_device, supports_fp16
+        device = get_device()
+        # Load in fp16 on GPU — halves static weight memory (~1.3 GB → ~0.65 GB)
         # and also halves activation/beam-search tensors during inference.
-        load_dtype = torch.float16 if device == "cuda" else torch.float32
+        load_dtype = torch.float16 if supports_fp16() else torch.float32
 
         cls._processor = TrOCRProcessor.from_pretrained(
             _MODEL_ID, cache_dir=CACHE_DIR

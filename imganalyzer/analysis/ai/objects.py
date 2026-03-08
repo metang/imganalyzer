@@ -50,9 +50,8 @@ class ObjectDetector:
             del cls._processor
             cls._processor = None
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            from imganalyzer.device import empty_cache
+            empty_cache()
         except Exception:
             pass
 
@@ -95,7 +94,9 @@ class ObjectDetector:
         model = ObjectDetector._model
         device = next(model.parameters()).device
 
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
+        from imganalyzer.device import get_device_type, supports_fp16
+        dev_type = get_device_type()
+        with torch.inference_mode(), torch.autocast(dev_type, dtype=torch.float16, enabled=supports_fp16()):
             inputs = processor(
                 images=pil_img,
                 text=detection_prompt,
@@ -190,7 +191,9 @@ class ObjectDetector:
         device = next(model.parameters()).device
 
         try:
-            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
+            from imganalyzer.device import get_device_type, supports_fp16
+            dev_type = get_device_type()
+            with torch.inference_mode(), torch.autocast(dev_type, dtype=torch.float16, enabled=supports_fp16()):
                 inputs = processor(
                     images=pil_images,
                     text=[detection_prompt] * len(pil_images),
@@ -258,7 +261,8 @@ class ObjectDetector:
         from rich.console import Console
         Console().print("[dim]Loading GroundingDINO model (first run downloads ~700MB)...[/dim]")
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        from imganalyzer.device import get_device, supports_fp16
+        device = get_device()
         model_id = "IDEA-Research/grounding-dino-base"
 
         # Try the fast image processor first (significant speed gain).
@@ -283,13 +287,13 @@ class ObjectDetector:
         cls._model.eval()
 
         # Selectively convert the visual backbone (Swin Transformer) to
-        # fp16 on CUDA.  The text enhancer layers in the encoder/decoder
+        # fp16 on CUDA/MPS.  The text enhancer layers in the encoder/decoder
         # must stay fp32 (they mix dtype-sensitive ops that crash with
         # fp16 weights), but the Swin backbone is a standard vision
         # transformer that works fine in fp16.  Saves ~0.35 GB VRAM.
         # Inference already runs under autocast(fp16) so this is
         # consistent; we are just reducing static weight memory.
-        if device == "cuda":
+        if supports_fp16():
             try:
                 cls._model.model.backbone.half()
             except Exception:

@@ -57,9 +57,8 @@ class CLIPEmbedder:
         cls._tokenizer = None
         cls._device = None
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            from imganalyzer.device import empty_cache
+            empty_cache()
         except Exception:
             pass
 
@@ -104,7 +103,7 @@ class CLIPEmbedder:
 
         image_input = CLIPEmbedder._preprocess(img).unsqueeze(0).to(CLIPEmbedder._device)
 
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=(CLIPEmbedder._device != "cpu")):
+        with torch.no_grad(), torch.autocast(CLIPEmbedder._device, enabled=(CLIPEmbedder._device != "cpu")):
             features = CLIPEmbedder._model.encode_image(image_input)
             features = features / features.norm(dim=-1, keepdim=True)
 
@@ -128,7 +127,7 @@ class CLIPEmbedder:
 
         image_input = CLIPEmbedder._preprocess(img).unsqueeze(0).to(CLIPEmbedder._device)
 
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=(CLIPEmbedder._device != "cpu")):
+        with torch.no_grad(), torch.autocast(CLIPEmbedder._device, enabled=(CLIPEmbedder._device != "cpu")):
             features = CLIPEmbedder._model.encode_image(image_input)
             features = features / features.norm(dim=-1, keepdim=True)
 
@@ -162,7 +161,7 @@ class CLIPEmbedder:
         # Stack into (N, C, H, W) batch tensor
         batch_input = torch.stack(tensors).to(CLIPEmbedder._device)
 
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=(CLIPEmbedder._device != "cpu")):
+        with torch.no_grad(), torch.autocast(CLIPEmbedder._device, enabled=(CLIPEmbedder._device != "cpu")):
             features = CLIPEmbedder._model.encode_image(batch_input)
             features = features / features.norm(dim=-1, keepdim=True)
 
@@ -177,7 +176,7 @@ class CLIPEmbedder:
 
         tokens = CLIPEmbedder._tokenizer([text]).to(CLIPEmbedder._device)
 
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=(CLIPEmbedder._device != "cpu")):
+        with torch.no_grad(), torch.autocast(CLIPEmbedder._device, enabled=(CLIPEmbedder._device != "cpu")):
             features = CLIPEmbedder._model.encode_text(tokens)
             features = features / features.norm(dim=-1, keepdim=True)
 
@@ -201,13 +200,14 @@ class CLIPEmbedder:
         from rich.console import Console
         Console().print("[dim]Loading CLIP ViT-L/14 model...[/dim]")
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        # Load weights directly in fp16 on CUDA — saves ~0.75 GB vs fp32 default.
+        from imganalyzer.device import get_device, supports_fp16
+        device = get_device()
+        # Load weights directly in fp16 on GPU — saves ~0.75 GB vs fp32 default.
         # Inference already runs under autocast so this is fully consistent.
         model, _, preprocess = open_clip.create_model_and_transforms(
             "ViT-L-14",
             pretrained="openai",
-            precision="fp16" if device == "cuda" else "fp32",
+            precision="fp16" if supports_fp16() else "fp32",
             cache_dir=str(Path(CACHE_DIR) / "clip"),
         )
         tokenizer = open_clip.get_tokenizer("ViT-L-14")

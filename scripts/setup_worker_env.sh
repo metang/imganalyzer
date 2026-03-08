@@ -49,7 +49,11 @@ pushd "$REPO_DIR" >/dev/null
 conda run -n "$ENV_NAME" python -m pip install -U pip setuptools wheel
 
 if [[ "$OS_NAME" == "Darwin" ]]; then
-  echo "==> Installing macOS ONNX runtime from conda-forge..."
+  # On macOS, PyPI only hosts older PyTorch wheels (≤2.2.x) which are
+  # incompatible with numpy 2.x.  Install PyTorch from conda's pytorch
+  # channel first so pip won't try to pull the old wheels.
+  echo "==> Installing PyTorch + ONNX runtime from conda channels (macOS)..."
+  conda install -n "$ENV_NAME" -c pytorch pytorch torchvision torchaudio -y
   conda install -n "$ENV_NAME" -c conda-forge onnxruntime -y
 fi
 
@@ -68,7 +72,15 @@ echo "==> Installing editable package with extras: [$EXTRAS]"
 conda run -n "$ENV_NAME" python -m pip install -e ".[${EXTRAS}]"
 
 echo "==> Verifying local AI imports (torch + insightface + onnxruntime)..."
-conda run -n "$ENV_NAME" python -c "import insightface, onnxruntime as ort, torch; print('torch', torch.__version__); print('insightface', insightface.__version__); print('onnxruntime', ort.__version__)"
+conda run -n "$ENV_NAME" python -c "
+import torch, numpy as np
+print('torch', torch.__version__, '/ numpy', np.__version__)
+# Smoke-test: catch numpy ABI mismatches that only surface at runtime
+_ = torch.tensor([1.0])
+import insightface, onnxruntime as ort
+print('insightface', insightface.__version__)
+print('onnxruntime', ort.__version__)
+"
 
 echo "==> Verifying cloud provider import ($WORKER_CLOUD_PROVIDER)..."
 case "$WORKER_CLOUD_PROVIDER" in

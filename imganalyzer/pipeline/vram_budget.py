@@ -143,6 +143,12 @@ class VRAMBudget:
             if torch.cuda.is_available():
                 props = torch.cuda.get_device_properties(0)
                 return props.total_memory / (1024 ** 3)
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                # Apple Silicon uses unified memory; report the recommended
+                # model budget (75% of physical RAM) as "VRAM".
+                import os
+                total_ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+                return total_ram * 0.75 / (1024 ** 3)
         except Exception:
             pass
         return 8.0

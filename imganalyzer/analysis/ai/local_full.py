@@ -14,16 +14,15 @@ from typing import Any
 
 
 def _empty_cache() -> None:
-    """Release the PyTorch CUDA allocator cache between pipeline stages.
+    """Release the GPU allocator cache between pipeline stages.
 
     Called after each model's forward pass completes so that activation
     tensors and KV-cache buffers are returned to the OS before the next
-    model runs.  No-op when CUDA is unavailable.
+    model runs.  No-op when no GPU is available.
     """
     try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        from imganalyzer.device import empty_cache
+        empty_cache()
     except Exception:
         pass
 

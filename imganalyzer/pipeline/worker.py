@@ -261,6 +261,7 @@ class Worker:
         vram = VRAMBudget()  # auto-detects GPU VRAM, applies 70% cap
         # Cap PyTorch CUDA memory usage conservatively, but ensure the BLIP-2
         # phase is not impossible on smaller cards (e.g. 8 GB).
+        # (MPS uses unified memory — no per-process fraction API.)
         try:
             import torch
             if torch.cuda.is_available():

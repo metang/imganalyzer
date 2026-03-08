@@ -363,9 +363,8 @@ class ModuleRunner:
         # feature maps) before the embedding job loads CLIP.  All 4 models stay
         # resident in VRAM as singletons, but their inference buffers are freed.
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            from imganalyzer.device import empty_cache
+            empty_cache()
         except Exception:
             pass
 
@@ -711,9 +710,8 @@ class ModuleRunner:
                 console.print(f"  [dim]CLIP embeddings computed for image {image_id}[/dim]")
 
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            from imganalyzer.device import empty_cache
+            empty_cache()
         except Exception:
             pass
 

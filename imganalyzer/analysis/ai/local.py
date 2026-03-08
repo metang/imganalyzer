@@ -39,9 +39,8 @@ class LocalAI:
             del cls._processor
             cls._processor = None
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            from imganalyzer.device import empty_cache
+            empty_cache()
         except Exception:
             pass
 
@@ -66,10 +65,11 @@ class LocalAI:
             LocalAI._processor = Blip2Processor.from_pretrained(
                 _MODEL_ID, cache_dir=CACHE_DIR
             )
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            from imganalyzer.device import get_device, supports_fp16
+            device = get_device()
             LocalAI._model = Blip2ForConditionalGeneration.from_pretrained(
                 _MODEL_ID,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                torch_dtype=torch.float16 if supports_fp16() else torch.float32,
                 low_cpu_mem_usage=True,
                 cache_dir=CACHE_DIR,
             ).to(device)
@@ -128,8 +128,8 @@ class LocalAI:
                     pass
 
         # Free activation tensors once after all VQA is done (not between questions).
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        from imganalyzer.device import empty_cache
+        empty_cache()
 
         # 3. Keywords from caption
         results["keywords"] = _extract_keywords(caption)
@@ -169,10 +169,11 @@ class LocalAI:
             LocalAI._processor = Blip2Processor.from_pretrained(
                 _MODEL_ID, cache_dir=CACHE_DIR
             )
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            from imganalyzer.device import get_device, supports_fp16
+            device = get_device()
             LocalAI._model = Blip2ForConditionalGeneration.from_pretrained(
                 _MODEL_ID,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                torch_dtype=torch.float16 if supports_fp16() else torch.float32,
                 low_cpu_mem_usage=True,
                 cache_dir=CACHE_DIR,
             ).to(device)
@@ -214,8 +215,8 @@ class LocalAI:
                 vqa_answers = [processor.decode(out[i], skip_special_tokens=True).strip() for i in range(len(vqa_images))]
 
             # Free activation tensors
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            from imganalyzer.device import empty_cache
+            empty_cache()
 
             # 3. Assemble per-image results
             all_results: list[dict[str, Any]] = []
@@ -232,8 +233,8 @@ class LocalAI:
 
         except Exception:
             # OOM or batching failure — fall back to sequential processing
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            from imganalyzer.device import empty_cache
+            empty_cache()
             return [self.analyze(d) for d in image_data_list]
 
 

@@ -1513,8 +1513,8 @@ def search_json_cmd(
             CLIPEmbedder._model = None
             CLIPEmbedder._preprocess = None
             CLIPEmbedder._tokenizer = None
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        from imganalyzer.device import empty_cache
+        empty_cache()
     except Exception:
         pass
 
