@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import sys
 import threading
@@ -2218,6 +2219,13 @@ class TestProfiler:
 
 class TestProbeAvailableModules:
     """Tests for _probe_available_modules capability detection."""
+
+    def test_sets_mps_fallback_env_when_unset(self, monkeypatch):
+        from imganalyzer.pipeline.distributed_worker import _probe_available_modules
+
+        monkeypatch.delenv("PYTORCH_ENABLE_MPS_FALLBACK", raising=False)
+        _probe_available_modules(cloud_provider="copilot")
+        assert os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") == "1"
 
     def test_always_includes_metadata_and_technical(self):
         from imganalyzer.pipeline.distributed_worker import _probe_available_modules

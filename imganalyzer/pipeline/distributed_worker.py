@@ -37,6 +37,13 @@ _ALWAYS_AVAILABLE_MODULES = {"metadata", "technical"}
 _CLOUD_MODULES = {"cloud_ai", "aesthetic"}
 
 
+def _ensure_torch_runtime_env() -> None:
+    """Set torch runtime env vars that must be present before importing torch."""
+    # Some ops used by GroundingDINO are still missing on MPS; this enables
+    # CPU fallback for unsupported kernels instead of raising hard failures.
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+
 def _current_python_info() -> str:
     """Return a short description of the active Python interpreter."""
     exe = sys.executable or "unknown"
@@ -54,6 +61,7 @@ def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
     Checks for required dependencies at startup so the worker only claims
     jobs it can execute, avoiding wasteful claim-then-skip cycles.
     """
+    _ensure_torch_runtime_env()
     available = list(_ALWAYS_AVAILABLE_MODULES)
 
     # Check local-AI deps (torch + transformers)
@@ -237,6 +245,7 @@ class DistributedWorker:
         write_xmp: bool = True,
         path_mappings: list[tuple[str, str]] | None = None,
     ) -> None:
+        _ensure_torch_runtime_env()
         self.client = CoordinatorClient(coordinator_url, auth_token=auth_token)
         self.worker_id = worker_id or platform.node() or "imganalyzer-worker"
         self.display_name = display_name or self.worker_id

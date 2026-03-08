@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from unittest.mock import patch
@@ -84,6 +85,15 @@ def test_should_bypass_proxy_for_private_coordinator_urls():
     assert _should_bypass_proxy("http://127.0.0.1:8765/jsonrpc") is True
     assert _should_bypass_proxy("http://coordinator.local:8765/jsonrpc") is True
     assert _should_bypass_proxy("https://example.com/jsonrpc") is False
+
+
+def test_distributed_worker_init_sets_mps_fallback_even_with_module_filter(monkeypatch):
+    monkeypatch.delenv("PYTORCH_ENABLE_MPS_FALLBACK", raising=False)
+    DistributedWorker(
+        coordinator_url="http://127.0.0.1:8765/",
+        module_filter="objects",
+    )
+    assert os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") == "1"
 
 
 def test_coordinator_client_bypasses_env_proxy_for_private_hosts(monkeypatch):
