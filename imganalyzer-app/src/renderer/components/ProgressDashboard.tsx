@@ -263,21 +263,32 @@ function NodeMetrics({ node }: { node: BatchNode }) {
 
 function MasterNodeCard({ node }: { node: BatchNode }) {
   return (
-    <section className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <details className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3">
         <div>
           <div className="text-[11px] uppercase tracking-wider text-neutral-500">Master device</div>
           <div className="mt-1 text-sm font-semibold text-neutral-100">{node.label}</div>
           <div className="mt-2">
-            <ActivePassChips modules={node.activeModules} emptyLabel="No active passes" />
+            <ActivePassChips
+              modules={node.activeModules}
+              emptyLabel={node.runningJobs > 0 ? 'Resolving active passes…' : 'No active passes'}
+            />
           </div>
         </div>
-        <span className={`rounded-full border px-2.5 py-1 text-xs ${statusTone(node.status)}`}>
-          {node.status}
-        </span>
-      </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className={`rounded-full border px-2.5 py-1 ${statusTone(node.status)}`}>
+            {node.status}
+          </span>
+          <span className="rounded-full border border-neutral-700 px-2.5 py-1 text-neutral-300">
+            {node.runningJobs.toLocaleString()} running
+          </span>
+          <span className="rounded-full border border-neutral-700 px-2.5 py-1 text-neutral-300">
+            {fmtRate(node.imagesPerSec)}
+          </span>
+        </div>
+      </summary>
       <NodeMetrics node={node} />
-    </section>
+    </details>
   )
 }
 

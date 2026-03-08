@@ -247,7 +247,7 @@ class CloudAI:
             from copilot import CopilotClient
         except ImportError:
             raise ImportError(
-                "GitHub Copilot SDK required: pip install github-copilot-sdk"
+                "GitHub Copilot SDK required: pip install 'imganalyzer[copilot]'"
             )
         async def _run(analysis_path: str) -> dict[str, Any]:
             # Always create a fresh client — asyncio.run() closes its event

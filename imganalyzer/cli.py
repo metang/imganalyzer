@@ -621,7 +621,11 @@ def run_distributed_worker(
     module: Optional[str] = typer.Option(None, "--module", help="Optional single-module filter when claiming jobs"),
     path_mapping: list[str] | None = typer.Option(None, "--path-mapping", help="Repeatable source-to-local prefix remap rule: SOURCE_PREFIX=LOCAL_PREFIX"),
     force: bool = typer.Option(False, "--force", help="Ignore cache and re-run analyzed modules"),
-    cloud_provider: str = typer.Option("openai", "--cloud", help="Cloud AI provider for cloud_ai/aesthetic modules"),
+    cloud_provider: str = typer.Option(
+        "copilot",
+        "--cloud",
+        help="Cloud AI provider for cloud_ai/aesthetic modules (copilot/openai/anthropic/google)",
+    ),
     no_xmp: bool = typer.Option(False, "--no-xmp", help="Tell the coordinator not to write XMP sidecars for jobs completed by this worker"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose worker logging"),
     detection_prompt: Optional[str] = typer.Option(None, "--detection-prompt"),

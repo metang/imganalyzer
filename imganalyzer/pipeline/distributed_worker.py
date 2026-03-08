@@ -140,7 +140,7 @@ class DistributedWorker:
         lease_ttl_seconds: int = 120,
         module_filter: str | None = None,
         force: bool = False,
-        cloud_provider: str = "openai",
+        cloud_provider: str = "copilot",
         detection_prompt: str | None = None,
         detection_threshold: float | None = None,
         face_match_threshold: float | None = None,

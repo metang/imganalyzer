@@ -13,6 +13,7 @@ PYTHON_VERSION="${IMGANALYZER_PYTHON_VERSION:-3.12}"
 REPO_URL="${IMGANALYZER_REPO_URL:-https://github.com/metang/imganalyzer.git}"
 REPO_DIR="${1:-$DEFAULT_REPO_DIR}"
 OS_NAME="$(uname -s)"
+WORKER_CLOUD_PROVIDER="${IMGANALYZER_WORKER_CLOUD_PROVIDER:-copilot}"
 
 require_cmd() {
   local name="$1"
@@ -52,10 +53,39 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
   conda install -n "$ENV_NAME" -c conda-forge onnxruntime -y
 fi
 
-conda run -n "$ENV_NAME" python -m pip install -e ".[local-ai]"
+case "$WORKER_CLOUD_PROVIDER" in
+  copilot|openai|anthropic|google)
+    ;;
+  *)
+    echo "Error: Unsupported cloud provider '$WORKER_CLOUD_PROVIDER'." >&2
+    echo "Use one of: copilot, openai, anthropic, google" >&2
+    exit 1
+    ;;
+esac
+
+EXTRAS="local-ai,$WORKER_CLOUD_PROVIDER"
+echo "==> Installing editable package with extras: [$EXTRAS]"
+conda run -n "$ENV_NAME" python -m pip install -e ".[${EXTRAS}]"
 
 echo "==> Verifying local AI imports (torch + insightface + onnxruntime)..."
 conda run -n "$ENV_NAME" python -c "import insightface, onnxruntime as ort, torch; print('torch', torch.__version__); print('insightface', insightface.__version__); print('onnxruntime', ort.__version__)"
+
+echo "==> Verifying cloud provider import ($WORKER_CLOUD_PROVIDER)..."
+case "$WORKER_CLOUD_PROVIDER" in
+  copilot)
+    conda run -n "$ENV_NAME" python -c "import copilot; print('copilot sdk ok')"
+    ;;
+  openai)
+    conda run -n "$ENV_NAME" python -c "import openai; print('openai ok')"
+    ;;
+  anthropic)
+    conda run -n "$ENV_NAME" python -c "import anthropic; print('anthropic ok')"
+    ;;
+  google)
+    conda run -n "$ENV_NAME" python -c "from google.cloud import vision; print('google vision ok')"
+    ;;
+esac
+
 popd >/dev/null
 
 cat <<EOF
@@ -65,7 +95,8 @@ Setup complete.
 Start worker with:
   conda run -n $ENV_NAME imganalyzer run-distributed-worker \\
     --coordinator http://<COORDINATOR_IP>:8765/jsonrpc \\
-    --worker-id worker-01
+    --worker-id worker-01 \\
+    --cloud $WORKER_CLOUD_PROVIDER
 
 Then requeue failed jobs on the coordinator:
   - UI: click "Retry failed"

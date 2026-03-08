@@ -336,8 +336,8 @@ export function BatchRunView({
   }, [batch])
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
-      <div className="flex flex-col gap-4 h-full overflow-hidden px-4 py-4">
+    <div className="relative h-full overflow-y-auto">
+      <div className="flex min-h-full flex-col gap-4 px-4 py-4">
 
         {/* Auto-resume banner */}
         {resumeBanner && (
@@ -373,12 +373,12 @@ export function BatchRunView({
 
         <LiveErrorPanel error={error} results={results} />
 
-        <div className="flex-1 flex flex-col min-h-0 border-t border-neutral-800 pt-3">
+        <section className="flex min-h-[220px] max-h-[38vh] flex-col rounded-xl border border-neutral-800 bg-neutral-900/30 p-3">
           <p className="text-xs text-neutral-500 mb-1.5">
             Live results (last 200)
           </p>
           <LiveResultsFeed results={results} />
-        </div>
+        </section>
       </div>
 
       {showStopDialog && (

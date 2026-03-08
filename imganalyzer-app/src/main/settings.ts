@@ -291,6 +291,7 @@ function buildWorkerSetupInfo(settings: AppSettings): WorkerSetupInfo {
       'imganalyzer run-distributed-worker',
       `  --coordinator ${coordinatorUrl}`,
       '  --worker-id worker-01',
+      '  --cloud copilot',
       ...mappingSegments,
       tokenSegment ? ` ${tokenSegment.trimStart()}` : '',
     ].filter(Boolean).join(' \\\n'),
@@ -299,6 +300,7 @@ function buildWorkerSetupInfo(settings: AppSettings): WorkerSetupInfo {
       'Workers must either read the stored image paths directly or remap them with --path-mapping when the NAS mount root differs.',
       'Add one --path-mapping SOURCE_PREFIX=LOCAL_PREFIX flag per differing NAS mount root.',
       'Analysis results are sent back to the coordinator, which remains the only database writer.',
+      'Set --cloud to the same provider used by the batch session so workers can process cloud_ai and aesthetic jobs consistently.',
       settings.distributed.authToken
         ? 'Pass the configured auth token to each worker with --auth-token.'
         : 'Auth is currently disabled for the job server; enable a token before exposing it beyond localhost.',

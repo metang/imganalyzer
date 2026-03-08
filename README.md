@@ -103,11 +103,13 @@ bash scripts/setup_worker_env.sh ~/imganalyzer-worker
 ```
 
 This script creates/uses a Python 3.12 Conda env (`imganalyzer312`), installs
-`imganalyzer[local-ai]` from source, and verifies `torch` + `insightface`
-imports. You can override defaults with:
+`imganalyzer[local-ai,<provider>]` from source, and verifies both local AI
+and cloud-provider imports. Default provider is `copilot`. You can override
+defaults with:
 - `IMGANALYZER_ENV_NAME`
 - `IMGANALYZER_PYTHON_VERSION`
 - `IMGANALYZER_REPO_URL`
+- `IMGANALYZER_WORKER_CLOUD_PROVIDER` (`copilot`, `openai`, `anthropic`, `google`)
 
 Platform note:
 - macOS uses CPU `onnxruntime` (no `onnxruntime-gpu` wheels available); the
@@ -146,6 +148,7 @@ allow rules must be added in domain Group Policy.
 Useful worker options:
 
 - `--module metadata` to dedicate a worker to a single module
+- `--cloud copilot` to process `cloud_ai` and `aesthetic` with Copilot backend (match your batch provider)
 - `--lease-ttl 300` to request longer job leases
 - `--heartbeat-interval 15` to refresh worker and lease liveness more often
 - `--path-mapping "SOURCE_PREFIX=LOCAL_PREFIX"` to remap shared-NAS paths on a worker with a different mount root

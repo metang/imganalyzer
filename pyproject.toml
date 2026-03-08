@@ -50,8 +50,10 @@ local-ai = [
 openai = ["openai>=1.30"]
 anthropic = ["anthropic>=0.28"]
 google = ["google-cloud-vision>=3.7"]
+copilot = ["github-copilot-sdk"]
 all-ai = [
     "imganalyzer[local-ai]",
+    "imganalyzer[copilot]",
     "imganalyzer[openai]",
     "imganalyzer[anthropic]",
     "imganalyzer[google]",
