@@ -279,9 +279,12 @@ def extract_embedding_from_image(image_path: "Path | str") -> np.ndarray | None:
     """
     from pathlib import Path as _Path
     from PIL import Image
+    from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
 
     path = _Path(image_path)
-    img = Image.open(path).convert("RGB")
+    register_optional_pillow_opener(path)
+    with pillow_decode_guard(path):
+        img = Image.open(path).convert("RGB")
     rgb = np.array(img, dtype=np.uint8)
 
     analyzer = FaceAnalyzer()

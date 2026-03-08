@@ -239,6 +239,58 @@ def test_server_jobs_claim_packages_embedding_context(tmp_path, monkeypatch):
     assert job["context"]["modules"]["cloud_ai"]["providers"][0]["description"] == "dock at sunset"
 
 
+def test_server_jobs_skip_cascades_corrupt_file_to_pending_sibling_jobs(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-corrupt-skip.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_path = tmp_path / "broken.tiff"
+    image_id = repo.register_image(file_path=str(image_path))
+    first_job = queue.enqueue(image_id, "metadata")
+    second_job = queue.enqueue(image_id, "technical")
+    assert first_job is not None
+    assert second_job is not None
+
+    claimed = queue.claim_leased(worker_id="worker-1", lease_ttl_seconds=120, batch_size=1)
+    assert len(claimed) == 1
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+
+    result = server._handle_jobs_skip(
+        {
+            "jobId": claimed[0]["id"],
+            "leaseToken": claimed[0]["lease_token"],
+            "reason": "corrupt_file",
+            "details": "Pillow cannot decode broken.tiff: Invalid value for samples per pixel",
+        }
+    )
+
+    assert result == {"ok": True}
+
+    rows = conn.execute(
+        "SELECT id, status, skip_reason FROM job_queue WHERE image_id = ? ORDER BY id",
+        [image_id],
+    ).fetchall()
+    assert [(row["id"], row["status"], row["skip_reason"]) for row in rows] == [
+        (first_job, "skipped", "corrupt_file"),
+        (second_job, "skipped", "corrupt_file"),
+    ]
+
+    corrupt = conn.execute(
+        "SELECT file_path, error_msg FROM corrupt_files WHERE image_id = ?",
+        [image_id],
+    ).fetchone()
+    assert corrupt is not None
+    assert corrupt["file_path"] == str(image_path)
+    assert "Pillow cannot decode broken.tiff" in corrupt["error_msg"]
+
+
 def test_server_jobs_claim_scans_past_prereq_blocked_jobs(tmp_path, monkeypatch):
     db_path = tmp_path / "server-claim-scan.db"
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)

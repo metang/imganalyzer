@@ -438,6 +438,17 @@ class JobQueue:
         )
         self.conn.commit()
 
+    def mark_image_pending_jobs_skipped(self, image_id: int, reason: str) -> int:
+        """Skip pending jobs for an image after a fatal file-level failure."""
+        cur = self.conn.execute(
+            """UPDATE job_queue
+               SET status = 'skipped', skip_reason = ?, completed_at = ?
+               WHERE image_id = ? AND status = 'pending'""",
+            [reason, _now(), image_id],
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def mark_pending(self, job_id: int) -> None:
         """Reset a claimed (running) job back to pending.
 

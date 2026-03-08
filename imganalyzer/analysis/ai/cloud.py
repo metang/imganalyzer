@@ -77,17 +77,20 @@ def _encode_image(path: Path, max_size_kb: int = 1024) -> tuple[str, str]:
     """Return base64-encoded image and MIME type, resized if needed."""
     from PIL import Image
     import io
+    from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
 
-    img = Image.open(path)  # Path objects work on both Windows and macOS
-    if img.mode not in ("RGB", "L"):
-        img = img.convert("RGB")
+    register_optional_pillow_opener(path)
+    with pillow_decode_guard(path):
+        img = Image.open(path)  # Path objects work on both Windows and macOS
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
 
-    # Resize large images for API efficiency
-    w, h = img.size
-    max_dim = 1568  # Anthropic recommended max
-    if max(w, h) > max_dim:
-        ratio = max_dim / max(w, h)
-        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+        # Resize large images for API efficiency
+        w, h = img.size
+        max_dim = 1568  # Anthropic recommended max
+        if max(w, h) > max_dim:
+            ratio = max_dim / max(w, h)
+            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
 
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
@@ -312,15 +315,25 @@ def _convert_raw_to_jpeg(raw_path: Path) -> Path:
         img = Image.fromarray(rgb)
     else:
         # HEIC/HEIF/AVIF — Pillow opens these directly (with pillow-heif registered).
-        img = Image.open(raw_path)
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
+        from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
 
-    w, h = img.size
-    max_dim = 1568
-    if max(w, h) > max_dim:
-        ratio = max_dim / max(w, h)
-        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+        register_optional_pillow_opener(raw_path)
+        with pillow_decode_guard(raw_path):
+            img = Image.open(raw_path)
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+
+            w, h = img.size
+            max_dim = 1568
+            if max(w, h) > max_dim:
+                ratio = max_dim / max(w, h)
+                img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+    if raw_path.suffix.lower() in _RAW_EXTENSIONS:
+        w, h = img.size
+        max_dim = 1568
+        if max(w, h) > max_dim:
+            ratio = max_dim / max(w, h)
+            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     tmp.close()

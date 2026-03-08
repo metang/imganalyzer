@@ -931,6 +931,7 @@ def _handle_jobs_skip(params: dict) -> dict:
         repo = Repository(conn)
         job_row = conn.execute("SELECT image_id FROM job_queue WHERE id = ?", [job_id]).fetchone()
         if job_row is not None:
+            queue.mark_image_pending_jobs_skipped(int(job_row["image_id"]), reason)
             image = repo.get_image(int(job_row["image_id"]))
             if image is not None:
                 conn.execute(
@@ -1961,11 +1962,8 @@ def _handle_thumbnail(params: dict) -> dict:
         ".sr2", ".srf", ".x3f", ".iiq", ".mos", ".raw",
     }
 
-    if ext in (".heic", ".heif"):
-        from pillow_heif import register_heif_opener
-        register_heif_opener()
-
     from PIL import Image
+    from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
 
     if ext in RAW_EXTS:
         import rawpy
@@ -1975,8 +1973,10 @@ def _handle_thumbnail(params: dict) -> dict:
             rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
         img = Image.fromarray(rgb)
     else:
-        img = Image.open(path)
-        img = img.convert("RGB")
+        register_optional_pillow_opener(path)
+        with pillow_decode_guard(path):
+            img = Image.open(path)
+            img = img.convert("RGB")
 
     img.thumbnail((400, 300), Image.LANCZOS)
     buf = io.BytesIO()
@@ -2007,12 +2007,8 @@ def _handle_fullimage(params: dict) -> dict:
         # Electron can read these directly — no need to decode via Python
         return {"native": True, "path": image_path}
 
-    # RAW or HEIC — decode to JPEG
-    if ext in (".heic", ".heif"):
-        from pillow_heif import register_heif_opener
-        register_heif_opener()
-
     from PIL import Image
+    from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
 
     if ext in RAW_EXTS:
         import rawpy
@@ -2022,8 +2018,10 @@ def _handle_fullimage(params: dict) -> dict:
             rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
         img = Image.fromarray(rgb)
     else:
-        img = Image.open(path)
-        img = img.convert("RGB")
+        register_optional_pillow_opener(path)
+        with pillow_decode_guard(path):
+            img = Image.open(path)
+            img = img.convert("RGB")
 
     # Limit to 4K display size
     MAX_DIM = 3840
@@ -2249,11 +2247,10 @@ def _handle_faces_crop(params: dict) -> dict:
         return {"error": f"Image file not found: {file_path}"}
 
     from PIL import Image
+    from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
 
     ext = path.suffix.lower()
-    if ext in (".heic", ".heif"):
-        from pillow_heif import register_heif_opener
-        register_heif_opener()
+    register_optional_pillow_opener(path)
 
     RAW_EXTS = {
         ".arw", ".cr2", ".cr3", ".nef", ".nrw", ".orf", ".raf", ".rw2",
@@ -2269,8 +2266,9 @@ def _handle_faces_crop(params: dict) -> dict:
             rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
         img = Image.fromarray(rgb)
     else:
-        img = Image.open(path)
-        img = img.convert("RGB")
+        with pillow_decode_guard(path):
+            img = Image.open(path)
+            img = img.convert("RGB")
 
     # Crop face region with some padding.
     # IMPORTANT: bbox coordinates were computed on a pre-resized image

@@ -426,7 +426,11 @@ class DistributedWorker:
 
         except ValueError as exc:
             err_lower = str(exc).lower()
-            if "libraw cannot decode" in err_lower or "libraw postprocess failed" in err_lower:
+            if (
+                "libraw cannot decode" in err_lower
+                or "libraw postprocess failed" in err_lower
+                or "pillow cannot decode" in err_lower
+            ):
                 elapsed = int(time.time() * 1000) - start_ms
                 skipped = self._coordinator_call(
                     "jobs/skip",

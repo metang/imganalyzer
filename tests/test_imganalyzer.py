@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import sys
 import threading
@@ -116,6 +117,56 @@ class TestMetadataExtractor:
         from imganalyzer.analysis.metadata import MetadataExtractor
         result = MetadataExtractor(img_path, synthetic_image_data).extract()
         assert isinstance(result, dict)
+
+
+# ── StandardReader ──────────────────────────────────────────────────────────────
+
+class TestStandardReader:
+    def test_read_wraps_decode_errors_and_suppresses_tiff_logger(self, tmp_path, caplog):
+        import imganalyzer.readers.standard as standard
+
+        path = tmp_path / "bad.tiff"
+
+        def _fail_open(*_args, **_kwargs):
+            logging.getLogger("PIL.TiffImagePlugin").error(
+                "More samples per pixel than can be decoded: %s", 10
+            )
+            raise SyntaxError("Invalid value for samples per pixel")
+
+        with caplog.at_level(logging.ERROR, logger="PIL.TiffImagePlugin"), \
+             patch("PIL.Image.open", side_effect=_fail_open):
+            with pytest.raises(
+                ValueError,
+                match=r"Pillow cannot decode bad\.tiff: Invalid value for samples per pixel",
+            ):
+                standard.read(path)
+
+        assert "More samples per pixel than can be decoded" not in caplog.text
+
+    def test_read_headers_wraps_decode_errors_and_suppresses_tiff_logger(
+        self,
+        tmp_path,
+        caplog,
+    ):
+        import imganalyzer.readers.standard as standard
+
+        path = tmp_path / "headers-bad.tiff"
+
+        def _fail_open(*_args, **_kwargs):
+            logging.getLogger("PIL.TiffImagePlugin").error(
+                "More samples per pixel than can be decoded: %s", 10
+            )
+            raise SyntaxError("Invalid value for samples per pixel")
+
+        with caplog.at_level(logging.ERROR, logger="PIL.TiffImagePlugin"), \
+             patch("PIL.Image.open", side_effect=_fail_open):
+            with pytest.raises(
+                ValueError,
+                match=r"Pillow cannot decode headers-bad\.tiff: Invalid value for samples per pixel",
+            ):
+                standard.read_headers(path)
+
+        assert "More samples per pixel than can be decoded" not in caplog.text
 
 
 # ── Analyzer control path ─────────────────────────────────────────────────────
@@ -1412,6 +1463,56 @@ class TestWorkerFlushRecovery:
 
         assert written == 1
         assert worker._xmp_candidates == {202}
+
+    def test_process_job_skips_pillow_decode_errors_and_pending_siblings(self, tmp_path):
+        from imganalyzer.db.queue import JobQueue
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.pipeline.worker import Worker
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        image_path = tmp_path / "broken.tiff"
+        image_id = repo.register_image(file_path=str(image_path))
+        first_job = queue.enqueue(image_id, "metadata")
+        second_job = queue.enqueue(image_id, "technical")
+        assert first_job is not None
+        assert second_job is not None
+
+        worker = Worker(conn, workers=1, cloud_workers=1)
+
+        class FakeRunner:
+            def should_run(self, _image_id: int, _module: str) -> bool:
+                return True
+
+            def run(self, _image_id: int, _module: str) -> dict[str, object]:
+                raise ValueError(
+                    "Pillow cannot decode broken.tiff: Invalid value for samples per pixel"
+                )
+
+        worker._get_thread_db = lambda: (conn, repo, queue, FakeRunner())  # type: ignore[method-assign]
+
+        status = worker._process_job({"id": first_job, "image_id": image_id, "module": "metadata"})
+
+        assert status == "skipped"
+
+        rows = conn.execute(
+            "SELECT id, status, skip_reason FROM job_queue WHERE image_id = ? ORDER BY id",
+            [image_id],
+        ).fetchall()
+        assert [(row["id"], row["status"], row["skip_reason"]) for row in rows] == [
+            (first_job, "skipped", "corrupt_file"),
+            (second_job, "skipped", "corrupt_file"),
+        ]
+
+        corrupt = conn.execute(
+            "SELECT file_path, error_msg FROM corrupt_files WHERE image_id = ?",
+            [image_id],
+        ).fetchone()
+        assert corrupt is not None
+        assert corrupt["file_path"] == str(image_path)
+        assert "Pillow cannot decode broken.tiff" in corrupt["error_msg"]
 
 
 class TestSearchIndex:

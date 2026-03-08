@@ -748,9 +748,14 @@ class Worker:
 
         except ValueError as exc:
             err_lower = str(exc).lower()
-            if "libraw cannot decode" in err_lower or "libraw postprocess failed" in err_lower:
+            if (
+                "libraw cannot decode" in err_lower
+                or "libraw postprocess failed" in err_lower
+                or "pillow cannot decode" in err_lower
+            ):
                 elapsed = int(time.time() * 1000) - start_ms
                 queue.mark_skipped(job_id, "corrupt_file")
+                queue.mark_image_pending_jobs_skipped(image_id, "corrupt_file")
                 _emit_result(path, module, "skipped", elapsed, f"corrupt file: {exc}")
                 # Persist corrupt file path for later handling
                 conn, _, _, _ = self._get_thread_db()
