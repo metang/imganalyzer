@@ -449,6 +449,35 @@ class JobQueue:
         self.conn.commit()
         return cur.rowcount
 
+    def mark_image_pending_modules_skipped(
+        self,
+        image_id: int,
+        modules: list[str],
+        reason: str,
+    ) -> int:
+        """Skip pending jobs for specific modules on one image."""
+        if not modules:
+            return 0
+        placeholders = ",".join("?" * len(modules))
+        cur = self.conn.execute(
+            f"""UPDATE job_queue
+                SET status = 'skipped', skip_reason = ?, completed_at = ?
+                WHERE image_id = ? AND status = 'pending' AND module IN ({placeholders})""",
+            [reason, _now(), image_id, *modules],
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def get_image_module_job_status(self, image_id: int, module: str) -> str | None:
+        """Return the queue status for an image/module, if a job row exists."""
+        row = self.conn.execute(
+            "SELECT status FROM job_queue WHERE image_id = ? AND module = ?",
+            [image_id, module],
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["status"])
+
     def mark_pending(self, job_id: int) -> None:
         """Reset a claimed (running) job back to pending.
 

@@ -972,6 +972,114 @@ class TestObjectDetector:
         assert len(objs) == 1
         assert objs[0] == "car:75%"
 
+    def test_load_models_falls_back_to_slow_processor_on_import_error(self):
+        import types
+        from imganalyzer.analysis.ai.objects import ObjectDetector
+
+        class FakeCuda:
+            @staticmethod
+            def is_available() -> bool:
+                return False
+
+        fake_torch = types.SimpleNamespace(cuda=FakeCuda(), float32="float32")
+        fast_processor = object()
+        slow_processor = object()
+        processor_calls: list[dict[str, object]] = []
+
+        class FakeAutoProcessor:
+            @staticmethod
+            def from_pretrained(model_id: str, **kwargs):
+                processor_calls.append({"model_id": model_id, **kwargs})
+                if kwargs.get("use_fast") is not False:
+                    raise ImportError("GroundingDinoImageProcessorFast requires PyTorch")
+                return slow_processor
+
+        class FakeModel:
+            def to(self, _device: str):
+                return self
+
+            def eval(self):
+                return None
+
+        class FakeAutoModel:
+            @staticmethod
+            def from_pretrained(_model_id: str, **_kwargs):
+                return FakeModel()
+
+        fake_transformers = types.SimpleNamespace(
+            AutoProcessor=FakeAutoProcessor,
+            AutoModelForZeroShotObjectDetection=FakeAutoModel,
+        )
+
+        ObjectDetector._processor = None
+        ObjectDetector._model = None
+        with patch.dict(
+            sys.modules,
+            {"torch": fake_torch, "transformers": fake_transformers},
+        ):
+            ObjectDetector._load_models()
+
+        try:
+            assert ObjectDetector._processor is slow_processor
+            assert len(processor_calls) == 2
+            assert "use_fast" not in processor_calls[0]
+            assert processor_calls[1]["use_fast"] is False
+        finally:
+            ObjectDetector._processor = None
+            ObjectDetector._model = None
+
+    def test_load_models_uses_fast_processor_when_available(self):
+        import types
+        from imganalyzer.analysis.ai.objects import ObjectDetector
+
+        class FakeCuda:
+            @staticmethod
+            def is_available() -> bool:
+                return False
+
+        fake_torch = types.SimpleNamespace(cuda=FakeCuda(), float32="float32")
+        fast_processor = object()
+        processor_calls: list[dict[str, object]] = []
+
+        class FakeAutoProcessor:
+            @staticmethod
+            def from_pretrained(model_id: str, **kwargs):
+                processor_calls.append({"model_id": model_id, **kwargs})
+                return fast_processor
+
+        class FakeModel:
+            def to(self, _device: str):
+                return self
+
+            def eval(self):
+                return None
+
+        class FakeAutoModel:
+            @staticmethod
+            def from_pretrained(_model_id: str, **_kwargs):
+                return FakeModel()
+
+        fake_transformers = types.SimpleNamespace(
+            AutoProcessor=FakeAutoProcessor,
+            AutoModelForZeroShotObjectDetection=FakeAutoModel,
+        )
+
+        ObjectDetector._processor = None
+        ObjectDetector._model = None
+        with patch.dict(
+            sys.modules,
+            {"torch": fake_torch, "transformers": fake_transformers},
+        ):
+            ObjectDetector._load_models()
+
+        try:
+            assert ObjectDetector._processor is fast_processor
+            assert len(processor_calls) == 1
+            assert "use_fast" not in processor_calls[0]
+        finally:
+            ObjectDetector._processor = None
+            ObjectDetector._model = None
+
 
 # ── Batch Processing DB Integration ──────────────────────────────────────────
 
@@ -1513,6 +1621,83 @@ class TestWorkerFlushRecovery:
         assert corrupt is not None
         assert corrupt["file_path"] == str(image_path)
         assert "Pillow cannot decode broken.tiff" in corrupt["error_msg"]
+
+    def test_process_job_marks_missing_dependency_skipped(self, tmp_path):
+        from imganalyzer.db.queue import JobQueue
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.pipeline.worker import Worker
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        image_path = tmp_path / "missing-torch.jpg"
+        image_id = repo.register_image(file_path=str(image_path))
+        objects_job = queue.enqueue(image_id, "objects")
+        faces_job = queue.enqueue(image_id, "faces")
+        assert objects_job is not None
+        assert faces_job is not None
+
+        worker = Worker(conn, workers=1, cloud_workers=1)
+
+        class FakeRunner:
+            def should_run(self, _image_id: int, _module: str) -> bool:
+                return True
+
+            def run(self, _image_id: int, _module: str) -> dict[str, object]:
+                raise ImportError("PyTorch library was not found")
+
+        worker._get_thread_db = lambda: (conn, repo, queue, FakeRunner())  # type: ignore[method-assign]
+
+        status = worker._process_job({"id": objects_job, "image_id": image_id, "module": "objects"})
+        assert status == "skipped"
+
+        rows = conn.execute(
+            "SELECT id, status, skip_reason FROM job_queue WHERE image_id = ? ORDER BY id",
+            [image_id],
+        ).fetchall()
+        assert [(row["id"], row["status"], row["skip_reason"]) for row in rows] == [
+            (objects_job, "skipped", "missing_dependency"),
+            (faces_job, "skipped", "prerequisite_objects_missing_dependency"),
+        ]
+
+    def test_process_job_skips_when_prerequisite_failed(self, tmp_path):
+        from imganalyzer.db.queue import JobQueue
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.pipeline.worker import Worker
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        image_id = repo.register_image(file_path=str(tmp_path / "prereq.jpg"))
+        objects_job = queue.enqueue(image_id, "objects")
+        faces_job = queue.enqueue(image_id, "faces")
+        assert objects_job is not None
+        assert faces_job is not None
+        queue.mark_failed(objects_job, "ImportError: PyTorch not installed")
+
+        worker = Worker(conn, workers=1, cloud_workers=1)
+
+        class FakeRunner:
+            def should_run(self, _image_id: int, _module: str) -> bool:
+                return True
+
+            def run(self, _image_id: int, _module: str) -> dict[str, object]:
+                raise AssertionError("faces should not run when objects already failed")
+
+        worker._get_thread_db = lambda: (conn, repo, queue, FakeRunner())  # type: ignore[method-assign]
+
+        status = worker._process_job({"id": faces_job, "image_id": image_id, "module": "faces"})
+        assert status == "skipped"
+
+        row = conn.execute(
+            "SELECT status, skip_reason FROM job_queue WHERE id = ?",
+            [faces_job],
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "skipped"
+        assert row["skip_reason"] == "prerequisite_objects_failed"
 
 
 class TestSearchIndex:

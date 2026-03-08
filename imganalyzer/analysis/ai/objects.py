@@ -261,9 +261,18 @@ class ObjectDetector:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model_id = "IDEA-Research/grounding-dino-base"
 
-        cls._processor = AutoProcessor.from_pretrained(
-            model_id, cache_dir=CACHE_DIR
-        )
+        # Try the fast image processor first (significant speed gain).
+        # Fall back to the slow variant if it raises ImportError — the
+        # GroundingDinoImageProcessorFast can falsely report "PyTorch not
+        # found" in some environments even when torch is importable.
+        try:
+            cls._processor = AutoProcessor.from_pretrained(
+                model_id, cache_dir=CACHE_DIR,
+            )
+        except ImportError:
+            cls._processor = AutoProcessor.from_pretrained(
+                model_id, cache_dir=CACHE_DIR, use_fast=False,
+            )
         # Load in float32 first — GroundingDINO's text enhancer layers
         # have internal operations that fail with fp16 weights.
         cls._model = AutoModelForZeroShotObjectDetection.from_pretrained(

@@ -335,6 +335,42 @@ def test_server_jobs_claim_scans_past_prereq_blocked_jobs(tmp_path, monkeypatch)
     assert job["imageId"] == eligible_image_id
 
 
+def test_server_jobs_claim_skips_when_prerequisite_failed(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-claim-prereq-failed.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/nas/photos/prereq-failed.jpg")
+    objects_job = queue.enqueue(image_id, "objects")
+    faces_job = queue.enqueue(image_id, "faces")
+    assert objects_job is not None
+    assert faces_job is not None
+    queue.mark_failed(objects_job, "ImportError: PyTorch not installed")
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "faces"})
+    assert result["jobs"] == []
+
+    check = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    check.row_factory = sqlite3.Row
+    row = check.execute(
+        "SELECT status, skip_reason FROM job_queue WHERE id = ?",
+        [faces_job],
+    ).fetchone()
+    check.close()
+    assert row is not None
+    assert row["status"] == "skipped"
+    assert row["skip_reason"] == "prerequisite_objects_failed"
+
+
 def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
     db_path = tmp_path / "server-complete.db"
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)

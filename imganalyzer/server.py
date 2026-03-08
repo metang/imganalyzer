@@ -748,7 +748,15 @@ def _handle_jobs_claim(params: dict) -> dict:
 
             prereq = _PREREQUISITES.get(module_name)
             if prereq and not repo.is_analyzed(image_id, prereq):
-                queue.release_leased(job["id"], job["lease_token"])
+                prereq_status = queue.get_image_module_job_status(image_id, prereq)
+                if prereq_status in ("failed", "skipped"):
+                    queue.mark_skipped_leased(
+                        job["id"],
+                        job["lease_token"],
+                        f"prerequisite_{prereq}_{prereq_status}",
+                    )
+                else:
+                    queue.release_leased(job["id"], job["lease_token"])
                 continue
 
             if module_name in ("cloud_ai", "aesthetic") and _distributed_has_people(repo, image_id):

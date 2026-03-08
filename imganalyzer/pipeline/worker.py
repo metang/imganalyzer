@@ -86,6 +86,9 @@ _PREREQUISITES: dict[str, str] = {
     "ocr": "objects",
     "faces": "objects",
 }
+_DEPENDENTS: dict[str, list[str]] = {}
+for _mod, _prereq in _PREREQUISITES.items():
+    _DEPENDENTS.setdefault(_prereq, []).append(_mod)
 
 
 # ── Result notification callback ──────────────────────────────────────────────
@@ -577,7 +580,11 @@ class Worker:
             # Prerequisite check — defer (not skip) so job retries after prereq completes
             prereq = _PREREQUISITES.get(module)
             if prereq and not repo.is_analyzed(image_id, prereq):
-                queue.mark_pending(job_id)
+                prereq_status = queue.get_image_module_job_status(image_id, prereq)
+                if prereq_status in ("failed", "skipped"):
+                    queue.mark_skipped(job_id, f"prerequisite_{prereq}_{prereq_status}")
+                else:
+                    queue.mark_pending(job_id)
                 batch_stats["skipped"] += 1
                 continue
 
@@ -699,7 +706,11 @@ class Worker:
             # Defer back to pending so the job retries after prereq completes
             prereq = _PREREQUISITES.get(module)
             if prereq and not repo.is_analyzed(image_id, prereq):
-                queue.mark_pending(job_id)
+                prereq_status = queue.get_image_module_job_status(image_id, prereq)
+                if prereq_status in ("failed", "skipped"):
+                    queue.mark_skipped(job_id, f"prerequisite_{prereq}_{prereq_status}")
+                else:
+                    queue.mark_pending(job_id)
                 return "skipped"
 
             # ── People guard for cloud/aesthetic (privacy) ───────────────────
@@ -745,6 +756,23 @@ class Worker:
                     self._fts_dirty.add(image_id)
 
             return "done"
+
+        except ImportError as exc:
+            elapsed = int(time.time() * 1000) - start_ms
+            queue.mark_skipped(job_id, "missing_dependency")
+            dependent_modules = _DEPENDENTS.get(module, [])
+            if dependent_modules:
+                queue.mark_image_pending_modules_skipped(
+                    image_id,
+                    dependent_modules,
+                    f"prerequisite_{module}_missing_dependency",
+                )
+            _emit_result(path, module, "skipped", elapsed, f"missing dependency: {exc}")
+            if self.verbose:
+                console.print(
+                    f"  [yellow]Skipped:[/yellow] {path} module={module}: missing dependency"
+                )
+            return "skipped"
 
         except ValueError as exc:
             err_lower = str(exc).lower()

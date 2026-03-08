@@ -424,6 +424,26 @@ class DistributedWorker:
             )
             return "done"
 
+        except ImportError as exc:
+            elapsed = int(time.time() * 1000) - start_ms
+            skipped = self._coordinator_call(
+                "jobs/skip",
+                {
+                    "jobId": job_id,
+                    "leaseToken": lease_token,
+                    "reason": "missing_dependency",
+                    "details": str(exc),
+                },
+            )
+            if not bool(skipped.get("ok")):
+                raise RuntimeError("Coordinator rejected missing_dependency skip") from exc
+            _emit_result(path, module, "skipped", elapsed, f"missing dependency: {exc}")
+            console.print(
+                f"  [yellow]⊘[/yellow] [bold]{module}[/bold] skipped (missing dependency) in "
+                f"{elapsed / 1000:.1f}s ← {short_path}"
+            )
+            return "skipped"
+
         except ValueError as exc:
             err_lower = str(exc).lower()
             if (
