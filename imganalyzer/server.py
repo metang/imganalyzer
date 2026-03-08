@@ -706,58 +706,76 @@ def _handle_jobs_claim(params: dict) -> dict:
 
     requested = max(1, batch_size)
     scan_size = min(max(requested * 4, requested), 32)
-    claimed = queue.claim_leased(
-        worker_id=worker_id,
-        lease_ttl_seconds=max(5, lease_ttl_seconds),
-        batch_size=scan_size,
-        module=str(module) if module is not None else None,
+    # Scan multiple candidate windows in one request so module-filtered workers
+    # can reach eligible jobs even when many older rows are temporarily blocked
+    # by prerequisites (for example, faces waiting on objects).
+    max_scan_candidates = max(
+        scan_size,
+        min(256, max(requested * 16, scan_size * 32)),
     )
+    module_filter = str(module) if module is not None else None
     jobs: list[dict[str, Any]] = []
-    for job in claimed:
-        if len(jobs) >= requested:
-            queue.release_leased(job["id"], job["lease_token"])
-            continue
+    scanned_candidates = 0
+    while len(jobs) < requested and scanned_candidates < max_scan_candidates:
+        claim_size = min(scan_size, max_scan_candidates - scanned_candidates)
+        claimed = queue.claim_leased(
+            worker_id=worker_id,
+            lease_ttl_seconds=max(5, lease_ttl_seconds),
+            batch_size=claim_size,
+            module=module_filter,
+        )
+        if not claimed:
+            break
+        scanned_candidates += len(claimed)
 
-        image = repo.get_image(job["image_id"])
-        if image is None:
-            queue.mark_failed_leased(job["id"], job["lease_token"], "image_not_found")
-            continue
+        for job in claimed:
+            if len(jobs) >= requested:
+                queue.release_leased(job["id"], job["lease_token"])
+                continue
 
-        image_id = int(job["image_id"])
-        module_name = str(job["module"])
+            image = repo.get_image(job["image_id"])
+            if image is None:
+                queue.mark_failed_leased(job["id"], job["lease_token"], "image_not_found")
+                continue
 
-        if not force and repo.is_analyzed(image_id, module_name):
-            queue.mark_skipped_leased(job["id"], job["lease_token"], "already_analyzed")
-            continue
+            image_id = int(job["image_id"])
+            module_name = str(job["module"])
 
-        prereq = _PREREQUISITES.get(module_name)
-        if prereq and not repo.is_analyzed(image_id, prereq):
-            queue.release_leased(job["id"], job["lease_token"])
-            continue
+            if not force and repo.is_analyzed(image_id, module_name):
+                queue.mark_skipped_leased(job["id"], job["lease_token"], "already_analyzed")
+                continue
 
-        if module_name in ("cloud_ai", "aesthetic") and _distributed_has_people(repo, image_id):
-            queue.mark_skipped_leased(job["id"], job["lease_token"], "has_people")
-            continue
+            prereq = _PREREQUISITES.get(module_name)
+            if prereq and not repo.is_analyzed(image_id, prereq):
+                queue.release_leased(job["id"], job["lease_token"])
+                continue
 
-        if module_name == "aesthetic" and _has_active_cloud_ai_job(conn, image_id):
-            queue.release_leased(job["id"], job["lease_token"])
-            continue
+            if module_name in ("cloud_ai", "aesthetic") and _distributed_has_people(repo, image_id):
+                queue.mark_skipped_leased(job["id"], job["lease_token"], "has_people")
+                continue
 
-        jobs.append({
-            "id": job["id"],
-            "imageId": image_id,
-            "module": module_name,
-            "attempts": job["attempts"],
-            "leaseToken": job["lease_token"],
-            "leaseExpiresAt": job["lease_expires_at"],
-            "filePath": image["file_path"],
-            "image": {
-                "width": image.get("width"),
-                "height": image.get("height"),
-                "format": image.get("format"),
-            },
-            "context": _build_distributed_job_context(repo, image_id, module_name),
-        })
+            if module_name == "aesthetic" and _has_active_cloud_ai_job(conn, image_id):
+                queue.release_leased(job["id"], job["lease_token"])
+                continue
+
+            jobs.append({
+                "id": job["id"],
+                "imageId": image_id,
+                "module": module_name,
+                "attempts": job["attempts"],
+                "leaseToken": job["lease_token"],
+                "leaseExpiresAt": job["lease_expires_at"],
+                "filePath": image["file_path"],
+                "image": {
+                    "width": image.get("width"),
+                    "height": image.get("height"),
+                    "format": image.get("format"),
+                },
+                "context": _build_distributed_job_context(repo, image_id, module_name),
+            })
+
+        if len(claimed) < claim_size:
+            break
     return {"jobs": jobs}
 
 

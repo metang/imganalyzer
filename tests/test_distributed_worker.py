@@ -239,6 +239,50 @@ def test_server_jobs_claim_packages_embedding_context(tmp_path, monkeypatch):
     assert job["context"]["modules"]["cloud_ai"]["providers"][0]["description"] == "dock at sunset"
 
 
+def test_server_jobs_claim_scans_past_prereq_blocked_jobs(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-claim-scan.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    for idx in range(9):
+        image_id = repo.register_image(file_path=f"/nas/photos/blocked-{idx}.jpg")
+        job_id = queue.enqueue(image_id, "faces")
+        assert job_id is not None
+        conn.execute(
+            "UPDATE job_queue SET queued_at = ? WHERE id = ?",
+            [f"2024-01-01 00:00:{idx:02d}", job_id],
+        )
+
+    eligible_image_id = repo.register_image(file_path="/nas/photos/eligible.jpg")
+    eligible_job_id = queue.enqueue(eligible_image_id, "faces")
+    assert eligible_job_id is not None
+    conn.execute(
+        "UPDATE job_queue SET queued_at = ? WHERE id = ?",
+        ["2024-01-01 00:00:59", eligible_job_id],
+    )
+    repo.upsert_objects(
+        eligible_image_id,
+        {"detected_objects": [], "has_person": False, "has_text": False},
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "faces"})
+
+    assert len(result["jobs"]) == 1
+    job = result["jobs"][0]
+    assert job["id"] == eligible_job_id
+    assert job["imageId"] == eligible_image_id
+
+
 def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
     db_path = tmp_path / "server-complete.db"
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
