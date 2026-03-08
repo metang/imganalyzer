@@ -94,24 +94,33 @@ imganalyzer run-distributed-worker \
   --worker-id worker-01
 ```
 
-### Quick worker bootstrap (macOS/Linux with Conda)
+### Quick worker bootstrap
 
-If a worker is missing local AI deps (for example `insightface`), run:
+**macOS / Linux** (Bash + Conda):
 
 ```bash
 bash scripts/setup_worker_env.sh ~/imganalyzer-worker
 ```
 
-This script creates/uses a Python 3.12 Conda env (`imganalyzer312`), installs
-`imganalyzer[local-ai,<provider>]` from source, and verifies both local AI
-and cloud-provider imports. Default provider is `copilot`. You can override
-defaults with:
+**Windows** (PowerShell + Conda):
+
+```powershell
+.\scripts\setup_worker_env.ps1 -RepoDir D:\Code\imganalyzer
+```
+
+Both scripts create/reuse a Conda env (`imganalyzer` on Windows, `imganalyzer312`
+on macOS/Linux), install `imganalyzer[local-ai,<provider>]` from source, and
+verify local AI and cloud-provider imports. Default provider is `copilot`.
+Override defaults with environment variables:
 - `IMGANALYZER_ENV_NAME`
 - `IMGANALYZER_PYTHON_VERSION`
 - `IMGANALYZER_REPO_URL`
 - `IMGANALYZER_WORKER_CLOUD_PROVIDER` (`copilot`, `openai`, `anthropic`, `google`)
 
 Platform notes:
+- **Windows**: PyTorch is installed from the official PyTorch CUDA index
+  (`https://download.pytorch.org/whl/cu128`) for GPU support. The setup
+  script handles this automatically.
 - **macOS**: PyTorch is installed via `conda install -c pytorch` (not pip) because
   PyPI only hosts older macOS wheels that are incompatible with numpy ≥2. The
   setup script handles this automatically. If you see errors like
