@@ -493,6 +493,23 @@ class JobQueue:
         )
         self.conn.commit()
 
+    def defer(self, job_id: int, seconds: int = 30) -> None:
+        """Re-queue a job with a bumped ``queued_at`` timestamp.
+
+        Used when a job's prerequisite isn't met yet.  Pushing
+        ``queued_at`` forward prevents the same ineligible job from
+        being claimed repeatedly while eligible jobs starve.
+        """
+        self.conn.execute(
+            """UPDATE job_queue
+               SET status = 'pending', started_at = NULL,
+                   queued_at = ?,
+                   last_node_id = NULL, last_node_role = NULL
+               WHERE id = ?""",
+            [_now_plus(seconds), job_id],
+        )
+        self.conn.commit()
+
     # ── Retry failed jobs ──────────────────────────────────────────────────
 
     def retry_failed(self, max_attempts: int = 3) -> int:

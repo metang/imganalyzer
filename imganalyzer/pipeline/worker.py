@@ -704,14 +704,17 @@ class Worker:
                 return "skipped"
 
             # ── Prerequisite check (DB-driven) ───────────────────────────────
-            # Defer back to pending so the job retries after prereq completes
+            # Defer back to pending so the job retries after prereq completes.
+            # Use queue.defer() (not mark_pending) to bump queued_at — this
+            # prevents the same ineligible job from starving eligible ones
+            # that are further back in the queue.
             prereq = _PREREQUISITES.get(module)
             if prereq and not repo.is_analyzed(image_id, prereq):
                 prereq_status = queue.get_image_module_job_status(image_id, prereq)
                 if prereq_status in ("failed", "skipped"):
                     queue.mark_skipped(job_id, f"prerequisite_{prereq}_{prereq_status}")
                 else:
-                    queue.mark_pending(job_id)
+                    queue.defer(job_id)
                 return "skipped"
 
             # ── People guard for cloud/aesthetic (privacy) ───────────────────
