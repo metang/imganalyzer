@@ -247,13 +247,13 @@ def test_server_jobs_claim_scans_past_prereq_blocked_jobs(tmp_path, monkeypatch)
     repo = Repository(conn)
     queue = JobQueue(conn)
 
-    for idx in range(9):
+    for idx in range(300):
         image_id = repo.register_image(file_path=f"/nas/photos/blocked-{idx}.jpg")
         job_id = queue.enqueue(image_id, "faces")
         assert job_id is not None
         conn.execute(
             "UPDATE job_queue SET queued_at = ? WHERE id = ?",
-            [f"2024-01-01 00:00:{idx:02d}", job_id],
+            [f"2024-01-01 00:{idx // 60:02d}:{idx % 60:02d}", job_id],
         )
 
     eligible_image_id = repo.register_image(file_path="/nas/photos/eligible.jpg")
@@ -261,7 +261,7 @@ def test_server_jobs_claim_scans_past_prereq_blocked_jobs(tmp_path, monkeypatch)
     assert eligible_job_id is not None
     conn.execute(
         "UPDATE job_queue SET queued_at = ? WHERE id = ?",
-        ["2024-01-01 00:00:59", eligible_job_id],
+        ["2024-01-01 05:59:59", eligible_job_id],
     )
     repo.upsert_objects(
         eligible_image_id,

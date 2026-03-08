@@ -349,6 +349,43 @@ class DistributedWorker:
         jobs = result.get("jobs", [])
         return jobs if isinstance(jobs, list) else []
 
+    def _coordinator_queue_summary(self) -> str | None:
+        """Return a short queue snapshot for empty-poll diagnostics."""
+        try:
+            status = self._coordinator_call("status", {})
+        except Exception:
+            return None
+
+        totals = status.get("totals", {})
+        pending = int(totals.get("pending", 0) or 0)
+        running = int(totals.get("running", 0) or 0)
+        if pending <= 0 and running <= 0:
+            return "queue empty"
+
+        modules = status.get("modules", {})
+        active: list[str] = []
+        if isinstance(modules, dict):
+            for module_name, module_stats in modules.items():
+                if not isinstance(module_stats, dict):
+                    continue
+                pending_count = int(module_stats.get("pending", 0) or 0)
+                running_count = int(module_stats.get("running", 0) or 0)
+                if pending_count <= 0 and running_count <= 0:
+                    continue
+                summary = f"{module_name}"
+                if running_count > 0:
+                    summary += f" r{running_count}"
+                if pending_count > 0:
+                    summary += f" p{pending_count}"
+                active.append(summary)
+                if len(active) >= 5:
+                    break
+
+        summary = f"queue pending={pending}, running={running}"
+        if active:
+            summary += f"; active={', '.join(active)}"
+        return summary
+
     def _process_claimed_job(self, job: dict[str, Any]) -> str:
         """Process one leased job and report its final state to the coordinator."""
         image_id = int(job["imageId"])
@@ -540,11 +577,13 @@ class DistributedWorker:
                     poll_interval = max(self.poll_interval_seconds, 0.5)
                     idle_log_every = max(1, int(30 / poll_interval))
                     if self._empty_claim_polls % idle_log_every == 0:
+                        queue_summary = self._coordinator_queue_summary()
+                        queue_hint = f", {queue_summary}" if queue_summary else ""
                         console.print(
                             "[dim]No jobs claimed yet; "
                             f"still polling every {self.poll_interval_seconds:g}s "
                             f"(empty polls={self._empty_claim_polls}, "
-                            f"active leases={len(self._snapshot_active())})[/dim]"
+                            f"active leases={len(self._snapshot_active())}{queue_hint})[/dim]"
                         )
                     self._shutdown.wait(self.poll_interval_seconds)
                     continue

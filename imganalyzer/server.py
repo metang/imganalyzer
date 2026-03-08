@@ -706,14 +706,15 @@ def _handle_jobs_claim(params: dict) -> dict:
 
     requested = max(1, batch_size)
     scan_size = min(max(requested * 4, requested), 32)
-    # Scan multiple candidate windows in one request so module-filtered workers
-    # can reach eligible jobs even when many older rows are temporarily blocked
-    # by prerequisites (for example, faces waiting on objects).
+    module_filter = str(module) if module is not None else None
+    pending_candidates = max(requested, queue.pending_count(module_filter))
+    # Scan far enough in one request to rotate past large blocked backlogs
+    # (for example hundreds of faces/ocr jobs waiting on objects) instead of
+    # forcing remote workers to idle through many empty polls.
     max_scan_candidates = max(
         scan_size,
-        min(256, max(requested * 16, scan_size * 32)),
+        min(pending_candidates, max(2048, requested * 256)),
     )
-    module_filter = str(module) if module is not None else None
     jobs: list[dict[str, Any]] = []
     scanned_candidates = 0
     while len(jobs) < requested and scanned_candidates < max_scan_candidates:
