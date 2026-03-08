@@ -325,18 +325,37 @@ class Worker:
             task = progress.add_task("Processing", total=total_pending)
 
             # ── Helper: submit IO jobs to their pools ─────────────────────────
+            # Cap cloud futures to avoid blocking GPU phase transitions.
+            # Without a cap, thousands of cloud jobs queue up in the
+            # single-thread executor and shutdown(wait=True) stalls for hours.
+            _cloud_in_flight = 0
+            _max_cloud_in_flight = effective_cloud_workers * 2
+
             def _submit_io_jobs(
                 local_pool: ThreadPoolExecutor,
                 cloud_pool: ThreadPoolExecutor,
             ) -> dict[Future, dict[str, Any]]:
                 """Claim and submit a batch of local-IO and cloud jobs."""
+                nonlocal _cloud_in_flight
                 futures: dict[Future, dict[str, Any]] = {}
                 for module_set, pool in (
                     (LOCAL_IO_MODULES, local_pool),
                     (CLOUD_MODULES, cloud_pool),
                 ):
                     for mod in module_set:
-                        jobs = self.queue.claim(batch_size=batch_size, module=mod)
+                        if mod in CLOUD_MODULES:
+                            if _cloud_in_flight >= _max_cloud_in_flight:
+                                continue
+                            cloud_claim = max(
+                                1, _max_cloud_in_flight - _cloud_in_flight
+                            )
+                            jobs = self.queue.claim(
+                                batch_size=cloud_claim, module=mod
+                            )
+                        else:
+                            jobs = self.queue.claim(
+                                batch_size=batch_size, module=mod
+                            )
                         for i, job in enumerate(jobs):
                             if self._shutdown.is_set():
                                 for j in range(i, len(jobs)):
@@ -345,6 +364,8 @@ class Worker:
                             try:
                                 fut = pool.submit(self._process_job, job)
                                 futures[fut] = job
+                                if job["module"] in CLOUD_MODULES:
+                                    _cloud_in_flight += 1
                             except RuntimeError:
                                 for j in range(i, len(jobs)):
                                     self.queue.mark_pending(jobs[j]["id"])
@@ -353,6 +374,7 @@ class Worker:
 
             # ── Helper: collect results from futures ──────────────────────────
             def _collect_futures(futures: dict[Future, dict[str, Any]]) -> None:
+                nonlocal _cloud_in_flight
                 for fut, job in futures.items():
                     try:
                         result_status = fut.result()
@@ -366,14 +388,20 @@ class Worker:
                         image_row = self.repo.get_image(job["image_id"])
                         path = image_row["file_path"] if image_row else f"id={job['image_id']}"
                         _emit_result(path, job["module"], "failed", 0, error_msg)
+                    finally:
+                        if job["module"] in CLOUD_MODULES:
+                            _cloud_in_flight -= 1
                     progress.advance(task)
 
             def _cancel_futures(futures: dict[Future, dict[str, Any]]) -> None:
+                nonlocal _cloud_in_flight
                 for fut, job in list(futures.items()):
                     if fut.done():
                         continue
                     if fut.cancel():
                         self.queue.mark_pending(job["id"])
+                        if job["module"] in CLOUD_MODULES:
+                            _cloud_in_flight -= 1
                         futures.pop(fut, None)
 
             # ── Helper: claim jobs from queue ─────────────────────────────────

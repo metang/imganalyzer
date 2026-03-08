@@ -411,9 +411,13 @@ class ResourceScheduler:
             # Force allocator cleanup now so large model memory is released
             # before we wait on outstanding IO/cloud futures.
             self._force_cuda_cleanup()
-            # Collect remaining IO futures after unload so cloud/IO drain does
-            # not keep GPU-heavy models resident longer than needed.
+            # Cancel uncompleted futures on shutdown so the pool can exit.
             if self.is_shutdown and pending_futures and cancel_futures_fn is not None:
+                cancel_futures_fn(pending_futures)
+            # Cancel uncompleted cloud futures at phase boundary so the
+            # ThreadPoolExecutor can shut down promptly and the next GPU
+            # phase isn't blocked waiting for a slow cloud backlog.
+            elif pending_futures and cancel_futures_fn is not None:
                 cancel_futures_fn(pending_futures)
             if pending_futures:
                 collect_fn(pending_futures)
