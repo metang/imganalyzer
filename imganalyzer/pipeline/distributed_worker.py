@@ -479,9 +479,12 @@ class DistributedWorker:
                         if "timed out" in reason or "timeout" in reason:
                             hint = (
                                 "\n[dim]  Hint: if the coordinator is on a remote host, "
-                                "ensure the firewall allows inbound TCP on the coordinator port.\n"
-                                "  On Windows: New-NetFirewallRule -DisplayName 'imganalyzer' "
+                                "ensure firewall allows both coordinator port and python.exe inbound.\n"
+                                "  On Windows (port):   New-NetFirewallRule -DisplayName 'imganalyzer Coordinator TCP' "
                                 "-Direction Inbound -Protocol TCP -LocalPort <PORT> -Action Allow\n"
+                                "  On Windows (python): New-NetFirewallRule -DisplayName 'imganalyzer Python Inbound' "
+                                "-Direction Inbound -Program '<python.exe>' -Protocol TCP -Action Allow\n"
+                                "  If still blocked: disable inbound 'TCP Query User ... python.exe' BLOCK rules.\n"
                                 "  On Linux:   sudo ufw allow <PORT>/tcp[/dim]"
                             )
                         console.print(

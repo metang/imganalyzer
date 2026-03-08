@@ -94,6 +94,35 @@ imganalyzer run-distributed-worker \
   --worker-id worker-01
 ```
 
+### Firewall setup for remote workers (Windows coordinator)
+
+If workers are on another machine/LAN, you need both a port rule and a Python
+program rule on the coordinator host:
+
+```powershell
+# 1) Allow coordinator port
+New-NetFirewallRule -DisplayName "imganalyzer Coordinator TCP 8765" `
+  -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow
+
+# 2) Allow Python process that hosts the coordinator
+New-NetFirewallRule -DisplayName "imganalyzer Python Inbound" `
+  -Direction Inbound -Program "C:\Users\<you>\miniconda3\envs\imganalyzer\python.exe" `
+  -Protocol TCP -Action Allow
+```
+
+If connectivity still times out, check for an auto-created inbound **block**
+rule like `TCP Query User ... python.exe` and disable it:
+
+```powershell
+Get-NetFirewallRule -Enabled True -Direction Inbound -Action Block |
+  Where-Object { $_.DisplayName -like "*python.exe*" } |
+  Set-NetFirewallRule -Enabled False
+```
+
+If `netsh advfirewall show currentprofile` reports
+`LocalFirewallRules N/A (GPO-store only)`, local rules are ignored and the same
+allow rules must be added in domain Group Policy.
+
 Useful worker options:
 
 - `--module metadata` to dedicate a worker to a single module
