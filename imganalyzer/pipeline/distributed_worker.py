@@ -6,6 +6,7 @@ import ipaddress
 import os
 import platform
 import signal
+import socket
 import sqlite3
 import threading
 import time
@@ -53,8 +54,9 @@ class CoordinatorClient:
         self.timeout_seconds = timeout_seconds
         self._lock = threading.Lock()
         self._next_id = 1
+        self.bypass_proxy = _should_bypass_proxy(url)
         self._opener = request.build_opener(
-            request.ProxyHandler({}) if _should_bypass_proxy(url) else request.ProxyHandler()
+            request.ProxyHandler({}) if self.bypass_proxy else request.ProxyHandler()
         )
 
     def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -77,14 +79,31 @@ class CoordinatorClient:
         if self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"
         req = request.Request(self.url, data=payload, headers=headers, method="POST")
+        started = time.monotonic()
         try:
             with self._opener.open(req, timeout=self.timeout_seconds) as resp:
                 raw = resp.read()
+        except TimeoutError as exc:
+            elapsed = time.monotonic() - started
+            raise RuntimeError(
+                f"Coordinator request timed out for {method} after {elapsed:.1f}s "
+                f"(timeout={self.timeout_seconds:.1f}s, url={self.url}, bypass_proxy={self.bypass_proxy})"
+            ) from exc
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Coordinator HTTP {exc.code}: {body}") from exc
+            elapsed = time.monotonic() - started
+            raise RuntimeError(
+                f"Coordinator HTTP {exc.code} for {method} after {elapsed:.1f}s: {body}"
+            ) from exc
         except error.URLError as exc:
-            raise RuntimeError(f"Coordinator request failed: {exc.reason}") from exc
+            elapsed = time.monotonic() - started
+            reason = exc.reason
+            reason_type = type(reason).__name__
+            raise RuntimeError(
+                f"Coordinator request failed for {method} after {elapsed:.1f}s "
+                f"(timeout={self.timeout_seconds:.1f}s, url={self.url}, bypass_proxy={self.bypass_proxy}): "
+                f"{reason} [{reason_type}]"
+            ) from exc
 
         try:
             message = json.loads(raw.decode("utf-8"))
@@ -147,6 +166,59 @@ class DistributedWorker:
         self._shutdown = threading.Event()
         self._active_leases: dict[int, str] = {}
         self._active_lock = threading.Lock()
+        self._registration_attempts = 0
+        self._claim_attempts = 0
+
+    def _proxy_env_summary(self) -> str:
+        """Summarize proxy-related environment variables for diagnostics."""
+        keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+        values: list[str] = []
+        for key in keys:
+            raw = os.getenv(key) or os.getenv(key.lower())
+            if raw:
+                values.append(f"{key}={raw}")
+        return "; ".join(values) if values else "<none>"
+
+    def _resolve_host_summary(self) -> str:
+        """Resolve coordinator host to IPs for debugging connectivity issues."""
+        host = parse.urlparse(self.client.url).hostname
+        if not host:
+            return "<unparseable coordinator host>"
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            return f"{host}: resolution failed ({exc})"
+        addrs = sorted({info[4][0] for info in infos if info[4]})
+        return f"{host} -> {', '.join(addrs) if addrs else '<no addresses>'}"
+
+    def _log_connectivity_context(self) -> None:
+        """Print one-shot connectivity context at worker startup."""
+        parsed = parse.urlparse(self.client.url)
+        console.print(
+            "[dim]Coordinator endpoint:[/dim] "
+            f"{self.client.url} "
+            f"[dim](scheme={parsed.scheme or '<none>'}, host={parsed.hostname or '<none>'}, "
+            f"port={parsed.port or ('443' if parsed.scheme == 'https' else '80')}, "
+            f"bypass_proxy={self.client.bypass_proxy}, timeout={self.client.timeout_seconds:.1f}s)[/dim]"
+        )
+        console.print(f"[dim]Host resolution:[/dim] {self._resolve_host_summary()}")
+        console.print(f"[dim]Proxy env:[/dim] {self._proxy_env_summary()}")
+
+    def _tcp_probe_summary(self, timeout_seconds: float = 3.0) -> str:
+        """Perform a direct TCP probe to the coordinator host/port."""
+        parsed = parse.urlparse(self.client.url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host:
+            return "unavailable (invalid coordinator URL host)"
+        start = time.monotonic()
+        try:
+            with socket.create_connection((host, port), timeout=timeout_seconds):
+                elapsed = time.monotonic() - start
+                return f"ok in {elapsed:.2f}s to {host}:{port}"
+        except OSError as exc:
+            elapsed = time.monotonic() - start
+            return f"failed in {elapsed:.2f}s to {host}:{port}: {type(exc).__name__}: {exc}"
 
     def _handle_sigint(self, _signum: int, _frame: Any) -> None:
         """Request a graceful shutdown on Ctrl+C."""
@@ -393,13 +465,16 @@ class DistributedWorker:
         )
 
         try:
+            self._log_connectivity_context()
             while not self._shutdown.is_set():
                 if not registered:
+                    self._registration_attempts += 1
                     try:
                         self._register_worker()
                     except Exception as exc:
                         hint = ""
                         reason = str(exc).lower()
+                        probe = self._tcp_probe_summary()
                         if "timed out" in reason or "timeout" in reason:
                             hint = (
                                 "\n[dim]  Hint: if the coordinator is on a remote host, "
@@ -410,12 +485,15 @@ class DistributedWorker:
                             )
                         console.print(
                             "[yellow]Coordinator unavailable during registration; "
-                            f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc}{hint}"
+                            f"attempt {self._registration_attempts}, "
+                            f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc}\n"
+                            f"[dim]  TCP probe: {probe}[/dim]{hint}"
                         )
                         self._shutdown.wait(self.poll_interval_seconds)
                         continue
 
                     registered = True
+                    self._registration_attempts = 0
                     if not heartbeat_started:
                         heartbeat_thread.start()
                         heartbeat_started = True
@@ -432,16 +510,21 @@ class DistributedWorker:
                         has_connected = True
 
                 try:
+                    self._claim_attempts += 1
                     jobs = self._claim_jobs()
                 except Exception as exc:
                     registered = False
+                    probe = self._tcp_probe_summary()
                     console.print(
                         "[yellow]Coordinator unavailable while claiming jobs; "
-                        f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc}"
+                        f"attempt {self._claim_attempts}, "
+                        f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc}\n"
+                        f"[dim]  TCP probe: {probe}[/dim]"
                     )
                     self._shutdown.wait(self.poll_interval_seconds)
                     continue
 
+                self._claim_attempts = 0
                 if not jobs:
                     self._shutdown.wait(self.poll_interval_seconds)
                     continue
