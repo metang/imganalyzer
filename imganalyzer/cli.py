@@ -1596,41 +1596,58 @@ def cleanup_sessions(
     async def _cleanup() -> None:
         client = CopilotClient()
         try:
-            sessions = await client.list_sessions()
+            await client.start()
+            console.print("Listing Copilot sessions (this may take a moment)…")
+            resp = await client._client.request("session.list", {}, timeout=300)
+            all_data = resp.get("sessions", [])
 
             if not all_sessions:
-                sessions = [
-                    s
-                    for s in sessions
-                    if getattr(s, "summary", None)
-                    and "analyze this image" in s.summary.lower()
+                matched = [
+                    s for s in all_data
+                    if (s.get("summary") or "").lower().startswith("analyze this image")
                 ]
+            else:
+                matched = all_data
 
-            if not sessions:
+            if not matched:
                 console.print("[green]No matching Copilot sessions found.[/green]")
                 return
 
-            console.print(f"Found [bold]{len(sessions)}[/bold] session(s)")
+            console.print(
+                f"Found [bold]{len(matched)}[/bold] matching session(s)"
+                f" (out of {len(all_data)} total)"
+            )
 
             if dry_run:
-                for s in sessions:
-                    sid = getattr(s, "sessionId", getattr(s, "session_id", "?"))
-                    summary = getattr(s, "summary", "") or "(no summary)"
-                    started = getattr(s, "startTime", "") or ""
+                for s in matched[:50]:
+                    sid = s.get("sessionId", "?")
+                    summary = s.get("summary", "") or "(no summary)"
+                    started = s.get("startTime", "") or ""
                     console.print(f"  • {sid}  {summary}  [dim]{started}[/dim]")
+                if len(matched) > 50:
+                    console.print(f"  … and {len(matched) - 50} more")
                 console.print("\n[dim]Use without --dry-run to delete them.[/dim]")
                 return
 
             deleted = 0
-            for s in sessions:
-                sid = getattr(s, "sessionId", getattr(s, "session_id", "?"))
+            failed = 0
+            for i, s in enumerate(matched, 1):
+                sid = s.get("sessionId", "?")
                 try:
-                    await client.delete_session(sid)
+                    await client._client.request(
+                        "session.delete", {"sessionId": sid}, timeout=30
+                    )
                     deleted += 1
                 except Exception as exc:
-                    console.print(f"  [yellow]Failed to delete {sid}: {exc}[/yellow]")
+                    failed += 1
+                    if failed <= 5:
+                        console.print(f"  [yellow]Failed to delete {sid}: {exc}[/yellow]")
+                if i % 100 == 0:
+                    console.print(f"  Progress: {i}/{len(matched)}…")
 
             console.print(f"[green]Deleted {deleted} session(s).[/green]")
+            if failed:
+                console.print(f"[yellow]Failed to delete {failed} session(s).[/yellow]")
         finally:
             await _stop_copilot_client(client)
 
