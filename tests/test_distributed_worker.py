@@ -503,6 +503,7 @@ def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkey
 
 def test_run_forever_prints_progress_summary(monkeypatch):
     worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None  # bypass startup dep check in tests
 
     printed: list[str] = []
     monkeypatch.setattr("imganalyzer.pipeline.distributed_worker.console.print", lambda *args, **_kwargs: printed.append(" ".join(str(arg) for arg in args)))
@@ -532,6 +533,7 @@ def test_run_forever_prints_progress_summary(monkeypatch):
 
 def test_run_forever_retries_worker_registration_after_timeout(monkeypatch):
     worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None  # bypass startup dep check in tests
     worker.poll_interval_seconds = 0
 
     printed: list[str] = []
@@ -564,6 +566,7 @@ def test_run_forever_retries_worker_registration_after_timeout(monkeypatch):
 
 def test_run_forever_retries_claim_after_timeout(monkeypatch):
     worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None  # bypass startup dep check in tests
     worker.poll_interval_seconds = 0
 
     printed: list[str] = []

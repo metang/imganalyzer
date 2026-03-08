@@ -8,6 +8,7 @@ import platform
 import signal
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -34,6 +35,17 @@ _ALWAYS_AVAILABLE_MODULES = {"metadata", "technical"}
 
 # Modules that require a cloud SDK (checked separately per provider)
 _CLOUD_MODULES = {"cloud_ai", "aesthetic"}
+
+
+def _current_python_info() -> str:
+    """Return a short description of the active Python interpreter."""
+    exe = sys.executable or "unknown"
+    ver = platform.python_version()
+    env = os.environ.get("CONDA_DEFAULT_ENV", "")
+    parts = [f"{exe} (Python {ver})"]
+    if env:
+        parts.append(f"conda env={env}")
+    return ", ".join(parts)
 
 
 def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
@@ -634,6 +646,29 @@ class DistributedWorker:
                     console.print(
                         f"[yellow]Unavailable modules (missing deps):[/yellow] {', '.join(missing)}"
                     )
+                # Fail fast when core local-AI deps are absent — the worker
+                # would just claim and skip every objects/blip2/ocr/faces job.
+                local_ai_available = _LOCAL_AI_MODULES & set(self.supported_modules)
+                if not local_ai_available:
+                    console.print(
+                        "\n[bold red]ERROR: torch / transformers are not installed in "
+                        "this Python environment.[/bold red]\n"
+                        "[red]The worker cannot run any local-AI modules "
+                        "(objects, blip2, ocr, faces, embedding).[/red]\n\n"
+                        "You are likely running from the wrong conda environment.\n"
+                        "  [bold]Current python:[/bold] "
+                        + _current_python_info()
+                        + "\n\n"
+                        "[green]Fix:[/green] activate the environment that has "
+                        "local-AI dependencies:\n"
+                        "  [bold]conda activate imganalyzer312[/bold]\n"
+                        "  imganalyzer run-distributed-worker ...\n\n"
+                        "Or, to set up a fresh worker environment:\n"
+                        "  [bold]bash scripts/setup_worker_env.sh[/bold]\n\n"
+                        "[dim]To intentionally run only cloud modules, pass "
+                        "--module cloud_ai[/dim]"
+                    )
+                    raise SystemExit(1)
             while not self._shutdown.is_set():
                 if not registered:
                     self._registration_attempts += 1
