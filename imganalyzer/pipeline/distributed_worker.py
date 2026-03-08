@@ -16,6 +16,7 @@ from urllib import parse
 from urllib import error, request
 
 from rich.console import Console
+from rich.markup import escape
 
 from imganalyzer.db.repository import Repository
 from imganalyzer.db.schema import ensure_schema
@@ -310,7 +311,7 @@ class DistributedWorker:
                         f"[dim]Coordinator released {released} expired lease(s) during heartbeat[/dim]"
                     )
             except Exception as exc:
-                console.print(f"[red]Worker heartbeat failed:[/red] {exc}")
+                console.print(f"[red]Worker heartbeat failed:[/red] {escape(str(exc))}")
 
             for job_id, lease_token in self._snapshot_active():
                 try:
@@ -328,7 +329,9 @@ class DistributedWorker:
                             "completion may fail if another worker reclaimed it.[/yellow]"
                         )
                 except Exception as exc:
-                    console.print(f"[red]Lease heartbeat failed for job {job_id}:[/red] {exc}")
+                    console.print(
+                        f"[red]Lease heartbeat failed for job {job_id}:[/red] {escape(str(exc))}"
+                    )
 
             self._shutdown.wait(self.heartbeat_interval_seconds)
 
@@ -422,7 +425,7 @@ class DistributedWorker:
             _emit_result(path, module, "failed", elapsed, error_msg)
             console.print(
                 f"  [red]✗[/red] [bold]{module}[/bold] failed in {elapsed / 1000:.1f}s ← "
-                f"{short_path}: {error_msg}"
+                f"{escape(short_path)}: {escape(error_msg)}"
             )
             return "failed"
 
@@ -442,7 +445,8 @@ class DistributedWorker:
             except Exception as exc:
                 if self.verbose:
                     console.print(
-                        f"[yellow]Failed to release job {job_id} during shutdown:[/yellow] {exc}"
+                        f"[yellow]Failed to release job {job_id} during shutdown:[/yellow] "
+                        f"{escape(str(exc))}"
                     )
             finally:
                 self._clear_active(job_id)
@@ -473,6 +477,7 @@ class DistributedWorker:
                     try:
                         self._register_worker()
                     except Exception as exc:
+                        exc_text = escape(str(exc))
                         hint = ""
                         reason = str(exc).lower()
                         probe = self._tcp_probe_summary()
@@ -490,7 +495,7 @@ class DistributedWorker:
                         console.print(
                             "[yellow]Coordinator unavailable during registration; "
                             f"attempt {self._registration_attempts}, "
-                            f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc}\n"
+                            f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc_text}\n"
                             f"[dim]  TCP probe: {probe}[/dim]{hint}"
                         )
                         self._shutdown.wait(self.poll_interval_seconds)
@@ -519,10 +524,11 @@ class DistributedWorker:
                 except Exception as exc:
                     registered = False
                     probe = self._tcp_probe_summary()
+                    exc_text = escape(str(exc))
                     console.print(
                         "[yellow]Coordinator unavailable while claiming jobs; "
                         f"attempt {self._claim_attempts}, "
-                        f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc}\n"
+                        f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc_text}\n"
                         f"[dim]  TCP probe: {probe}[/dim]"
                     )
                     self._shutdown.wait(self.poll_interval_seconds)
@@ -567,7 +573,10 @@ class DistributedWorker:
                 self._coordinator_call("jobs/release-worker", {"workerId": self.worker_id})
             except Exception as exc:
                 if self.verbose:
-                    console.print(f"[yellow]Worker lease release failed on shutdown:[/yellow] {exc}")
+                    console.print(
+                        f"[yellow]Worker lease release failed on shutdown:[/yellow] "
+                        f"{escape(str(exc))}"
+                    )
             if is_main and original_handler is not None:
                 signal.signal(signal.SIGINT, original_handler)
 
