@@ -1,4 +1,4 @@
-import type { BatchStats, BatchModuleStats, BatchNode } from '../global'
+import type { BatchStats, BatchModuleStats, BatchNode, BatchActiveModule } from '../global'
 
 interface Props {
   stats: BatchStats
@@ -88,6 +88,10 @@ const MODULE_LABELS: Record<string, string> = {
   embedding: 'Embeddings',
 }
 
+function formatModuleLabel(module: string): string {
+  return MODULE_LABELS[module] ?? module
+}
+
 function SummaryCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 px-3 py-3">
@@ -168,6 +172,33 @@ function ModuleTableRow({ name, stats }: { name: string; stats: BatchModuleStats
   )
 }
 
+function ActivePassChips({
+  modules,
+  emptyLabel,
+}: {
+  modules: BatchActiveModule[]
+  emptyLabel?: string | null
+}) {
+  if (modules.length === 0) {
+    return emptyLabel ? <span className="text-xs text-neutral-500">{emptyLabel}</span> : null
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {modules.map((item) => (
+        <span
+          key={`${item.module}:${item.count}`}
+          className="rounded-full border border-blue-800/70 bg-blue-900/20 px-2.5 py-1 text-[11px] text-blue-200"
+          title={`${item.count} running ${formatModuleLabel(item.module)} pass${item.count === 1 ? '' : 'es'}`}
+        >
+          {formatModuleLabel(item.module)}
+          {item.count > 1 ? ` x${item.count}` : ''}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 function NodeMetrics({ node }: { node: BatchNode }) {
   const capabilityEntries = Object.entries(node.capabilities ?? {}).filter(([, value]) => {
     return value !== null && value !== undefined && value !== ''
@@ -237,6 +268,9 @@ function MasterNodeCard({ node }: { node: BatchNode }) {
         <div>
           <div className="text-[11px] uppercase tracking-wider text-neutral-500">Master device</div>
           <div className="mt-1 text-sm font-semibold text-neutral-100">{node.label}</div>
+          <div className="mt-2">
+            <ActivePassChips modules={node.activeModules} emptyLabel="No active passes" />
+          </div>
         </div>
         <span className={`rounded-full border px-2.5 py-1 text-xs ${statusTone(node.status)}`}>
           {node.status}
@@ -254,6 +288,9 @@ function WorkerNodeCard({ node }: { node: BatchNode }) {
         <div>
           <div className="text-[11px] uppercase tracking-wider text-neutral-500">Worker node</div>
           <div className="mt-1 text-sm font-semibold text-neutral-100">{node.label}</div>
+          <div className="mt-2">
+            <ActivePassChips modules={node.activeModules} emptyLabel={node.runningJobs > 0 ? 'Resolving active passes…' : null} />
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className={`rounded-full border px-2.5 py-1 ${statusTone(node.status)}`}>

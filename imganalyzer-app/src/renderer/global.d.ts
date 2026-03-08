@@ -273,6 +273,11 @@ export interface BatchQueueSummary {
   remainingJobs: number
 }
 
+export interface BatchActiveModule {
+  module: string
+  count: number
+}
+
 export interface BatchNode {
   id: string
   role: 'master' | 'worker'
@@ -289,6 +294,7 @@ export interface BatchNode {
   imagesPerSec: number
   avgMsPerImage: number
   capabilities?: Record<string, unknown>
+  activeModules: BatchActiveModule[]
 }
 
 export interface BatchStats {

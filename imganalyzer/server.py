@@ -224,6 +224,7 @@ def _handle_status(params: dict) -> dict:
            WHERE jq.status = 'running'
              AND jl.job_id IS NULL"""
     ).fetchone()
+    running_modules = _get_running_modules_by_node(conn)
     worker_items = _build_worker_items(conn)
 
     return {
@@ -244,6 +245,7 @@ def _handle_status(params: dict) -> dict:
                 "displayName": "Master device",
                 "platform": sys.platform,
                 "runningJobs": int(master_running_row["cnt"] if master_running_row is not None else 0),
+                "activeModules": running_modules.get(("master", "master"), []),
             },
             "workers": worker_items,
         },
@@ -530,8 +532,37 @@ def _get_worker_running_counts(conn: sqlite3.Connection) -> dict[str, int]:
     }
 
 
+def _get_running_modules_by_node(conn: sqlite3.Connection) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    rows = conn.execute(
+        """SELECT COALESCE(jq.last_node_role, CASE WHEN jl.worker_id IS NOT NULL THEN 'worker' ELSE 'master' END) AS node_role,
+                  COALESCE(jq.last_node_id, jl.worker_id, 'master') AS node_id,
+                  jq.module,
+                  COUNT(*) AS cnt
+           FROM job_queue jq
+           LEFT JOIN job_leases jl ON jl.job_id = jq.id
+           WHERE jq.status = 'running'
+           GROUP BY node_role, node_id, jq.module"""
+    ).fetchall()
+
+    items: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        node_role = str(row["node_role"] or "master")
+        node_id = str(row["node_id"] or "master")
+        key = (node_role, node_id)
+        items.setdefault(key, []).append({
+            "module": str(row["module"]),
+            "count": int(row["cnt"]),
+        })
+
+    for modules in items.values():
+        modules.sort(key=lambda item: (-int(item["count"]), str(item["module"])))
+
+    return items
+
+
 def _build_worker_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     running_counts = _get_worker_running_counts(conn)
+    running_modules = _get_running_modules_by_node(conn)
     rows = conn.execute(
         """SELECT id, display_name, platform, capabilities, status, last_heartbeat, created_at, updated_at
            FROM worker_nodes
@@ -555,6 +586,7 @@ def _build_worker_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
             "runningJobs": running_counts.get(worker_id, 0),
+            "activeModules": running_modules.get(("worker", worker_id), []),
         })
     return items
 

@@ -345,10 +345,14 @@ def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkey
 
     assert status["remaining_images"] == 2
     assert status["nodes"]["master"]["runningJobs"] == 1
+    assert status["nodes"]["master"]["activeModules"] == [
+        {"module": "technical", "count": 1}
+    ]
 
     worker = next(item for item in status["nodes"]["workers"] if item["id"] == "worker-1")
     assert worker["displayName"] == "Worker 1"
     assert worker["runningJobs"] == 1
+    assert worker["activeModules"] == [{"module": "objects", "count": 1}]
 
     recent_by_job = {item["jobId"]: item for item in status["recent_results"]}
     assert recent_by_job[master_done_job]["nodeRole"] == "master"
@@ -362,6 +366,7 @@ def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkey
     workers_list = server._handle_workers_list({})
     listed_worker = next(item for item in workers_list["workers"] if item["id"] == "worker-1")
     assert listed_worker["runningJobs"] == 1
+    assert listed_worker["activeModules"] == [{"module": "objects", "count": 1}]
 
 
 def test_run_forever_prints_progress_summary(monkeypatch):

@@ -62,6 +62,11 @@ export interface BatchQueueSummary {
   remainingJobs: number
 }
 
+export interface BatchActiveModule {
+  module: string
+  count: number
+}
+
 export interface BatchNode {
   id: string
   role: 'master' | 'worker'
@@ -78,6 +83,7 @@ export interface BatchNode {
   imagesPerSec: number
   avgMsPerImage: number
   capabilities?: Record<string, unknown>
+  activeModules: BatchActiveModule[]
 }
 
 export interface BatchStats {
@@ -149,6 +155,7 @@ interface ServerWorkerNode {
   status?: string
   lastHeartbeat?: string | null
   runningJobs?: number
+  activeModules?: BatchActiveModule[]
 }
 
 interface ServerRecentResult {
@@ -176,6 +183,7 @@ interface ServerStatusPayload {
       displayName?: string
       platform?: string
       runningJobs?: number
+      activeModules?: BatchActiveModule[]
     }
     workers?: ServerWorkerNode[]
   }
@@ -436,6 +444,7 @@ function buildBatchNodes(data: ServerStatusPayload): BatchNode[] {
     imagesPerSec: nodeMetrics[MASTER_NODE_ID]?.imagesPerSec ?? 0,
     avgMsPerImage: nodeMetrics[MASTER_NODE_ID]?.avgMsPerImage ?? 0,
     lastResultAt: masterCounts?.lastResultAt ?? null,
+    activeModules: masterMeta?.activeModules ?? [],
   }
 
   const workerNodes = (data.nodes?.workers ?? []).map((worker): BatchNode => {
@@ -456,6 +465,7 @@ function buildBatchNodes(data: ServerStatusPayload): BatchNode[] {
       imagesPerSec: nodeMetrics[worker.id]?.imagesPerSec ?? 0,
       avgMsPerImage: nodeMetrics[worker.id]?.avgMsPerImage ?? 0,
       capabilities: worker.capabilities,
+      activeModules: worker.activeModules ?? [],
     }
   })
 
