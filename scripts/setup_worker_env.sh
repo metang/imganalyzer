@@ -77,9 +77,24 @@ import torch, numpy as np
 print('torch', torch.__version__, '/ numpy', np.__version__)
 # Smoke-test: catch numpy ABI mismatches that only surface at runtime
 _ = torch.tensor([1.0])
+import transformers
+print('transformers', transformers.__version__)
+import open_clip
+print('open_clip ok')
 import insightface, onnxruntime as ort
 print('insightface', insightface.__version__)
 print('onnxruntime', ort.__version__)
+"
+
+echo "==> Running capability probe..."
+conda run -n "$ENV_NAME" python -c "
+from imganalyzer.pipeline.distributed_worker import _probe_available_modules
+modules = _probe_available_modules('$WORKER_CLOUD_PROVIDER')
+print('Supported modules:', ', '.join(modules))
+from imganalyzer.db.repository import ALL_MODULES
+missing = sorted(set(ALL_MODULES) - set(modules))
+if missing:
+    print('WARNING: Unavailable modules:', ', '.join(missing))
 "
 
 echo "==> Verifying cloud provider import ($WORKER_CLOUD_PROVIDER)..."
@@ -105,6 +120,13 @@ cat <<EOF
 Setup complete.
 
 Start worker with:
+  conda activate $ENV_NAME
+  imganalyzer run-distributed-worker \\
+    --coordinator http://<COORDINATOR_IP>:8765/jsonrpc \\
+    --worker-id worker-01 \\
+    --cloud $WORKER_CLOUD_PROVIDER
+
+Or without activating:
   conda run -n $ENV_NAME imganalyzer run-distributed-worker \\
     --coordinator http://<COORDINATOR_IP>:8765/jsonrpc \\
     --worker-id worker-01 \\
