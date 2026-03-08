@@ -311,8 +311,13 @@ class JobQueue:
                 self.conn.rollback()
                 return False
             self.conn.execute(
-                "UPDATE job_queue SET status = 'pending', started_at = NULL WHERE id = ?",
-                [job_id],
+                """UPDATE job_queue
+                   SET status = 'pending',
+                       started_at = NULL,
+                       queued_at = ?,
+                       attempts = attempts + 1
+                   WHERE id = ?""",
+                [_now(), job_id],
             )
             self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
             self.conn.commit()
