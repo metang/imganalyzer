@@ -1566,6 +1566,77 @@ def _detect_table_for_field(field: str) -> str | None:
     return _FIELD_TABLE_MAP.get(field)
 
 
+@app.command(name="cleanup-sessions")
+def cleanup_sessions(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="List sessions without deleting them"
+    ),
+    all_sessions: bool = typer.Option(
+        False, "--all", help="Delete ALL Copilot sessions, not just imganalyzer ones"
+    ),
+) -> None:
+    """Delete leftover Copilot sessions created by imganalyzer.
+
+    By default, only deletes sessions whose summary contains
+    "Analyze this image" (the prompt prefix used by imganalyzer).
+    Use ``--all`` to delete every Copilot session.
+    """
+    import asyncio as _asyncio
+
+    try:
+        from copilot import CopilotClient
+    except ImportError:
+        console.print(
+            "[red]GitHub Copilot SDK required:[/red] pip install 'imganalyzer[copilot]'"
+        )
+        raise typer.Exit(1)
+
+    from imganalyzer.analysis.ai.cloud import _stop_copilot_client
+
+    async def _cleanup() -> None:
+        client = CopilotClient()
+        try:
+            sessions = await client.list_sessions()
+
+            if not all_sessions:
+                sessions = [
+                    s
+                    for s in sessions
+                    if getattr(s, "summary", None)
+                    and "analyze this image" in s.summary.lower()
+                ]
+
+            if not sessions:
+                console.print("[green]No matching Copilot sessions found.[/green]")
+                return
+
+            console.print(f"Found [bold]{len(sessions)}[/bold] session(s)")
+
+            if dry_run:
+                for s in sessions:
+                    sid = getattr(s, "sessionId", getattr(s, "session_id", "?"))
+                    summary = getattr(s, "summary", "") or "(no summary)"
+                    started = getattr(s, "startTime", "") or ""
+                    console.print(f"  • {sid}  {summary}  [dim]{started}[/dim]")
+                console.print("\n[dim]Use without --dry-run to delete them.[/dim]")
+                return
+
+            deleted = 0
+            for s in sessions:
+                sid = getattr(s, "sessionId", getattr(s, "session_id", "?"))
+                try:
+                    await client.delete_session(sid)
+                    deleted += 1
+                except Exception as exc:
+                    console.print(f"  [yellow]Failed to delete {sid}: {exc}[/yellow]")
+
+            console.print(f"[green]Deleted {deleted} session(s).[/green]")
+        finally:
+            await _stop_copilot_client(client)
+
+    _asyncio.run(_cleanup())
+
+
 if __name__ == "__main__":
     app()
 

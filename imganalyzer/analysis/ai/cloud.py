@@ -241,6 +241,9 @@ class CloudAI:
         """GitHub Copilot SDK backend — uses gpt-4.1 vision model.
 
         The SDK is async; we run it synchronously via asyncio.run().
+        Each analysis gets a fresh session which is deleted after use so
+        sessions don't accumulate in the user's Copilot history.
+
         RAW files are converted to a temporary JPEG first (same approach
         as the Electron copilot-analyzer.ts reference implementation).
         Returns all standard cloud_ai fields PLUS aesthetic_score /
@@ -252,6 +255,7 @@ class CloudAI:
             raise ImportError(
                 "GitHub Copilot SDK required: pip install 'imganalyzer[copilot]'"
             )
+
         async def _run(analysis_path: str) -> dict[str, Any]:
             # Always create a fresh client — asyncio.run() closes its event
             # loop on return, so any cached client becomes invalid.
@@ -272,6 +276,17 @@ class CloudAI:
                     raise RuntimeError("Copilot returned an empty response")
                 return _parse_json_response(content)
             finally:
+                # Delete the session to prevent "Analyze this image" clutter.
+                try:
+                    await asyncio.wait_for(
+                        client.delete_session(session.session_id), timeout=10.0
+                    )
+                except Exception:
+                    log.debug(
+                        "Failed to delete Copilot session %s",
+                        getattr(session, "session_id", "?"),
+                        exc_info=True,
+                    )
                 await _stop_copilot_client(client)
 
         # RAW and HEIC/HEIF/AVIF files must be converted to JPEG before submission.

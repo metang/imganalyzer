@@ -290,14 +290,17 @@ class TestAnalyzer:
 # ── CloudAI cleanup ─────────────────────────────────────────────────────────────
 
 class TestCloudAI:
-    def test_copilot_backend_stops_client_after_success(self, tmp_path, monkeypatch):
+    def test_copilot_backend_deletes_session_and_stops_client(self, tmp_path, monkeypatch):
         from imganalyzer.analysis.ai.cloud import CloudAI
 
         image_path = tmp_path / "copilot.jpg"
         image_path.write_bytes(b"stub")
-        created_clients: list[FakeCopilotClient] = []
+        created_clients: list = []
+        deleted_session_ids: list[str] = []
 
         class FakeSession:
+            session_id = "test-session-1"
+
             async def send_and_wait(self, payload, timeout):
                 class _Data:
                     content = json.dumps({"description": "ok", "keywords": ["tag"]})
@@ -315,6 +318,9 @@ class TestCloudAI:
             async def create_session(self, config):
                 return FakeSession()
 
+            async def delete_session(self, session_id):
+                deleted_session_ids.append(session_id)
+
             async def stop(self):
                 self.stop_calls += 1
                 return []
@@ -324,16 +330,20 @@ class TestCloudAI:
         result = CloudAI("copilot")._copilot(image_path, {})
 
         assert result["description"] == "ok"
+        assert deleted_session_ids == ["test-session-1"]
         assert created_clients[0].stop_calls == 1
 
-    def test_copilot_backend_stops_client_after_failure(self, tmp_path, monkeypatch):
+    def test_copilot_backend_deletes_session_after_failure(self, tmp_path, monkeypatch):
         from imganalyzer.analysis.ai.cloud import CloudAI
 
         image_path = tmp_path / "copilot.jpg"
         image_path.write_bytes(b"stub")
-        created_clients: list[FakeCopilotClient] = []
+        created_clients: list = []
+        deleted_session_ids: list[str] = []
 
         class FakeSession:
+            session_id = "test-session-fail"
+
             async def send_and_wait(self, payload, timeout):
                 raise RuntimeError("boom")
 
@@ -345,6 +355,9 @@ class TestCloudAI:
             async def create_session(self, config):
                 return FakeSession()
 
+            async def delete_session(self, session_id):
+                deleted_session_ids.append(session_id)
+
             async def stop(self):
                 self.stop_calls += 1
                 return []
@@ -354,6 +367,8 @@ class TestCloudAI:
         with pytest.raises(RuntimeError, match="boom"):
             CloudAI("copilot")._copilot(image_path, {})
 
+        # Session should still be deleted even on failure.
+        assert deleted_session_ids == ["test-session-fail"]
         assert created_clients[0].stop_calls == 1
 
 
