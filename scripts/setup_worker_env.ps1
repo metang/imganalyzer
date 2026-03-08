@@ -98,9 +98,9 @@ Push-Location $RepoDir
 conda run -n $EnvName python -m pip install -U pip setuptools wheel
 
 # On Windows with an NVIDIA GPU, install PyTorch with CUDA from the official
-# PyTorch index to get the latest GPU-enabled wheels.
+# PyTorch index to get the latest GPU-enabled wheels (2.5+).
 Write-Host "==> Installing PyTorch with CUDA support..."
-conda run -n $EnvName python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+conda run -n $EnvName python -m pip install "torch>=2.5" torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 $Extras = "local-ai,$CloudProvider"
 Write-Host "==> Installing editable package with extras: [$Extras]"

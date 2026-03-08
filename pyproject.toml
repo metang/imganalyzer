@@ -39,7 +39,7 @@ dependencies = [
 [project.optional-dependencies]
 local-ai = [
     "transformers>=4.40",
-    "torch>=2.0",
+    "torch>=2.5",
     "accelerate>=0.29",
     "open_clip_torch>=2.24",
     "huggingface_hub>=0.23",

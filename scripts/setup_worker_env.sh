@@ -75,11 +75,12 @@ pushd "$REPO_DIR" >/dev/null
 conda run -n "$ENV_NAME" python -m pip install -U pip setuptools wheel
 
 if [[ "$OS_NAME" == "Darwin" ]]; then
-  # On macOS, PyPI only hosts older PyTorch wheels (≤2.2.x) which are
-  # incompatible with numpy 2.x.  Install PyTorch from conda's pytorch
-  # channel first so pip won't try to pull the old wheels.
+  # On macOS, PyPI only hosts x86_64 PyTorch wheels up to 2.2.x and arm64
+  # wheels from 2.5+.  The conda defaults channel (pkgs/main) carries
+  # 2.5.1+ for both osx-64 and osx-arm64, so install from there first to
+  # prevent pip from pulling an incompatible old wheel.
   echo "==> Installing PyTorch + ONNX runtime from conda channels (macOS)..."
-  conda install -n "$ENV_NAME" -c pytorch pytorch torchvision torchaudio -y
+  conda install -n "$ENV_NAME" "pytorch>=2.5" torchvision torchaudio -y
   conda install -n "$ENV_NAME" -c conda-forge onnxruntime -y
 fi
 
