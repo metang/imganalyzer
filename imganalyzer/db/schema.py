@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -39,6 +39,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         13: _migrate_v13,
         14: _migrate_v14,
         15: _migrate_v15,
+        16: _migrate_v16,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -633,5 +634,24 @@ def _migrate_v15(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_job_leases_expiry
         ON job_leases(lease_expires_at)
+    """)
+
+
+# ── Migration v16: Track node ownership on queue rows ─────────────────────────
+
+def _migrate_v16(conn: sqlite3.Connection) -> None:
+    """Persist the last node that touched a queue row for live progress UI."""
+    for col_def in (
+        "last_node_id TEXT",
+        "last_node_role TEXT",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE job_queue ADD COLUMN {col_def}")
+        except Exception:
+            pass
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_job_queue_node_status
+        ON job_queue(last_node_role, last_node_id, status, completed_at)
     """)
 

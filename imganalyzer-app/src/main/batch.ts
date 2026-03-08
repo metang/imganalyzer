@@ -54,6 +54,32 @@ export interface BatchModuleStats {
   avgMsPerImage: number
 }
 
+export interface BatchQueueSummary {
+  totalPasses: number
+  activePasses: number
+  completedPasses: number
+  remainingPasses: number
+  remainingJobs: number
+}
+
+export interface BatchNode {
+  id: string
+  role: 'master' | 'worker'
+  label: string
+  status: string
+  platform?: string
+  lastHeartbeat?: string | null
+  lastResultAt?: string | null
+  runningJobs: number
+  completedJobs: number
+  doneJobs: number
+  failedJobs: number
+  skippedJobs: number
+  imagesPerSec: number
+  avgMsPerImage: number
+  capabilities?: Record<string, unknown>
+}
+
 export interface BatchStats {
   status: BatchStatus
   monitorOnly: boolean
@@ -64,6 +90,8 @@ export interface BatchStats {
   imagesPerSec: number
   estimatedMs: number
   elapsedMs: number
+  queue: BatchQueueSummary
+  nodes: BatchNode[]
 }
 
 export type BatchStatus =
@@ -76,12 +104,18 @@ export type BatchStatus =
   | 'error'
 
 export interface BatchResult {
+  id: string
+  jobId?: number
   path: string
   module: string
   status: 'done' | 'failed' | 'skipped'
   durationMs: number
   error?: string
   keywords?: string[]
+  nodeId: string
+  nodeRole: 'master' | 'worker'
+  nodeLabel: string
+  completedAt?: string
 }
 
 export interface BatchIngestProgress {
@@ -91,6 +125,61 @@ export interface BatchIngestProgress {
   enqueued: number
   skipped: number
   current: string
+}
+
+interface CompletionEntry {
+  ts: number
+  durationMs: number
+  module: string
+  nodeId: string
+}
+
+interface NodeCounters {
+  done: number
+  failed: number
+  skipped: number
+  lastResultAt: string | null
+}
+
+interface ServerWorkerNode {
+  id: string
+  displayName?: string
+  platform?: string
+  capabilities?: Record<string, unknown>
+  status?: string
+  lastHeartbeat?: string | null
+  runningJobs?: number
+}
+
+interface ServerRecentResult {
+  jobId: number
+  path: string
+  module: string
+  status: 'done' | 'failed' | 'skipped'
+  durationMs?: number
+  error?: string | null
+  completedAt?: string
+  nodeId?: string
+  nodeRole?: 'master' | 'worker'
+  nodeLabel?: string
+}
+
+interface ServerStatusPayload {
+  total_images: number
+  modules: Record<string, Record<string, number>>
+  totals: Record<string, number>
+  remaining_images?: number
+  nodes?: {
+    master?: {
+      id?: string
+      role?: 'master'
+      displayName?: string
+      platform?: string
+      runningJobs?: number
+    }
+    workers?: ServerWorkerNode[]
+  }
+  recent_results?: ServerRecentResult[]
 }
 
 // ── Module-scope state ────────────────────────────────────────────────────────
@@ -105,14 +194,23 @@ let currentRunId = 0
 let idleTimer: ReturnType<typeof setTimeout> | null = null
 let monitorOnly = false
 
-// Sliding window of { timestamp, durationMs, module } for avg-per-image computation
-const completionWindow: Array<{ ts: number; durationMs: number; module: string }> = []
+const MASTER_NODE_ID = 'master'
+const MASTER_NODE_LABEL = 'Master device'
+const SYNTHETIC_RESULT_WINDOW_SLOP_MS = POLL_INTERVAL_MS * 2
+
+// Sliding window of done results for avg-per-image computation.
+const completionWindow: CompletionEntry[] = []
+const processedStatusResultKeys = new Set<string>()
+const nodeCounters = new Map<string, NodeCounters>()
+let nextResultSequence = 0
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Reset all completion counters for a fresh session. */
 function resetSessionCounters(): void {
   completionWindow.length = 0
+  processedStatusResultKeys.clear()
+  nodeCounters.clear()
 }
 
 /** Emit a batch:tick event to the renderer with current stats. */
@@ -138,23 +236,97 @@ function pruneCompletionWindow(now: number): void {
   }
 }
 
+function trackNodeCounters(result: BatchResult): void {
+  const current = nodeCounters.get(result.nodeId) ?? {
+    done: 0,
+    failed: 0,
+    skipped: 0,
+    lastResultAt: null,
+  }
+
+  if (result.status === 'done') current.done += 1
+  else if (result.status === 'failed') current.failed += 1
+  else current.skipped += 1
+
+  current.lastResultAt = result.completedAt ?? new Date().toISOString()
+  nodeCounters.set(result.nodeId, current)
+}
+
 /** Record a completion and maintain the sliding window + session counters. */
-function recordCompletion(durationMs: number, module: string): void {
+function recordCompletion(durationMs: number, module: string, nodeId: string): void {
   const now = Date.now()
-  completionWindow.push({ ts: now, durationMs, module })
-  // Evict entries older than COMPLETION_WINDOW_MS
+  completionWindow.push({ ts: now, durationMs, module, nodeId })
   pruneCompletionWindow(now)
-  // Keep the window bounded
   if (completionWindow.length > AVG_WINDOW * 2) {
     completionWindow.splice(0, completionWindow.length - AVG_WINDOW * 2)
   }
 }
 
+function trackResult(result: BatchResult, emit = true): void {
+  trackNodeCounters(result)
+  if (result.status === 'done') {
+    recordCompletion(result.durationMs, result.module, result.nodeId)
+  }
+  if (emit) emitResult(result)
+}
+
+function getStatusResultKey(result: ServerRecentResult): string {
+  return `${result.jobId}:${result.completedAt ?? ''}:${result.status}`
+}
+
+function nextLocalResultId(): string {
+  nextResultSequence += 1
+  return `local:${nextResultSequence}`
+}
+
+function parseServerTimestamp(value?: string | null): number | null {
+  if (!value) return null
+  const isoLike = value.includes('T') ? value : value.replace(' ', 'T')
+  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(isoLike) ? isoLike : `${isoLike}Z`
+  const parsed = Date.parse(normalized)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function syncRecentResults(recentResults: ServerRecentResult[]): void {
+  if (recentResults.length === 0) return
+
+  const minimumTs =
+    sessionStartMs > 0
+      ? sessionStartMs - SYNTHETIC_RESULT_WINDOW_SLOP_MS
+      : 0
+
+  const ordered = [...recentResults].reverse()
+  for (const item of ordered) {
+    const key = getStatusResultKey(item)
+    if (processedStatusResultKeys.has(key)) continue
+    processedStatusResultKeys.add(key)
+
+    const completedTs = parseServerTimestamp(item.completedAt)
+    if (minimumTs > 0 && completedTs !== null && completedTs < minimumTs) continue
+
+    if (!monitorOnly && (item.nodeRole ?? 'master') === 'master') continue
+
+    trackResult(
+      {
+        id: key,
+        jobId: item.jobId,
+        path: item.path,
+        module: item.module,
+        status: item.status,
+        durationMs: item.durationMs ?? 0,
+        error: item.error ?? undefined,
+        nodeId: item.nodeId ?? MASTER_NODE_ID,
+        nodeRole: item.nodeRole ?? 'master',
+        nodeLabel: item.nodeLabel ?? MASTER_NODE_LABEL,
+        completedAt: item.completedAt,
+      },
+      true
+    )
+  }
+}
+
 /** Compute rate using a rolling time span from the oldest entry in the window. */
-function computeRollingRate(
-  entries: Array<{ ts: number; durationMs: number; module: string }>,
-  now: number
-): number {
+function computeRollingRate(entries: CompletionEntry[], now: number): number {
   if (entries.length === 0) return 0
   const spanMs = Math.max(1000, now - entries[0].ts)
   return entries.length / (spanMs / 1000)
@@ -162,7 +334,7 @@ function computeRollingRate(
 
 /** Compute derived metrics using rolling done-only speed. */
 function computeMetrics(
-  pending: number,
+  remainingPasses: number,
   workers: number,
   cloudWorkers: number
 ): { imagesPerSec: number; avgMsPerImage: number; estimatedMs: number } {
@@ -178,9 +350,11 @@ function computeMetrics(
 
   const effectiveWorkers = Math.max(1, workers + cloudWorkers)
   const estimatedMs =
-    avgMsPerImage > 0 && pending > 0
-      ? (pending * avgMsPerImage) / effectiveWorkers
-      : 0
+    imagesPerSec > 0 && remainingPasses > 0
+      ? (remainingPasses / imagesPerSec) * 1000
+      : avgMsPerImage > 0 && remainingPasses > 0
+        ? (remainingPasses * avgMsPerImage) / effectiveWorkers
+        : 0
 
   return { imagesPerSec, avgMsPerImage, estimatedMs }
 }
@@ -189,7 +363,7 @@ function computeMetrics(
 function computeModuleMetrics(): Record<string, { imagesPerSec: number; avgMsPerImage: number }> {
   const now = Date.now()
   pruneCompletionWindow(now)
-  const byModule: Record<string, Array<{ ts: number; durationMs: number; module: string }>> = {}
+  const byModule: Record<string, CompletionEntry[]> = {}
   for (const entry of completionWindow) {
     if (!byModule[entry.module]) byModule[entry.module] = []
     byModule[entry.module].push(entry)
@@ -209,25 +383,113 @@ function computeModuleMetrics(): Record<string, { imagesPerSec: number; avgMsPer
   return metrics
 }
 
+function computeNodeMetrics(): Record<string, { imagesPerSec: number; avgMsPerImage: number }> {
+  const now = Date.now()
+  pruneCompletionWindow(now)
+  const byNode: Record<string, CompletionEntry[]> = {}
+  for (const entry of completionWindow) {
+    if (!byNode[entry.nodeId]) byNode[entry.nodeId] = []
+    byNode[entry.nodeId].push(entry)
+  }
+
+  const metrics: Record<string, { imagesPerSec: number; avgMsPerImage: number }> = {}
+  for (const [nodeId, entries] of Object.entries(byNode)) {
+    const lastN = entries.slice(-AVG_WINDOW)
+    const avgMsPerImage =
+      lastN.length > 0
+        ? lastN.reduce((sum, e) => sum + e.durationMs, 0) / lastN.length
+        : 0
+    metrics[nodeId] = {
+      imagesPerSec: computeRollingRate(entries, now),
+      avgMsPerImage,
+    }
+  }
+  return metrics
+}
+
+function buildBatchNodes(data: ServerStatusPayload): BatchNode[] {
+  const nodeMetrics = computeNodeMetrics()
+  const masterMeta = data.nodes?.master
+  const masterCounts = nodeCounters.get(MASTER_NODE_ID)
+  const masterRunningJobs = masterMeta?.runningJobs ?? 0
+
+  const masterStatus =
+    monitorOnly
+      ? 'monitoring'
+      : masterRunningJobs > 0
+        ? 'running'
+        : batchStatus === 'running'
+          ? 'coordinating'
+          : batchStatus
+
+  const masterNode: BatchNode = {
+    id: MASTER_NODE_ID,
+    role: 'master',
+    label: masterMeta?.displayName ?? MASTER_NODE_LABEL,
+    status: masterStatus,
+    platform: masterMeta?.platform,
+    runningJobs: masterRunningJobs,
+    completedJobs: (masterCounts?.done ?? 0) + (masterCounts?.failed ?? 0) + (masterCounts?.skipped ?? 0),
+    doneJobs: masterCounts?.done ?? 0,
+    failedJobs: masterCounts?.failed ?? 0,
+    skippedJobs: masterCounts?.skipped ?? 0,
+    imagesPerSec: nodeMetrics[MASTER_NODE_ID]?.imagesPerSec ?? 0,
+    avgMsPerImage: nodeMetrics[MASTER_NODE_ID]?.avgMsPerImage ?? 0,
+    lastResultAt: masterCounts?.lastResultAt ?? null,
+  }
+
+  const workerNodes = (data.nodes?.workers ?? []).map((worker): BatchNode => {
+    const workerCounts = nodeCounters.get(worker.id)
+    return {
+      id: worker.id,
+      role: 'worker',
+      label: worker.displayName ?? worker.id,
+      status: (worker.runningJobs ?? 0) > 0 ? 'running' : (worker.status ?? 'idle'),
+      platform: worker.platform,
+      lastHeartbeat: worker.lastHeartbeat ?? null,
+      lastResultAt: workerCounts?.lastResultAt ?? null,
+      runningJobs: worker.runningJobs ?? 0,
+      completedJobs: (workerCounts?.done ?? 0) + (workerCounts?.failed ?? 0) + (workerCounts?.skipped ?? 0),
+      doneJobs: workerCounts?.done ?? 0,
+      failedJobs: workerCounts?.failed ?? 0,
+      skippedJobs: workerCounts?.skipped ?? 0,
+      imagesPerSec: nodeMetrics[worker.id]?.imagesPerSec ?? 0,
+      avgMsPerImage: nodeMetrics[worker.id]?.avgMsPerImage ?? 0,
+      capabilities: worker.capabilities,
+    }
+  })
+
+  return [masterNode, ...workerNodes]
+}
+
 /** Poll status via RPC (no subprocess) and emit a batch:tick. */
 async function doPoll(): Promise<void> {
   try {
-    const data = await rpc.call('status', {}) as {
-      total_images: number
-      modules: Record<string, Record<string, number>>
-      totals: Record<string, number>
-    }
+    const data = await rpc.call('status', {}) as ServerStatusPayload
 
     const workers = sessionConfig?.workers ?? 1
     const cloudWorkers = sessionConfig?.cloudWorkers ?? 4
     const pending = data.totals.pending ?? 0
     const running = data.totals.running ?? 0
-    const activeJobs = pending + running
-    const metrics = computeMetrics(pending, workers, cloudWorkers)
+    const remainingPasses = pending + running
+    const activePasses = running
+
+    const shouldSyncRecentResults =
+      monitorOnly ||
+      batchStatus === 'running' ||
+      batchStatus === 'paused' ||
+      batchStatus === 'done' ||
+      batchStatus === 'error'
+
+    if (shouldSyncRecentResults) {
+      syncRecentResults(data.recent_results ?? [])
+    }
+
+    const metrics = computeMetrics(remainingPasses, workers, cloudWorkers)
     const moduleMetrics = computeModuleMetrics()
 
     if (monitorOnly) {
-      if (activeJobs > 0) {
+      if (remainingPasses > 0) {
         batchStatus = 'running'
       } else if (batchStatus === 'running' || batchStatus === 'paused') {
         batchStatus = 'done'
@@ -250,22 +512,34 @@ async function doPoll(): Promise<void> {
       }
     }
 
+    const totals = {
+      pending: data.totals.pending ?? 0,
+      running: data.totals.running ?? 0,
+      done: data.totals.done ?? 0,
+      failed: data.totals.failed ?? 0,
+      skipped: data.totals.skipped ?? 0,
+    }
+    const completedPasses = totals.done + totals.failed + totals.skipped
+    const totalPasses = remainingPasses + completedPasses
+
     const stats: BatchStats = {
       status: batchStatus,
       monitorOnly,
       totalImages: data.total_images,
       modules: modulesWithSpeed,
-      totals: {
-        pending:  data.totals.pending  ?? 0,
-        running:  data.totals.running  ?? 0,
-        done:     data.totals.done     ?? 0,
-        failed:   data.totals.failed   ?? 0,
-        skipped:  data.totals.skipped  ?? 0,
-      },
+      totals,
       avgMsPerImage: metrics.avgMsPerImage,
-      imagesPerSec:  metrics.imagesPerSec,
-      estimatedMs:   metrics.estimatedMs,
-      elapsedMs:     sessionStartMs > 0 ? Date.now() - sessionStartMs : 0,
+      imagesPerSec: metrics.imagesPerSec,
+      estimatedMs: metrics.estimatedMs,
+      elapsedMs: sessionStartMs > 0 ? Date.now() - sessionStartMs : 0,
+      queue: {
+        totalPasses,
+        activePasses,
+        completedPasses,
+        remainingPasses,
+        remainingJobs: data.remaining_images ?? 0,
+      },
+      nodes: buildBatchNodes(data),
     }
 
     emitTick(stats)
@@ -308,17 +582,19 @@ function setupNotificationListener(): void {
             ? rawKw.split(',').map((s: string) => s.trim()).filter(Boolean)
             : undefined
         const result: BatchResult = {
-          path:       (p.path as string) ?? '',
-          module:     (p.module as string) ?? '',
-          status:     p.status as 'done' | 'failed' | 'skipped',
+          id: nextLocalResultId(),
+          path: (p.path as string) ?? '',
+          module: (p.module as string) ?? '',
+          status: p.status as 'done' | 'failed' | 'skipped',
           durationMs: (p.ms as number) ?? 0,
-          error:      p.error as string | undefined,
+          error: p.error as string | undefined,
           keywords,
+          nodeId: MASTER_NODE_ID,
+          nodeRole: 'master',
+          nodeLabel: MASTER_NODE_LABEL,
+          completedAt: new Date().toISOString(),
         }
-        emitResult(result)
-        if (result.status === 'done') {
-          recordCompletion(result.durationMs, result.module)
-        }
+        trackResult(result)
         break
       }
 
@@ -326,7 +602,6 @@ function setupNotificationListener(): void {
         const runId = currentRunId
         if (batchStatus !== 'running') break
         isRunActive = false
-        stopPolling()
         void rpc.call('status', {}).then((data: any) => {
           if (currentRunId !== runId) return
           const pending = data?.totals?.pending ?? 0
@@ -335,6 +610,7 @@ function setupNotificationListener(): void {
             batchStatus = 'paused'
           } else {
             batchStatus = 'done'
+            stopPolling()
             if (idleTimer) clearTimeout(idleTimer)
             idleTimer = setTimeout(() => {
               batchStatus = 'idle'
@@ -345,6 +621,7 @@ function setupNotificationListener(): void {
         }).catch(() => {
           if (currentRunId !== runId) return
           batchStatus = 'done'
+          stopPolling()
           void doPoll()
           if (idleTimer) clearTimeout(idleTimer)
           idleTimer = setTimeout(() => {
@@ -359,7 +636,6 @@ function setupNotificationListener(): void {
         const runId = currentRunId
         if (batchStatus !== 'running') break
         isRunActive = false
-        stopPolling()
         void rpc.call('status', {}).then((data: any) => {
           if (currentRunId !== runId) return
           const pending = data?.totals?.pending ?? 0
@@ -368,6 +644,7 @@ function setupNotificationListener(): void {
             batchStatus = 'paused'
           } else {
             batchStatus = 'error'
+            stopPolling()
             if (idleTimer) clearTimeout(idleTimer)
             idleTimer = setTimeout(() => {
               batchStatus = 'idle'
@@ -378,6 +655,7 @@ function setupNotificationListener(): void {
         }).catch(() => {
           if (currentRunId !== runId) return
           batchStatus = 'error'
+          stopPolling()
           void doPoll()
           if (idleTimer) clearTimeout(idleTimer)
           idleTimer = setTimeout(() => {
@@ -509,7 +787,6 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       await rpc.call('cancel_run', {})
     } catch { /* ignore */ }
     isRunActive = false
-    stopPolling()
     batchStatus = 'paused'
     monitorOnly = false
     // Emit one tick so the UI updates immediately

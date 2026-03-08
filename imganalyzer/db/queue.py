@@ -65,8 +65,9 @@ class JobQueue:
                 """UPDATE job_queue
                    SET status = 'pending', attempts = 0, error_message = NULL,
                        skip_reason = NULL, started_at = NULL, completed_at = NULL,
-                       queued_at = ?, priority = ?
-                   WHERE id = ?""",
+                       queued_at = ?, priority = ?,
+                       last_node_id = NULL, last_node_role = NULL
+                    WHERE id = ?""",
                 [_now(), priority, existing["id"]],
             )
             if _auto_commit:
@@ -100,7 +101,13 @@ class JobQueue:
 
     # ── Claim (atomic) ─────────────────────────────────────────────────────
 
-    def claim(self, batch_size: int = 1, module: str | None = None) -> list[dict[str, Any]]:
+    def claim(
+        self,
+        batch_size: int = 1,
+        module: str | None = None,
+        node_id: str = "master",
+        node_role: str = "master",
+    ) -> list[dict[str, Any]]:
         """Atomically claim up to *batch_size* pending jobs.
 
         Returns list of job dicts with keys: id, image_id, module, attempts.
@@ -134,9 +141,10 @@ class JobQueue:
             placeholders = ",".join("?" * len(job_ids))
             self.conn.execute(
                 f"""UPDATE job_queue
-                    SET status = 'running', started_at = ?
+                    SET status = 'running', started_at = ?,
+                        last_node_id = ?, last_node_role = ?
                     WHERE id IN ({placeholders})""",
-                [_now()] + job_ids,
+                [_now(), node_id, node_role] + job_ids,
             )
             self.conn.commit()
         except Exception:
@@ -179,9 +187,10 @@ class JobQueue:
             placeholders = ",".join("?" * len(job_ids))
             self.conn.execute(
                 f"""UPDATE job_queue
-                    SET status = 'running', started_at = ?
+                    SET status = 'running', started_at = ?,
+                        last_node_id = ?, last_node_role = ?
                     WHERE id IN ({placeholders})""",
-                [now] + job_ids,
+                [now, worker_id, "worker"] + job_ids,
             )
 
             claimed: list[dict[str, Any]] = []
@@ -226,7 +235,8 @@ class JobQueue:
             placeholders = ",".join("?" * len(job_ids))
             cur = self.conn.execute(
                 f"""UPDATE job_queue
-                    SET status = 'pending', started_at = NULL, attempts = attempts + 1
+                    SET status = 'pending', started_at = NULL, attempts = attempts + 1,
+                        last_node_id = NULL, last_node_role = NULL
                     WHERE id IN ({placeholders})""",
                 job_ids,
             )
@@ -255,7 +265,8 @@ class JobQueue:
             placeholders = ",".join("?" * len(job_ids))
             cur = self.conn.execute(
                 f"""UPDATE job_queue
-                    SET status = 'pending', started_at = NULL, attempts = attempts + 1
+                    SET status = 'pending', started_at = NULL, attempts = attempts + 1,
+                        last_node_id = NULL, last_node_role = NULL
                     WHERE id IN ({placeholders})""",
                 job_ids,
             )
@@ -315,8 +326,10 @@ class JobQueue:
                    SET status = 'pending',
                        started_at = NULL,
                        queued_at = ?,
-                       attempts = attempts + 1
-                   WHERE id = ?""",
+                       attempts = attempts + 1,
+                       last_node_id = NULL,
+                       last_node_role = NULL
+                    WHERE id = ?""",
                 [_now(), job_id],
             )
             self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
@@ -433,7 +446,8 @@ class JobQueue:
         """
         self.conn.execute(
             """UPDATE job_queue
-               SET status = 'pending', started_at = NULL
+               SET status = 'pending', started_at = NULL,
+                   last_node_id = NULL, last_node_role = NULL
                WHERE id = ?""",
             [job_id],
         )
@@ -446,8 +460,9 @@ class JobQueue:
         cur = self.conn.execute(
             """UPDATE job_queue
                SET status = 'pending', error_message = NULL,
-                   started_at = NULL, completed_at = NULL
-               WHERE status = 'failed' AND attempts < ?""",
+                   started_at = NULL, completed_at = NULL,
+                   last_node_id = NULL, last_node_role = NULL
+                WHERE status = 'failed' AND attempts < ?""",
             [max_attempts],
         )
         self.conn.commit()
@@ -460,15 +475,17 @@ class JobQueue:
         if timeout_minutes <= 0:
             cur = self.conn.execute(
                 """UPDATE job_queue
-                   SET status = 'pending', attempts = attempts + 1
-                   WHERE status = 'running'"""
+                   SET status = 'pending', attempts = attempts + 1,
+                       last_node_id = NULL, last_node_role = NULL
+                    WHERE status = 'running'"""
             )
         else:
             cur = self.conn.execute(
                 """UPDATE job_queue
-                   SET status = 'pending', attempts = attempts + 1
-                   WHERE status = 'running'
-                   AND started_at <= datetime('now', '-' || ? || ' minutes')""",
+                   SET status = 'pending', attempts = attempts + 1,
+                       last_node_id = NULL, last_node_role = NULL
+                    WHERE status = 'running'
+                    AND started_at <= datetime('now', '-' || ? || ' minutes')""",
                 [timeout_minutes],
             )
         self.conn.commit()
@@ -495,6 +512,15 @@ class JobQueue:
             "SELECT status, COUNT(*) as cnt FROM job_queue GROUP BY status"
         ).fetchall()
         return {r["status"]: r["cnt"] for r in rows}
+
+    def remaining_image_count(self) -> int:
+        """Return the number of distinct images with pending or running work."""
+        row = self.conn.execute(
+            """SELECT COUNT(DISTINCT image_id) as cnt
+               FROM job_queue
+               WHERE status IN ('pending', 'running')"""
+        ).fetchone()
+        return int(row["cnt"] if row is not None else 0)
 
     def pending_count(self, module: str | None = None) -> int:
         if module:

@@ -31,14 +31,21 @@ export function LiveResultsFeed({ results }: Props) {
 
   return (
     <div className="flex-1 overflow-y-auto text-xs font-mono">
-      {results.map((r, i) => (
+      {results.map((r) => (
         <div
-          key={i}
+          key={r.id}
           className="flex items-baseline gap-2 px-3 py-0.5 hover:bg-neutral-800/50 transition-colors"
         >
           {/* Status badge — fixed width */}
           <span className={`w-9 shrink-0 font-semibold uppercase ${STATUS_COLORS[r.status]}`}>
             {STATUS_LABELS[r.status]}
+          </span>
+          {/* Node label */}
+          <span
+            className="hidden w-24 shrink-0 truncate text-neutral-500 md:block"
+            title={r.nodeLabel}
+          >
+            {r.nodeLabel}
           </span>
           {/* Module name — fixed width */}
           <span className="w-20 shrink-0 text-neutral-500">{r.module}</span>

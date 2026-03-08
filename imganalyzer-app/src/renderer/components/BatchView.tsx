@@ -5,7 +5,7 @@ import { ProgressDashboard } from './ProgressDashboard'
 import { LiveResultsFeed } from './LiveResultsFeed'
 import { ConfirmStopDialog } from './ConfirmStopDialog'
 import type { UseBatchProcessReturn } from '../hooks/useBatchProcess'
-import type { BatchIngestProgress } from '../global'
+import type { BatchIngestProgress, BatchResult } from '../global'
 
 // ── Shared props type ─────────────────────────────────────────────────────────
 
@@ -183,6 +183,51 @@ function IngestPanel({ progress }: { progress: BatchIngestProgress | null }) {
   )
 }
 
+function LiveErrorPanel({ error, results }: { error: string | null; results: BatchResult[] }) {
+  const failures = results.filter((result) => result.status === 'failed').slice(0, 5)
+
+  if (!error && failures.length === 0) return null
+
+  return (
+    <section className="rounded-xl border border-red-800/80 bg-red-900/10 p-4">
+      <div className="text-sm font-semibold text-red-300">Live errors</div>
+      <p className="mt-1 text-xs text-red-200/80">
+        New failures appear here immediately so you can confirm what is breaking.
+      </p>
+
+      {error && (
+        <div className="mt-3 rounded-lg border border-red-800/80 bg-red-950/40 px-3 py-2 text-sm text-red-200">
+          {error}
+        </div>
+      )}
+
+      {failures.length > 0 && (
+        <div className="mt-3 flex flex-col gap-2">
+          {failures.map((result) => (
+            <div
+              key={result.id}
+              className="rounded-lg border border-red-900/70 bg-black/20 px-3 py-2 text-xs"
+            >
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="font-semibold text-red-300">{result.nodeLabel}</span>
+                <span className="text-neutral-400">{result.module}</span>
+                <span className="text-neutral-500">
+                  {result.path.replace(/^.*[\\/]/, '')}
+                </span>
+              </div>
+              {result.error && (
+                <div className="mt-1 whitespace-pre-wrap break-words text-red-100">
+                  {result.error}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
 // ── BatchConfigView ───────────────────────────────────────────────────────────
 
 /**
@@ -261,7 +306,7 @@ export function BatchRunView({
   resumeBanner,
   onDismissBanner,
 }: BatchRunViewProps) {
-  const { stats, results, ingestSummary } = batch
+  const { stats, results, ingestSummary, error } = batch
 
   const [showStopDialog, setShowStopDialog] = useState(false)
   // Derive the folder from initialFolder (passed from App which tracks gallery folder)
@@ -325,6 +370,8 @@ export function BatchRunView({
           onClearQueue={handleClearQueue}
           onClearCompleted={handleClearCompleted}
         />
+
+        <LiveErrorPanel error={error} results={results} />
 
         <div className="flex-1 flex flex-col min-h-0 border-t border-neutral-800 pt-3">
           <p className="text-xs text-neutral-500 mb-1.5">

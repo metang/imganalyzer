@@ -297,6 +297,73 @@ def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
     check_conn.close()
 
 
+def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-status.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    conn.execute(
+        """INSERT INTO worker_nodes (id, display_name, platform, status)
+           VALUES (?, ?, ?, ?)""",
+        ["worker-1", "Worker 1", "linux", "online"],
+    )
+
+    master_done_image = repo.register_image(file_path="/photos/master-done.jpg")
+    master_done_job = queue.enqueue(master_done_image, "metadata")
+    assert master_done_job is not None
+    queue.claim(batch_size=1, module="metadata")
+    queue.mark_done(master_done_job)
+
+    master_running_image = repo.register_image(file_path="/photos/master-running.jpg")
+    master_running_job = queue.enqueue(master_running_image, "technical")
+    assert master_running_job is not None
+    queue.claim(batch_size=1, module="technical")
+
+    worker_running_image = repo.register_image(file_path="/photos/worker-running.jpg")
+    worker_running_job = queue.enqueue(worker_running_image, "objects")
+    assert worker_running_job is not None
+    running_claim = queue.claim_leased(worker_id="worker-1", batch_size=1, module="objects")
+    assert len(running_claim) == 1
+
+    worker_failed_image = repo.register_image(file_path="/photos/worker-failed.jpg")
+    worker_failed_job = queue.enqueue(worker_failed_image, "faces")
+    assert worker_failed_job is not None
+    failed_claim = queue.claim_leased(worker_id="worker-1", batch_size=1, module="faces")
+    assert len(failed_claim) == 1
+    assert queue.mark_failed_leased(worker_failed_job, failed_claim[0]["lease_token"], "boom") is True
+
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    status = server._handle_status({})
+
+    assert status["remaining_images"] == 2
+    assert status["nodes"]["master"]["runningJobs"] == 1
+
+    worker = next(item for item in status["nodes"]["workers"] if item["id"] == "worker-1")
+    assert worker["displayName"] == "Worker 1"
+    assert worker["runningJobs"] == 1
+
+    recent_by_job = {item["jobId"]: item for item in status["recent_results"]}
+    assert recent_by_job[master_done_job]["nodeRole"] == "master"
+    assert recent_by_job[master_done_job]["nodeId"] == "master"
+    assert recent_by_job[master_done_job]["path"] == "/photos/master-done.jpg"
+    assert recent_by_job[worker_failed_job]["nodeRole"] == "worker"
+    assert recent_by_job[worker_failed_job]["nodeId"] == "worker-1"
+    assert recent_by_job[worker_failed_job]["nodeLabel"] == "Worker 1"
+    assert recent_by_job[worker_failed_job]["error"] == "boom"
+
+    workers_list = server._handle_workers_list({})
+    listed_worker = next(item for item in workers_list["workers"] if item["id"] == "worker-1")
+    assert listed_worker["runningJobs"] == 1
+
+
 def test_run_forever_prints_progress_summary(monkeypatch):
     worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
 

@@ -31,6 +31,14 @@ function emptyStats(): BatchStats {
     imagesPerSec: 0,
     estimatedMs: 0,
     elapsedMs: 0,
+    queue: {
+      totalPasses: 0,
+      activePasses: 0,
+      completedPasses: 0,
+      remainingPasses: 0,
+      remainingJobs: 0,
+    },
+    nodes: [],
   }
 }
 

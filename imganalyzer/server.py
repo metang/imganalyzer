@@ -196,6 +196,7 @@ def _handle_status(params: dict) -> dict:
     total_images = repo.count_images()
     module_stats = queue.stats()
     totals = queue.total_stats()
+    remaining_images = queue.remaining_image_count()
 
     from imganalyzer.db.repository import ALL_MODULES
     queue_modules = list(module_stats.keys())
@@ -216,6 +217,15 @@ def _handle_status(params: dict) -> dict:
             "skipped": s.get("skipped", 0),
         }
 
+    master_running_row = conn.execute(
+        """SELECT COUNT(*) AS cnt
+           FROM job_queue jq
+           LEFT JOIN job_leases jl ON jl.job_id = jq.id
+           WHERE jq.status = 'running'
+             AND jl.job_id IS NULL"""
+    ).fetchone()
+    worker_items = _build_worker_items(conn)
+
     return {
         "total_images": total_images,
         "modules": modules_out,
@@ -226,6 +236,18 @@ def _handle_status(params: dict) -> dict:
             "failed": totals.get("failed", 0),
             "skipped": totals.get("skipped", 0),
         },
+        "remaining_images": remaining_images,
+        "nodes": {
+            "master": {
+                "id": "master",
+                "role": "master",
+                "displayName": "Master device",
+                "platform": sys.platform,
+                "runningJobs": int(master_running_row["cnt"] if master_running_row is not None else 0),
+            },
+            "workers": worker_items,
+        },
+        "recent_results": _recent_queue_results(conn),
     }
 
 
@@ -493,9 +515,23 @@ def _handle_workers_heartbeat(params: dict) -> dict:
     return {"workerId": worker_id, "ok": True, "releasedExpired": released}
 
 
-def _handle_workers_list(_params: dict) -> dict:
-    """List registered worker nodes and recent heartbeat metadata."""
-    conn = _get_db()
+def _get_worker_running_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    rows = conn.execute(
+        """SELECT jl.worker_id, COUNT(*) AS cnt
+           FROM job_leases jl
+           JOIN job_queue jq ON jq.id = jl.job_id
+           WHERE jq.status = 'running'
+           GROUP BY jl.worker_id"""
+    ).fetchall()
+    return {
+        str(row["worker_id"]): int(row["cnt"])
+        for row in rows
+        if row["worker_id"] is not None
+    }
+
+
+def _build_worker_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    running_counts = _get_worker_running_counts(conn)
     rows = conn.execute(
         """SELECT id, display_name, platform, capabilities, status, last_heartbeat, created_at, updated_at
            FROM worker_nodes
@@ -508,8 +544,9 @@ def _handle_workers_list(_params: dict) -> dict:
             caps = json.loads(caps_raw)
         except Exception:
             caps = {}
+        worker_id = str(row["id"])
         items.append({
-            "id": row["id"],
+            "id": worker_id,
             "displayName": row["display_name"],
             "platform": row["platform"],
             "capabilities": caps,
@@ -517,8 +554,66 @@ def _handle_workers_list(_params: dict) -> dict:
             "lastHeartbeat": row["last_heartbeat"],
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
+            "runningJobs": running_counts.get(worker_id, 0),
         })
-    return {"workers": items}
+    return items
+
+
+def _recent_queue_results(conn: sqlite3.Connection, limit: int = 200) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT jq.id,
+                  jq.module,
+                  jq.status,
+                  jq.error_message,
+                  jq.skip_reason,
+                  jq.completed_at,
+                  jq.last_node_id,
+                  jq.last_node_role,
+                  i.file_path,
+                  wn.display_name AS worker_display_name,
+                  COALESCE(
+                      CAST(ROUND((julianday(jq.completed_at) - julianday(jq.started_at)) * 86400000.0) AS INTEGER),
+                      0
+                  ) AS duration_ms
+           FROM job_queue jq
+           JOIN images i ON i.id = jq.image_id
+           LEFT JOIN worker_nodes wn ON wn.id = jq.last_node_id
+           WHERE jq.status IN ('done', 'failed', 'skipped')
+             AND jq.completed_at IS NOT NULL
+           ORDER BY jq.completed_at DESC, jq.id DESC
+           LIMIT ?""",
+        [max(1, int(limit))],
+    ).fetchall()
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        node_role = str(row["last_node_role"] or "master")
+        node_id = str(row["last_node_id"] or "master")
+        node_label = (
+            str(row["worker_display_name"])
+            if node_role == "worker" and row["worker_display_name"]
+            else "Master device"
+        )
+        message = row["error_message"] or row["skip_reason"]
+        items.append({
+            "jobId": int(row["id"]),
+            "path": row["file_path"],
+            "module": row["module"],
+            "status": row["status"],
+            "durationMs": max(0, int(row["duration_ms"] or 0)),
+            "completedAt": row["completed_at"],
+            "error": str(message) if message else None,
+            "nodeId": node_id,
+            "nodeRole": node_role,
+            "nodeLabel": node_label,
+        })
+    return items
+
+
+def _handle_workers_list(_params: dict) -> dict:
+    """List registered worker nodes and recent heartbeat metadata."""
+    conn = _get_db()
+    return {"workers": _build_worker_items(conn)}
 
 
 _DISTRIBUTED_CONTEXT_MODULES: dict[str, tuple[str, ...]] = {

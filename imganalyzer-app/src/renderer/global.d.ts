@@ -265,6 +265,32 @@ export interface BatchModuleStats {
   avgMsPerImage: number
 }
 
+export interface BatchQueueSummary {
+  totalPasses: number
+  activePasses: number
+  completedPasses: number
+  remainingPasses: number
+  remainingJobs: number
+}
+
+export interface BatchNode {
+  id: string
+  role: 'master' | 'worker'
+  label: string
+  status: string
+  platform?: string
+  lastHeartbeat?: string | null
+  lastResultAt?: string | null
+  runningJobs: number
+  completedJobs: number
+  doneJobs: number
+  failedJobs: number
+  skippedJobs: number
+  imagesPerSec: number
+  avgMsPerImage: number
+  capabilities?: Record<string, unknown>
+}
+
 export interface BatchStats {
   status: BatchStatus
   monitorOnly: boolean
@@ -275,15 +301,23 @@ export interface BatchStats {
   imagesPerSec: number
   estimatedMs: number
   elapsedMs: number
+  queue: BatchQueueSummary
+  nodes: BatchNode[]
 }
 
 export interface BatchResult {
+  id: string
+  jobId?: number
   path: string
   module: string
   status: 'done' | 'failed' | 'skipped'
   durationMs: number
   error?: string
   keywords?: string[]
+  nodeId: string
+  nodeRole: 'master' | 'worker'
+  nodeLabel: string
+  completedAt?: string
 }
 
 export interface BatchIngestProgress {

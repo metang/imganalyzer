@@ -1,4 +1,4 @@
-import type { BatchStats, BatchModuleStats } from '../global'
+import type { BatchStats, BatchModuleStats, BatchNode } from '../global'
 
 interface Props {
   stats: BatchStats
@@ -9,8 +9,6 @@ interface Props {
   onClearQueue(): void
   onClearCompleted(): void
 }
-
-// ── Formatting helpers ────────────────────────────────────────────────────────
 
 function fmtMs(ms: number): string {
   if (ms <= 0) return '—'
@@ -24,184 +22,401 @@ function fmtMs(ms: number): string {
 
 function fmtRate(imgPerSec: number): string {
   if (imgPerSec <= 0) return '—'
-  return `${imgPerSec.toFixed(1)}`
+  return `${imgPerSec.toFixed(1)} img/s`
+}
+
+function parseTimestamp(value?: string | null): number | null {
+  if (!value) return null
+  const isoLike = value.includes('T') ? value : value.replace(' ', 'T')
+  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(isoLike) ? isoLike : `${isoLike}Z`
+  const parsed = Date.parse(normalized)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function fmtRelativeTime(value?: string | null): string {
+  const ts = parseTimestamp(value)
+  if (ts === null) return '—'
+  const deltaMs = Math.max(0, Date.now() - ts)
+  const seconds = Math.round(deltaMs / 1000)
+  if (seconds < 10) return 'just now'
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.round(hours / 24)
+  return `${days}d ago`
+}
+
+function statusTone(status: string): string {
+  switch (status) {
+    case 'running':
+      return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+    case 'monitoring':
+    case 'coordinating':
+      return 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+    case 'paused':
+      return 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30'
+    case 'error':
+      return 'bg-red-500/15 text-red-300 border-red-500/30'
+    case 'done':
+      return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+    case 'online':
+      return 'bg-neutral-700/60 text-neutral-200 border-neutral-600'
+    default:
+      return 'bg-neutral-800 text-neutral-300 border-neutral-700'
+  }
+}
+
+function formatCapabilityValue(value: unknown): string {
+  if (typeof value === 'boolean') return value ? 'yes' : 'no'
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(1)
+  if (typeof value === 'string') return value
+  return JSON.stringify(value)
 }
 
 const MODULE_LABELS: Record<string, string> = {
-  metadata:  'Metadata',
+  metadata: 'Metadata',
   technical: 'Technical',
-  local_ai:  'Local AI',
-  blip2:     'BLIP-2 Caption',
-  objects:   'Objects (DINO)',
-  ocr:       'OCR',
-  faces:     'Faces',
-  cloud_ai:  'Cloud AI',
+  local_ai: 'Local AI',
+  blip2: 'BLIP-2 Caption',
+  objects: 'Objects (DINO)',
+  ocr: 'OCR',
+  faces: 'Faces',
+  cloud_ai: 'Cloud AI',
   aesthetic: 'Aesthetic',
   embedding: 'Embeddings',
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+function SummaryCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 px-3 py-3">
+      <div className="text-[11px] uppercase tracking-wider text-neutral-500">{label}</div>
+      <div className="mt-1 font-mono text-base text-neutral-100">{value}</div>
+      {hint && <div className="mt-1 text-xs text-neutral-500">{hint}</div>}
+    </div>
+  )
+}
+
+function QueuePill({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: number
+  tone?: 'warning' | 'danger'
+}) {
+  const toneClass =
+    tone === 'danger'
+      ? 'border-red-800/80 text-red-300'
+      : tone === 'warning'
+        ? 'border-yellow-800/80 text-yellow-300'
+        : 'border-neutral-800 text-neutral-300'
+
+  return (
+    <div className={`rounded-full border px-3 py-1.5 text-xs ${toneClass}`}>
+      <span className="text-neutral-500">{label}</span>
+      <span className="ml-2 font-mono">{value.toLocaleString()}</span>
+    </div>
+  )
+}
 
 function ModuleTableRow({ name, stats }: { name: string; stats: BatchModuleStats }) {
-  const total    = stats.pending + stats.running + stats.done + stats.failed + stats.skipped
+  const total = stats.pending + stats.running + stats.done + stats.failed + stats.skipped
   const complete = stats.done + stats.failed + stats.skipped
-  const pct      = total > 0 ? Math.round((complete / total) * 100) : 0
+  const pct = total > 0 ? Math.round((complete / total) * 100) : 0
 
   return (
     <tr className="text-xs">
-      {/* Module name */}
-      <td className="py-1 pr-3 text-neutral-400 whitespace-nowrap">
+      <td className="py-1.5 pr-3 text-neutral-400 whitespace-nowrap">
         {MODULE_LABELS[name] ?? name}
       </td>
-      {/* Progress bar */}
-      <td className="py-1 pr-3 w-full">
+      <td className="py-1.5 pr-3 min-w-[180px]">
         <div className="flex items-center gap-2">
-          <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
             <div
-              className="h-full bg-blue-600 rounded-full transition-all duration-300"
+              className="h-full rounded-full bg-blue-600 transition-all duration-300"
               style={{ width: `${pct}%` }}
             />
           </div>
-          <span className="text-neutral-500 w-8 text-right shrink-0">{pct}%</span>
+          <span className="w-8 shrink-0 text-right text-neutral-500">{pct}%</span>
         </div>
       </td>
-      {/* Speed */}
-      <td className="py-1 px-2 text-right font-mono text-neutral-300 whitespace-nowrap">
+      <td className="px-2 py-1.5 text-right font-mono text-neutral-300 whitespace-nowrap">
         {fmtRate(stats.imagesPerSec)}
       </td>
-      {/* Avg ms */}
-      <td className="py-1 px-2 text-right font-mono text-neutral-400 whitespace-nowrap">
+      <td className="px-2 py-1.5 text-right font-mono text-neutral-400 whitespace-nowrap">
         {fmtMs(stats.avgMsPerImage)}
       </td>
-      {/* Processed (done) */}
-      <td className="py-1 px-2 text-right font-mono text-neutral-300 whitespace-nowrap">
+      <td className="px-2 py-1.5 text-right font-mono text-neutral-300 whitespace-nowrap">
+        {stats.pending.toLocaleString()}
+      </td>
+      <td className="px-2 py-1.5 text-right font-mono text-neutral-300 whitespace-nowrap">
+        {stats.running.toLocaleString()}
+      </td>
+      <td className="px-2 py-1.5 text-right font-mono text-neutral-300 whitespace-nowrap">
         {stats.done.toLocaleString()}
       </td>
-      {/* Skipped */}
-      <td className={`py-1 px-2 text-right font-mono whitespace-nowrap ${stats.skipped > 0 ? 'text-yellow-500' : 'text-neutral-600'}`}>
-        {stats.skipped > 0 ? stats.skipped.toLocaleString() : '—'}
-      </td>
-      {/* Error */}
-      <td className={`py-1 px-2 text-right font-mono whitespace-nowrap ${stats.failed > 0 ? 'text-red-500' : 'text-neutral-600'}`}>
+      <td className={`px-2 py-1.5 text-right font-mono whitespace-nowrap ${stats.failed > 0 ? 'text-red-400' : 'text-neutral-600'}`}>
         {stats.failed > 0 ? stats.failed.toLocaleString() : '—'}
       </td>
-      {/* Total */}
-      <td className="py-1 pl-2 text-right font-mono text-neutral-500 whitespace-nowrap">
-        {total.toLocaleString()}
+      <td className={`pl-2 py-1.5 text-right font-mono whitespace-nowrap ${stats.skipped > 0 ? 'text-yellow-400' : 'text-neutral-600'}`}>
+        {stats.skipped > 0 ? stats.skipped.toLocaleString() : '—'}
       </td>
     </tr>
   )
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
+function NodeMetrics({ node }: { node: BatchNode }) {
+  const capabilityEntries = Object.entries(node.capabilities ?? {}).filter(([, value]) => {
+    return value !== null && value !== undefined && value !== ''
+  })
 
-export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFailed, onClearQueue, onClearCompleted }: Props) {
-  const { status, monitorOnly, totals, modules, imagesPerSec, avgMsPerImage, estimatedMs, elapsedMs } = stats
+  return (
+    <div className="mt-3 grid gap-3 md:grid-cols-2">
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <SummaryCard label="Running" value={node.runningJobs.toLocaleString()} />
+        <SummaryCard label="Completed" value={node.completedJobs.toLocaleString()} />
+        <SummaryCard label="Done rate" value={fmtRate(node.imagesPerSec)} />
+        <SummaryCard label="Avg/pass" value={fmtMs(node.avgMsPerImage)} />
+        <SummaryCard label="Failed" value={node.failedJobs.toLocaleString()} />
+        <SummaryCard label="Skipped" value={node.skippedJobs.toLocaleString()} />
+      </div>
 
-  const totalJobs  = totals.pending + totals.running + totals.done + totals.failed + totals.skipped
-  const complete   = totals.done + totals.failed + totals.skipped
-  const overallPct = totalJobs > 0 ? Math.round((complete / totalJobs) * 100) : 0
+      <div className="rounded-xl border border-neutral-800 bg-neutral-900/40 px-3 py-3 text-xs">
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-neutral-500">Platform</span>
+            <span className="text-right text-neutral-200">{node.platform || '—'}</span>
+          </div>
+          {node.lastHeartbeat !== undefined && (
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-neutral-500">Last heartbeat</span>
+              <span className="text-right text-neutral-200">{fmtRelativeTime(node.lastHeartbeat)}</span>
+            </div>
+          )}
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-neutral-500">Last result</span>
+            <span className="text-right text-neutral-200">{fmtRelativeTime(node.lastResultAt)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-neutral-500">Done / Fail / Skip</span>
+            <span className="text-right font-mono text-neutral-200">
+              {node.doneJobs} / {node.failedJobs} / {node.skippedJobs}
+            </span>
+          </div>
+        </div>
 
-  const jobsPerSec = elapsedMs > 0 ? (complete / (elapsedMs / 1000)) : 0
+        {capabilityEntries.length > 0 && (
+          <div className="mt-3 border-t border-neutral-800 pt-3">
+            <div className="mb-2 text-[11px] uppercase tracking-wider text-neutral-500">
+              Capabilities
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {capabilityEntries.map(([key, value]) => (
+                <span
+                  key={key}
+                  className="rounded-full border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300"
+                >
+                  {key}: {formatCapabilityValue(value)}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function MasterNodeCard({ node }: { node: BatchNode }) {
+  return (
+    <section className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-neutral-500">Master device</div>
+          <div className="mt-1 text-sm font-semibold text-neutral-100">{node.label}</div>
+        </div>
+        <span className={`rounded-full border px-2.5 py-1 text-xs ${statusTone(node.status)}`}>
+          {node.status}
+        </span>
+      </div>
+      <NodeMetrics node={node} />
+    </section>
+  )
+}
+
+function WorkerNodeCard({ node }: { node: BatchNode }) {
+  return (
+    <details className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-neutral-500">Worker node</div>
+          <div className="mt-1 text-sm font-semibold text-neutral-100">{node.label}</div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className={`rounded-full border px-2.5 py-1 ${statusTone(node.status)}`}>
+            {node.status}
+          </span>
+          <span className="rounded-full border border-neutral-700 px-2.5 py-1 text-neutral-300">
+            {node.runningJobs.toLocaleString()} running
+          </span>
+          <span className="rounded-full border border-neutral-700 px-2.5 py-1 text-neutral-300">
+            {fmtRate(node.imagesPerSec)}
+          </span>
+        </div>
+      </summary>
+      <NodeMetrics node={node} />
+    </details>
+  )
+}
+
+export function ProgressDashboard({
+  stats,
+  onPause,
+  onResume,
+  onStop,
+  onRetryFailed,
+  onClearQueue,
+  onClearCompleted,
+}: Props) {
+  const {
+    status,
+    monitorOnly,
+    queue,
+    totals,
+    modules,
+    imagesPerSec,
+    avgMsPerImage,
+    estimatedMs,
+    elapsedMs,
+    nodes,
+  } = stats
+
+  const totalPasses = queue.totalPasses
+  const complete = queue.completedPasses
+  const overallPct = totalPasses > 0 ? Math.round((complete / totalPasses) * 100) : 0
 
   const isRunning = status === 'running'
-  const isPaused  = status === 'paused'
+  const isPaused = status === 'paused'
   const hasPending = totals.pending > 0
-
-  // Show Resume when paused OR when there are pending jobs but the worker
-  // is no longer running (e.g. worker exited / finished early / error state).
   const showResume = isPaused || (!isRunning && hasPending)
 
-  // Modules with at least one failure — passed to onRetryFailed
   const failedModules = Object.entries(modules)
     .filter(([, s]) => s && s.failed > 0)
     .map(([mod]) => mod)
 
-  const canRetry      = failedModules.length > 0 && !isRunning
-  const canClearQueue = !isRunning && !isPaused && totalJobs > 0
+  const canRetry = failedModules.length > 0 && !isRunning
+  const canClearQueue = !isRunning && !isPaused && totalPasses > 0
   const canClearCompleted = (totals.done + totals.skipped) > 0
 
   const moduleEntries = Object.entries(modules).filter(
     (entry): entry is [string, BatchModuleStats] => entry[1] != null
   )
 
+  const masterNode = nodes.find((node) => node.role === 'master')
+  const workerNodes = nodes.filter((node) => node.role === 'worker')
+
   return (
     <div className="flex flex-col gap-4">
-
-      {/* ── Overall progress bar ────────────────────────────────────────────── */}
       <div className="flex flex-col gap-1.5">
-        <div className="flex justify-between text-xs text-neutral-400">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-neutral-400">
           <span>
-            {complete.toLocaleString()} / {totalJobs.toLocaleString()} jobs
-            {jobsPerSec > 0 && <span className="text-neutral-500 ml-1.5">({jobsPerSec.toFixed(1)}/s)</span>}
+            {complete.toLocaleString()} / {totalPasses.toLocaleString()} passes complete
           </span>
           <span>{overallPct}%</span>
         </div>
-        <div className="h-2 bg-neutral-800 rounded-full overflow-hidden">
+        <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
           <div
             className={`h-full rounded-full transition-all duration-300 ${
-              status === 'error' ? 'bg-red-600' :
-              status === 'done'  ? 'bg-emerald-600' :
-              'bg-blue-600'
+              status === 'error'
+                ? 'bg-red-600'
+                : status === 'done'
+                  ? 'bg-emerald-600'
+                  : 'bg-blue-600'
             }`}
             style={{ width: `${overallPct}%` }}
           />
         </div>
       </div>
 
-      {/* ── Per-module table ─────────────────────────────────────────────────── */}
-      {moduleEntries.length > 0 && (
-        <table className="w-full border-collapse">
-          <thead>
-            <tr className="text-[10px] uppercase tracking-wider text-neutral-600">
-              <th className="py-1 pr-3 text-left font-medium">Module</th>
-              <th className="py-1 pr-3 text-left font-medium">Progress</th>
-              <th className="py-1 px-2 text-right font-medium whitespace-nowrap">done/s</th>
-              <th className="py-1 px-2 text-right font-medium whitespace-nowrap">Avg ms</th>
-              <th className="py-1 px-2 text-right font-medium">Processed</th>
-              <th className="py-1 px-2 text-right font-medium">Skipped</th>
-              <th className="py-1 px-2 text-right font-medium">Error</th>
-              <th className="py-1 pl-2 text-right font-medium">Total</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-neutral-800/50">
-            {moduleEntries.map(([mod, s]) => (
-              <ModuleTableRow key={mod} name={mod} stats={s} />
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      {/* ── Stats row ────────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-4 gap-2 text-xs">
-        {[
-          { label: 'Done rate', value: imagesPerSec > 0 ? fmtRate(imagesPerSec) + ' img/s' : '—' },
-          { label: 'Avg/img', value: fmtMs(avgMsPerImage) },
-          { label: 'ETA',     value: fmtMs(estimatedMs) },
-          { label: 'Elapsed', value: fmtMs(elapsedMs) },
-        ].map(({ label, value }) => (
-          <div key={label} className="flex flex-col gap-0.5 bg-neutral-800/60 rounded-lg px-3 py-2">
-            <span className="text-neutral-500">{label}</span>
-            <span className="font-mono text-neutral-200">{value}</span>
-          </div>
-        ))}
-      </div>
-
       {monitorOnly && (
-        <p className="text-xs text-blue-300 bg-blue-900/20 border border-blue-800 rounded-lg px-3 py-2">
+        <p className="rounded-lg border border-blue-800 bg-blue-900/20 px-3 py-2 text-xs text-blue-300">
           Monitoring distributed worker progress. Pause/Resume control the local worker only.
         </p>
       )}
 
-      {/* ── Control buttons ──────────────────────────────────────────────────── */}
-      <div className="flex gap-2 flex-wrap">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+        <SummaryCard label="Remaining jobs" value={queue.remainingJobs.toLocaleString()} />
+        <SummaryCard label="Remaining passes" value={queue.remainingPasses.toLocaleString()} />
+        <SummaryCard label="Done rate" value={fmtRate(imagesPerSec)} />
+        <SummaryCard
+          label="ETA"
+          value={fmtMs(estimatedMs)}
+          hint={estimatedMs > 0 ? 'Based on recent throughput' : 'Waiting for enough samples'}
+        />
+        <SummaryCard label="Elapsed" value={fmtMs(elapsedMs)} />
+        <SummaryCard label="Avg/pass" value={fmtMs(avgMsPerImage)} />
+      </div>
+
+      <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
+        <div className="mb-3 text-sm font-semibold text-neutral-100">Queue status</div>
+        <div className="flex flex-wrap gap-2">
+          <QueuePill label="Pending" value={totals.pending} />
+          <QueuePill label="Running" value={totals.running} />
+          <QueuePill label="Done" value={totals.done} />
+          <QueuePill label="Failed" value={totals.failed} tone="danger" />
+          <QueuePill label="Skipped" value={totals.skipped} tone="warning" />
+        </div>
+      </section>
+
+      {masterNode && <MasterNodeCard node={masterNode} />}
+
+      {workerNodes.length > 0 && (
+        <section className="flex flex-col gap-3">
+          <div className="text-sm font-semibold text-neutral-100">Worker nodes</div>
+          <div className="grid gap-3 xl:grid-cols-2">
+            {workerNodes.map((node) => (
+              <WorkerNodeCard key={node.id} node={node} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {moduleEntries.length > 0 && (
+        <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
+          <div className="mb-3 text-sm font-semibold text-neutral-100">Remaining passes by module</div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full border-collapse">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-wider text-neutral-600">
+                  <th className="py-1 pr-3 text-left font-medium">Module</th>
+                  <th className="py-1 pr-3 text-left font-medium">Progress</th>
+                  <th className="py-1 px-2 text-right font-medium whitespace-nowrap">done/s</th>
+                  <th className="py-1 px-2 text-right font-medium whitespace-nowrap">Avg ms</th>
+                  <th className="py-1 px-2 text-right font-medium">Pending</th>
+                  <th className="py-1 px-2 text-right font-medium">Running</th>
+                  <th className="py-1 px-2 text-right font-medium">Done</th>
+                  <th className="py-1 px-2 text-right font-medium">Failed</th>
+                  <th className="py-1 pl-2 text-right font-medium">Skipped</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-neutral-800/70">
+                {moduleEntries.map(([mod, moduleStats]) => (
+                  <ModuleTableRow key={mod} name={mod} stats={moduleStats} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      <div className="flex flex-wrap gap-2">
         {!monitorOnly && isRunning && (
           <button
             onClick={onPause}
-            className="
-              px-4 py-1.5 rounded-lg text-sm text-neutral-200
-              bg-neutral-700 hover:bg-neutral-600 transition-colors
-            "
+            className="rounded-lg bg-neutral-700 px-4 py-1.5 text-sm text-neutral-200 transition-colors hover:bg-neutral-600"
           >
             Pause
           </button>
@@ -209,10 +424,7 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
         {!monitorOnly && showResume && (
           <button
             onClick={onResume}
-            className="
-              px-4 py-1.5 rounded-lg text-sm text-neutral-200
-              bg-blue-700 hover:bg-blue-600 transition-colors
-            "
+            className="rounded-lg bg-blue-700 px-4 py-1.5 text-sm text-neutral-200 transition-colors hover:bg-blue-600"
           >
             Resume
           </button>
@@ -220,11 +432,7 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
         {(isRunning || isPaused) && (
           <button
             onClick={onStop}
-            className="
-              px-4 py-1.5 rounded-lg text-sm text-red-300
-              bg-neutral-800 border border-neutral-700
-              hover:bg-red-900/40 hover:border-red-700 transition-colors
-            "
+            className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-1.5 text-sm text-red-300 transition-colors hover:border-red-700 hover:bg-red-900/40"
           >
             Stop
           </button>
@@ -232,12 +440,8 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
         {canRetry && (
           <button
             onClick={() => onRetryFailed(failedModules)}
-            className="
-              px-4 py-1.5 rounded-lg text-sm text-orange-300
-              bg-neutral-800 border border-neutral-700
-              hover:bg-orange-900/30 hover:border-orange-700 transition-colors
-            "
-            title={`Retry ${totals.failed} failed job${totals.failed !== 1 ? 's' : ''} across: ${failedModules.join(', ')}`}
+            className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-1.5 text-sm text-orange-300 transition-colors hover:border-orange-700 hover:bg-orange-900/30"
+            title={`Retry ${totals.failed} failed pass${totals.failed !== 1 ? 'es' : ''} across: ${failedModules.join(', ')}`}
           >
             Retry failed ({totals.failed})
           </button>
@@ -245,11 +449,7 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
         {canClearQueue && (
           <button
             onClick={onClearQueue}
-            className="
-              px-4 py-1.5 rounded-lg text-sm text-neutral-400
-              bg-neutral-800 border border-neutral-700
-              hover:bg-red-900/30 hover:border-red-800 hover:text-red-300 transition-colors
-            "
+            className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-1.5 text-sm text-neutral-400 transition-colors hover:border-red-800 hover:bg-red-900/30 hover:text-red-300"
             title="Delete all jobs from the queue and reset to idle"
           >
             Clear queue
@@ -258,12 +458,8 @@ export function ProgressDashboard({ stats, onPause, onResume, onStop, onRetryFai
         {canClearCompleted && (
           <button
             onClick={onClearCompleted}
-            className="
-              px-4 py-1.5 rounded-lg text-sm text-neutral-400
-              bg-neutral-800 border border-neutral-700
-              hover:bg-neutral-700/50 hover:border-neutral-600 hover:text-neutral-200 transition-colors
-            "
-            title={`Remove ${totals.done + totals.skipped} completed job${totals.done + totals.skipped !== 1 ? 's' : ''} from the queue`}
+            className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-1.5 text-sm text-neutral-400 transition-colors hover:border-neutral-600 hover:bg-neutral-700/50 hover:text-neutral-200"
+            title={`Remove ${totals.done + totals.skipped} completed pass${totals.done + totals.skipped !== 1 ? 'es' : ''} from the queue`}
           >
             Clear completed ({totals.done + totals.skipped})
           </button>
