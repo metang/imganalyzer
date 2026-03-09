@@ -362,6 +362,16 @@ class DistributedWorker:
     def _pull_and_restart(self) -> None:
         """Pull latest code and re-exec the worker process."""
         assert self._repo_dir is not None
+        # Record HEAD before pulling so we can tell if anything changed.
+        old_head = ""
+        try:
+            old_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self._repo_dir, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+        except Exception:
+            pass
+
         console.print("[cyan]Pulling latest code…[/cyan]")
         result = subprocess.run(
             ["git", "pull", "--ff-only"],
@@ -372,7 +382,23 @@ class DistributedWorker:
                 f"[red]git pull failed (exit {result.returncode}):[/red] "
                 f"{result.stderr.strip()}"
             )
+            self._update_pending = False
             return
+
+        new_head = ""
+        try:
+            new_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self._repo_dir, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+        except Exception:
+            pass
+
+        if old_head and new_head and old_head == new_head:
+            console.print("[dim]Already up to date — skipping restart.[/dim]")
+            self._update_pending = False
+            return
+
         console.print(f"[green]Updated:[/green] {result.stdout.strip()}")
         console.print("[cyan]Restarting worker…[/cyan]")
         os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -1149,5 +1175,10 @@ class DistributedWorker:
 
         if self._update_pending and self._repo_dir is not None:
             self._pull_and_restart()
+            # _pull_and_restart returns only if pull had no new commits.
+            # Reset state and re-enter the main loop.
+            self._shutdown.clear()
+            self._update_pending = False
+            return self.run_forever()
 
         return stats
