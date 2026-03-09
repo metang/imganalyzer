@@ -860,6 +860,39 @@ def _handle_jobs_release(params: dict) -> dict:
     return {"ok": ok}
 
 
+def _worker_node_info(conn: Any, job_id: int) -> tuple[str, str, str]:
+    """Return (nodeId, nodeRole, nodeLabel) for a completed job."""
+    row = conn.execute(
+        """SELECT jq.last_node_id, jq.last_node_role, wn.display_name
+           FROM job_queue jq
+           LEFT JOIN worker_nodes wn ON jq.last_node_id = wn.id
+           WHERE jq.id = ?""",
+        [job_id],
+    ).fetchone()
+    if row is None:
+        return ("master", "master", "Master device")
+    node_role = str(row["last_node_role"] or "master")
+    node_id = str(row["last_node_id"] or "master")
+    node_label = (
+        str(row["display_name"])
+        if node_role == "worker" and row["display_name"]
+        else "Master device"
+    )
+    return (node_id, node_role, node_label)
+
+
+def _job_duration_ms(conn: Any, job_id: int) -> int:
+    """Compute wall-clock duration in ms from started_at to completed_at."""
+    row = conn.execute(
+        """SELECT CAST(
+               ROUND((julianday(completed_at) - julianday(started_at)) * 86400000.0)
+           AS INTEGER) AS ms
+           FROM job_queue WHERE id = ?""",
+        [job_id],
+    ).fetchone()
+    return max(0, int(row["ms"] or 0)) if row else 0
+
+
 def _handle_jobs_complete(params: dict) -> dict:
     """Persist a worker result payload and mark the leased job complete."""
     from imganalyzer.db.repository import Repository
@@ -931,6 +964,33 @@ def _handle_jobs_complete(params: dict) -> dict:
                 write_xmp_from_db(repo, image_id)
             except Exception:
                 pass
+
+    # Emit a run/result notification so the frontend live-feed shows this
+    # worker result immediately (same as the master-side _emit_result path).
+    try:
+        image = repo.get_image(image_id)
+        file_path = image["file_path"] if image else ""
+        node_id, node_role, node_label = _worker_node_info(conn, job_id)
+        duration_ms = _job_duration_ms(conn, job_id)
+        kw: list[str] | None = None
+        if module_name == "cloud_ai":
+            providers = (payload.get("data") or {}).get("providers", [])
+            if providers and isinstance(providers, list):
+                kw = providers[0].get("keywords")
+        note: dict[str, Any] = {
+            "path": file_path,
+            "module": module_name,
+            "status": "done",
+            "ms": duration_ms,
+            "nodeId": node_id,
+            "nodeRole": node_role,
+            "nodeLabel": node_label,
+        }
+        if kw:
+            note["keywords"] = kw
+        _send_notification("run/result", note)
+    except Exception:
+        pass  # notification failure is non-fatal
 
     return {"ok": True}
 

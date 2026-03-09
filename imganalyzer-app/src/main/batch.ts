@@ -591,6 +591,9 @@ function setupNotificationListener(): void {
           : typeof rawKw === 'string'
             ? rawKw.split(',').map((s: string) => s.trim()).filter(Boolean)
             : undefined
+        const nodeId = typeof p.nodeId === 'string' ? p.nodeId : MASTER_NODE_ID
+        const nodeRole = p.nodeRole === 'worker' ? 'worker' as const : 'master' as const
+        const nodeLabel = typeof p.nodeLabel === 'string' ? p.nodeLabel : MASTER_NODE_LABEL
         const result: BatchResult = {
           id: nextLocalResultId(),
           path: (p.path as string) ?? '',
@@ -599,9 +602,9 @@ function setupNotificationListener(): void {
           durationMs: (p.ms as number) ?? 0,
           error: p.error as string | undefined,
           keywords,
-          nodeId: MASTER_NODE_ID,
-          nodeRole: 'master',
-          nodeLabel: MASTER_NODE_LABEL,
+          nodeId,
+          nodeRole,
+          nodeLabel,
           completedAt: new Date().toISOString(),
         }
         trackResult(result)
