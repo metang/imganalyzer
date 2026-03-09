@@ -522,6 +522,101 @@ class DistributedWorker:
                     self._shutdown.wait(delay)
         raise RuntimeError(f"Coordinator call failed unexpectedly for {method}")
 
+    def _try_report_skip(
+        self,
+        *,
+        job_id: int,
+        lease_token: str,
+        reason: str,
+        details: str,
+    ) -> bool:
+        """Best-effort skip reporting; never raises to the caller."""
+        try:
+            skipped = self._coordinator_call_with_lock_retry(
+                "jobs/skip",
+                {
+                    "jobId": job_id,
+                    "leaseToken": lease_token,
+                    "reason": reason,
+                    "details": details,
+                },
+            )
+            if bool(skipped.get("ok")):
+                return True
+            console.print(
+                f"[yellow]Coordinator rejected {reason} skip for job {job_id}; "
+                "the lease may have expired.[/yellow]"
+            )
+            return False
+        except Exception as exc:
+            console.print(
+                f"[yellow]Failed to report {reason} skip for job {job_id}:[/yellow] "
+                f"{escape(str(exc))}"
+            )
+            return False
+
+    def _safe_emit_result(
+        self,
+        *,
+        path: str,
+        module: str,
+        status: str,
+        elapsed_ms: int,
+        error: str = "",
+        keywords: list[str] | None = None,
+    ) -> None:
+        """Emit a result notification without allowing secondary crashes."""
+        try:
+            _emit_result(path, module, status, elapsed_ms, error, keywords=keywords)
+        except Exception as exc:
+            console.print(
+                "[yellow]Failed to emit run/result notification:[/yellow] "
+                f"{escape(str(exc))}"
+            )
+
+    def _report_failure(
+        self,
+        *,
+        job_id: int,
+        lease_token: str,
+        path: str,
+        module: str,
+        short_path: str,
+        started_monotonic: float,
+        exc: Exception,
+    ) -> str:
+        """Best-effort failure reporting that never raises to the caller."""
+        elapsed = int((time.monotonic() - started_monotonic) * 1000)
+        error_msg = f"{type(exc).__name__}: {exc}"
+        try:
+            failed = self._coordinator_call_with_lock_retry(
+                "jobs/fail",
+                {"jobId": job_id, "leaseToken": lease_token, "error": error_msg},
+            )
+            if not bool(failed.get("ok")) and self.verbose:
+                console.print(
+                    f"[yellow]Coordinator rejected failure update for job {job_id}; "
+                    "the lease may have expired.[/yellow]"
+                )
+        except Exception as mark_exc:
+            if self.verbose:
+                console.print(
+                    f"[yellow]Failed to report job {job_id} as failed:[/yellow] "
+                    f"{escape(str(mark_exc))}"
+                )
+        self._safe_emit_result(
+            path=path,
+            module=module,
+            status="failed",
+            elapsed_ms=elapsed,
+            error=error_msg,
+        )
+        console.print(
+            f"  [red]✗[/red] [bold]{module}[/bold] failed in {elapsed / 1000:.1f}s ← "
+            f"{escape(short_path)}: {escape(error_msg)}"
+        )
+        return "failed"
+
     def _register_worker(self) -> None:
         """Register this worker with the coordinator."""
         capabilities: dict[str, Any] = {
@@ -544,7 +639,13 @@ class DistributedWorker:
         """Track currently leased jobs so the heartbeat thread can extend them."""
         with self._active_lock:
             for job in jobs:
-                self._active_leases[int(job["id"])] = str(job["leaseToken"])
+                try:
+                    self._active_leases[int(job["id"])] = str(job["leaseToken"])
+                except (KeyError, TypeError, ValueError):
+                    if self.verbose:
+                        console.print(
+                            f"[yellow]Ignoring malformed claimed job lease payload:[/yellow] {job!r}"
+                        )
 
     def _clear_active(self, job_id: int) -> None:
         """Stop heartbeating a completed or released lease."""
@@ -558,7 +659,10 @@ class DistributedWorker:
 
     def _heartbeat_loop(self) -> None:
         """Refresh worker and lease liveness until shutdown."""
-        while not self._shutdown.is_set():
+        while True:
+            active_leases = self._snapshot_active()
+            if self._shutdown.is_set() and not active_leases:
+                break
             try:
                 heartbeat = self._coordinator_call("workers/heartbeat", {"workerId": self.worker_id})
                 released = int(heartbeat.get("releasedExpired", 0))
@@ -569,7 +673,7 @@ class DistributedWorker:
             except Exception as exc:
                 console.print(f"[red]Worker heartbeat failed:[/red] {escape(str(exc))}")
 
-            for job_id, lease_token in self._snapshot_active():
+            for job_id, lease_token in active_leases:
                 try:
                     result = self._coordinator_call(
                         "jobs/heartbeat",
@@ -589,7 +693,11 @@ class DistributedWorker:
                         f"[red]Lease heartbeat failed for job {job_id}:[/red] {escape(str(exc))}"
                     )
 
-            self._shutdown.wait(self.heartbeat_interval_seconds)
+            if self._shutdown.is_set():
+                # Keep leases alive while draining in-flight jobs after Ctrl+C.
+                time.sleep(min(self.heartbeat_interval_seconds, 1.0))
+            else:
+                self._shutdown.wait(self.heartbeat_interval_seconds)
 
     def _claim_jobs(self) -> list[dict[str, Any]]:
         """Lease the next batch of jobs from the coordinator."""
@@ -646,14 +754,44 @@ class DistributedWorker:
 
     def _process_claimed_job(self, job: dict[str, Any]) -> str:
         """Process one leased job and report its final state to the coordinator."""
-        image_id = int(job["imageId"])
-        module = str(job["module"])
-        job_id = int(job["id"])
-        lease_token = str(job["leaseToken"])
-        path = str(job.get("filePath") or f"id={image_id}")
-        short_path = Path(path).name
-        start_ms = int(time.time() * 1000)
         started_monotonic = time.monotonic()
+        image_id_raw = job.get("imageId")
+        path = str(job.get("filePath") or f"id={image_id_raw}")
+        short_path = Path(path).name
+        try:
+            image_id = int(job["imageId"])
+            module = str(job["module"])
+            job_id = int(job["id"])
+            lease_token = str(job["leaseToken"])
+        except (KeyError, TypeError, ValueError) as exc:
+            elapsed = int((time.monotonic() - started_monotonic) * 1000)
+            console.print(
+                "[yellow]Malformed claimed job payload; marking as failed if possible:[/yellow] "
+                f"{escape(str(exc))} payload={job!r}"
+            )
+            job_id_raw = job.get("id")
+            lease_token_raw = str(job.get("leaseToken", "")).strip()
+            module_name = str(job.get("module", "unknown"))
+            if isinstance(job_id_raw, int) and lease_token_raw:
+                self._report_failure(
+                    job_id=job_id_raw,
+                    lease_token=lease_token_raw,
+                    path=path,
+                    module=module_name,
+                    short_path=short_path,
+                    started_monotonic=started_monotonic,
+                    exc=ValueError(f"Malformed claimed job payload: {exc}"),
+                )
+            else:
+                self._safe_emit_result(
+                    path=path,
+                    module=module_name,
+                    status="failed",
+                    elapsed_ms=elapsed,
+                    error=f"Malformed claimed job payload: {exc}",
+                )
+            return "failed"
+
         conn: sqlite3.Connection | None = None
         sandbox_ms = 0
         run_ms = 0
@@ -709,7 +847,13 @@ class DistributedWorker:
             if not bool(done.get("ok")):
                 raise RuntimeError(f"Coordinator rejected completion for job {job_id}")
             keywords = result.get("keywords") if module == "cloud_ai" and result else None
-            _emit_result(path, module, "done", elapsed, keywords=keywords)
+            self._safe_emit_result(
+                path=path,
+                module=module,
+                status="done",
+                elapsed_ms=elapsed,
+                keywords=keywords,
+            )
             console.print(
                 f"  [green]✓[/green] [bold]{module}[/bold] done in {elapsed / 1000:.1f}s ← {short_path}"
             )
@@ -728,19 +872,22 @@ class DistributedWorker:
             return "done"
 
         except ImportError as exc:
-            elapsed = int(time.time() * 1000) - start_ms
-            skipped = self._coordinator_call_with_lock_retry(
-                "jobs/skip",
-                {
-                    "jobId": job_id,
-                    "leaseToken": lease_token,
-                    "reason": "missing_dependency",
-                    "details": str(exc),
-                },
+            elapsed = int((time.monotonic() - started_monotonic) * 1000)
+            reported = self._try_report_skip(
+                job_id=job_id,
+                lease_token=lease_token,
+                reason="missing_dependency",
+                details=str(exc),
             )
-            if not bool(skipped.get("ok")):
-                raise RuntimeError("Coordinator rejected missing_dependency skip") from exc
-            _emit_result(path, module, "skipped", elapsed, f"missing dependency: {exc}")
+            if not reported:
+                return "failed"
+            self._safe_emit_result(
+                path=path,
+                module=module,
+                status="skipped",
+                elapsed_ms=elapsed,
+                error=f"missing dependency: {exc}",
+            )
             console.print(
                 f"  [yellow]⊘[/yellow] [bold]{module}[/bold] skipped (missing dependency) in "
                 f"{elapsed / 1000:.1f}s ← {short_path}"
@@ -754,51 +901,47 @@ class DistributedWorker:
                 or "libraw postprocess failed" in err_lower
                 or "pillow cannot decode" in err_lower
             ):
-                elapsed = int(time.time() * 1000) - start_ms
-                skipped = self._coordinator_call_with_lock_retry(
-                    "jobs/skip",
-                    {
-                        "jobId": job_id,
-                        "leaseToken": lease_token,
-                        "reason": "corrupt_file",
-                        "details": str(exc),
-                    },
+                elapsed = int((time.monotonic() - started_monotonic) * 1000)
+                reported = self._try_report_skip(
+                    job_id=job_id,
+                    lease_token=lease_token,
+                    reason="corrupt_file",
+                    details=str(exc),
                 )
-                if not bool(skipped.get("ok")):
-                    raise RuntimeError("Coordinator rejected corrupt_file skip") from exc
-                _emit_result(path, module, "skipped", elapsed, f"corrupt file: {exc}")
+                if not reported:
+                    return "failed"
+                self._safe_emit_result(
+                    path=path,
+                    module=module,
+                    status="skipped",
+                    elapsed_ms=elapsed,
+                    error=f"corrupt file: {exc}",
+                )
                 console.print(
                     f"  [yellow]⊘[/yellow] [bold]{module}[/bold] skipped (corrupt) in "
                     f"{elapsed / 1000:.1f}s ← {short_path}"
                 )
                 return "skipped"
-            raise
+            return self._report_failure(
+                job_id=job_id,
+                lease_token=lease_token,
+                path=path,
+                module=module,
+                short_path=short_path,
+                started_monotonic=started_monotonic,
+                exc=exc,
+            )
 
         except Exception as exc:
-            elapsed = int(time.time() * 1000) - start_ms
-            error_msg = f"{type(exc).__name__}: {exc}"
-            try:
-                failed = self._coordinator_call_with_lock_retry(
-                    "jobs/fail",
-                    {"jobId": job_id, "leaseToken": lease_token, "error": error_msg},
-                )
-                if not bool(failed.get("ok")) and self.verbose:
-                    console.print(
-                        f"[yellow]Coordinator rejected failure update for job {job_id}; "
-                        "the lease may have expired.[/yellow]"
-                    )
-            except Exception as mark_exc:
-                if self.verbose:
-                    console.print(
-                        f"[yellow]Failed to report job {job_id} as failed:[/yellow] "
-                        f"{escape(str(mark_exc))}"
-                    )
-            _emit_result(path, module, "failed", elapsed, error_msg)
-            console.print(
-                f"  [red]✗[/red] [bold]{module}[/bold] failed in {elapsed / 1000:.1f}s ← "
-                f"{escape(short_path)}: {escape(error_msg)}"
+            return self._report_failure(
+                job_id=job_id,
+                lease_token=lease_token,
+                path=path,
+                module=module,
+                short_path=short_path,
+                started_monotonic=started_monotonic,
+                exc=exc,
             )
-            return "failed"
 
         finally:
             finished.set()

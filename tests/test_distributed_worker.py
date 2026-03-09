@@ -6,6 +6,8 @@ import threading
 import time
 from unittest.mock import patch
 
+import pytest
+
 from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository
 from imganalyzer.db.schema import ensure_schema
@@ -171,6 +173,147 @@ def test_process_claimed_job_does_not_crash_when_fail_update_raises(tmp_path):
 
     assert status == "failed"
     assert fail_calls["count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("runner_error", "reason"),
+    [
+        (ImportError("module torch is not installed"), "missing_dependency"),
+        (ValueError("Pillow cannot decode broken.jpg: bad bytes"), "corrupt_file"),
+    ],
+)
+def test_process_claimed_job_skip_rejection_is_nonfatal(tmp_path, runner_error, reason):
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+    image_id = repo.register_image(file_path="/photos/distributed-metadata.jpg")
+
+    worker = DistributedWorker(
+        coordinator_url="http://127.0.0.1:8765/",
+        worker_id="worker-a",
+        batch_size=1,
+        write_xmp=False,
+    )
+
+    class FailingRunner:
+        def run(self, _image_id: int, _module: str):
+            raise runner_error
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_call(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, dict(params)))
+        if method != "jobs/skip":
+            raise AssertionError(f"Unexpected coordinator method: {method}")
+        return {"ok": False}
+
+    worker._open_job_sandbox = lambda _job: (conn, repo, FailingRunner())  # type: ignore[method-assign]
+    worker._coordinator_call = fake_call  # type: ignore[method-assign]
+
+    status = worker._process_claimed_job(
+        {
+            "id": 10,
+            "imageId": image_id,
+            "module": "metadata",
+            "leaseToken": "lease-1001",
+            "filePath": "/photos/distributed-metadata.jpg",
+        }
+    )
+
+    assert status == "failed"
+    assert calls == [
+        (
+            "jobs/skip",
+            {
+                "jobId": 10,
+                "leaseToken": "lease-1001",
+                "reason": reason,
+                "details": str(runner_error),
+            },
+        )
+    ]
+
+
+def test_process_claimed_job_non_corrupt_value_error_reports_failed(tmp_path):
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+    image_id = repo.register_image(file_path="/photos/distributed-metadata.jpg")
+
+    worker = DistributedWorker(
+        coordinator_url="http://127.0.0.1:8765/",
+        worker_id="worker-a",
+        batch_size=1,
+        write_xmp=False,
+    )
+
+    class FailingRunner:
+        def run(self, _image_id: int, _module: str):
+            raise ValueError("unexpected metadata parse error")
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_call(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, dict(params)))
+        if method != "jobs/fail":
+            raise AssertionError(f"Unexpected coordinator method: {method}")
+        return {"ok": True}
+
+    worker._open_job_sandbox = lambda _job: (conn, repo, FailingRunner())  # type: ignore[method-assign]
+    worker._coordinator_call = fake_call  # type: ignore[method-assign]
+
+    status = worker._process_claimed_job(
+        {
+            "id": 12,
+            "imageId": image_id,
+            "module": "metadata",
+            "leaseToken": "lease-1002",
+            "filePath": "/photos/distributed-metadata.jpg",
+        }
+    )
+
+    assert status == "failed"
+    assert calls == [
+        (
+            "jobs/fail",
+            {
+                "jobId": 12,
+                "leaseToken": "lease-1002",
+                "error": "ValueError: unexpected metadata parse error",
+            },
+        )
+    ]
+
+
+def test_process_claimed_job_malformed_payload_returns_failed(monkeypatch):
+    worker = DistributedWorker(
+        coordinator_url="http://127.0.0.1:8765/",
+        worker_id="worker-a",
+        batch_size=1,
+        write_xmp=False,
+    )
+
+    called = {"count": 0}
+
+    def fake_call(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        called["count"] += 1
+        return {"ok": True}
+
+    worker._coordinator_call = fake_call  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "imganalyzer.pipeline.distributed_worker._emit_result",
+        lambda *_args, **_kwargs: None,
+    )
+
+    status = worker._process_claimed_job(
+        {
+            "id": 13,
+            "module": "metadata",
+            "leaseToken": "lease-1003",
+            "filePath": "/photos/distributed-metadata.jpg",
+        }
+    )
+
+    assert status == "failed"
+    assert called["count"] == 1
 
 
 def test_process_claimed_job_logs_slow_diagnostics(tmp_path, monkeypatch):
@@ -751,6 +894,39 @@ def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkey
     listed_worker = next(item for item in workers_list["workers"] if item["id"] == "worker-1")
     assert listed_worker["runningJobs"] == 1
     assert listed_worker["activeModules"] == [{"module": "objects", "count": 1}]
+
+
+def test_heartbeat_loop_keeps_leases_alive_during_shutdown(monkeypatch):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None  # bypass startup dep check in tests
+    worker.heartbeat_interval_seconds = 2.0
+    worker._mark_all_active([{"id": 99, "leaseToken": "lease-99"}])
+    worker._shutdown.set()
+
+    calls: list[tuple[str, dict[str, object]]] = []
+    sleep_calls: list[float] = []
+
+    def _fake_call(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, dict(params)))
+        if method == "workers/heartbeat":
+            return {"releasedExpired": 0}
+        if method == "jobs/heartbeat":
+            worker._clear_active(99)
+            return {"ok": True}
+        raise AssertionError(f"Unexpected coordinator method: {method}")
+
+    monkeypatch.setattr(worker, "_coordinator_call", _fake_call)
+    monkeypatch.setattr(
+        "imganalyzer.pipeline.distributed_worker.time.sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    worker._heartbeat_loop()
+
+    assert [method for method, _params in calls] == ["workers/heartbeat", "jobs/heartbeat"]
+    assert calls[1][1] == {"jobId": 99, "leaseToken": "lease-99", "extendTtlSeconds": 120}
+    assert sleep_calls == [1.0]
+    assert worker._snapshot_active() == []
 
 
 def test_run_forever_prints_progress_summary(monkeypatch):
