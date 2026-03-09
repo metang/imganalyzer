@@ -17,8 +17,8 @@ The GUI spawns `python -m imganalyzer.server` once at startup. All commands (thu
 imganalyzer/
 ├── imganalyzer/                       # Python package
 │   ├── __init__.py                    # Version string
-│   ├── cli.py                         # Typer CLI (14+ commands)
-│   ├── server.py                      # JSON-RPC 2.0 stdio server (18+ methods)
+│   ├── cli.py                         # Typer CLI (20+ commands)
+│   ├── server.py                      # JSON-RPC 2.0 stdio server (25+ methods)
 │   ├── analyzer.py                    # Orchestrator: AnalysisResult dataclass + pipeline dispatch
 │   ├── readers/
 │   │   ├── raw.py                     # RAW decoder via rawpy (LibRaw), header-only mode
@@ -36,13 +36,16 @@ imganalyzer/
 │   │       └── cloud.py               # OpenAI / Anthropic / Google / Copilot backends
 │   ├── db/
 │   │   ├── connection.py              # SQLite singleton, WAL mode, thread-safe
-│   │   ├── schema.py                  # 7 migrations, 13+ tables, FTS5
+│   │   ├── schema.py                  # 16 migrations, 13+ tables, FTS5
 │   │   ├── repository.py             # CRUD, overrides, face management, FTS5 index
 │   │   ├── queue.py                   # Job queue with atomic claim + priority ordering
 │   │   └── search.py                  # Hybrid FTS5 + CLIP search with RRF scoring
 │   ├── pipeline/
 │   │   ├── batch.py                   # Folder scanning, image registration, job enqueue
-│   │   ├── worker.py                  # Two-phase batch worker, GPU model management
+│   │   ├── worker.py                  # Three-phase batch worker, GPU model management
+│   │   ├── scheduler.py              # Three-phase GPU resource scheduler with VRAM budget
+│   │   ├── vram_budget.py            # GPU memory tracking (CUDA + MPS)
+│   │   ├── distributed_worker.py     # Remote worker for distributed batch processing
 │   │   ├── modules.py                 # Per-module dispatch, override guard, XMP from DB
 │   │   └── passes/                    # Individual GPU pass modules
 │   │       ├── blip2.py               # BLIP-2 batch pass
@@ -62,6 +65,7 @@ imganalyzer/
 │   │   │   ├── images.ts              # Thumbnail (LRU 1000) + full-res (LRU 2) via RPC
 │   │   │   ├── analyzer.ts            # Single-image analysis via RPC + progress stage map
 │   │   │   ├── batch.ts               # Batch IPC handlers (ingest/start/pause/resume/stop)
+│   │   │   ├── coordinator.ts         # HTTP coordinator lifecycle management
 │   │   │   ├── search.ts              # Search IPC handler + filter types
 │   │   │   ├── faces.ts               # Face management IPC (list/cluster/crop/alias)
 │   │   │   ├── xmp.ts                 # XMP sidecar parser (fast-xml-parser)
@@ -96,8 +100,8 @@ imganalyzer/
 │   ├── tailwind.config.js
 │   └── package.json
 │
-├── tests/                             # Python unit tests (pytest, 50 tests)
-├── scripts/                           # Diagnostic utilities (9 scripts)
+├── tests/                             # Python unit tests (pytest, 165 tests across 4 files)
+├── scripts/                           # Diagnostic utilities + worker setup
 ├── pyproject.toml                     # Python project config + dependencies
 ├── ARCHITECTURE.md                    # This file
 ├── AGENTS.md                          # Agent coding rules
@@ -138,6 +142,15 @@ imganalyzer merge-face SOURCE_NAME TARGET_NAME
 # Utilities
 imganalyzer override <image> <field> <value>
 imganalyzer purge-missing
+
+# Distributed processing
+imganalyzer run-distributed-worker --coordinator http://host:8787
+
+# Copilot session management
+imganalyzer cleanup-sessions --dry-run
+
+# Performance profiling
+imganalyzer profile-report
 ```
 
 **JSON-RPC Server** (`server.py`):
@@ -164,6 +177,13 @@ Spawned by Electron as `python -m imganalyzer.server`. Reads JSON-RPC requests f
 | `faces/crop` | Get cropped face thumbnail (base64 JPEG) |
 | `faces/run-clustering` | Run agglomerative clustering |
 | `shutdown` | Graceful server shutdown |
+| `workers/register` | Register a distributed worker |
+| `workers/heartbeat` | Refresh worker heartbeat, recover expired leases |
+| `workers/list` | List connected workers |
+| `jobs/claim` | Atomic lease of pending jobs with TTL |
+| `jobs/complete` | Mark leased job as done |
+| `jobs/fail` | Mark leased job as failed |
+| `jobs/release-expired` | Requeue expired leases |
 
 **Notifications** (server → client, unsolicited):
 | Notification | Payload |
@@ -176,7 +196,7 @@ Spawned by Electron as `python -m imganalyzer.server`. Reads JSON-RPC requests f
 
 ### Database Layer (`db/`)
 
-SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema managed by 7 sequential migrations.
+SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema managed by 16 sequential migrations.
 
 **Core tables:**
 | Table | Purpose |
@@ -221,6 +241,8 @@ metadata(100) > technical(90) > objects(85) > blip2(80) > local_ai(80)
 - `cloud_ai`, `aesthetic`, `ocr`, and `faces` all depend on `objects` completing first
 - `objects` determines `has_person` (privacy gate for cloud/aesthetic) and `has_text` (gate for OCR)
 
+**Job deferral:** When a job's prerequisite isn't met, it is deferred via `defer()` which bumps `queued_at` forward by 30 seconds. This prevents the same ineligible jobs from being repeatedly claimed and starving eligible jobs further back in the queue. Contrast with `mark_pending()` which preserves the original `queued_at` (used for shutdown recovery).
+
 ### Batch Pipeline (`pipeline/`)
 
 **Ingest** (`batch.py`):
@@ -231,24 +253,36 @@ metadata(100) > technical(90) > objects(85) > blip2(80) > local_ai(80)
 - File fingerprinting uses path+size+mtime (not SHA-256) for speed
 
 **Worker** (`worker.py`):
-Two-phase processing loop designed for GPU memory efficiency:
+Three-phase GPU processing loop designed for GPU memory efficiency:
 
 ```
-Phase 1: Drain ALL 'objects' jobs (GroundingDINO, serial GPU)
+Phase 0: Drain ALL 'objects' jobs (GroundingDINO, batch=4)
   └─ Sets has_person / has_text flags, unlocking privacy gates
   └─ Unload GroundingDINO from GPU
 
-Phase 2: Sequential GPU passes + concurrent cloud thread pool
-  ├─ blip2 (batch=2)     → Unload BLIP-2
-  ├─ ocr (batch=8)       → Unload TrOCR       (only if has_text)
-  ├─ faces (batch=1)     → Unload InsightFace  (only if has_person)
-  ├─ local_ai (batch=1)  → Legacy combined pass
-  ├─ embedding (batch=32)→ Unload CLIP
-  └─ [concurrent] cloud_ai + aesthetic (ThreadPoolExecutor)
-       └─ Skipped for images with has_person=True (privacy)
+Phase 1: BLIP-2 captioning (exclusive GPU, batch=1)
+  └─ Requires sole GPU access (~6 GB VRAM)
+  └─ Unload BLIP-2
+
+Phase 2: Co-resident GPU models (~2.75 GB total)
+  ├─ faces (batch=8)     → InsightFace (only if has_person)
+  ├─ ocr (batch=4)       → TrOCR (only if has_text)
+  └─ embedding (batch=16)→ CLIP ViT-L/14
+
+[Concurrent throughout] cloud_ai + aesthetic (ThreadPoolExecutor)
+  └─ Skipped for images with has_person=True (privacy)
+  └─ Cloud futures capped at 2× cloud_workers to prevent phase starvation
+
+IO drain: After all GPU phases, remaining cloud/IO jobs drain with boosted thread pool
 ```
 
-Peak VRAM: ~4.7 GB (models loaded/unloaded between passes, not co-resident ~9.5 GB).
+**VRAM Budget** (`vram_budget.py`):
+Thread-safe GPU memory tracker. Auto-detects CUDA or MPS GPU, applies 70% VRAM cap. Tracks per-module reservations and supports exclusive modules (blip2 cannot share GPU). Falls back to physical RAM for MPS (Apple Silicon).
+
+**Resource Scheduler** (`scheduler.py`):
+Orchestrates the three GPU phases with VRAM-aware model loading. Single-module phases run on the main thread; multi-module phases (Phase 2) run each module in its own thread with image prefetching to hide disk I/O. Cancels uncompleted cloud futures at phase boundaries to prevent blocking.
+
+Peak VRAM: ~6 GB during BLIP-2 phase; ~2.75 GB during Phase 2 (models loaded/unloaded between phases).
 
 **Module Runner** (`modules.py`):
 - Dispatches to per-module analysis functions
@@ -282,11 +316,11 @@ All metrics computed from raw pixels (NumPy/OpenCV):
 
 | Module | Model | Library | Batch Size |
 |---|---|---|---|
-| Captioning | BLIP-2 (flan-t5-xl) | `transformers` | 2 |
-| Object detection | GroundingDINO (grounding-dino-base) | `transformers` (`AutoModelForZeroShotObjectDetection`) | 8 |
-| OCR | TrOCR (trocr-large-printed) | `transformers` | — |
-| Face detection | buffalo_l (RetinaFace + ArcFace) | `insightface` | 1 |
-| Embeddings | OpenCLIP ViT-L/14 | `open_clip_torch` | 32 |
+| Captioning | BLIP-2 (flan-t5-xl) | `transformers` | 1 |
+| Object detection | GroundingDINO (grounding-dino-base) | `transformers` (`AutoModelForZeroShotObjectDetection`) | 4 |
+| OCR | TrOCR (trocr-large-printed) | `transformers` | 4 |
+| Face detection | buffalo_l (RetinaFace + ArcFace) | `insightface` | 8 |
+| Embeddings | OpenCLIP ViT-L/14 | `open_clip_torch` | 16 |
 
 All models are lazy-loaded singletons — weights cached in `~/.cache/huggingface/` and `~/.insightface/`.
 
@@ -571,6 +605,35 @@ worker.py _emit_result()
 
 ---
 
+## Distributed Processing
+
+imganalyzer supports distributing batch analysis across multiple machines:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Coordinator (HTTP JSON-RPC server)                      │
+│  python -m imganalyzer.server --transport http            │
+│  • Manages job_queue in SQLite                           │
+│  • Lease-based job distribution with TTL                 │
+│  • Worker registration, heartbeats, capability tracking  │
+│  • Optional bearer token authentication                  │
+│  • Launched automatically by Electron app                │
+└────────┬──────────────────────────┬──────────────────────┘
+         │ HTTP JSON-RPC            │ HTTP JSON-RPC
+┌────────▼──────────┐    ┌─────────▼─────────┐
+│  Worker 1 (GPU)   │    │  Worker 2 (GPU)   │
+│  run-distributed  │    │  run-distributed  │
+│  -worker          │    │  -worker          │
+│  • Claims leases  │    │  • Claims leases  │
+│  • Runs analysis  │    │  • Runs analysis  │
+│  • Reports results│    │  • Reports results│
+└───────────────────┘    └───────────────────┘
+```
+
+Workers probe their capabilities at startup (available GPU models, cloud providers) and only claim jobs they can process. Leases include a TTL; if a worker crashes, expired leases are automatically re-queued.
+
+---
+
 ## Runtime Dependencies
 
 ### Python (Python 3.10+, CUDA GPU recommended)
@@ -594,6 +657,7 @@ worker.py _emit_result()
 | `rich` 13.0+ | Terminal output formatting |
 | `httpx` 0.27+ | HTTP client (reverse geocoding) |
 | `python-dotenv` 1.0+ | Environment variable loading |
+| `github-copilot-sdk` | Copilot cloud AI backend (optional) |
 
 Optional cloud backends: `openai`, `anthropic`, `google-cloud-vision`.
 
@@ -614,9 +678,9 @@ Optional cloud backends: `openai`, `anthropic`, `google-cloud-vision`.
 
 **Persistent JSON-RPC server instead of per-call subprocesses.** The original architecture spawned `conda run python <script>` for every thumbnail, full-res decode, and analysis call. This added 1-3 seconds of subprocess startup overhead per call. The current architecture spawns a single persistent Python process at app start, keeping all models loaded in memory and eliminating per-call overhead.
 
-**Two-phase GPU processing.** Objects (GroundingDINO) runs first for all images before any other GPU module. This is required because `has_person` and `has_text` flags from object detection gate downstream modules: cloud AI and aesthetic scoring skip images with people (privacy), and OCR only runs on images with detected text. Processing objects first avoids wasted work.
+**Three-phase GPU processing.** Objects (GroundingDINO) runs first for all images before any other GPU module (Phase 0). This is required because `has_person` and `has_text` flags from object detection gate downstream modules: cloud AI and aesthetic scoring skip images with people (privacy), and OCR only runs on images with detected text. BLIP-2 then runs exclusively in Phase 1 (~6 GB VRAM). Phase 2 runs faces, OCR, and embedding co-resident (~2.75 GB). Processing objects first avoids wasted work.
 
-**Sequential model loading with unloading.** GPU models are loaded one at a time and unloaded before loading the next. This keeps peak VRAM at ~4.7 GB instead of ~9.5 GB if all models were co-resident, making the system usable on consumer GPUs (8 GB VRAM).
+**Sequential model loading with VRAM budget.** GPU models are loaded according to a VRAM budget tracker that caps usage at 70% of available GPU memory. Exclusive modules (BLIP-2) require sole GPU access; co-resident modules share within budget. This keeps the system usable on consumer GPUs (8 GB VRAM) while maximizing throughput in Phase 2.
 
 **SQLite as the central data store.** All analysis results are stored in SQLite, not just in XMP files. This enables search, face clustering, progress tracking, and crash recovery. XMP files are regenerated from the database as an export format, maintaining Lightroom compatibility without making XMP the source of truth.
 
@@ -629,3 +693,11 @@ Optional cloud backends: `openai`, `anthropic`, `google-cloud-vision`.
 **Privacy guard for people.** Images where GroundingDINO detects a person are automatically excluded from cloud AI analysis and aesthetic scoring. This is enforced at the module runner level, the worker level, and the cloud AI function level to prevent accidental leakage of photos containing people to third-party APIs.
 
 **Override protection.** Users can manually override any analysis field (e.g., correcting an AI caption). Overridden fields are stored in a separate `overrides` table and excluded from UPDATE statements during re-analysis, ensuring manual corrections are never overwritten.
+
+**Three-phase GPU scheduling with VRAM budget.** The original two-phase approach (objects first, then everything else) was replaced with a three-phase scheduler backed by a VRAM budget tracker. Phase 0 runs objects (prerequisite). Phase 1 runs BLIP-2 exclusively (~6 GB). Phase 2 runs faces+OCR+embedding co-resident (~2.75 GB). This maximizes GPU utilization while respecting memory constraints.
+
+**Cloud future capping at phase boundaries.** Cloud API futures submitted during GPU phases are capped at 2× the cloud worker count. Uncompleted cloud futures are cancelled at GPU phase boundaries and returned to the pending queue. This prevents the ThreadPoolExecutor shutdown from blocking for hours when thousands of slow cloud API calls have been queued.
+
+**Job deferral to prevent queue starvation.** When a job's prerequisite isn't met, `defer()` bumps its `queued_at` timestamp forward by 30 seconds instead of preserving the original timestamp. This prevents the same ineligible jobs from being repeatedly claimed at the front of the queue, starving eligible jobs with later timestamps.
+
+**Distributed processing via HTTP coordinator.** The JSON-RPC server supports an HTTP transport mode for distributing batch work across multiple machines. Workers claim job leases with TTLs and report completions. This enables scaling GPU-intensive analysis across a fleet of machines without shared filesystem requirements (workers access images via their own mounts).

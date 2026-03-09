@@ -71,7 +71,7 @@ Four GPU-accelerated models run on the user's machine:
 | Face detection | InsightFace (buffalo_l: RetinaFace + ArcFace) | Face detection, embedding extraction, recognition against registered identities |
 | OCR | TrOCR (trocr-large-printed) | Text recognition with document tiling, gated on text detection from GroundingDINO |
 
-Models are lazy-loaded singletons cached in `~/.cache/huggingface/` and `~/.insightface/`. Total VRAM requirement: ~4.7 GB peak (models are loaded and unloaded sequentially, not co-resident).
+Models are lazy-loaded singletons cached in `~/.cache/huggingface/` and `~/.insightface/`. Total VRAM requirement: ~6 GB peak during BLIP-2 phase (models are loaded and unloaded sequentially across three GPU phases, not co-resident).
 
 ### 5. Cloud AI Analysis
 
@@ -87,6 +87,8 @@ Cloud vision APIs provide higher-quality captions and aesthetic scores. Supporte
 Cloud AI extracts: detailed description, keywords, scene type, mood, aesthetic score (1-10), composition notes, and species identification for animals. Cloud analysis also handles aesthetic scoring, avoiding a redundant API call.
 
 **Privacy guard**: Images where GroundingDINO detects a person are automatically excluded from cloud AI and aesthetic scoring to protect privacy.
+
+**Session cleanup**: When using GitHub Copilot, each analysis creates a server-side session. Sessions are automatically deleted after each analysis to prevent accumulation. A CLI command (`imganalyzer cleanup-sessions`) can bulk-delete leftover sessions.
 
 ### 6. CLIP Embeddings & Semantic Search
 
@@ -170,15 +172,31 @@ The batch pipeline is designed for large libraries (500K+ images):
 
 1. **Ingest**: Scan folder, register images in SQLite, enqueue jobs per module. Batched transactions (500 images per commit). File fingerprinting uses path+size+mtime instead of SHA-256.
 
-2. **Two-phase worker**: Phase 1 drains all `objects` jobs first (GroundingDINO, serial GPU) to determine which images contain people (unlocking the privacy gate for cloud/aesthetic). Phase 2 runs remaining GPU passes sequentially (blip2 -> ocr -> faces -> embedding) with a concurrent cloud thread pool.
+2. **Three-phase worker**: Phase 0 drains all `objects` jobs (GroundingDINO, batch=4) to determine which images contain people/text (unlocking privacy gates). Phase 1 runs BLIP-2 captioning exclusively (~6 GB VRAM, batch=1). Phase 2 runs faces (batch=8), OCR (batch=4), and embedding (batch=16) co-resident on the GPU (~2.75 GB total). Cloud AI and aesthetic scoring run concurrently in a thread pool throughout all phases.
 
-3. **GPU memory management**: Models are loaded and unloaded between passes, keeping peak VRAM at ~4.7 GB instead of ~9.5 GB if all models were co-resident.
+3. **VRAM budget system**: Dynamic GPU memory tracking (CUDA + MPS) ensures models fit within 70% of available VRAM. Exclusive modules (BLIP-2) require sole GPU access; co-resident modules (faces, OCR, embedding) share the GPU within budget.
 
-4. **Batched inference**: objects (batch=8), blip2 (batch=2), embedding (batch=32).
+4. **Cloud future capping**: Cloud API submissions are capped at 2× the cloud worker count to prevent GPU phase transitions from blocking on thousands of slow API calls. Uncompleted cloud futures are cancelled at phase boundaries.
 
-5. **Deferred housekeeping**: FTS5 search index and XMP sidecar writes are flushed every 60 seconds, not per-job.
+5. **Job deferral**: Jobs with unmet prerequisites are deferred (queued_at bumped forward by 30 seconds) instead of re-queued at the same position, preventing queue starvation where ineligible jobs block eligible ones.
 
-6. **Session recovery**: If the app crashes mid-batch, leftover jobs are detected on next launch and can be resumed.
+6. **Deferred housekeeping**: FTS5 search index and XMP sidecar writes are flushed every 60 seconds, not per-job.
+
+7. **Session recovery**: If the app crashes mid-batch, leftover jobs are detected on next launch and can be resumed.
+
+8. **Distributed processing**: Multiple machines can participate in batch analysis via an HTTP coordinator that distributes job leases to remote workers.
+
+---
+
+## Distributed Processing
+
+imganalyzer supports distributing batch analysis across multiple machines via an HTTP coordinator:
+
+- The coordinator exposes a JSON-RPC API over HTTP (with optional bearer token auth)
+- Remote workers register, claim job leases with TTL, and report completions
+- Workers probe their own capabilities (GPU models, cloud providers) at startup
+- The Electron app can launch the coordinator automatically and show connected worker status
+- Setup scripts (`scripts/setup_worker_env.sh`, `scripts/setup_worker_env.ps1`) bootstrap worker environments with all dependencies
 
 ---
 
@@ -196,7 +214,7 @@ The Python backend runs as a persistent child process, communicating with Electr
 
 ## Data Storage
 
-All analysis results are stored in a SQLite database at `~/.cache/imganalyzer/imganalyzer.db` (configurable via `IMGANALYZER_DB_PATH`). The database uses WAL mode for concurrent read/write access across threads. Schema includes 13+ tables across 7 migration versions, with FTS5 virtual tables for full-text search and a dedicated table for CLIP embeddings.
+All analysis results are stored in a SQLite database at `~/.cache/imganalyzer/imganalyzer.db` (configurable via `IMGANALYZER_DB_PATH`). The database uses WAL mode for concurrent read/write access across threads. Schema includes 13+ tables across 16 migration versions, with FTS5 virtual tables for full-text search and a dedicated table for CLIP embeddings.
 
 XMP sidecar files are the export format — they are regenerated from the database on demand or periodically during batch processing.
 
@@ -233,6 +251,16 @@ imganalyzer override photo.jpg caption "My custom caption"
 imganalyzer purge-missing
 imganalyzer queue-clear --status failed
 imganalyzer rebuild --module objects
+
+# Distributed worker
+imganalyzer run-distributed-worker --coordinator http://host:8787
+
+# Copilot session cleanup
+imganalyzer cleanup-sessions --dry-run
+imganalyzer cleanup-sessions
+
+# Performance profiling
+imganalyzer profile-report
 ```
 
 ---
@@ -261,6 +289,7 @@ Environment variables (set in `.env` or shell):
 
 - **Python**: 3.10+ with CUDA-capable GPU for local AI (torch + CUDA)
 - **Node.js**: Electron 31 for the desktop GUI
-- **GPU VRAM**: ~4.7 GB peak (models loaded sequentially)
+- **GPU VRAM**: ~6 GB peak for BLIP-2 phase (models loaded sequentially; other phases need ~2.75 GB)
 - **Disk**: ~3 GB for model weights (downloaded on first use)
 - **OS**: Windows (primary target), Linux/macOS should work but less tested
+- **Apple Silicon**: Macs supported via MPS backend with CPU fallback for unsupported ops
