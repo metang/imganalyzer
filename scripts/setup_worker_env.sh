@@ -75,12 +75,24 @@ pushd "$REPO_DIR" >/dev/null
 conda run -n "$ENV_NAME" python -m pip install -U pip setuptools wheel
 
 if [[ "$OS_NAME" == "Darwin" ]]; then
-  # On macOS, PyPI only hosts x86_64 PyTorch wheels up to 2.2.x and arm64
-  # wheels from 2.5+.  The conda defaults channel (pkgs/main) carries
-  # 2.5.1+ for both osx-64 and osx-arm64, so install from there first to
-  # prevent pip from pulling an incompatible old wheel.
-  echo "==> Installing PyTorch + ONNX runtime from conda channels (macOS)..."
-  conda install -n "$ENV_NAME" "pytorch>=2.5" torchvision torchaudio -y
+  # Remove any conda-installed PyTorch first. Mixing conda-torch and pip-torch
+  # leaves stale libtorch_*.dylib files in $CONDA_PREFIX/lib/ that the pip
+  # package symlinks to, causing symbol-not-found crashes at import time.
+  CONDA_PREFIX_ENV="$(conda info --base)/envs/$ENV_NAME"
+  STALE_LIBS=("$CONDA_PREFIX_ENV"/lib/libtorch*.dylib)
+  if [[ -e "${STALE_LIBS[0]}" ]]; then
+    echo "==> Removing stale conda-installed libtorch libs to avoid conflicts..."
+    conda run -n "$ENV_NAME" conda remove --force pytorch torchvision torchaudio -y 2>/dev/null || true
+    rm -f "$CONDA_PREFIX_ENV"/lib/libtorch*.dylib
+  fi
+
+  # PyPI ships arm64 macOS wheels for torch ≥ 2.5, so pip handles this fine
+  # now. Installing via pip keeps a single consistent torch installation and
+  # avoids the conda/pip libtorch conflict.
+  echo "==> Installing PyTorch via pip (macOS)..."
+  conda run -n "$ENV_NAME" python -m pip install "torch>=2.5" torchvision torchaudio
+
+  # onnxruntime: still install from conda-forge for macOS compatibility
   conda install -n "$ENV_NAME" -c conda-forge onnxruntime -y
 fi
 
@@ -97,6 +109,27 @@ esac
 EXTRAS="local-ai,$WORKER_CLOUD_PROVIDER"
 echo "==> Installing editable package with extras: [$EXTRAS]"
 conda run -n "$ENV_NAME" python -m pip install -e ".[${EXTRAS}]"
+
+# ── Post-install: detect broken libtorch symlinks ────────────────────────────
+# If conda torch was ever installed and later replaced by pip torch, broken
+# symlinks can be left behind. Detect and fix before the verification step.
+CONDA_PREFIX_ENV="$(conda info --base)/envs/$ENV_NAME"
+TORCH_LIB_DIR="$CONDA_PREFIX_ENV/lib/python$PYTHON_VERSION/site-packages/torch/lib"
+if [[ -d "$TORCH_LIB_DIR" ]]; then
+  BROKEN_LINKS=()
+  for f in "$TORCH_LIB_DIR"/libtorch*.dylib "$TORCH_LIB_DIR"/libtorch*.so; do
+    if [[ -L "$f" ]] && [[ ! -e "$f" ]]; then
+      BROKEN_LINKS+=("$f")
+    fi
+  done
+  if [[ ${#BROKEN_LINKS[@]} -gt 0 ]]; then
+    echo "⚠ Found broken torch symlinks — reinstalling torch cleanly..."
+    rm -f "$CONDA_PREFIX_ENV"/lib/libtorch*.dylib "$CONDA_PREFIX_ENV"/lib/libtorch*.so
+    conda run -n "$ENV_NAME" python -m pip uninstall torch -y
+    rm -rf "$TORCH_LIB_DIR/../"  # remove leftover torch dir
+    conda run -n "$ENV_NAME" python -m pip install --no-cache-dir "torch>=2.5" torchvision torchaudio
+  fi
+fi
 
 echo "==> Verifying local AI imports (torch + insightface + onnxruntime)..."
 conda run -n "$ENV_NAME" python -c "

@@ -99,6 +99,15 @@ conda run -n $EnvName python -m pip install -U pip setuptools wheel
 
 # On Windows with an NVIDIA GPU, install PyTorch with CUDA from the official
 # PyTorch index to get the latest GPU-enabled wheels (2.5+).
+# First, remove any conda-installed torch to avoid stale libtorch DLL conflicts.
+$CondaPrefixEnv = (conda info --base) + "\envs\$EnvName"
+$StaleLibs = Get-ChildItem -Path "$CondaPrefixEnv\Library\lib" -Filter "torch*.lib" -ErrorAction SilentlyContinue
+if ($StaleLibs) {
+    Write-Host "==> Removing stale conda-installed torch libs to avoid conflicts..."
+    conda run -n $EnvName conda remove --force pytorch torchvision torchaudio -y 2>$null
+    Remove-Item -Force "$CondaPrefixEnv\Library\lib\torch*.lib" -ErrorAction SilentlyContinue
+    Remove-Item -Force "$CondaPrefixEnv\Library\bin\torch*.dll" -ErrorAction SilentlyContinue
+}
 Write-Host "==> Installing PyTorch with CUDA support..."
 conda run -n $EnvName python -m pip install "torch>=2.5" torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
