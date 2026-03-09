@@ -640,6 +640,47 @@ def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
     check_conn.close()
 
 
+def test_persist_cloud_ai_payload_ignores_provider_primary_key(tmp_path):
+    from imganalyzer.pipeline.distributed_payloads import persist_result_payload
+
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+
+    first_image_id = repo.register_image(file_path="/nas/photos/existing.jpg")
+    repo.upsert_cloud_ai(first_image_id, "openai", {"description": "existing row"})
+
+    second_image_id = repo.register_image(file_path="/nas/photos/new.jpg")
+    persist_result_payload(
+        conn,
+        repo,
+        image_id=second_image_id,
+        module="cloud_ai",
+        payload={
+            "data": {
+                "providers": [
+                    {
+                        "id": 1,
+                        "provider": "openai",
+                        "description": "new row",
+                        "keywords": ["sunset"],
+                    }
+                ]
+            }
+        },
+    )
+
+    cloud_rows = conn.execute(
+        """SELECT image_id, provider, description
+           FROM analysis_cloud_ai
+           ORDER BY image_id""",
+    ).fetchall()
+    assert [(row["image_id"], row["provider"], row["description"]) for row in cloud_rows] == [
+        (first_image_id, "openai", "existing row"),
+        (second_image_id, "openai", "new row"),
+    ]
+    conn.close()
+
+
 def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkeypatch):
     db_path = tmp_path / "server-status.db"
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)

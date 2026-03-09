@@ -8,7 +8,9 @@ from typing import Any
 from imganalyzer.db.repository import Repository
 from imganalyzer.pipeline.modules import write_local_ai_split_tables
 
-_ANALYSIS_HOUSEKEEPING_KEYS = {"image_id", "analyzed_at", "provider"}
+# Fields managed by the coordinator DB layer; worker payloads must not persist
+# these values directly when replaying results into a different database context.
+_ANALYSIS_HOUSEKEEPING_KEYS = {"id", "image_id", "analyzed_at", "provider"}
 
 
 def _clean_analysis_row(data: dict[str, Any] | None) -> dict[str, Any]:
