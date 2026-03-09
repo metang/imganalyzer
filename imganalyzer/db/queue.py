@@ -159,6 +159,7 @@ class JobQueue:
         batch_size: int = 1,
         module: str | None = None,
         modules: list[str] | None = None,
+        exclude_modules: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Atomically claim jobs and create leases for distributed workers."""
         where = "WHERE status = 'pending'"
@@ -170,6 +171,10 @@ class JobQueue:
             placeholders = ",".join("?" * len(modules))
             where += f" AND module IN ({placeholders})"
             params.extend(modules)
+        if exclude_modules:
+            excl_ph = ",".join("?" * len(exclude_modules))
+            where += f" AND module NOT IN ({excl_ph})"
+            params.extend(exclude_modules)
         params.append(batch_size)
 
         self.conn.execute("BEGIN IMMEDIATE")

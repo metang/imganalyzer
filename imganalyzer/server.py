@@ -725,18 +725,27 @@ def _handle_jobs_claim(params: dict) -> dict:
     )
     jobs: list[dict[str, Any]] = []
     scanned_candidates = 0
+    # When a module yields only invalid jobs for several consecutive batches,
+    # exclude it so lower-priority modules (e.g. embedding) can be reached.
+    exhausted_modules: set[str] = set()
+    module_miss_streak: dict[str, int] = {}
+    _MISS_THRESHOLD = scan_size * 2  # skip module after this many consecutive misses
     while len(jobs) < requested and scanned_candidates < max_scan_candidates:
         claim_size = min(scan_size, max_scan_candidates - scanned_candidates)
+        excl = sorted(exhausted_modules) if exhausted_modules else None
         claimed = queue.claim_leased(
             worker_id=worker_id,
             lease_ttl_seconds=max(5, lease_ttl_seconds),
             batch_size=claim_size,
             module=module_filter,
             modules=modules_filter,
+            exclude_modules=excl,
         )
         if not claimed:
             break
         scanned_candidates += len(claimed)
+
+        batch_valid_modules: set[str] = set()
 
         for job in claimed:
             if len(jobs) >= requested:
@@ -776,6 +785,7 @@ def _handle_jobs_claim(params: dict) -> dict:
                 queue.release_leased(job["id"], job["lease_token"])
                 continue
 
+            batch_valid_modules.add(module_name)
             jobs.append({
                 "id": job["id"],
                 "imageId": image_id,
@@ -791,6 +801,18 @@ def _handle_jobs_claim(params: dict) -> dict:
                 },
                 "context": _build_distributed_job_context(repo, image_id, module_name),
             })
+
+        # Track per-module miss streaks to detect exhausted modules.
+        # Only in multi-module mode — single-module filter is explicit.
+        if not module_filter:
+            for mod in {str(j["module"]) for j in claimed}:
+                if mod in batch_valid_modules:
+                    module_miss_streak.pop(mod, None)
+                else:
+                    miss_count = sum(1 for j in claimed if str(j["module"]) == mod)
+                    module_miss_streak[mod] = module_miss_streak.get(mod, 0) + miss_count
+                    if module_miss_streak[mod] >= _MISS_THRESHOLD:
+                        exhausted_modules.add(mod)
 
         if len(claimed) < claim_size:
             break

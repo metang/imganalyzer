@@ -85,6 +85,7 @@ _PREREQUISITES: dict[str, str] = {
     "aesthetic": "objects",
     "ocr": "objects",
     "faces": "objects",
+    "embedding": "objects",
 }
 _DEPENDENTS: dict[str, list[str]] = {}
 for _mod, _prereq in _PREREQUISITES.items():

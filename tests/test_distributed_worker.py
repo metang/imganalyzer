@@ -429,6 +429,9 @@ def test_server_jobs_claim_packages_embedding_context(tmp_path, monkeypatch):
     queue = JobQueue(conn)
 
     image_id = repo.register_image(file_path="/nas/photos/image.jpg")
+    repo.upsert_objects(
+        image_id, {"detected_objects": [], "has_person": False, "has_text": False}
+    )
     repo.upsert_local_ai(image_id, {"description": "red boat", "scene_type": "harbor"})
     repo.upsert_cloud_ai(image_id, "openai", {"description": "dock at sunset"})
     queue.enqueue(image_id, "embedding")
