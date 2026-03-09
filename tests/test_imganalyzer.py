@@ -317,6 +317,7 @@ class TestCloudAI:
                 created_clients.append(self)
 
             async def create_session(self, config):
+                assert config.get("on_permission_request") is FakePermissionHandler.approve_all
                 return FakeSession()
 
             async def delete_session(self, session_id):
@@ -326,7 +327,19 @@ class TestCloudAI:
                 self.stop_calls += 1
                 return []
 
-        monkeypatch.setitem(sys.modules, "copilot", types.SimpleNamespace(CopilotClient=FakeCopilotClient))
+        class FakePermissionHandler:
+            @staticmethod
+            def approve_all(*_args, **_kwargs):
+                return object()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "copilot",
+            types.SimpleNamespace(
+                CopilotClient=FakeCopilotClient,
+                PermissionHandler=FakePermissionHandler,
+            ),
+        )
 
         result = CloudAI("copilot")._copilot(image_path, {})
 
@@ -354,6 +367,7 @@ class TestCloudAI:
                 created_clients.append(self)
 
             async def create_session(self, config):
+                assert config.get("on_permission_request") is FakePermissionHandler.approve_all
                 return FakeSession()
 
             async def delete_session(self, session_id):
@@ -363,7 +377,19 @@ class TestCloudAI:
                 self.stop_calls += 1
                 return []
 
-        monkeypatch.setitem(sys.modules, "copilot", types.SimpleNamespace(CopilotClient=FakeCopilotClient))
+        class FakePermissionHandler:
+            @staticmethod
+            def approve_all(*_args, **_kwargs):
+                return object()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "copilot",
+            types.SimpleNamespace(
+                CopilotClient=FakeCopilotClient,
+                PermissionHandler=FakePermissionHandler,
+            ),
+        )
 
         with pytest.raises(RuntimeError, match="boom"):
             CloudAI("copilot")._copilot(image_path, {})

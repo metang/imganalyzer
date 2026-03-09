@@ -250,7 +250,7 @@ class CloudAI:
         aesthetic_label so both modules are populated in one API call.
         """
         try:
-            from copilot import CopilotClient
+            from copilot import CopilotClient, PermissionHandler
         except ImportError:
             raise ImportError(
                 "GitHub Copilot SDK required: pip install 'imganalyzer[copilot]'"
@@ -262,7 +262,10 @@ class CloudAI:
             client = CopilotClient()
             session = None
             try:
-                session = await client.create_session({"model": "gpt-4.1"})
+                session = await client.create_session({
+                    "model": "gpt-4.1",
+                    "on_permission_request": PermissionHandler.approve_all,
+                })
                 event = await session.send_and_wait(
                     {
                         "prompt": "Analyze this image.\n\n" + SYSTEM_PROMPT_WITH_AESTHETIC,
