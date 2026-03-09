@@ -25,29 +25,6 @@ function fmtRate(imgPerSec: number): string {
   return `${imgPerSec.toFixed(1)} img/s`
 }
 
-function parseTimestamp(value?: string | null): number | null {
-  if (!value) return null
-  const isoLike = value.includes('T') ? value : value.replace(' ', 'T')
-  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(isoLike) ? isoLike : `${isoLike}Z`
-  const parsed = Date.parse(normalized)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-function fmtRelativeTime(value?: string | null): string {
-  const ts = parseTimestamp(value)
-  if (ts === null) return '—'
-  const deltaMs = Math.max(0, Date.now() - ts)
-  const seconds = Math.round(deltaMs / 1000)
-  if (seconds < 10) return 'just now'
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.round(hours / 24)
-  return `${days}d ago`
-}
-
 function statusTone(status: string): string {
   switch (status) {
     case 'running':
@@ -66,13 +43,6 @@ function statusTone(status: string): string {
     default:
       return 'bg-neutral-800 text-neutral-300 border-neutral-700'
   }
-}
-
-function formatCapabilityValue(value: unknown): string {
-  if (typeof value === 'boolean') return value ? 'yes' : 'no'
-  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(1)
-  if (typeof value === 'string') return value
-  return JSON.stringify(value)
 }
 
 const MODULE_LABELS: Record<string, string> = {
@@ -199,124 +169,68 @@ function ActivePassChips({
   )
 }
 
-function NodeMetrics({ node }: { node: BatchNode }) {
-  const capabilityEntries = Object.entries(node.capabilities ?? {}).filter(([, value]) => {
-    return value !== null && value !== undefined && value !== ''
-  })
+const NODE_COLORS = [
+  { bar: 'bg-blue-500', dot: 'bg-blue-400', text: 'text-blue-300' },
+  { bar: 'bg-emerald-500', dot: 'bg-emerald-400', text: 'text-emerald-300' },
+  { bar: 'bg-purple-500', dot: 'bg-purple-400', text: 'text-purple-300' },
+  { bar: 'bg-amber-500', dot: 'bg-amber-400', text: 'text-amber-300' },
+  { bar: 'bg-rose-500', dot: 'bg-rose-400', text: 'text-rose-300' },
+  { bar: 'bg-cyan-500', dot: 'bg-cyan-400', text: 'text-cyan-300' },
+]
+
+function NodeContribution({ nodes }: { nodes: BatchNode[] }) {
+  const totalDone = nodes.reduce((sum, n) => sum + n.completedJobs, 0)
+  if (totalDone === 0 && nodes.every((n) => n.runningJobs === 0)) return null
 
   return (
-    <div className="mt-3 grid gap-3 md:grid-cols-2">
-      <div className="grid grid-cols-2 gap-2 text-xs">
-        <SummaryCard label="Running" value={node.runningJobs.toLocaleString()} />
-        <SummaryCard label="Completed" value={node.completedJobs.toLocaleString()} />
-        <SummaryCard label="Done rate" value={fmtRate(node.imagesPerSec)} />
-        <SummaryCard label="Avg/pass" value={fmtMs(node.avgMsPerImage)} />
-        <SummaryCard label="Failed" value={node.failedJobs.toLocaleString()} />
-        <SummaryCard label="Skipped" value={node.skippedJobs.toLocaleString()} />
-      </div>
+    <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
+      <div className="mb-3 text-sm font-semibold text-neutral-100">Worker contribution</div>
 
-      <div className="rounded-xl border border-neutral-800 bg-neutral-900/40 px-3 py-3 text-xs">
-        <div className="grid gap-2">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-neutral-500">Platform</span>
-            <span className="text-right text-neutral-200">{node.platform || '—'}</span>
-          </div>
-          {node.lastHeartbeat !== undefined && (
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-neutral-500">Last heartbeat</span>
-              <span className="text-right text-neutral-200">{fmtRelativeTime(node.lastHeartbeat)}</span>
-            </div>
-          )}
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-neutral-500">Last result</span>
-            <span className="text-right text-neutral-200">{fmtRelativeTime(node.lastResultAt)}</span>
-          </div>
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-neutral-500">Done / Fail / Skip</span>
-            <span className="text-right font-mono text-neutral-200">
-              {node.doneJobs} / {node.failedJobs} / {node.skippedJobs}
-            </span>
-          </div>
+      {totalDone > 0 && (
+        <div className="mb-3 flex h-3 overflow-hidden rounded-full bg-neutral-800">
+          {nodes.map((node, i) => {
+            const pct = totalDone > 0 ? (node.completedJobs / totalDone) * 100 : 0
+            if (pct === 0) return null
+            return (
+              <div
+                key={node.id}
+                className={`${NODE_COLORS[i % NODE_COLORS.length].bar} transition-all duration-500`}
+                style={{ width: `${pct}%` }}
+                title={`${node.label}: ${node.completedJobs.toLocaleString()} (${Math.round(pct)}%)`}
+              />
+            )
+          })}
         </div>
+      )}
 
-        {capabilityEntries.length > 0 && (
-          <div className="mt-3 border-t border-neutral-800 pt-3">
-            <div className="mb-2 text-[11px] uppercase tracking-wider text-neutral-500">
-              Capabilities
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {capabilityEntries.map(([key, value]) => (
-                <span
-                  key={key}
-                  className="rounded-full border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300"
-                >
-                  {key}: {formatCapabilityValue(value)}
+      <div className="grid gap-1.5">
+        {nodes.map((node, i) => {
+          const pct = totalDone > 0 ? (node.completedJobs / totalDone) * 100 : 0
+          const color = NODE_COLORS[i % NODE_COLORS.length]
+          return (
+            <div key={node.id} className="flex items-center gap-3 text-xs">
+              <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${color.dot}`} />
+              <span className="min-w-[120px] text-neutral-200">{node.label}</span>
+              <span className={`rounded-full border px-2 py-0.5 text-[11px] ${statusTone(node.status)}`}>
+                {node.status}
+              </span>
+              <span className="ml-auto font-mono text-neutral-300">
+                {node.completedJobs.toLocaleString()}
+              </span>
+              {totalDone > 0 && (
+                <span className="w-10 text-right font-mono text-neutral-500">
+                  {Math.round(pct)}%
                 </span>
-              ))}
+              )}
+              <span className="w-16 text-right font-mono text-neutral-400">
+                {fmtRate(node.imagesPerSec)}
+              </span>
+              <ActivePassChips modules={node.activeModules} />
             </div>
-          </div>
-        )}
+          )
+        })}
       </div>
-    </div>
-  )
-}
-
-function MasterNodeCard({ node }: { node: BatchNode }) {
-  return (
-    <details className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
-      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="text-[11px] uppercase tracking-wider text-neutral-500">Master device</div>
-          <div className="mt-1 text-sm font-semibold text-neutral-100">{node.label}</div>
-          <div className="mt-2">
-            <ActivePassChips
-              modules={node.activeModules}
-              emptyLabel={node.runningJobs > 0 ? 'Resolving active passes…' : 'No active passes'}
-            />
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className={`rounded-full border px-2.5 py-1 ${statusTone(node.status)}`}>
-            {node.status}
-          </span>
-          <span className="rounded-full border border-neutral-700 px-2.5 py-1 text-neutral-300">
-            {node.runningJobs.toLocaleString()} running
-          </span>
-          <span className="rounded-full border border-neutral-700 px-2.5 py-1 text-neutral-300">
-            {fmtRate(node.imagesPerSec)}
-          </span>
-        </div>
-      </summary>
-      <NodeMetrics node={node} />
-    </details>
-  )
-}
-
-function WorkerNodeCard({ node }: { node: BatchNode }) {
-  return (
-    <details className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
-      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="text-[11px] uppercase tracking-wider text-neutral-500">Worker node</div>
-          <div className="mt-1 text-sm font-semibold text-neutral-100">{node.label}</div>
-          <div className="mt-2">
-            <ActivePassChips modules={node.activeModules} emptyLabel={node.runningJobs > 0 ? 'Resolving active passes…' : null} />
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className={`rounded-full border px-2.5 py-1 ${statusTone(node.status)}`}>
-            {node.status}
-          </span>
-          <span className="rounded-full border border-neutral-700 px-2.5 py-1 text-neutral-300">
-            {node.runningJobs.toLocaleString()} running
-          </span>
-          <span className="rounded-full border border-neutral-700 px-2.5 py-1 text-neutral-300">
-            {fmtRate(node.imagesPerSec)}
-          </span>
-        </div>
-      </summary>
-      <NodeMetrics node={node} />
-    </details>
+    </section>
   )
 }
 
@@ -362,9 +276,6 @@ export function ProgressDashboard({
   const moduleEntries = Object.entries(modules).filter(
     (entry): entry is [string, BatchModuleStats] => entry[1] != null
   )
-
-  const masterNode = nodes.find((node) => node.role === 'master')
-  const workerNodes = nodes.filter((node) => node.role === 'worker')
 
   return (
     <div className="flex flex-col gap-4">
@@ -419,18 +330,7 @@ export function ProgressDashboard({
         </div>
       </section>
 
-      {masterNode && <MasterNodeCard node={masterNode} />}
-
-      {workerNodes.length > 0 && (
-        <section className="flex flex-col gap-3">
-          <div className="text-sm font-semibold text-neutral-100">Worker nodes</div>
-          <div className="grid gap-3 xl:grid-cols-2">
-            {workerNodes.map((node) => (
-              <WorkerNodeCard key={node.id} node={node} />
-            ))}
-          </div>
-        </section>
-      )}
+      <NodeContribution nodes={nodes} />
 
       {moduleEntries.length > 0 && (
         <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
