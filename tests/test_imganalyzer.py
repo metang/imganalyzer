@@ -317,7 +317,10 @@ class TestCloudAI:
                 created_clients.append(self)
 
             async def create_session(self, config):
-                assert config.get("on_permission_request") is FakePermissionHandler.approve_all
+                handler = config.get("on_permission_request")
+                assert callable(handler)
+                result = handler(None, {})
+                assert result["kind"] == "approved"
                 return FakeSession()
 
             async def delete_session(self, session_id):
@@ -327,17 +330,11 @@ class TestCloudAI:
                 self.stop_calls += 1
                 return []
 
-        class FakePermissionHandler:
-            @staticmethod
-            def approve_all(*_args, **_kwargs):
-                return object()
-
         monkeypatch.setitem(
             sys.modules,
             "copilot",
             types.SimpleNamespace(
                 CopilotClient=FakeCopilotClient,
-                PermissionHandler=FakePermissionHandler,
             ),
         )
 
@@ -367,7 +364,8 @@ class TestCloudAI:
                 created_clients.append(self)
 
             async def create_session(self, config):
-                assert config.get("on_permission_request") is FakePermissionHandler.approve_all
+                handler = config.get("on_permission_request")
+                assert callable(handler)
                 return FakeSession()
 
             async def delete_session(self, session_id):
@@ -377,17 +375,11 @@ class TestCloudAI:
                 self.stop_calls += 1
                 return []
 
-        class FakePermissionHandler:
-            @staticmethod
-            def approve_all(*_args, **_kwargs):
-                return object()
-
         monkeypatch.setitem(
             sys.modules,
             "copilot",
             types.SimpleNamespace(
                 CopilotClient=FakeCopilotClient,
-                PermissionHandler=FakePermissionHandler,
             ),
         )
 
