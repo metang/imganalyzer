@@ -618,6 +618,18 @@ def run_distributed_worker(
     poll_interval: float = typer.Option(5.0, "--poll-interval", min=0.5, help="Seconds to wait between empty claim polls"),
     heartbeat_interval: float = typer.Option(30.0, "--heartbeat-interval", min=1.0, help="Seconds between worker and lease heartbeats"),
     lease_ttl: int = typer.Option(120, "--lease-ttl", min=5, help="Lease TTL in seconds requested from the coordinator"),
+    slow_job_seconds: float = typer.Option(
+        45.0,
+        "--slow-job-seconds",
+        min=0.0,
+        help="Log per-stage diagnostics when a claimed job exceeds this many seconds (0 disables)",
+    ),
+    job_log_interval: float = typer.Option(
+        30.0,
+        "--job-log-interval",
+        min=0.0,
+        help="Emit periodic 'still running' logs for active jobs (seconds, 0 disables)",
+    ),
     module: Optional[str] = typer.Option(None, "--module", help="Optional single-module filter when claiming jobs"),
     path_mapping: list[str] | None = typer.Option(None, "--path-mapping", help="Repeatable source-to-local prefix remap rule: SOURCE_PREFIX=LOCAL_PREFIX"),
     force: bool = typer.Option(False, "--force", help="Ignore cache and re-run analyzed modules"),
@@ -671,6 +683,8 @@ def run_distributed_worker(
         verbose=verbose,
         write_xmp=not no_xmp,
         path_mappings=path_mappings,
+        slow_job_log_seconds=slow_job_seconds,
+        running_log_interval_seconds=job_log_interval,
     )
     stats = worker.run_forever()
     console.print(

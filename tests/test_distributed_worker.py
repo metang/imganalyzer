@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from unittest.mock import patch
 
 from imganalyzer.db.queue import JobQueue
@@ -78,6 +79,111 @@ def test_process_claimed_job_reports_completion(tmp_path):
             },
         )
     ]
+
+
+def test_process_claimed_job_logs_slow_diagnostics(tmp_path, monkeypatch):
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+    image_id = repo.register_image(file_path="/photos/distributed-metadata.jpg")
+
+    worker = DistributedWorker(
+        coordinator_url="http://127.0.0.1:8765/",
+        worker_id="worker-a",
+        batch_size=1,
+        write_xmp=False,
+        slow_job_log_seconds=0.05,
+        running_log_interval_seconds=0.0,
+    )
+
+    class FakeRunner:
+        def run(self, _image_id: int, _module: str):
+            return {"description": "ok"}
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "imganalyzer.pipeline.distributed_worker.console.print",
+        lambda *args, **_kwargs: printed.append(" ".join(str(arg) for arg in args)),
+    )
+
+    mono_values = [0.0, 0.0, 0.01, 0.01, 0.12, 0.12, 0.13, 0.13, 0.20, 0.20, 0.20]
+    mono_idx = {"value": 0}
+
+    def _fake_monotonic() -> float:
+        idx = mono_idx["value"]
+        if idx < len(mono_values):
+            value = mono_values[idx]
+        else:
+            value = mono_values[-1]
+        mono_idx["value"] = idx + 1
+        return value
+
+    monkeypatch.setattr("imganalyzer.pipeline.distributed_worker.time.monotonic", _fake_monotonic)
+
+    worker._open_job_sandbox = lambda _job: (conn, repo, FakeRunner())  # type: ignore[method-assign]
+    worker._coordinator_call = lambda _method, _params: {"ok": True}  # type: ignore[method-assign]
+
+    with patch(
+        "imganalyzer.pipeline.distributed_worker.extract_result_payload",
+        return_value={"data": {"camera_make": "TestCam"}},
+    ):
+        status = worker._process_claimed_job(
+            {
+                "id": 6,
+                "imageId": image_id,
+                "module": "metadata",
+                "leaseToken": "lease-456",
+                "filePath": "/photos/distributed-metadata.jpg",
+            }
+        )
+
+    assert status == "done"
+    assert any("Slow job diagnostic" in line for line in printed)
+
+
+def test_process_claimed_job_logs_still_running(tmp_path, monkeypatch):
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+    image_id = repo.register_image(file_path="/photos/distributed-metadata.jpg")
+
+    worker = DistributedWorker(
+        coordinator_url="http://127.0.0.1:8765/",
+        worker_id="worker-a",
+        batch_size=1,
+        write_xmp=False,
+        slow_job_log_seconds=0.0,
+        running_log_interval_seconds=0.01,
+    )
+
+    class SlowRunner:
+        def run(self, _image_id: int, _module: str):
+            time.sleep(0.05)
+            return {"description": "ok"}
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "imganalyzer.pipeline.distributed_worker.console.print",
+        lambda *args, **_kwargs: printed.append(" ".join(str(arg) for arg in args)),
+    )
+
+    worker._open_job_sandbox = lambda _job: (conn, repo, SlowRunner())  # type: ignore[method-assign]
+    worker._coordinator_call = lambda _method, _params: {"ok": True}  # type: ignore[method-assign]
+
+    with patch(
+        "imganalyzer.pipeline.distributed_worker.extract_result_payload",
+        return_value={"data": {"camera_make": "TestCam"}},
+    ):
+        status = worker._process_claimed_job(
+            {
+                "id": 7,
+                "imageId": image_id,
+                "module": "metadata",
+                "leaseToken": "lease-789",
+                "filePath": "/photos/distributed-metadata.jpg",
+            }
+        )
+
+    assert status == "done"
+    assert any("still running" in line for line in printed)
 
 
 def test_should_bypass_proxy_for_private_coordinator_urls():

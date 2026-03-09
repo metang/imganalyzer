@@ -244,6 +244,8 @@ class DistributedWorker:
         verbose: bool = False,
         write_xmp: bool = True,
         path_mappings: list[tuple[str, str]] | None = None,
+        slow_job_log_seconds: float = 45.0,
+        running_log_interval_seconds: float = 30.0,
     ) -> None:
         _ensure_torch_runtime_env()
         self.client = CoordinatorClient(coordinator_url, auth_token=auth_token)
@@ -262,6 +264,8 @@ class DistributedWorker:
         self.verbose = verbose
         self.write_xmp = write_xmp
         self.path_mappings = path_mappings or []
+        self.slow_job_log_seconds = max(0.0, slow_job_log_seconds)
+        self.running_log_interval_seconds = max(0.0, running_log_interval_seconds)
 
         # Probe which modules this worker can actually execute.
         # When a single --module filter is set, trust the user; otherwise
@@ -277,6 +281,27 @@ class DistributedWorker:
         self._registration_attempts = 0
         self._claim_attempts = 0
         self._empty_claim_polls = 0
+
+    def _job_runtime_logger(
+        self,
+        *,
+        module: str,
+        short_path: str,
+        job_id: int,
+        started_monotonic: float,
+        finished: threading.Event,
+    ) -> None:
+        """Emit periodic logs while a claimed job is still executing."""
+        interval = self.running_log_interval_seconds
+        if interval <= 0:
+            return
+
+        while not finished.wait(interval):
+            elapsed = time.monotonic() - started_monotonic
+            console.print(
+                f"[dim]  … {module} still running ({elapsed:.1f}s) ← "
+                f"{escape(short_path)} (job {job_id})[/dim]"
+            )
 
     def _proxy_env_summary(self) -> str:
         """Summarize proxy-related environment variables for diagnostics."""
@@ -507,17 +532,48 @@ class DistributedWorker:
         path = str(job.get("filePath") or f"id={image_id}")
         short_path = Path(path).name
         start_ms = int(time.time() * 1000)
+        started_monotonic = time.monotonic()
         conn: sqlite3.Connection | None = None
+        sandbox_ms = 0
+        run_ms = 0
+        payload_ms = 0
+        complete_ms = 0
+        finished = threading.Event()
+        runtime_thread: threading.Thread | None = None
+
+        if self.running_log_interval_seconds > 0:
+            runtime_thread = threading.Thread(
+                target=self._job_runtime_logger,
+                kwargs={
+                    "module": module,
+                    "short_path": short_path,
+                    "job_id": job_id,
+                    "started_monotonic": started_monotonic,
+                    "finished": finished,
+                },
+                name=f"{self.worker_id}-job-{job_id}-runtime",
+                daemon=True,
+            )
+            runtime_thread.start()
 
         console.print(
             f"  [blue]▶[/blue] [bold]{module}[/bold] ← {short_path} [dim](job {job_id})[/dim]"
         )
 
         try:
+            sandbox_started = time.monotonic()
             conn, repo, runner = self._open_job_sandbox(job)
+            sandbox_ms = int((time.monotonic() - sandbox_started) * 1000)
+
+            run_started = time.monotonic()
             result = runner.run(image_id, module)
+            run_ms = int((time.monotonic() - run_started) * 1000)
+
+            payload_started = time.monotonic()
             payload = extract_result_payload(conn, repo, image_id=image_id, module=module)
-            elapsed = int(time.time() * 1000) - start_ms
+            payload_ms = int((time.monotonic() - payload_started) * 1000)
+
+            complete_started = time.monotonic()
             done = self._coordinator_call(
                 "jobs/complete",
                 {
@@ -527,6 +583,8 @@ class DistributedWorker:
                     "noXmp": not self.write_xmp,
                 },
             )
+            complete_ms = int((time.monotonic() - complete_started) * 1000)
+            elapsed = int((time.monotonic() - started_monotonic) * 1000)
             if not bool(done.get("ok")):
                 raise RuntimeError(f"Coordinator rejected completion for job {job_id}")
             keywords = result.get("keywords") if module == "cloud_ai" and result else None
@@ -534,6 +592,18 @@ class DistributedWorker:
             console.print(
                 f"  [green]✓[/green] [bold]{module}[/bold] done in {elapsed / 1000:.1f}s ← {short_path}"
             )
+            if (
+                self.slow_job_log_seconds > 0
+                and elapsed >= int(self.slow_job_log_seconds * 1000)
+            ):
+                console.print(
+                    "[yellow]  Slow job diagnostic:[/yellow] "
+                    f"{module} job {job_id} total {elapsed / 1000:.1f}s "
+                    f"(sandbox {sandbox_ms / 1000:.2f}s, "
+                    f"run {run_ms / 1000:.2f}s, "
+                    f"payload {payload_ms / 1000:.2f}s, "
+                    f"complete {complete_ms / 1000:.2f}s)"
+                )
             return "done"
 
         except ImportError as exc:
@@ -603,6 +673,9 @@ class DistributedWorker:
             return "failed"
 
         finally:
+            finished.set()
+            if runtime_thread is not None:
+                runtime_thread.join(timeout=0.1)
             if conn is not None:
                 conn.close()
             self._clear_active(job_id)
