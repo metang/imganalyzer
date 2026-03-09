@@ -260,6 +260,7 @@ class CloudAI:
             # Always create a fresh client — asyncio.run() closes its event
             # loop on return, so any cached client becomes invalid.
             client = CopilotClient()
+            session = None
             try:
                 session = await client.create_session({"model": "gpt-4.1"})
                 event = await session.send_and_wait(
@@ -277,16 +278,17 @@ class CloudAI:
                 return _parse_json_response(content)
             finally:
                 # Delete the session to prevent "Analyze this image" clutter.
-                try:
-                    await asyncio.wait_for(
-                        client.delete_session(session.session_id), timeout=10.0
-                    )
-                except Exception:
-                    log.debug(
-                        "Failed to delete Copilot session %s",
-                        getattr(session, "session_id", "?"),
-                        exc_info=True,
-                    )
+                if session is not None:
+                    try:
+                        await asyncio.wait_for(
+                            client.delete_session(session.session_id), timeout=10.0
+                        )
+                    except Exception:
+                        log.debug(
+                            "Failed to delete Copilot session %s",
+                            session.session_id,
+                            exc_info=True,
+                        )
                 await _stop_copilot_client(client)
 
         # RAW and HEIC/HEIF/AVIF files must be converted to JPEG before submission.
