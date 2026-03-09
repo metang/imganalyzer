@@ -81,6 +81,98 @@ def test_process_claimed_job_reports_completion(tmp_path):
     ]
 
 
+def test_process_claimed_job_retries_transient_db_lock_on_complete(tmp_path):
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+    image_id = repo.register_image(file_path="/photos/distributed-metadata.jpg")
+
+    worker = DistributedWorker(
+        coordinator_url="http://127.0.0.1:8765/",
+        worker_id="worker-a",
+        batch_size=1,
+        write_xmp=False,
+    )
+    worker._db_lock_retry_attempts = 4
+    worker._db_lock_retry_base_seconds = 0.0
+
+    class FakeRunner:
+        def run(self, _image_id: int, _module: str):
+            return {"description": "ok"}
+
+    call_counts = {"complete": 0}
+
+    def fake_call(method: str, _params: dict[str, object]) -> dict[str, object]:
+        if method != "jobs/complete":
+            raise AssertionError(f"Unexpected coordinator method: {method}")
+        call_counts["complete"] += 1
+        if call_counts["complete"] < 3:
+            raise RuntimeError("database is locked")
+        return {"ok": True}
+
+    worker._open_job_sandbox = lambda _job: (conn, repo, FakeRunner())  # type: ignore[method-assign]
+    worker._coordinator_call = fake_call  # type: ignore[method-assign]
+
+    with patch(
+        "imganalyzer.pipeline.distributed_worker.extract_result_payload",
+        return_value={"data": {"camera_make": "TestCam"}},
+    ):
+        status = worker._process_claimed_job(
+            {
+                "id": 8,
+                "imageId": image_id,
+                "module": "metadata",
+                "leaseToken": "lease-999",
+                "filePath": "/photos/distributed-metadata.jpg",
+            }
+        )
+
+    assert status == "done"
+    assert call_counts["complete"] == 3
+
+
+def test_process_claimed_job_does_not_crash_when_fail_update_raises(tmp_path):
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+    image_id = repo.register_image(file_path="/photos/distributed-metadata.jpg")
+
+    worker = DistributedWorker(
+        coordinator_url="http://127.0.0.1:8765/",
+        worker_id="worker-a",
+        batch_size=1,
+        write_xmp=False,
+    )
+    worker._db_lock_retry_attempts = 2
+    worker._db_lock_retry_base_seconds = 0.0
+
+    class FailingRunner:
+        def run(self, _image_id: int, _module: str):
+            raise RuntimeError("boom")
+
+    fail_calls = {"count": 0}
+
+    def fake_call(method: str, _params: dict[str, object]) -> dict[str, object]:
+        if method != "jobs/fail":
+            raise AssertionError(f"Unexpected coordinator method: {method}")
+        fail_calls["count"] += 1
+        raise RuntimeError("database is locked")
+
+    worker._open_job_sandbox = lambda _job: (conn, repo, FailingRunner())  # type: ignore[method-assign]
+    worker._coordinator_call = fake_call  # type: ignore[method-assign]
+
+    status = worker._process_claimed_job(
+        {
+            "id": 9,
+            "imageId": image_id,
+            "module": "metadata",
+            "leaseToken": "lease-1000",
+            "filePath": "/photos/distributed-metadata.jpg",
+        }
+    )
+
+    assert status == "failed"
+    assert fail_calls["count"] == 2
+
+
 def test_process_claimed_job_logs_slow_diagnostics(tmp_path, monkeypatch):
     conn = _make_test_db(tmp_path)
     repo = Repository(conn)

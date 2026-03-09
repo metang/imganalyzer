@@ -35,6 +35,11 @@ _ALWAYS_AVAILABLE_MODULES = {"metadata", "technical"}
 
 # Modules that require a cloud SDK (checked separately per provider)
 _CLOUD_MODULES = {"cloud_ai", "aesthetic"}
+_TRANSIENT_DB_LOCK_MARKERS = (
+    "database is locked",
+    "database table is locked",
+    "database schema is locked",
+)
 
 
 def _ensure_torch_runtime_env() -> None:
@@ -136,6 +141,12 @@ def _should_bypass_proxy(url: str) -> bool:
     except ValueError:
         return host.endswith(".local")
     return addr.is_private or addr.is_loopback or addr.is_link_local
+
+
+def _is_transient_db_lock_error(exc: Exception) -> bool:
+    """Return True when an exception looks like a transient SQLite lock conflict."""
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _TRANSIENT_DB_LOCK_MARKERS)
 
 
 class CoordinatorClient:
@@ -266,6 +277,8 @@ class DistributedWorker:
         self.path_mappings = path_mappings or []
         self.slow_job_log_seconds = max(0.0, slow_job_log_seconds)
         self.running_log_interval_seconds = max(0.0, running_log_interval_seconds)
+        self._db_lock_retry_attempts = 4
+        self._db_lock_retry_base_seconds = 0.25
 
         # Probe which modules this worker can actually execute.
         # When a single --module filter is set, trust the user; otherwise
@@ -400,6 +413,30 @@ class DistributedWorker:
     def _coordinator_call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Delegate a request to the coordinator client."""
         return self.client.call(method, params)
+
+    def _coordinator_call_with_lock_retry(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Retry coordinator calls when SQLite lock conflicts are transient."""
+        attempts = max(1, self._db_lock_retry_attempts)
+        base_delay = max(0.0, self._db_lock_retry_base_seconds)
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._coordinator_call(method, params)
+            except Exception as exc:
+                if not _is_transient_db_lock_error(exc) or attempt >= attempts:
+                    raise
+                delay = min(2.0, base_delay * (2 ** (attempt - 1)))
+                if self.verbose:
+                    console.print(
+                        "[yellow]Coordinator database is locked; retrying "
+                        f"{method} ({attempt}/{attempts - 1}) in {delay:.2f}s[/yellow]"
+                    )
+                if delay > 0:
+                    self._shutdown.wait(delay)
+        raise RuntimeError(f"Coordinator call failed unexpectedly for {method}")
 
     def _register_worker(self) -> None:
         """Register this worker with the coordinator."""
@@ -574,7 +611,7 @@ class DistributedWorker:
             payload_ms = int((time.monotonic() - payload_started) * 1000)
 
             complete_started = time.monotonic()
-            done = self._coordinator_call(
+            done = self._coordinator_call_with_lock_retry(
                 "jobs/complete",
                 {
                     "jobId": job_id,
@@ -608,7 +645,7 @@ class DistributedWorker:
 
         except ImportError as exc:
             elapsed = int(time.time() * 1000) - start_ms
-            skipped = self._coordinator_call(
+            skipped = self._coordinator_call_with_lock_retry(
                 "jobs/skip",
                 {
                     "jobId": job_id,
@@ -634,7 +671,7 @@ class DistributedWorker:
                 or "pillow cannot decode" in err_lower
             ):
                 elapsed = int(time.time() * 1000) - start_ms
-                skipped = self._coordinator_call(
+                skipped = self._coordinator_call_with_lock_retry(
                     "jobs/skip",
                     {
                         "jobId": job_id,
@@ -656,15 +693,22 @@ class DistributedWorker:
         except Exception as exc:
             elapsed = int(time.time() * 1000) - start_ms
             error_msg = f"{type(exc).__name__}: {exc}"
-            failed = self._coordinator_call(
-                "jobs/fail",
-                {"jobId": job_id, "leaseToken": lease_token, "error": error_msg},
-            )
-            if not bool(failed.get("ok")) and self.verbose:
-                console.print(
-                    f"[yellow]Coordinator rejected failure update for job {job_id}; "
-                    "the lease may have expired.[/yellow]"
+            try:
+                failed = self._coordinator_call_with_lock_retry(
+                    "jobs/fail",
+                    {"jobId": job_id, "leaseToken": lease_token, "error": error_msg},
                 )
+                if not bool(failed.get("ok")) and self.verbose:
+                    console.print(
+                        f"[yellow]Coordinator rejected failure update for job {job_id}; "
+                        "the lease may have expired.[/yellow]"
+                    )
+            except Exception as mark_exc:
+                if self.verbose:
+                    console.print(
+                        f"[yellow]Failed to report job {job_id} as failed:[/yellow] "
+                        f"{escape(str(mark_exc))}"
+                    )
             _emit_result(path, module, "failed", elapsed, error_msg)
             console.print(
                 f"  [red]✗[/red] [bold]{module}[/bold] failed in {elapsed / 1000:.1f}s ← "
