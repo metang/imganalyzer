@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import type { BatchResult } from '../global'
 
 interface Props {
@@ -16,11 +17,50 @@ const STATUS_LABELS: Record<BatchResult['status'], string> = {
   skipped: 'skip',
 }
 
+/** Distinct hues for worker nodes on a dark background. */
+const NODE_PALETTE = [
+  { text: 'text-sky-400',     dot: 'bg-sky-400' },
+  { text: 'text-violet-400',  dot: 'bg-violet-400' },
+  { text: 'text-amber-400',   dot: 'bg-amber-400' },
+  { text: 'text-teal-400',    dot: 'bg-teal-400' },
+  { text: 'text-rose-400',    dot: 'bg-rose-400' },
+  { text: 'text-lime-400',    dot: 'bg-lime-400' },
+  { text: 'text-fuchsia-400', dot: 'bg-fuchsia-400' },
+  { text: 'text-cyan-400',    dot: 'bg-cyan-400' },
+  { text: 'text-orange-400',  dot: 'bg-orange-400' },
+  { text: 'text-indigo-400',  dot: 'bg-indigo-400' },
+]
+
+const MASTER_STYLE = { text: 'text-blue-400', dot: 'bg-blue-400' }
+
+function djb2(s: string): number {
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+  return h
+}
+
+/** Build a stable nodeId → palette mapping from the current result set. */
+function buildNodeColorMap(results: BatchResult[]): Map<string, typeof MASTER_STYLE> {
+  const map = new Map<string, typeof MASTER_STYLE>()
+  for (const r of results) {
+    if (map.has(r.nodeId)) continue
+    if (r.nodeRole === 'master') {
+      map.set(r.nodeId, MASTER_STYLE)
+    } else {
+      const idx = Math.abs(djb2(r.nodeId)) % NODE_PALETTE.length
+      map.set(r.nodeId, NODE_PALETTE[idx])
+    }
+  }
+  return map
+}
+
 /**
  * Scrollable live feed of the last 200 per-job results.
  * Newest entries appear at the top.
  */
 export function LiveResultsFeed({ results }: Props) {
+  const nodeColors = useMemo(() => buildNodeColorMap(results), [results])
+
   if (results.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-neutral-600 text-xs">
@@ -31,7 +71,9 @@ export function LiveResultsFeed({ results }: Props) {
 
   return (
     <div className="flex-1 overflow-y-auto text-xs font-mono">
-      {results.map((r) => (
+      {results.map((r) => {
+        const nc = nodeColors.get(r.nodeId) ?? MASTER_STYLE
+        return (
         <div
           key={r.id}
           className="flex items-baseline gap-2 px-3 py-0.5 hover:bg-neutral-800/50 transition-colors"
@@ -40,11 +82,12 @@ export function LiveResultsFeed({ results }: Props) {
           <span className={`w-9 shrink-0 font-semibold uppercase ${STATUS_COLORS[r.status]}`}>
             {STATUS_LABELS[r.status]}
           </span>
-          {/* Node label */}
+          {/* Node label with per-node color */}
           <span
-            className="hidden w-24 shrink-0 truncate text-neutral-500 md:block"
+            className={`hidden items-center gap-1.5 w-28 shrink-0 truncate md:inline-flex ${nc.text}`}
             title={r.nodeLabel}
           >
+            <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${nc.dot}`} />
             {r.nodeLabel}
           </span>
           {/* Module name — fixed width */}
@@ -83,7 +126,8 @@ export function LiveResultsFeed({ results }: Props) {
             </span>
           )}
         </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
