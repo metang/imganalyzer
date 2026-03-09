@@ -8,6 +8,7 @@ import platform
 import signal
 import socket
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -40,6 +41,21 @@ _TRANSIENT_DB_LOCK_MARKERS = (
     "database table is locked",
     "database schema is locked",
 )
+
+
+def _detect_git_repo() -> Path | None:
+    """Return the git repo root containing this package, or None."""
+    try:
+        pkg_dir = Path(__file__).resolve().parent.parent
+        r = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=pkg_dir, capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return Path(r.stdout.strip())
+    except Exception:
+        pass
+    return None
 
 
 def _ensure_torch_runtime_env() -> None:
@@ -257,6 +273,8 @@ class DistributedWorker:
         path_mappings: list[tuple[str, str]] | None = None,
         slow_job_log_seconds: float = 45.0,
         running_log_interval_seconds: float = 30.0,
+        auto_update: bool = False,
+        auto_update_interval_seconds: float = 60.0,
     ) -> None:
         _ensure_torch_runtime_env()
         self.client = CoordinatorClient(coordinator_url, auth_token=auth_token)
@@ -294,6 +312,72 @@ class DistributedWorker:
         self._registration_attempts = 0
         self._claim_attempts = 0
         self._empty_claim_polls = 0
+
+        # Auto-update: check git for new commits and restart when found.
+        self._auto_update = auto_update
+        self._auto_update_interval = max(30.0, auto_update_interval_seconds)
+        self._last_update_check = 0.0
+        self._update_pending = False
+        self._repo_dir: Path | None = None
+        if auto_update:
+            self._repo_dir = _detect_git_repo()
+
+    # ── Auto-update ───────────────────────────────────────────────────────
+
+    def _maybe_check_for_update(self) -> None:
+        """Check git for new commits if enough time has passed."""
+        if not self._auto_update or self._repo_dir is None:
+            return
+        now = time.monotonic()
+        if now - self._last_update_check < self._auto_update_interval:
+            return
+        self._last_update_check = now
+        if self._has_remote_update():
+            console.print(
+                "[yellow]Code update detected on remote; "
+                "finishing current work and restarting…[/yellow]"
+            )
+            self._update_pending = True
+            self._shutdown.set()
+
+    def _has_remote_update(self) -> bool:
+        """Return True if the remote branch has commits ahead of local HEAD."""
+        try:
+            subprocess.run(
+                ["git", "fetch", "origin"],
+                cwd=self._repo_dir, capture_output=True, timeout=30,
+            )
+            local = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self._repo_dir, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            upstream = subprocess.run(
+                ["git", "rev-parse", "@{u}"],
+                cwd=self._repo_dir, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            return bool(upstream) and local != upstream
+        except Exception:
+            return False
+
+    def _pull_and_restart(self) -> None:
+        """Pull latest code and re-exec the worker process."""
+        assert self._repo_dir is not None
+        console.print("[cyan]Pulling latest code…[/cyan]")
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=self._repo_dir, capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            console.print(
+                f"[red]git pull failed (exit {result.returncode}):[/red] "
+                f"{result.stderr.strip()}"
+            )
+            return
+        console.print(f"[green]Updated:[/green] {result.stdout.strip()}")
+        console.print("[cyan]Restarting worker…[/cyan]")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    # ── Job runtime ───────────────────────────────────────────────────────
 
     def _job_runtime_logger(
         self,
@@ -772,6 +856,18 @@ class DistributedWorker:
                     console.print(
                         f"[yellow]Unavailable modules (missing deps):[/yellow] {', '.join(missing)}"
                     )
+                if self._auto_update:
+                    if self._repo_dir:
+                        console.print(
+                            f"[dim]Auto-update enabled "
+                            f"(checking every {self._auto_update_interval:g}s, "
+                            f"repo: {self._repo_dir})[/dim]"
+                        )
+                    else:
+                        console.print(
+                            "[yellow]Auto-update requested but no git repo found; disabled.[/yellow]"
+                        )
+                        self._auto_update = False
                 # Fail fast when core local-AI deps are absent — the worker
                 # would just claim and skip every objects/blip2/ocr/faces job.
                 local_ai_available = _LOCAL_AI_MODULES & set(self.supported_modules)
@@ -873,6 +969,7 @@ class DistributedWorker:
                             f"active leases={len(self._snapshot_active())}{queue_hint})[/dim]"
                         )
                     self._shutdown.wait(self.poll_interval_seconds)
+                    self._maybe_check_for_update()
                     continue
 
                 self._empty_claim_polls = 0
@@ -892,6 +989,7 @@ class DistributedWorker:
                         f"{stats.get('failed', 0)} failed, "
                         f"{stats.get('skipped', 0)} skipped"
                     )
+                self._maybe_check_for_update()
         finally:
             self._shutdown.set()
             self._release_all_active_leases()
@@ -905,5 +1003,8 @@ class DistributedWorker:
                     )
             if is_main and original_handler is not None:
                 signal.signal(signal.SIGINT, original_handler)
+
+        if self._update_pending and self._repo_dir is not None:
+            self._pull_and_restart()
 
         return stats

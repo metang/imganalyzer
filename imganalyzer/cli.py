@@ -643,6 +643,8 @@ def run_distributed_worker(
     detection_prompt: Optional[str] = typer.Option(None, "--detection-prompt"),
     detection_threshold: Optional[float] = typer.Option(None, "--detection-threshold", min=0.0, max=1.0),
     face_threshold: Optional[float] = typer.Option(None, "--face-threshold", min=0.0, max=1.0),
+    auto_update: bool = typer.Option(False, "--auto-update", help="Automatically pull new code from git and restart when updates are detected"),
+    auto_update_interval: float = typer.Option(60.0, "--auto-update-interval", min=30.0, help="Seconds between git update checks (requires --auto-update)"),
 ) -> None:
     """Run a distributed worker that claims leased jobs from a coordinator."""
     from dotenv import load_dotenv
@@ -685,6 +687,8 @@ def run_distributed_worker(
         path_mappings=path_mappings,
         slow_job_log_seconds=slow_job_seconds,
         running_log_interval_seconds=job_log_interval,
+        auto_update=auto_update,
+        auto_update_interval_seconds=auto_update_interval,
     )
     stats = worker.run_forever()
     console.print(
