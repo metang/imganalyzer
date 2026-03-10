@@ -1193,6 +1193,16 @@ class DistributedWorker:
             registered = False
             self._empty_claim_polls = 0
             console.print("[dim]Resuming worker…[/dim]")
+
+            # Restart the heartbeat thread (the old one exited when
+            # _shutdown was set during the update-check teardown).
+            heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name=f"{self.worker_id}-heartbeat",
+                daemon=True,
+            )
+            heartbeat_thread.start()
+
             try:
                 while not self._shutdown.is_set():
                     if not registered:
