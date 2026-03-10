@@ -315,7 +315,7 @@ class DistributedWorker:
 
         # Auto-update: check git for new commits and restart when found.
         self._auto_update = auto_update
-        self._auto_update_interval = max(30.0, auto_update_interval_seconds)
+        self._auto_update_interval = max(60.0, auto_update_interval_seconds)
         self._last_update_check = 0.0
         self._update_pending = False
         self._repo_dir: Path | None = None
@@ -1183,15 +1183,63 @@ class DistributedWorker:
                         f"[yellow]Worker lease release failed on shutdown:[/yellow] "
                         f"{escape(str(exc))}"
                     )
-            if is_main and original_handler is not None:
-                signal.signal(signal.SIGINT, original_handler)
 
         if self._update_pending and self._repo_dir is not None:
             self._pull_and_restart()
             # _pull_and_restart returns only if pull had no new commits.
-            # Reset state and re-enter the main loop.
+            # Resume the main loop without full re-init.
             self._shutdown.clear()
             self._update_pending = False
-            return self.run_forever()
+            registered = False
+            self._empty_claim_polls = 0
+            console.print("[dim]Resuming worker…[/dim]")
+            try:
+                while not self._shutdown.is_set():
+                    if not registered:
+                        try:
+                            self._register_worker()
+                        except Exception:
+                            self._shutdown.wait(self.poll_interval_seconds)
+                            continue
+                        registered = True
+                        console.print(
+                            f"[green]Reconnected to coordinator as[/green] "
+                            f"{self.display_name} [dim]({self.worker_id})[/dim]"
+                        )
+
+                    try:
+                        jobs = self._claim_jobs()
+                    except Exception:
+                        registered = False
+                        self._shutdown.wait(self.poll_interval_seconds)
+                        continue
+
+                    if not jobs:
+                        self._empty_claim_polls += 1
+                        self._shutdown.wait(self.poll_interval_seconds)
+                        self._maybe_check_for_update()
+                        continue
+
+                    self._empty_claim_polls = 0
+                    console.print(f"[cyan]Claimed {len(jobs)} job(s)[/cyan]")
+                    self._mark_all_active(jobs)
+                    for job in jobs:
+                        if self._shutdown.is_set():
+                            break
+                        status = self._process_claimed_job(job)
+                        stats[status] = stats.get(status, 0) + 1
+                    self._maybe_check_for_update()
+            finally:
+                self._shutdown.set()
+                self._release_all_active_leases()
+                try:
+                    self._coordinator_call(
+                        "jobs/release-worker", {"workerId": self.worker_id}
+                    )
+                except Exception:
+                    pass
+
+        if is_main and original_handler is not None:
+            signal.signal(signal.SIGINT, original_handler)
 
         return stats
