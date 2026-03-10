@@ -378,12 +378,25 @@ class DistributedWorker:
             cwd=self._repo_dir, capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
+            # ff-only failed (local diverged) — force-reset to upstream.
             console.print(
-                f"[red]git pull failed (exit {result.returncode}):[/red] "
-                f"{result.stderr.strip()}"
+                "[yellow]Fast-forward failed; resetting to upstream…[/yellow]"
             )
-            self._update_pending = False
-            return
+            branch = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self._repo_dir, capture_output=True, text=True, timeout=10,
+            ).stdout.strip() or "main"
+            reset = subprocess.run(
+                ["git", "reset", "--hard", f"origin/{branch}"],
+                cwd=self._repo_dir, capture_output=True, text=True, timeout=30,
+            )
+            if reset.returncode != 0:
+                console.print(
+                    f"[red]git reset failed (exit {reset.returncode}):[/red] "
+                    f"{reset.stderr.strip()}"
+                )
+                self._update_pending = False
+                return
 
         new_head = ""
         try:
@@ -399,7 +412,7 @@ class DistributedWorker:
             self._update_pending = False
             return
 
-        console.print(f"[green]Updated:[/green] {result.stdout.strip()}")
+        console.print(f"[green]Updated:[/green] {old_head[:8]}→{new_head[:8]}")
         console.print("[cyan]Restarting worker…[/cyan]")
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
