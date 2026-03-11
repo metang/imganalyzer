@@ -1,0 +1,1 @@
+"""Aesthetic scoring model adapters."""

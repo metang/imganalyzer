@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "model-eval"
+version = "0.1.0"
+description = "Evaluate aesthetic and captioning models for imganalyzer"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.5",
+    "transformers>=4.45",
+    "Pillow>=10.0",
+    "typer[all]>=0.12",
+    "Jinja2>=3.1",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+aesthetic = [
+    "aesthetic-predictor-v2-5",
+    "open_clip_torch>=2.24",
+    # pyiqa pins transformers==4.37.2 — install separately:
+    #   pip install pyiqa --no-deps
+    #   pip install timm einops
+]
+caption = [
+    "accelerate>=0.29",
+    "bitsandbytes>=0.43",
+    "qwen-vl-utils",
+]
+cloud = [
+    "openai>=1.30",
+]
+all = [
+    "model-eval[aesthetic,caption,cloud]",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+model-eval = "model_eval.cli:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.setuptools.packages.find]
+include = ["model_eval*"]

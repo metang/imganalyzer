@@ -1,0 +1,435 @@
+{
+  "qwen3.5-vl-2b": {
+    "20250812-DSC02000": {
+      "caption": "A simple wooden cross stands quietly on a rustic wooden altar inside a dimly lit room. Looking out through a large, dark-framed window, a breathtaking view of rugged mountain peaks under a bright blue sky fills the view. Below the jagged peaks, green trees and golden sage brush create a peaceful natural landscape. The interior\u2019s woodwork matches the outdoor scenery, blending the quiet solitude of the sanctuary with the grandeur of the outdoors.",
+      "inference_time_s": 27.227,
+      "model": "qwen3.5-vl-2b"
+    },
+    "20250812-DSC02080": {
+      "caption": "Dramatic pink and purple clouds paint a stunning sunset over a vast grassy plain. Rolling hills and a single, solitary tree frame the scene. A faint path leads into the distance, emphasizing the isolation of the wilderness under a colorful, textured sky.",
+      "inference_time_s": 6.07,
+      "model": "qwen3.5-vl-2b"
+    },
+    "20250814-DSC09568": {
+      "caption": "",
+      "inference_time_s": 7.665,
+      "model": "qwen3.5-vl-2b"
+    },
+    "20250814-DSC09590": {
+      "caption": "A dramatic waterfall cascades down a steep canyon wall, plunging into a misty abyss below. The surrounding terrain is rugged, characterized by steep slopes of gray rock and vibrant yellow mineral deposits from glacial meltwater. Lush pine forests cling to the mountain sides, framing the powerful flow of water that tumbles over the edge. A stream rushes to the pool at the canyon floor, contrasting the white spray of the falls with the deep, cool tones of the forest and rocks.",
+      "inference_time_s": 5.702,
+      "model": "qwen3.5-vl-2b"
+    },
+    "DSC00011": {
+      "caption": "A large bison rumbles across a dusty, sandy path in a grassy, sagebrush-rich environment. Its dark, shaggy coat and thick shoulder hump dominate the frame as it kicks up dust in the foreground. The background fades into a misty forest of pine trees, blurring the distance. This striking wildlife shot captures the raw energy of the animal in its natural habitat.",
+      "inference_time_s": 5.819,
+      "model": "qwen3.5-vl-2b"
+    },
+    "DSC00176": {
+      "caption": "This photo features a solitary brown bear wandering through a lush, grassy landscape. The terrain is a mix of tall, golden-yellow vegetation and scattered fallen logs in the middle distance. A gravelly riverbed occupies the immediate foreground, while rolling hills with sparse scrub rise in the background. The warm, soft light suggests a quiet moment in nature, likely late afternoon.",
+      "inference_time_s": 4.387,
+      "model": "qwen3.5-vl-2b"
+    },
+    "DSC00188": {
+      "caption": "This image captures a dramatic sunset where the sun breaks through a line of dark clouds. The sky is filled with layers of clouds, illuminated by the warm, golden light of the setting sun. Below, a dark silhouette of the landscape anchors the frame, creating a stark contrast with the glowing atmosphere above. The scene is dominated by rich amber and orange tones, evoking a serene and golden hour atmosphere.",
+      "inference_time_s": 5.735,
+      "model": "qwen3.5-vl-2b"
+    },
+    "DSC01987": {
+      "caption": "",
+      "inference_time_s": 7.86,
+      "model": "qwen3.5-vl-2b"
+    },
+    "DSC02121": {
+      "caption": "Two weathered, dilapidated buildings sit alone in the center of a sprawling sagebrush plain. They are dwarfed by a vast, jagged mountain range in the distance under a sky filled with layered clouds tinged with evening's soft pink and violet hues. The scene captures a quiet, solitary moment in the wild, where the rugged topography meets an arid landscape at twilight.",
+      "inference_time_s": 7.371,
+      "model": "qwen3.5-vl-2b"
+    },
+    "DSC02359": {
+      "caption": "",
+      "inference_time_s": 7.759,
+      "model": "qwen3.5-vl-2b"
+    },
+    "faces tab 2026-03-01 120634": {
+      "caption": "",
+      "inference_time_s": 7.348,
+      "model": "qwen3.5-vl-2b"
+    },
+    "IMG_5172": {
+      "caption": "",
+      "inference_time_s": 7.625,
+      "model": "qwen3.5-vl-2b"
+    },
+    "IMG_5701": {
+      "caption": "Three individuals pose for a selfie along a snowy path. The man on the right, wearing a bright blue jacket, leads the shot while flanked",
+      "inference_time_s": 7.511,
+      "model": "qwen3.5-vl-2b"
+    },
+    "IMG_6675": {
+      "caption": "This image captures a quiet urban sunset framed by high-rise apartment blocks. The warm golden glow of the setting sun illuminates the middle ground, where a small pond is surrounded by bare trees. In the immediate foreground on the right, a rooftop play area with slides and a blue swimming pool sits in the shadow. This urban landscape balances the density of the city with the peaceful isolation of the quiet park and rooftop amenities.",
+      "inference_time_s": 6.968,
+      "model": "qwen3.5-vl-2b"
+    },
+    "IMG_6676": {
+      "caption": "A candid family selfie captures a heartwarming moment inside a cozy living room. On the left, a father smiles warmly while holding the camera, while a daughter on the right holds a large green squid plush toy and playfully sticks a toothpick in her mouth. Between them, a young boy gazes on, clutching a pink stuffed animal. The room is filled with educational books and posters on the wall, suggesting a home library or learning space, with a grey beanbag and small drawers completing the domestic backdrop.",
+      "inference_time_s": 5.575,
+      "model": "qwen3.5-vl-2b"
+    },
+    "IMG_6677": {
+      "caption": "A collection of approximately eight plastic grocery bags rests on a polished hardwood floor, likely waiting to be unpacked. The bags are tied at the top and contain various colorful goods, though the contents are obscured. One bag prominently features \"FRESHHIPPO\" branding. The scene suggests a post-haul or preparation for a grocery delivery, with a wooden chair leg visible in the upper right corner and a shoe sole peeking in at the bottom edge.",
+      "inference_time_s": 4.337,
+      "model": "qwen3.5-vl-2b"
+    },
+    "IMG_8855": {
+      "caption": "A young boy stands on a bed in a cabin-style room, adjusting his black and grey jacket. Beside him sits a large, grey \"TITAN\" branded cooler bag on the white linens. Behind him, a person in an orange jacket stands near a wall-mounted wooden light fixture with a tree design. In the background, wooden hangers hang near a wooden door frame, suggesting a cozy, rustic lodging environment.",
+      "inference_time_s": 5.298,
+      "model": "qwen3.5-vl-2b"
+    }
+  },
+  "qwen3.5-vl-4b": {
+    "20250812-DSC02000": {
+      "caption": "",
+      "inference_time_s": 11.753,
+      "model": "qwen3.5-vl-4b"
+    },
+    "20250812-DSC02080": {
+      "caption": "A landscape captures a dramatic sunset or sunrise over a vast, grassy plain meeting rolling green hills. The sky dominates the frame, painted in intense shades of magenta, pink, and purple by the light. A lone tree stands as a focal point on the right, while a faint, winding road leads the eye toward distant mountains. The layered, textured clouds create a surreal atmosphere that contrasts with the darker earthy tones below.",
+      "inference_time_s": 7.07,
+      "model": "qwen3.5-vl-4b"
+    },
+    "20250814-DSC09568": {
+      "caption": "",
+      "inference_time_s": 9.715,
+      "model": "qwen3.5-vl-4b"
+    },
+    "20250814-DSC09590": {
+      "caption": "",
+      "inference_time_s": 9.541,
+      "model": "qwen3.5-vl-4b"
+    },
+    "DSC00011": {
+      "caption": "A massive North American bison bull gallops energetically through a rugged, grassy slope. Its dark, shaggy coat is thick, framing prominent curved horns as it moves forward. A significant cloud of reddish-brown dust billows from its hooves, obscuring the ground beneath it. In the background, a soft-focus forest of green conifers lines a hillside, while pale sagebrush borders the dusty track, creating an atmosphere of untamed wilderness.",
+      "inference_time_s": 7.625,
+      "model": "qwen3.5-vl-4b"
+    },
+    "DSC00176": {
+      "caption": "An isolated brown bear traverses a sunlit meadow during the golden hour. Walking through tall, yellowing grass, the animal pauses on a grassy rise just above a dirt embankment. The background reveals a sloping hillside dotted with scattered timber, while the immediate foreground suggests a gravelly riverbank. The scene captures a quiet moment of wildlife in its natural, open habitat.",
+      "inference_time_s": 7.408,
+      "model": "qwen3.5-vl-4b"
+    },
+    "DSC00188": {
+      "caption": "A brilliant sunset scene features a bright sun peeking just above a dark, horizontal band of clouds. The light is intensely golden and orange, illuminating the tops of the scattered cloud formations above against a hazy sky. The foreground is a deep, silhouetted black, emphasizing the warmth of the fading day.",
+      "inference_time_s": 5.597,
+      "model": "qwen3.5-vl-4b"
+    },
+    "DSC01987": {
+      "caption": "This photograph captures a peaceful moment at a mountain lake, likely within a Canadian wilderness. In the foreground, a young boy stands on the rocky shore, looking toward the clear, shallow water, while a companion crouches nearby, peering into the depths. Majestic, rugged mountains rise steeply behind a dense forest line, all set against a bright blue sky with wispy clouds, capturing a serene and adventurous outdoor scene.",
+      "inference_time_s": 6.719,
+      "model": "qwen3.5-vl-4b"
+    },
+    "DSC02121": {
+      "caption": "This photograph features an isolated, weathered cabin standing alone in a vast field of sagebrush. In the distance, a majestic mountain range rises against a dramatic, overcast sky filled with heavy, textured clouds. The lighting suggests the",
+      "inference_time_s": 9.998,
+      "model": "qwen3.5-vl-4b"
+    },
+    "DSC02359": {
+      "caption": "Captured from directly above, this image features the vibrant, turquoise expanse of clear water, likely a shallow tropical bay or pristine swimming pool. The surface is textured with gentle, rhythmic ripples that create an intricate, scale-like pattern. Sunlight breaks across the waves, shifting the water's hue from bright aquamarine to deeper ocean blue, evoking a sense of calm and refreshing heat.",
+      "inference_time_s": 6.32,
+      "model": "qwen3.5-vl-4b"
+    },
+    "faces tab 2026-03-01 120634": {
+      "caption": "",
+      "inference_time_s": 9.43,
+      "model": "qwen3.5-vl-4b"
+    },
+    "IMG_5172": {
+      "caption": "",
+      "inference_time_s": 9.756,
+      "model": "qwen3.5-vl-4b"
+    },
+    "IMG_5701": {
+      "caption": "This outdoor selfie captures three friends enjoying a crisp winter day. Two young women stand side-by-side on the left, bundled in dark puffer jackets, while a smiling man in a blue jacket holds the camera on the right. They are positioned on a paved path scattered with melting patches of snow. Behind them, bare trees frame the scene, with modern high-rise buildings and green construction fencing visible in the distance against a bright, overcast sky.",
+      "inference_time_s": 8.953,
+      "model": "qwen3.5-vl-4b"
+    },
+    "IMG_6675": {
+      "caption": "This panoramic view captures a quiet sunset over a dense urban residential neighborhood. The golden sun sits low above the distant skyline, casting long shadows and a warm glow across the city. In the foreground, a rooftop pool and play area overlook a tranquil park with a still lake, surrounded by bare trees that indicate the season is likely late autumn or winter.",
+      "inference_time_s": 7.683,
+      "model": "qwen3.5-vl-4b"
+    },
+    "IMG_6676": {
+      "caption": "This selfie captures a cheerful family of three in a cozy home library. A smiling father takes the picture on the left, while his two children pose beside him. The young boy holds a pink plush toy, and the girl presents a large mint-green stuffed animal. Behind them, white bookshelves are densely packed with colorful books and board games, creating a warm, intellectual backdrop for their playful family moment.",
+      "inference_time_s": 5.132,
+      "model": "qwen3.5-vl-4b"
+    },
+    "IMG_6677": {
+      "caption": "This photo displays a cluster of roughly eight plastic shopping bags resting on a polished wooden parquet floor. The translucent bags are tied at the top, revealing glimpses of colorful contents, suggesting a recent delivery or haul. Several bags feature printed branding, such as \"FreshHippo\" and a blue dragon logo. Wooden chair legs frame the scene in the background, indicating the bags are likely in a living room or dining area.",
+      "inference_time_s": 6.894,
+      "model": "qwen3.5-vl-4b"
+    },
+    "IMG_8855": {
+      "caption": "",
+      "inference_time_s": 9.719,
+      "model": "qwen3.5-vl-4b"
+    }
+  },
+  "qwen3.5-vl-9b": {
+    "20250812-DSC02000": {
+      "caption": "This image features a simple wooden cross standing on a ledge before a large window, framing a breathtaking mountain vista. Through the glass, rugged peaks\u2014resembling the Grand Teton range\u2014rise dramatically behind a line of green trees and a grassy meadow. Above, a bright blue sky is dotted with fluffy white clouds. The dark interior of the room contrasts sharply with the vibrant, natural light and scenery outside, creating a peaceful, contemplative atmosphere.",
+      "inference_time_s": 14.501,
+      "model": "qwen3.5-vl-9b"
+    },
+    "20250812-DSC02080": {
+      "caption": "A solitary tree stands in a vast, grassy field, framed by rolling hills in the distance. The scene is dominated by a dramatic sky filled with thick clouds glowing in vibrant shades of magenta and deep purple, capturing the intensity of a spectacular sunset. The landscape offers a serene, open vista, highlighting the isolation of the single tree against the expansive natural backdrop.",
+      "inference_time_s": 7.352,
+      "model": "qwen3.5-vl-9b"
+    },
+    "20250814-DSC09568": {
+      "caption": "",
+      "inference_time_s": 12.281,
+      "model": "qwen3.5-vl-9b"
+    },
+    "20250814-DSC09590": {
+      "caption": "This striking landscape features a powerful waterfall plunging vertically into a deep canyon. The cascade creates a billowing mist as it crashes into the river pool below. Steep, rugged canyon walls rise on either side, displaying gray rock accented by pale yellow mineral deposits. Dark green coniferous trees line the rim and scattered slopes, contrasting with the rushing water and earth tones. Sunlight highlights the right bank, emphasizing the dramatic scale of the natural formation.",
+      "inference_time_s": 10.454,
+      "model": "qwen3.5-vl-9b"
+    },
+    "DSC00011": {
+      "caption": "A large American bison is captured in motion, charging along a dirt path and kicking up a cloud of dust. The animal's dark fur and curved horns are prominent against a background of pale sagebrush and blurry evergreen trees. The image has a hazy, atmospheric quality, suggesting morning mist, while the bison dominates the foreground of this rugged, natural setting.",
+      "inference_time_s": 9.315,
+      "model": "qwen3.5-vl-9b"
+    },
+    "DSC00176": {
+      "caption": "A solitary brown bear walks through a field of tall, golden grasses near a gravel riverbank. The landscape features a mix of green vegetation and dry stalks, scattered with fallen logs and driftwood. In the background, a gently sloping hill rises, slightly out of focus, suggesting a vast, open wilderness environment. The soft, warm lighting suggests either early morning or late afternoon.",
+      "inference_time_s": 7.554,
+      "model": "qwen3.5-vl-9b"
+    },
+    "DSC00188": {
+      "caption": "The sun rests just above the horizon, peeking through a thick, dark band of clouds. The sky is washed in a deep, warm amber glow, illuminating scattered clouds with golden light. Below, the landscape is a complete silhouette, emphasizing the intense brightness of the sun against the darker atmosphere.",
+      "inference_time_s": 7.076,
+      "model": "qwen3.5-vl-9b"
+    },
+    "DSC01987": {
+      "caption": "A child in a blue jacket and cap stands on the rocky edge of a clear, calm lake. Nearby, another person crouches in the shallow water, looking down at the stones beneath the surface. Towering, rugged mountains rise steeply on the left bank, covered in evergreen forests. The sky is bright blue with scattered white clouds, suggesting a pleasant day for outdoor exploration.",
+      "inference_time_s": 11.042,
+      "model": "qwen3.5-vl-9b"
+    },
+    "DSC02121": {
+      "caption": "This landscape photograph captures a vast, open valley dominated by dense sagebrush in the foreground. A solitary, small structure stands alone in the center distance, dwarfed by the expansive flatland. To the left, a rugged mountain range rises against a dramatic sky filled with textured clouds. The scene is bathed in the soft, diffused light of twilight, creating a moody, atmospheric mood typical of the American West.",
+      "inference_time_s": 10.107,
+      "model": "qwen3.5-vl-9b"
+    },
+    "DSC02359": {
+      "caption": "This overhead shot features the undulating surface of crystal-clear turquoise water. Gentle ripples create a rhythmic texture across the frame, suggesting a shallow pool or calm ocean. The",
+      "inference_time_s": 12.63,
+      "model": "qwen3.5-vl-9b"
+    },
+    "faces tab 2026-03-01 120634": {
+      "caption": "",
+      "inference_time_s": 12.338,
+      "model": "qwen3.5-vl-9b"
+    },
+    "IMG_5172": {
+      "caption": "A crumpled Columbia Sportswear receipt lies on a white surface, listing various outdoor apparel purchases like hats and jackets. The document details item codes, promotional discounts, and a final total of $493.10 paid via credit card. To the right, a snippet of handwritten notes on lined paper is visible. The receipt includes standard transaction info, a store address in Fullale, WA, and a barcode at the bottom, documenting a shopping trip dated 11/28/25.",
+      "inference_time_s": 7.663,
+      "model": "qwen3.5-vl-9b"
+    },
+    "IMG_5701": {
+      "caption": "This selfie features a man and two young women posing outdoors on a winter day. The man, wearing a blue puffer jacket, smiles broadly while holding the camera. The two women beside him wear dark coats, with the center figure sporting a red hood. They stand on a snow-dusted path lined with bare trees and urban buildings featuring green construction fencing in the background.",
+      "inference_time_s": 8.488,
+      "model": "qwen3.5-vl-9b"
+    },
+    "IMG_6675": {
+      "caption": "Captured at sunrise, this urban landscape features a residential neighborhood where tall apartment buildings surround a central park with a reflective pond. The low sun casts a warm, golden glow across the scene, highlighting bare winter trees and the city skyline. In the foreground, a playground area with colorful equipment sits near a small pool, offering a glimpse into community life within this peaceful, hazy morning light.",
+      "inference_time_s": 8.51,
+      "model": "qwen3.5-vl-9b"
+    },
+    "IMG_6676": {
+      "caption": "This family selfie features a man in a beige fleece on the left and a girl on the right holding a large green plush toy. Between them, a young boy hugs a pink character plush. They are in a living room with a white bookshelf filled with colorful books and games behind the man. A grey sofa and educational posters on the light green wall are visible in the background, creating a cozy domestic scene.",
+      "inference_time_s": 9.754,
+      "model": "qwen3.5-vl-9b"
+    },
+    "IMG_6677": {
+      "caption": "This overhead view shows eight full, white plastic garbage bags clustered on a polished hardwood floor. The bags appear to contain mixed household waste or sorted recycling, with some colorful containers visible inside. One bag features blue branding reading \"FRESHIPPO.\" The setting includes parts of wooden furniture in the corners and a small wire lying on the floor near the bottom edge.",
+      "inference_time_s": 6.534,
+      "model": "qwen3.5-vl-9b"
+    },
+    "IMG_8855": {
+      "caption": "A young boy stands in a rustic, wood-paneled bedroom, looking playfully at the camera while wearing a dark jacket. Beside him rests a large grey cooler bag labeled \"Titan by Arctic Zone,\" featuring a mesh pocket filled with colorful items. The bag sits on a white bedspread. In the background, wooden wainscoting, a wall sconce with a forest design, and a closet with hangers are visible, along with the partial figure of another person in an orange jacket.",
+      "inference_time_s": 11.722,
+      "model": "qwen3.5-vl-9b"
+    }
+  },
+  "qwen2.5-vl-3b": {
+    "20250812-DSC02000": {
+      "caption": "The image captures a serene mountainous landscape viewed through a window, framed by a wooden cross and a wooden bench. The rugged peaks and scattered trees create a tranquil backdrop, while the cross adds a spiritual element to the scene.",
+      "inference_time_s": 16.469,
+      "model": "qwen2.5-vl-3b"
+    },
+    "20250812-DSC02080": {
+      "caption": "This image captures a breathtaking sunset over a vast, open landscape. The sky is painted with vibrant hues of pink and purple, creating a stunning contrast against the darkening horizon. The setting sun casts a warm glow over rolling hills and sparse vegetation, emphasizing the serene beauty of nature. The scene is tranquil, with no visible human activity, allowing the viewer to fully immerse in the peaceful and majestic atmosphere.",
+      "inference_time_s": 3.69,
+      "model": "qwen2.5-vl-3b"
+    },
+    "20250814-DSC09568": {
+      "caption": "The image showcases the Grand Prismatic Spring in Yellowstone National Park, a stunning example of geothermal activity. The vibrant, multicolored pool of water is surrounded by a network of pathways and visitors, with lush green trees framing the scene. The backdrop features rolling hills and a clear blue sky, creating a picturesque and serene landscape.",
+      "inference_time_s": 3.69,
+      "model": "qwen2.5-vl-3b"
+    },
+    "20250814-DSC09590": {
+      "caption": "A majestic waterfall cascades down a rugged cliff face, surrounded by dense forests and towering mountains. The mist from the falls creates a dramatic effect, highlighting the natural beauty of this serene landscape.",
+      "inference_time_s": 3.308,
+      "model": "qwen2.5-vl-3b"
+    },
+    "DSC00011": {
+      "caption": "A majestic bison stands in a misty, forested landscape, its dark, shaggy coat contrasting with the lighter, wispy vegetation. The setting is serene and wild, with the bison appearing calm and alert, its large, curved horns and muscular build standing out against the natural backdrop.",
+      "inference_time_s": 3.785,
+      "model": "qwen2.5-vl-3b"
+    },
+    "DSC00176": {
+      "caption": "In this serene wilderness scene, two brown bears are seen grazing in a vast, grassy field. The setting is a mix of open plains and scattered trees, with a backdrop of rolling hills. The bears, with their distinctive brown fur, are the focal point, moving gracefully through the landscape. The image captures the essence of their natural habitat, emphasizing the tranquility and vastness of the wilderness.",
+      "inference_time_s": 3.832,
+      "model": "qwen2.5-vl-3b"
+    },
+    "DSC00188": {
+      "caption": "The image captures a breathtaking sunset, with the sun partially obscured by clouds. The sky is a stunning gradient of warm oranges and yellows, transitioning into deep blacks as it meets the horizon. The clouds, silhouetted against the vibrant backdrop, add a dramatic contrast to the scene. The overall atmosphere is serene and awe-inspiring, evoking a sense of tranquility and the passage of time.",
+      "inference_time_s": 3.78,
+      "model": "qwen2.5-vl-3b"
+    },
+    "DSC01987": {
+      "caption": "A serene lakeside scene with a rocky shore and clear, calm water. A person in a blue jacket and black hat stands on the rocks, looking out at the expansive lake. The background features a majestic mountain range under a partly cloudy sky, with lush green trees and a distant horizon. The overall atmosphere is peaceful and natural.",
+      "inference_time_s": 4.078,
+      "model": "qwen2.5-vl-3b"
+    },
+    "DSC02121": {
+      "caption": "The image captures a serene, expansive landscape at dusk or dawn, with a lone house nestled in the foreground. The sky is filled with soft, wispy clouds, transitioning from light to dark hues, suggesting the early hours of the day. In the distance, majestic mountains rise, partially obscured by the clouds, adding depth and grandeur to the scene. The foreground is a mix of grassy plains and shrubs, bathed in the gentle light of the setting or rising sun.",
+      "inference_time_s": 4.187,
+      "model": "qwen2.5-vl-3b"
+    },
+    "DSC02359": {
+      "caption": "The image captures a serene and vibrant turquoise ocean surface, with gentle waves creating a mesmerizing pattern of ripples and reflections. The setting is a vast, open sea, bathed in natural light that enhances the vivid blue hues. Notable details include the smooth, undisturbed water in the foreground and the dynamic, rippling waves in the background, creating a sense of depth and tranquility.",
+      "inference_time_s": 4.129,
+      "model": "qwen2.5-vl-3b"
+    },
+    "faces tab 2026-03-01 120634": {
+      "caption": "The image shows a computer screen with a program named \"imganalyzer\" open. The program displays a list of face identities with the label \"Unknown\" for each entry. The error message indicates that an RPC call timed out after 120,000 milliseconds. The interface suggests that the program is analyzing images and categorizing faces, but the specific identities are not recognized.",
+      "inference_time_s": 4.175,
+      "model": "qwen2.5-vl-3b"
+    },
+    "IMG_5172": {
+      "caption": "A Columbia store receipt showing various items purchased, including a pair of \"N Clear Mountain\" FS Boots and a \"M Midweight Light\" jacket, with discounts applied. The total amount is $493.10. The receipt also includes a customer ID, transaction details, and a barcode.",
+      "inference_time_s": 4.157,
+      "model": "qwen2.5-vl-3b"
+    },
+    "IMG_5701": {
+      "caption": "A family of three is captured in a snowy outdoor setting. The father, wearing a blue jacket, is on the right, while the mother and daughter, both in black jackets, are in the center. The background features leafless trees and a green building, suggesting a winter day in an urban park.",
+      "inference_time_s": 4.022,
+      "model": "qwen2.5-vl-3b"
+    },
+    "IMG_6675": {
+      "caption": "The image captures a serene urban sunset scene. The setting sun casts a warm, golden glow over a cityscape filled with tall buildings, some with visible smokestacks. In the foreground, a rooftop pool area with a blue pool and a white and blue striped awning is visible. The sky transitions from a deep blue to a soft orange near the horizon, creating a picturesque backdrop.",
+      "inference_time_s": 4.041,
+      "model": "qwen2.5-vl-3b"
+    },
+    "IMG_6676": {
+      "error": "HTTP Error 500: Internal Server Error",
+      "model": "qwen2.5-vl-3b"
+    },
+    "IMG_6677": {
+      "error": "HTTP Error 500: Internal Server Error",
+      "model": "qwen2.5-vl-3b"
+    },
+    "IMG_8855": {
+      "caption": "A young person is standing in a cozy, wooden-paneled room, adjusting their jacket. They are holding a large, open suitcase with a colorful strap. The room features a bed with a white comforter, a wooden dresser, and a wall sconce with a mountain and tree design.",
+      "inference_time_s": 11.037,
+      "model": "qwen2.5-vl-3b"
+    }
+  },
+  "qwen2.5-vl-7b": {
+    "20250812-DSC02000": {
+      "caption": "This image captures a serene interior view of a chapel, framed by a large window. The window reveals a breathtaking mountain landscape under a partly cloudy sky. In the foreground, a simple wooden cross stands on a bench, symbolizing faith and tranquility. The contrast between the dark interior and the vibrant, natural scenery outside creates a peaceful and contemplative atmosphere.",
+      "inference_time_s": 7.074,
+      "model": "qwen2.5-vl-7b"
+    },
+    "20250812-DSC02080": {
+      "caption": "This image captures a serene landscape at sunset, with a vibrant sky painted in hues of pink and purple. The foreground features a solitary tree standing in a vast, open field, while the background showcases rolling hills and a dense forest line. The clouds are illuminated by the setting sun, creating a dramatic and tranquil scene.",
+      "inference_time_s": 3.843,
+      "model": "qwen2.5-vl-7b"
+    },
+    "20250814-DSC09568": {
+      "caption": "This image captures the vibrant Grand Prismatic Spring in Yellowstone National Park, surrounded by lush green pine trees and a clear blue sky. The spring's vivid hues of blue, green, and orange contrast beautifully with the earthy tones of the surrounding landscape. A wooden walkway encircles the spring, allowing visitors to safely observe this natural wonder. In the background, a forested hillside and distant mountains frame the scene, enhancing the sense of scale and beauty.",
+      "inference_time_s": 4.163,
+      "model": "qwen2.5-vl-7b"
+    },
+    "20250814-DSC09590": {
+      "caption": "This image captures the Lower Falls of the Yellowstone River, a majestic waterfall cascading down a steep, rocky cliff. The surrounding landscape is lush with evergreen trees, and the river flows through a deep canyon, highlighting the natural beauty and grandeur of Yellowstone National Park.",
+      "inference_time_s": 3.605,
+      "model": "qwen2.5-vl-7b"
+    },
+    "DSC00011": {
+      "caption": "This image captures a bison resting in a misty, natural setting, likely a prairie or forested area. The bison, with its dark fur and prominent horns, is the focal point, lying on the ground amidst sparse vegetation and a backdrop of trees. The mist adds a serene, ethereal quality to the scene, emphasizing the wild and untouched environment.",
+      "inference_time_s": 4.172,
+      "model": "qwen2.5-vl-7b"
+    },
+    "DSC00176": {
+      "caption": "This image captures a serene landscape featuring two grizzly bears in a grassy, open field with a backdrop of rolling hills and sparse vegetation. The foreground includes a rocky streambed, adding texture to the scene. The lighting suggests early morning or late afternoon, casting a warm glow over the natural setting.",
+      "inference_time_s": 3.996,
+      "model": "qwen2.5-vl-7b"
+    },
+    "DSC00188": {
+      "caption": "This image captures a serene sunset, with the sun partially obscured by a low-hanging cloud formation, casting a warm, golden glow across the sky. The horizon is dark, contrasting sharply with the vibrant hues of the setting sun, creating a tranquil and dramatic scene.",
+      "inference_time_s": 3.994,
+      "model": "qwen2.5-vl-7b"
+    },
+    "DSC01987": {
+      "caption": "This image captures a serene lakeside scene with a group of children exploring the rocky shoreline of a calm, expansive lake. The backdrop features majestic, forested mountains under a partly cloudy sky, creating a picturesque and tranquil setting. The children, dressed in casual outdoor attire, are engaged in examining the water and rocks, highlighting a moment of curiosity and exploration in a natural environment.",
+      "inference_time_s": 4.463,
+      "model": "qwen2.5-vl-7b"
+    },
+    "DSC02121": {
+      "caption": "This image captures a serene landscape at dusk, featuring a vast, open field with low-lying shrubs in the foreground. In the mid-ground, a small, isolated building stands near a body of water, with distant mountains forming a dramatic backdrop. The sky is filled with a mix of dark clouds and patches of light, creating a moody and tranquil atmosphere.",
+      "inference_time_s": 4.413,
+      "model": "qwen2.5-vl-7b"
+    },
+    "DSC02359": {
+      "caption": "This image showcases a close-up view of rippling turquoise water, likely from a pool or a calm sea. The water's surface is textured with gentle waves and ripples, reflecting light and creating a shimmering effect. The uniformity of the color and the fine detail of the ripples suggest a tranquil, undisturbed environment.",
+      "inference_time_s": 4.372,
+      "model": "qwen2.5-vl-7b"
+    },
+    "faces tab 2026-03-01 120634": {
+      "caption": "This image shows a screenshot of the imgAnalyzer software interface, specifically the 'Faces' tab. It displays a list of 'Unknown' face identities, each with a thumbnail image and the number of faces and images associated with them. The interface indicates a total of 700 clusters and 843 faces. A red error message at the top states that an RPC call to 'faces/run-clustering' timed out after 120000ms.",
+      "inference_time_s": 4.798,
+      "model": "qwen2.5-vl-7b"
+    },
+    "IMG_5172": {
+      "caption": "This image shows a receipt from Columbia Store #451 at the Seattle Premium Outlets. It details a purchase of various Columbia products, including jackets and thermal wear, with discounts applied. The receipt includes item descriptions, prices, and promotional discounts, totaling $493.10. The transaction was made using a Visa card, and the receipt includes a barcode and customer information.",
+      "inference_time_s": 4.609,
+      "model": "qwen2.5-vl-7b"
+    },
+    "IMG_5701": {
+      "caption": "This image captures a family of three enjoying a winter day outdoors. The setting is a snowy urban park with bare trees and a mix of modern and older buildings in the background. The family, dressed in winter jackets, smiles warmly at the camera, with the father on the right and the mother and daughter on the left. The scene conveys a sense of togetherness and joy in a cold, yet beautiful environment.",
+      "inference_time_s": 4.618,
+      "model": "qwen2.5-vl-7b"
+    },
+    "IMG_6675": {
+      "caption": "This image captures a serene urban sunset scene, with the sun low on the horizon casting a warm glow over a residential area. Tall apartment buildings frame the background, while a central park with a small pond and pathways provides a tranquil foreground. The sky transitions from a soft orange near the sun to a deep blue above, highlighting the peaceful coexistence of nature and urban life.",
+      "inference_time_s": 4.474,
+      "model": "qwen2.5-vl-7b"
+    },
+    "IMG_6676": {
+      "caption": "This image captures a family selfie in a cozy living room. The setting includes a bookshelf filled with books and toys, a couch with a blanket, and a wall adorned with educational posters. The main subjects are a smiling adult and a child, both holding plush toys, with another child partially visible in the background. The scene conveys a warm, familial atmosphere.",
+      "inference_time_s": 4.464,
+      "model": "qwen2.5-vl-7b"
+    },
+    "IMG_6677": {
+      "caption": "This image shows a collection of plastic grocery bags scattered on a polished wooden floor. The bags, some labeled with logos, appear to contain food items, suggesting a delivery or shopping haul. The setting is indoors, with a chair partially visible in the corner, and the floor reflects light, indicating a clean and well-maintained environment.",
+      "inference_time_s": 4.58,
+      "model": "qwen2.5-vl-7b"
+    },
+    "IMG_8855": {
+      "caption": "The image shows a young boy in a cozy, wooden-paneled room, possibly a cabin or hotel room, with a bed and a wall-mounted coat rack. He is wearing a dark jacket and is playfully interacting with a large, gray cooler bag, which is prominently displayed on the bed. The room has a warm, rustic ambiance with a light fixture on the wall and a neatly arranged coat rack with wooden hangers.",
+      "inference_time_s": 4.702,
+      "model": "qwen2.5-vl-7b"
+    }
+  }
+}

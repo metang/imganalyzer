@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Model Evaluation Report</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  .caption-card { white-space: pre-wrap; word-break: break-word; }
+  .tab-btn.active { border-color: #3b82f6; color: #3b82f6; font-weight: 600; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+  .img-thumb { cursor: pointer; transition: transform 0.15s; }
+  .img-thumb:hover { transform: scale(1.05); }
+  .score-bar { height: 20px; border-radius: 4px; transition: width 0.3s; }
+</style>
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen">
+<div class="max-w-7xl mx-auto px-4 py-8">
+  <h1 class="text-3xl font-bold mb-2">Model Evaluation Report</h1>
+  <p class="text-gray-500 mb-8">
+    {{ image_stems | length }} images &middot;
+    {{ aesthetic_models | length }} aesthetic models &middot;
+    {{ caption_models | length }} caption models
+  </p>
+
+  <!-- Tab navigation -->
+  <div class="flex gap-2 border-b mb-6 overflow-x-auto">
+    <button class="tab-btn active pb-2 border-b-2 border-transparent px-2 text-sm whitespace-nowrap"
+            onclick="switchTab('overview')">Overview</button>
+    {% for stem in image_stems %}
+    <button class="tab-btn pb-2 border-b-2 border-transparent px-2 text-sm whitespace-nowrap"
+            onclick="switchTab('img-{{ loop.index }}')"
+            title="{{ image_data[stem].name }}">{{ image_data[stem].name }}</button>
+    {% endfor %}
+  </div>
+
+  <!-- Overview tab -->
+  <div id="tab-overview" class="tab-content active">
+    <h2 class="text-xl font-semibold mb-4">Image Grid</h2>
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
+      {% for stem in image_stems %}
+      <div class="img-thumb bg-white rounded-lg shadow p-2 text-center"
+           onclick="switchTab('img-{{ loop.index }}')">
+        {% if image_data[stem].thumbnail_b64 %}
+        <img src="data:image/jpeg;base64,{{ image_data[stem].thumbnail_b64 }}"
+             alt="{{ image_data[stem].name }}"
+             class="rounded mx-auto mb-2 max-h-48 object-contain">
+        {% else %}
+        <div class="h-48 bg-gray-200 rounded flex items-center justify-center text-gray-500">
+          No preview
+        </div>
+        {% endif %}
+        <p class="text-xs text-gray-600 truncate">{{ image_data[stem].name }}</p>
+      </div>
+      {% endfor %}
+    </div>
+
+    {% if aesthetic_models %}
+    <h2 class="text-xl font-semibold mb-4">Aesthetic Scores Summary</h2>
+    <div class="overflow-x-auto mb-8">
+      <table class="w-full bg-white rounded-lg shadow text-sm">
+        <thead>
+          <tr class="bg-gray-100">
+            <th class="px-3 py-2 text-left">Image</th>
+            {% for model in aesthetic_models %}
+            <th class="px-3 py-2 text-center">{{ model }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for stem in image_stems %}
+          <tr class="border-t">
+            <td class="px-3 py-2 font-medium truncate max-w-[160px]">{{ image_data[stem].name }}</td>
+            {% for model in aesthetic_models %}
+            <td class="px-3 py-2 text-center">
+              {% set r = results.get(model, {}).get(stem, {}) %}
+              {% if r.score is defined %}
+                <span class="font-mono">{{ "%.2f" | format(r.score) }}</span>
+              {% elif r.error is defined %}
+                <span class="text-red-400 text-xs">error</span>
+              {% else %}
+                <span class="text-gray-300">—</span>
+              {% endif %}
+            </td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Per-image tabs -->
+  {% for stem in image_stems %}
+  <div id="tab-img-{{ loop.index }}" class="tab-content">
+    <div class="flex flex-col lg:flex-row gap-6">
+      <!-- Image preview -->
+      <div class="lg:w-1/3">
+        {% if image_data[stem].thumbnail_b64 %}
+        <img src="data:image/jpeg;base64,{{ image_data[stem].thumbnail_b64 }}"
+             alt="{{ image_data[stem].name }}"
+             class="rounded-lg shadow w-full">
+        {% endif %}
+        <p class="text-sm text-gray-500 mt-2">{{ image_data[stem].name }}</p>
+      </div>
+
+      <div class="lg:w-2/3 space-y-6">
+        <!-- Aesthetic scores for this image -->
+        {% if aesthetic_models %}
+        <div>
+          <h3 class="text-lg font-semibold mb-3">Aesthetic Scores</h3>
+          <div class="space-y-2">
+            {% for model in aesthetic_models %}
+            <div class="flex items-center gap-3">
+              <span class="w-32 text-sm font-medium truncate" title="{{ model }}">{{ model }}</span>
+              {% set r = results.get(model, {}).get(stem, {}) %}
+              {% if r.score is defined %}
+                {% set score = r.score %}
+                {# Normalize bar width: use model max from score_maxes #}
+                {% set max_score = score_maxes.get(model, 10) %}
+                {% set width = (score / max_score * 100) | int %}
+                {% if width > 100 %}{% set width = 100 %}{% endif %}
+                <div class="flex-1 bg-gray-200 rounded h-5 overflow-hidden">
+                  <div class="score-bar bg-blue-500" style="width: {{ width }}%"></div>
+                </div>
+                <span class="w-16 text-sm font-mono text-right">{{ "%.2f" | format(score) }}</span>
+                {# Show sub-scores if present (e.g. UniPercept iaa/iqa/ista) #}
+                {% if r.details is defined and r.details | length > 0 %}
+                <span class="text-xs text-gray-400 ml-1">
+                  {% for k, v in r.details.items() %}{{ k }}={{ "%.1f" | format(v) }}{% if not loop.last %}, {% endif %}{% endfor %}
+                </span>
+                {% endif %}
+              {% elif r.error is defined %}
+                <span class="text-red-400 text-xs">{{ r.error[:60] }}</span>
+              {% else %}
+                <span class="text-gray-300 text-sm">not run</span>
+              {% endif %}
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- Captions for this image -->
+        {% if caption_models %}
+        <div>
+          <h3 class="text-lg font-semibold mb-3">Captions</h3>
+          <div class="grid grid-cols-1 gap-3">
+            {% for model in caption_models %}
+            <div class="bg-white rounded-lg shadow p-4">
+              <div class="flex items-center justify-between mb-2">
+                <span class="font-semibold text-sm {% if model == 'gpt-4o' %}text-purple-600{% elif model == 'blip2' %}text-amber-600{% else %}text-gray-700{% endif %}">
+                  {{ model }}
+                  {% if model == 'gpt-4o' %}<span class="text-xs bg-purple-100 px-1.5 py-0.5 rounded ml-1">cloud baseline</span>{% endif %}
+                  {% if model == 'blip2' %}<span class="text-xs bg-amber-100 px-1.5 py-0.5 rounded ml-1">current</span>{% endif %}
+                </span>
+                {% set r = results.get(model, {}).get(stem, {}) %}
+                {% if r.inference_time_s is defined %}
+                <span class="text-xs text-gray-400">{{ r.inference_time_s }}s</span>
+                {% endif %}
+              </div>
+              {% set r = results.get(model, {}).get(stem, {}) %}
+              {% if r.caption is defined %}
+              <p class="caption-card text-sm text-gray-700">{{ r.caption }}</p>
+              {% elif r.error is defined %}
+              <p class="text-red-400 text-sm">Error: {{ r.error }}</p>
+              {% else %}
+              <p class="text-gray-300 text-sm">Not run yet</p>
+              {% endif %}
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<script>
+function switchTab(tabId) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + tabId).classList.add('active');
+  const buttons = document.querySelectorAll('.tab-btn');
+  buttons.forEach(btn => {
+    if (btn.getAttribute('onclick') === `switchTab('${tabId}')`) {
+      btn.classList.add('active');
+    }
+  });
+}
+</script>
+</body>
+</html>
