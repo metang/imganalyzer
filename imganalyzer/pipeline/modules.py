@@ -294,6 +294,8 @@ class ModuleRunner:
             return self._run_cloud_ai(image_id, path)
         elif module == "aesthetic":
             return self._run_aesthetic(image_id, path)
+        elif module == "perception":
+            return self._run_perception(image_id, path)
         else:
             raise ValueError(f"Unknown module: {module}")
 
@@ -525,6 +527,22 @@ class ModuleRunner:
                 f"  [dim]Aesthetic analysis done for image {image_id}[/dim]"
             )
         return aesthetic_data
+
+    def _run_perception(self, image_id: int, path: Path) -> dict[str, Any]:
+        from imganalyzer.analysis.perception import analyze as perception_analyze
+
+        result = perception_analyze(path)
+
+        with _transaction(self.conn):
+            self.repo.upsert_perception(image_id, result)
+
+        if self.verbose:
+            iaa = result.get("perception_iaa", "?")
+            console.print(
+                f"  [dim]Perception analysis done for image {image_id} "
+                f"(IAA={iaa})[/dim]"
+            )
+        return result
 
     def _run_embedding(self, image_id: int, path: Path) -> dict[str, Any]:
         from imganalyzer.embeddings.clip_embedder import CLIPEmbedder
@@ -916,6 +934,13 @@ def write_xmp_from_db(repo: Repository, image_id: int) -> Path | None:
                     ai[k] = v
 
     result.ai_analysis = ai
+
+    # Perception — merge into ai_analysis so XMP writer picks it up
+    perception = full.get("perception", {})
+    for key in ("image_id", "analyzed_at"):
+        perception.pop(key, None)
+    if perception:
+        ai.update(perception)
 
     xmp_path = path.with_suffix(".xmp")
     result.write_xmp(xmp_path)

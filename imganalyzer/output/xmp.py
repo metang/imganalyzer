@@ -253,6 +253,20 @@ class XMPWriter:
         if ai.get("aesthetic_label"):
             desc.set(_ns("imganalyzer", "AestheticLabel"), ai["aesthetic_label"])
 
+        # Perception scoring (UniPercept IAA / IQA / ISTA)
+        if ai.get("perception_iaa") is not None:
+            desc.set(_ns("imganalyzer", "PerceptionIAA"), str(round(float(ai["perception_iaa"]), 2)))
+        if ai.get("perception_iaa_label"):
+            desc.set(_ns("imganalyzer", "PerceptionIAALabel"), ai["perception_iaa_label"])
+        if ai.get("perception_iqa") is not None:
+            desc.set(_ns("imganalyzer", "PerceptionIQA"), str(round(float(ai["perception_iqa"]), 2)))
+        if ai.get("perception_iqa_label"):
+            desc.set(_ns("imganalyzer", "PerceptionIQALabel"), ai["perception_iqa_label"])
+        if ai.get("perception_ista") is not None:
+            desc.set(_ns("imganalyzer", "PerceptionISTA"), str(round(float(ai["perception_ista"]), 2)))
+        if ai.get("perception_ista_label"):
+            desc.set(_ns("imganalyzer", "PerceptionISTALabel"), ai["perception_ista_label"])
+
         # Face analysis
         if ai.get("face_count") is not None:
             desc.set(_ns("imganalyzer", "FaceCount"), str(ai["face_count"]))

@@ -154,6 +154,19 @@ export function parseXmp(xml: string): XmpData {
   const aLabel = attr(desc, 'imganalyzer:AestheticLabel')
   if (aLabel) result.aestheticLabel = aLabel
 
+  const pIAA = attr(desc, 'imganalyzer:PerceptionIAA')
+  if (pIAA) result.perceptionIAA = parseFloat(pIAA)
+  const pIAALabel = attr(desc, 'imganalyzer:PerceptionIAALabel')
+  if (pIAALabel) result.perceptionIAALabel = pIAALabel
+  const pIQA = attr(desc, 'imganalyzer:PerceptionIQA')
+  if (pIQA) result.perceptionIQA = parseFloat(pIQA)
+  const pIQALabel = attr(desc, 'imganalyzer:PerceptionIQALabel')
+  if (pIQALabel) result.perceptionIQALabel = pIQALabel
+  const pISTA = attr(desc, 'imganalyzer:PerceptionISTA')
+  if (pISTA) result.perceptionISTA = parseFloat(pISTA)
+  const pISTALabel = attr(desc, 'imganalyzer:PerceptionISTALabel')
+  if (pISTALabel) result.perceptionISTALabel = pISTALabel
+
   const fCount = attr(desc, 'imganalyzer:FaceCount')
   if (fCount) result.faceCount = parseInt(fCount)
   result.faceIdentities = bagItems(desc, 'imganalyzer:FaceIdentities')

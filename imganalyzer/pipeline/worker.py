@@ -63,7 +63,7 @@ from imganalyzer.pipeline.scheduler import ResourceScheduler
 console = Console()
 
 # Modules that use GPU — must run single-threaded on the main thread
-GPU_MODULES = {"local_ai", "embedding", "blip2", "objects", "ocr", "faces"}
+GPU_MODULES = {"local_ai", "embedding", "blip2", "objects", "ocr", "faces", "perception"}
 # Local I/O-bound modules — parallel, governed by `workers`
 LOCAL_IO_MODULES = {"metadata", "technical"}
 # Cloud API modules — parallel, governed by `cloud_workers`

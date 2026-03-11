@@ -130,6 +130,16 @@ CREATE TABLE analysis_aesthetic (
     aesthetic_label TEXT,
     aesthetic_reason TEXT
 );
+CREATE TABLE analysis_perception (
+    image_id INTEGER PRIMARY KEY,
+    perception_iaa REAL,
+    perception_iaa_label TEXT,
+    perception_iqa REAL,
+    perception_iqa_label TEXT,
+    perception_ista REAL,
+    perception_ista_label TEXT,
+    analyzed_at TEXT
+);
 CREATE TABLE embeddings (
     image_id INTEGER,
     embedding_type TEXT,

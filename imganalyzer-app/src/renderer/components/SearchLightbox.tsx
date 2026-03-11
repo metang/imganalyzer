@@ -117,6 +117,39 @@ function AnalysisSidebar({
           </Section>
         )}
 
+        {/* Perception */}
+        {(item.perception_iaa !== null || item.perception_iqa !== null || item.perception_ista !== null) && (
+          <Section title="Perception">
+            {item.perception_iaa !== null && (
+              <div className="py-1 border-b border-neutral-800">
+                <div className="flex justify-between mb-1">
+                  <span className="text-neutral-500 text-xs">Aesthetic Appeal</span>
+                  {item.perception_iaa_label && <span className="text-xs text-neutral-400">{item.perception_iaa_label}</span>}
+                </div>
+                <ScoreBar value={item.perception_iaa} max={10} />
+              </div>
+            )}
+            {item.perception_iqa !== null && (
+              <div className="py-1 border-b border-neutral-800">
+                <div className="flex justify-between mb-1">
+                  <span className="text-neutral-500 text-xs">Image Quality</span>
+                  {item.perception_iqa_label && <span className="text-xs text-neutral-400">{item.perception_iqa_label}</span>}
+                </div>
+                <ScoreBar value={item.perception_iqa} max={10} />
+              </div>
+            )}
+            {item.perception_ista !== null && (
+              <div className="py-1 border-b border-neutral-800">
+                <div className="flex justify-between mb-1">
+                  <span className="text-neutral-500 text-xs">Structure & Texture</span>
+                  {item.perception_ista_label && <span className="text-xs text-neutral-400">{item.perception_ista_label}</span>}
+                </div>
+                <ScoreBar value={item.perception_ista} max={10} />
+              </div>
+            )}
+          </Section>
+        )}
+
         {/* AI Analysis */}
         {(item.description || item.scene_type || item.main_subject || item.lighting || item.mood ||
           item.detected_objects?.length || item.keywords?.length || item.ocr_text ||

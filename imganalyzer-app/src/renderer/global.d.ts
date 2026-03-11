@@ -20,6 +20,12 @@ export interface XmpData {
   mood?: string
   aestheticScore?: number
   aestheticLabel?: string
+  perceptionIAA?: number
+  perceptionIAALabel?: string
+  perceptionIQA?: number
+  perceptionIQALabel?: string
+  perceptionISTA?: number
+  perceptionISTALabel?: string
   faceCount?: number
   faceIdentities?: string[]
   faceDetails?: string[]
@@ -177,6 +183,12 @@ export interface SearchResult {
   aesthetic_score: number | null
   aesthetic_label: string | null
   aesthetic_reason: string | null
+  perception_iaa: number | null
+  perception_iaa_label: string | null
+  perception_iqa: number | null
+  perception_iqa_label: string | null
+  perception_ista: number | null
+  perception_ista_label: string | null
 }
 
 export interface SearchResponse {

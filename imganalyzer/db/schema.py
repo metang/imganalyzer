@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -40,6 +40,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         14: _migrate_v14,
         15: _migrate_v15,
         16: _migrate_v16,
+        17: _migrate_v17,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -653,5 +654,24 @@ def _migrate_v16(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_job_queue_node_status
         ON job_queue(last_node_role, last_node_id, status, completed_at)
+    """)
+
+
+# ── Migration v17: Perception analysis table ──────────────────────────────────
+
+def _migrate_v17(conn: sqlite3.Connection) -> None:
+    """Add perception analysis table (UniPercept IAA / IQA / ISTA scores)."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_perception (
+            image_id              INTEGER PRIMARY KEY
+                                  REFERENCES images(id) ON DELETE CASCADE,
+            perception_iaa        REAL,
+            perception_iaa_label  TEXT,
+            perception_iqa        REAL,
+            perception_iqa_label  TEXT,
+            perception_ista       REAL,
+            perception_ista_label TEXT,
+            analyzed_at           TEXT
+        )
     """)
 

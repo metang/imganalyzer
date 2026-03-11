@@ -1300,19 +1300,23 @@ def _handle_search(params: dict) -> dict:
             ORDER BY ca.analyzed_at DESC, ca.id DESC
             LIMIT 1
         ) AS cloud_description,
-        ae.aesthetic_score, ae.aesthetic_label, ae.aesthetic_reason
+        ae.aesthetic_score, ae.aesthetic_label, ae.aesthetic_reason,
+        ap.perception_iaa, ap.perception_iaa_label,
+        ap.perception_iqa, ap.perception_iqa_label,
+        ap.perception_ista, ap.perception_ista_label
     """
 
     joins = """
         FROM images i
-        LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
-        LEFT JOIN analysis_technical t  ON t.image_id  = i.id
-        LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
-        LEFT JOIN analysis_blip2     b2 ON b2.image_id = i.id
-        LEFT JOIN analysis_objects   ob ON ob.image_id = i.id
-        LEFT JOIN analysis_ocr      ocr ON ocr.image_id = i.id
-        LEFT JOIN analysis_faces     af ON af.image_id = i.id
-        LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
+        LEFT JOIN analysis_metadata    m  ON m.image_id  = i.id
+        LEFT JOIN analysis_technical   t  ON t.image_id  = i.id
+        LEFT JOIN analysis_local_ai    la ON la.image_id = i.id
+        LEFT JOIN analysis_blip2       b2 ON b2.image_id = i.id
+        LEFT JOIN analysis_objects     ob ON ob.image_id = i.id
+        LEFT JOIN analysis_ocr        ocr ON ocr.image_id = i.id
+        LEFT JOIN analysis_faces       af ON af.image_id = i.id
+        LEFT JOIN analysis_aesthetic   ae ON ae.image_id = i.id
+        LEFT JOIN analysis_perception  ap ON ap.image_id = i.id
     """
 
     def _json_field(val: Any) -> Any:
@@ -1851,19 +1855,23 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
             ORDER BY ca.analyzed_at DESC, ca.id DESC
             LIMIT 1
         ) AS cloud_description,
-        ae.aesthetic_score, ae.aesthetic_label, ae.aesthetic_reason
+        ae.aesthetic_score, ae.aesthetic_label, ae.aesthetic_reason,
+        ap.perception_iaa, ap.perception_iaa_label,
+        ap.perception_iqa, ap.perception_iqa_label,
+        ap.perception_ista, ap.perception_ista_label
     """
 
     joins = """
         FROM images i
-        LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
-        LEFT JOIN analysis_technical t  ON t.image_id  = i.id
-        LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
-        LEFT JOIN analysis_blip2     b2 ON b2.image_id = i.id
-        LEFT JOIN analysis_objects   ob ON ob.image_id = i.id
-        LEFT JOIN analysis_ocr      ocr ON ocr.image_id = i.id
-        LEFT JOIN analysis_faces     af ON af.image_id = i.id
-        LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
+        LEFT JOIN analysis_metadata    m  ON m.image_id  = i.id
+        LEFT JOIN analysis_technical   t  ON t.image_id  = i.id
+        LEFT JOIN analysis_local_ai    la ON la.image_id = i.id
+        LEFT JOIN analysis_blip2       b2 ON b2.image_id = i.id
+        LEFT JOIN analysis_objects     ob ON ob.image_id = i.id
+        LEFT JOIN analysis_ocr        ocr ON ocr.image_id = i.id
+        LEFT JOIN analysis_faces       af ON af.image_id = i.id
+        LEFT JOIN analysis_aesthetic   ae ON ae.image_id = i.id
+        LEFT JOIN analysis_perception  ap ON ap.image_id = i.id
     """
 
     rows = conn.execute(

@@ -27,6 +27,7 @@ MODULE_TABLE_MAP: dict[str, str] = {
     "faces":      "analysis_faces",
     "cloud_ai":   "analysis_cloud_ai",
     "aesthetic":  "analysis_aesthetic",
+    "perception": "analysis_perception",
     "embedding":  "embeddings",
 }
 
@@ -244,6 +245,18 @@ class Repository:
         vals = [image_id] + list(data.values()) + [_now()]
         self.conn.execute(
             f"INSERT INTO analysis_aesthetic ({col_str}) VALUES ({placeholders})", vals
+        )
+
+    def upsert_perception(self, image_id: int, data: dict[str, Any]) -> None:
+        """Atomic write of the perception analysis result (IAA/IQA/ISTA)."""
+        data = self._apply_override_mask(image_id, "analysis_perception", data)
+        self.conn.execute("DELETE FROM analysis_perception WHERE image_id = ?", [image_id])
+        cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_str = ", ".join(cols)
+        vals = [image_id] + list(data.values()) + [_now()]
+        self.conn.execute(
+            f"INSERT INTO analysis_perception ({col_str}) VALUES ({placeholders})", vals
         )
 
     def upsert_blip2(self, image_id: int, data: dict[str, Any]) -> None:
@@ -1506,7 +1519,7 @@ class Repository:
         if img:
             result["image"] = img
 
-        for module in ("metadata", "technical", "local_ai", "blip2", "objects", "ocr", "faces", "aesthetic"):
+        for module in ("metadata", "technical", "local_ai", "blip2", "objects", "ocr", "faces", "aesthetic", "perception"):
             data = self.get_analysis(image_id, module)
             if data:
                 # Apply overrides on top

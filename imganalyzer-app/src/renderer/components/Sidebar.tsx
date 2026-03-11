@@ -124,6 +124,39 @@ function XmpResults({ xmp }: { xmp: XmpData }) {
         )}
       </Section>
 
+      {/* Perception (UniPercept IAA / IQA / ISTA) */}
+      {(xmp.perceptionIAA !== undefined || xmp.perceptionIQA !== undefined || xmp.perceptionISTA !== undefined) && (
+        <Section title="Perception">
+          {xmp.perceptionIAA !== undefined && (
+            <div className="py-1 border-b border-neutral-800">
+              <div className="flex justify-between mb-1">
+                <span className="text-neutral-500 text-xs">Aesthetic Appeal</span>
+                {xmp.perceptionIAALabel && <span className="text-xs text-neutral-400">{xmp.perceptionIAALabel}</span>}
+              </div>
+              <ScoreBar value={xmp.perceptionIAA} max={10} />
+            </div>
+          )}
+          {xmp.perceptionIQA !== undefined && (
+            <div className="py-1 border-b border-neutral-800">
+              <div className="flex justify-between mb-1">
+                <span className="text-neutral-500 text-xs">Image Quality</span>
+                {xmp.perceptionIQALabel && <span className="text-xs text-neutral-400">{xmp.perceptionIQALabel}</span>}
+              </div>
+              <ScoreBar value={xmp.perceptionIQA} max={10} />
+            </div>
+          )}
+          {xmp.perceptionISTA !== undefined && (
+            <div className="py-1 border-b border-neutral-800">
+              <div className="flex justify-between mb-1">
+                <span className="text-neutral-500 text-xs">Structure & Texture</span>
+                {xmp.perceptionISTALabel && <span className="text-xs text-neutral-400">{xmp.perceptionISTALabel}</span>}
+              </div>
+              <ScoreBar value={xmp.perceptionISTA} max={10} />
+            </div>
+          )}
+        </Section>
+      )}
+
       {/* Camera */}
       {(xmp.cameraMake || xmp.cameraModel || xmp.fNumber || xmp.exposureTime || xmp.focalLength || xmp.iso) && (
         <Section title="Camera">
