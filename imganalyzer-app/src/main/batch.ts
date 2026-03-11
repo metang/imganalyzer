@@ -1043,14 +1043,17 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   )
 
   // ── batch:rebuild-module ────────────────────────────────────────────────
-  // Re-enqueue a module for ALL images (force=true) and start the worker.
+  // Re-enqueue a module for ALL images (force=true). If the worker is
+  // already running, the new jobs are picked up automatically.
   ipcMain.handle(
     'batch:rebuild-module',
     async (_evt, module: string): Promise<void> => {
-      if (batchStatus === 'running') return
-
       await ensureServerRunning()
       await rpc.call('rebuild', { module, force: true })
+
+      // If a worker is already running it will pick up the new jobs —
+      // no need to spawn another one.
+      if (batchStatus === 'running') return
 
       const w  = sessionConfig?.workers      ?? 1
       const cw = sessionConfig?.cloudWorkers ?? 4

@@ -559,7 +559,88 @@ export function SettingsView() {
             ))}
           </ul>
         </section>
+
+        {/* ── Maintenance ──────────────────────────────────────── */}
+        <section className="rounded-xl border border-neutral-800 bg-neutral-900/60 p-5 flex flex-col gap-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold text-neutral-100">Maintenance</h2>
+          </div>
+          <RebuildPerceptionButton />
+        </section>
       </div>
+    </div>
+  )
+}
+
+function RebuildPerceptionButton() {
+  const [showConfirm, setShowConfirm] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
+  const [triggered, setTriggered] = useState(false)
+
+  const doRebuild = async () => {
+    setShowConfirm(false)
+    setConfirmText('')
+    setTriggered(true)
+    try {
+      await window.api.batchRebuildModule('perception')
+    } catch {
+      /* handled by batch hook */
+    }
+  }
+
+  if (triggered) {
+    return (
+      <p className="text-sm text-emerald-400">
+        Rebuild queued — switch to the <strong>Running</strong> tab to see progress.
+      </p>
+    )
+  }
+
+  if (showConfirm) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-sm text-purple-300">
+          Type <strong>Confirm</strong> to rebuild perception on all images:
+        </span>
+        <input
+          autoFocus
+          value={confirmText}
+          onChange={(e) => setConfirmText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && confirmText === 'Confirm') doRebuild()
+            else if (e.key === 'Escape') { setShowConfirm(false); setConfirmText('') }
+          }}
+          className="w-28 rounded border border-purple-700/60 bg-neutral-900 px-2 py-1 text-sm text-neutral-200 outline-none focus:border-purple-500"
+          placeholder="Confirm"
+        />
+        <button
+          disabled={confirmText !== 'Confirm'}
+          onClick={doRebuild}
+          className="rounded bg-purple-700 px-3 py-1 text-sm text-white transition-colors enabled:hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Go
+        </button>
+        <button
+          onClick={() => { setShowConfirm(false); setConfirmText('') }}
+          className="text-sm text-neutral-500 hover:text-neutral-300"
+        >
+          Cancel
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex items-center gap-4">
+      <button
+        onClick={() => setShowConfirm(true)}
+        className="rounded-lg border border-purple-700/50 bg-purple-900/30 px-4 py-1.5 text-sm text-purple-300 transition-colors hover:border-purple-600 hover:bg-purple-800/40"
+      >
+        Rebuild Perception
+      </button>
+      <span className="text-xs text-neutral-500">
+        Re-run IAA / IQA / ISTA analysis on all images
+      </span>
     </div>
   )
 }

@@ -367,7 +367,6 @@ export function BatchRunView({
           onResume={handleResume}
           onStop={() => setShowStopDialog(true)}
           onRetryFailed={batch.retryFailed}
-          onRebuildModule={batch.rebuildModule}
           onClearQueue={handleClearQueue}
           onClearCompleted={handleClearCompleted}
         />
