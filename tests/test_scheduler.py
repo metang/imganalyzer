@@ -148,16 +148,18 @@ class TestResourceScheduler:
 
     def test_gpu_phases(self):
         s = self._make()
-        assert len(s.gpu_phases) == 3
+        assert len(s.gpu_phases) == 4
         assert s.modules_for_phase(0) == ["objects"]
         assert s.modules_for_phase(1) == ["blip2"]
         assert s.modules_for_phase(2) == ["faces", "ocr", "embedding"]
+        assert s.modules_for_phase(3) == ["perception"]
 
     def test_co_resident_phase(self):
         s = self._make()
         assert not s.is_co_resident_phase(0)  # objects alone
         assert not s.is_co_resident_phase(1)  # blip2 alone
         assert s.is_co_resident_phase(2)       # faces + ocr + embedding
+        assert not s.is_co_resident_phase(3)  # perception alone
 
     def test_batch_sizes(self):
         s = self._make()

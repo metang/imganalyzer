@@ -25,7 +25,7 @@ from imganalyzer.pipeline.vram_budget import VRAMBudget
 # ── Module classifications ────────────────────────────────────────────────────
 
 GPU_MODULES: frozenset[str] = frozenset({
-    "objects", "blip2", "ocr", "faces", "embedding",
+    "objects", "blip2", "ocr", "faces", "embedding", "perception",
 })
 LOCAL_IO_MODULES: frozenset[str] = frozenset({"metadata", "technical"})
 CLOUD_MODULES: frozenset[str] = frozenset({"cloud_ai", "aesthetic"})
@@ -49,10 +49,12 @@ _BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "blip2", "embedding"})
 # Phase 0: objects   (must run first — unlocks cloud/aesthetic/ocr/faces)
 # Phase 1: blip2     (exclusive — too large to share)
 # Phase 2: faces, ocr, embedding (co-resident — total ~2.75 GB)
+# Phase 3: perception (exclusive — 15.6 GB 4-bit quantized UniPercept)
 _GPU_PHASES: list[list[str]] = [
     ["objects"],
     ["blip2"],
     ["faces", "ocr", "embedding"],
+    ["perception"],
 ]
 
 
