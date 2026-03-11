@@ -76,6 +76,8 @@ export interface UseBatchProcessReturn {
   monitorExisting(): Promise<boolean>
   /** Re-enqueue all failed jobs for the given modules and re-run. */
   retryFailed(modules: string[]): Promise<void>
+  /** Re-enqueue ALL images for a single module (force rebuild) and run. */
+  rebuildModule(module: string): Promise<void>
   /** Wipe the entire job queue and reset to idle. Returns number of deleted jobs. */
   clearQueue(): Promise<number>
   /** Remove completed (done + skipped) jobs from the queue. Returns number of deleted jobs. */
@@ -240,6 +242,16 @@ export function useBatchProcess(): UseBatchProcessReturn {
     }
   }, [])
 
+  const rebuildModule = useCallback(async (module: string) => {
+    try {
+      setStats((prev) => ({ ...prev, status: 'running' as BatchStatus, monitorOnly: false }))
+      await window.api.batchRebuildModule(module)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setStats((prev) => ({ ...prev, status: 'error' as BatchStatus, monitorOnly: false }))
+    }
+  }, [])
+
   const clearQueue = useCallback(async (): Promise<number> => {
     try {
       const { deleted } = await window.api.batchQueueClearAll()
@@ -278,6 +290,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
     monitorExisting,
     resumePending,
     retryFailed,
+    rebuildModule,
     clearQueue,
     clearCompleted,
     pause,

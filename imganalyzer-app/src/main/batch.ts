@@ -1042,6 +1042,53 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     }
   )
 
+  // ── batch:rebuild-module ────────────────────────────────────────────────
+  // Re-enqueue a module for ALL images (force=true) and start the worker.
+  ipcMain.handle(
+    'batch:rebuild-module',
+    async (_evt, module: string): Promise<void> => {
+      if (batchStatus === 'running') return
+
+      await ensureServerRunning()
+      await rpc.call('rebuild', { module, force: true })
+
+      const w  = sessionConfig?.workers      ?? 1
+      const cw = sessionConfig?.cloudWorkers ?? 4
+      const cloud = sessionConfig?.cloudProvider ?? 'copilot'
+
+      sessionStartMs = Date.now()
+      resetSessionCounters()
+      currentRunId++
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
+      batchStatus = 'running'
+      monitorOnly = false
+      isRunActive = true
+
+      try {
+        await rpc.call('run', {
+          workers: w,
+          cloudWorkers: cw,
+          cloudProvider: cloud,
+          noXmp: true,
+          verbose: true,
+          staleTimeout: 0,
+          profile: sessionConfig?.profile ?? false,
+        })
+      } catch (err) {
+        isRunActive = false
+        batchStatus = 'error'
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => {
+          batchStatus = 'idle'
+          monitorOnly = false
+        }, 5000)
+        return
+      }
+
+      startPolling()
+    }
+  )
+
   // ── batch:queue-clear-all ─────────────────────────────────────────────────
   // Only clears pending/running/failed jobs. Done and skipped rows are
   // preserved so that re-ingest correctly skips already-processed images

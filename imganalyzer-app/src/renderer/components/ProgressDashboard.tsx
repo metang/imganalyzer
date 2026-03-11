@@ -6,6 +6,7 @@ interface Props {
   onResume(): void
   onStop(): void
   onRetryFailed(modules: string[]): void
+  onRebuildModule(module: string): void
   onClearQueue(): void
   onClearCompleted(): void
 }
@@ -240,6 +241,7 @@ export function ProgressDashboard({
   onResume,
   onStop,
   onRetryFailed,
+  onRebuildModule,
   onClearQueue,
   onClearCompleted,
 }: Props) {
@@ -410,6 +412,15 @@ export function ProgressDashboard({
             title={`Remove ${totals.done + totals.skipped} completed pass${totals.done + totals.skipped !== 1 ? 'es' : ''} from the queue`}
           >
             Clear completed ({totals.done + totals.skipped})
+          </button>
+        )}
+        {!isRunning && !isPaused && (
+          <button
+            onClick={() => onRebuildModule('perception')}
+            className="rounded-lg border border-purple-700/50 bg-purple-900/30 px-4 py-1.5 text-sm text-purple-300 transition-colors hover:border-purple-600 hover:bg-purple-800/40"
+            title="Re-run perception analysis (IAA/IQA/ISTA) on all images"
+          >
+            Rebuild Perception
           </button>
         )}
       </div>

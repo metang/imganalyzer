@@ -92,6 +92,8 @@ contextBridge.exposeInMainWorld('api', {
 
   batchRetryFailed: (modules: string[]): Promise<void> =>
     ipcRenderer.invoke('batch:retry-failed', modules),
+  batchRebuildModule: (module: string): Promise<void> =>
+    ipcRenderer.invoke('batch:rebuild-module', module),
 
   batchQueueClearAll: (): Promise<{ deleted: number }> =>
     ipcRenderer.invoke('batch:queue-clear-all'),
