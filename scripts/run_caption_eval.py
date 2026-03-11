@@ -12,11 +12,10 @@ from model_eval.runner import run_evaluation, collect_images, console
 IMAGE_DIR = Path(__file__).resolve().parent.parent / "test_images"
 
 MODELS = [
+    "copilot",
     "qwen3.5-vl-2b",
     "qwen3.5-vl-4b",
     "qwen3.5-vl-9b",
-    "qwen2.5-vl-3b",
-    "qwen2.5-vl-7b",
 ]
 
 

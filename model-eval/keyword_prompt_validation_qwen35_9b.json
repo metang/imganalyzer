@@ -1,0 +1,18 @@
+{
+  "baseline": {
+    "ok": 12,
+    "inrange": 12,
+    "empty": 6,
+    "invalid": 9,
+    "total": 27,
+    "seconds": 461.7
+  },
+  "best_schema_json": {
+    "ok": 24,
+    "inrange": 23,
+    "empty": 1,
+    "invalid": 2,
+    "total": 27,
+    "seconds": 396.6
+  }
+}

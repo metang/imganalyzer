@@ -1,0 +1,172 @@
+{
+  "summary": {
+    "baseline": {
+      "ok": 13,
+      "inrange": 13,
+      "empty": 5,
+      "invalid": 9,
+      "total": 27,
+      "seconds": 392.4
+    },
+    "baseline_required": {
+      "ok": 11,
+      "inrange": 11,
+      "empty": 6,
+      "invalid": 10,
+      "total": 27,
+      "seconds": 369.5
+    },
+    "strict_schema": {
+      "ok": 21,
+      "inrange": 16,
+      "empty": 4,
+      "invalid": 2,
+      "total": 27,
+      "seconds": 338.9
+    },
+    "strict_schema_example": {
+      "ok": 24,
+      "inrange": 20,
+      "empty": 1,
+      "invalid": 2,
+      "total": 27,
+      "seconds": 361.0
+    }
+  },
+  "fails": {
+    "baseline": [
+      [
+        "20091214-JK9U4934.JPG",
+        "no-keywords",
+        0
+      ],
+      [
+        "20091216-JK9U9800.JPG",
+        "no-keywords",
+        0
+      ],
+      [
+        "20250812-DSC02000.jpg",
+        "empty",
+        0
+      ],
+      [
+        "20250812-DSC02080.jpg",
+        "empty",
+        0
+      ],
+      [
+        "20250814-DSC09590.jpg",
+        "no-keywords",
+        0
+      ],
+      [
+        "DSC00176.ARW",
+        "no-keywords",
+        0
+      ],
+      [
+        "DSC01987.ARW",
+        "no-keywords",
+        0
+      ],
+      [
+        "DSC02121.ARW",
+        "no-keywords",
+        0
+      ]
+    ],
+    "baseline_required": [
+      [
+        "20060212-PICT3101.JPG",
+        "no-keywords",
+        0
+      ],
+      [
+        "20091213-IMG_2423-3.JPG",
+        "empty",
+        0
+      ],
+      [
+        "20091216-JK9U9073.JPG",
+        "empty",
+        0
+      ],
+      [
+        "20250812-DSC02000.jpg",
+        "no-keywords",
+        0
+      ],
+      [
+        "20250812-DSC02080.jpg",
+        "empty",
+        0
+      ],
+      [
+        "20250814-DSC09590.jpg",
+        "no-keywords",
+        0
+      ],
+      [
+        "DSC00176.ARW",
+        "no-keywords",
+        0
+      ],
+      [
+        "DSC00188.ARW",
+        "no-keywords",
+        0
+      ]
+    ],
+    "strict_schema": [
+      [
+        "20060212-PICT3101.JPG",
+        "empty",
+        0
+      ],
+      [
+        "20091216-JK9U9073.JPG",
+        "empty",
+        0
+      ],
+      [
+        "20250814-DSC09568.jpg",
+        "no-keywords",
+        0
+      ],
+      [
+        "faces tab 2026-03-01 120634.png",
+        "empty",
+        0
+      ],
+      [
+        "IMG_5701.HEIC",
+        "no-keywords",
+        0
+      ],
+      [
+        "IMG_6676.HEIC",
+        "empty",
+        0
+      ]
+    ],
+    "strict_schema_example": [
+      [
+        "20250812-DSC02000.jpg",
+        "empty",
+        0
+      ],
+      [
+        "DSC00011.ARW",
+        "no-keywords",
+        0
+      ],
+      [
+        "IMG_6677.HEIC",
+        "no-keywords",
+        0
+      ]
+    ]
+  },
+  "best": "strict_schema_example"
+}
