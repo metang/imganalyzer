@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { BatchStats, BatchModuleStats, BatchNode, BatchActiveModule } from '../global'
 
 interface Props {
@@ -258,6 +259,9 @@ export function ProgressDashboard({
     nodes,
   } = stats
 
+  const [rebuildConfirmText, setRebuildConfirmText] = useState('')
+  const [showRebuildConfirm, setShowRebuildConfirm] = useState(false)
+
   const totalPasses = queue.totalPasses
   const complete = queue.completedPasses
   const overallPct = totalPasses > 0 ? Math.round((complete / totalPasses) * 100) : 0
@@ -414,14 +418,53 @@ export function ProgressDashboard({
             Clear completed ({totals.done + totals.skipped})
           </button>
         )}
-        {!isRunning && !isPaused && (
+        {!isRunning && !isPaused && !showRebuildConfirm && (
           <button
-            onClick={() => onRebuildModule('perception')}
+            onClick={() => setShowRebuildConfirm(true)}
             className="rounded-lg border border-purple-700/50 bg-purple-900/30 px-4 py-1.5 text-sm text-purple-300 transition-colors hover:border-purple-600 hover:bg-purple-800/40"
             title="Re-run perception analysis (IAA/IQA/ISTA) on all images"
           >
             Rebuild Perception
           </button>
+        )}
+        {showRebuildConfirm && (
+          <div className="flex items-center gap-2 rounded-lg border border-purple-700/50 bg-purple-900/20 px-3 py-1.5">
+            <span className="text-sm text-purple-300">Type <strong>Confirm</strong> to rebuild:</span>
+            <input
+              autoFocus
+              value={rebuildConfirmText}
+              onChange={(e) => setRebuildConfirmText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && rebuildConfirmText === 'Confirm') {
+                  setShowRebuildConfirm(false)
+                  setRebuildConfirmText('')
+                  onRebuildModule('perception')
+                } else if (e.key === 'Escape') {
+                  setShowRebuildConfirm(false)
+                  setRebuildConfirmText('')
+                }
+              }}
+              className="w-28 rounded border border-purple-700/60 bg-neutral-900 px-2 py-0.5 text-sm text-neutral-200 outline-none focus:border-purple-500"
+              placeholder="Confirm"
+            />
+            <button
+              disabled={rebuildConfirmText !== 'Confirm'}
+              onClick={() => {
+                setShowRebuildConfirm(false)
+                setRebuildConfirmText('')
+                onRebuildModule('perception')
+              }}
+              className="rounded bg-purple-700 px-3 py-0.5 text-sm text-white transition-colors enabled:hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Go
+            </button>
+            <button
+              onClick={() => { setShowRebuildConfirm(false); setRebuildConfirmText('') }}
+              className="text-sm text-neutral-500 hover:text-neutral-300"
+            >
+              Cancel
+            </button>
+          </div>
         )}
       </div>
     </div>
