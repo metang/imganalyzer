@@ -49,13 +49,18 @@ _BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "blip2", "embedding"})
 # Phase 0: objects   (must run first — unlocks cloud/aesthetic/ocr/faces)
 # Phase 1: blip2     (exclusive — too large to share)
 # Phase 2: faces, ocr, embedding (co-resident — total ~2.75 GB)
-# Phase 3: perception (exclusive — 15.6 GB 4-bit quantized UniPercept)
+#
+# perception runs independently during IO drain (not sequenced with above)
 _GPU_PHASES: list[list[str]] = [
     ["objects"],
     ["blip2"],
     ["faces", "ocr", "embedding"],
-    ["perception"],
 ]
+
+# GPU modules that run independently alongside the IO drain rather than
+# in the sequential phase pipeline.  They have no prerequisites on other
+# GPU modules and can coexist with cloud thread-pool work.
+INDEPENDENT_GPU_MODULES: frozenset[str] = frozenset({"perception"})
 
 
 class ResourceScheduler:
@@ -423,6 +428,11 @@ class ResourceScheduler:
                 cancel_futures_fn(pending_futures)
             if pending_futures:
                 collect_fn(pending_futures)
+
+    @staticmethod
+    def independent_gpu_modules() -> frozenset[str]:
+        """GPU modules that run outside the sequential phase pipeline."""
+        return INDEPENDENT_GPU_MODULES
 
     def run_io_drain(
         self,

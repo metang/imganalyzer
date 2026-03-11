@@ -490,21 +490,59 @@ class Worker:
                     )
 
             # ════════════════════════════════════════════════════════════════
-            # IO drain: remaining cloud/IO jobs with boosted cloud pool
+            # IO drain + independent GPU modules (e.g. perception)
+            # Independent GPU modules have no prerequisite on other GPU
+            # phases and run on a background thread while cloud/IO jobs
+            # continue in the thread pool.
             # ════════════════════════════════════════════════════════════════
             if not self._shutdown.is_set():
                 boosted_cloud = (
                     1 if self.cloud_provider == "copilot"
                     else scheduler.boosted_cloud_workers()
                 )
+
+                # Determine which independent GPU modules have pending work.
+                indie_gpu = [
+                    mod for mod in scheduler.independent_gpu_modules()
+                    if self.queue.pending_count(module=mod) > 0
+                ]
+
+                def _drain_indie_gpu(module: str) -> None:
+                    """Drain a single independent GPU module on a background thread."""
+                    while not self._shutdown.is_set():
+                        jobs = _claim_fn(1, module)
+                        if not jobs:
+                            break
+                        for job in jobs:
+                            self._process_job(job)
+
                 with (
                     self.profiler.span("io_drain"),
                     ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
                     ThreadPoolExecutor(max_workers=boosted_cloud)      as cloud_pool,
                 ):
-                    console.print(
-                        f"[dim]IO drain — cloud threads boosted to {boosted_cloud}[/dim]"
-                    )
+                    if indie_gpu:
+                        console.print(
+                            f"[dim]IO drain + GPU ({', '.join(indie_gpu)}) — "
+                            f"cloud threads boosted to {boosted_cloud}[/dim]"
+                        )
+                    else:
+                        console.print(
+                            f"[dim]IO drain — cloud threads boosted to {boosted_cloud}[/dim]"
+                        )
+
+                    # Start independent GPU modules on background threads.
+                    gpu_threads: list[threading.Thread] = []
+                    for mod in indie_gpu:
+                        t = threading.Thread(
+                            target=_drain_indie_gpu,
+                            args=(mod,),
+                            daemon=True,
+                            name=f"gpu-indie-{mod}",
+                        )
+                        gpu_threads.append(t)
+                        t.start()
+
                     scheduler.run_io_drain(
                         submit_io_fn=_submit_io_jobs,
                         collect_fn=_collect_futures,
@@ -513,6 +551,16 @@ class Worker:
                         cloud_pool=cloud_pool,
                         cancel_futures_fn=_cancel_futures,
                     )
+
+                    # IO drain finished — wait for independent GPU threads.
+                    # Keep submitting IO jobs that may have been enqueued while
+                    # GPU was still processing (e.g. by a concurrent rebuild).
+                    for t in gpu_threads:
+                        while t.is_alive():
+                            new = _submit_io_jobs(local_pool, cloud_pool)
+                            if new:
+                                _collect_futures(new)
+                            t.join(timeout=1.0)
 
         if self._shutdown.is_set():
             console.print("\n[yellow]Paused.[/yellow] Run `imganalyzer run` to resume.")
