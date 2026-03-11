@@ -418,10 +418,11 @@ export function ProgressDashboard({
             Clear completed ({totals.done + totals.skipped})
           </button>
         )}
-        {!isRunning && !isPaused && !showRebuildConfirm && (
+        {!showRebuildConfirm && (
           <button
+            disabled={isRunning || isPaused}
             onClick={() => setShowRebuildConfirm(true)}
-            className="rounded-lg border border-purple-700/50 bg-purple-900/30 px-4 py-1.5 text-sm text-purple-300 transition-colors hover:border-purple-600 hover:bg-purple-800/40"
+            className="rounded-lg border border-purple-700/50 bg-purple-900/30 px-4 py-1.5 text-sm text-purple-300 transition-colors enabled:hover:border-purple-600 enabled:hover:bg-purple-800/40 disabled:opacity-40 disabled:cursor-not-allowed"
             title="Re-run perception analysis (IAA/IQA/ISTA) on all images"
           >
             Rebuild Perception
