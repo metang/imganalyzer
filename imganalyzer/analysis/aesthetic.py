@@ -71,18 +71,12 @@ class SigLIPAesthetic:
         aesthetic_reason (empty — SigLIP doesn't explain), and provider.
         """
         import torch
-        from PIL import Image
-        from imganalyzer.readers.standard import (
-            pillow_decode_guard,
-            register_optional_pillow_opener,
-        )
+        from imganalyzer.readers import open_as_pil
 
         if cls._model is None:
             cls.load()
 
-        register_optional_pillow_opener(path)
-        with pillow_decode_guard(path):
-            img = Image.open(path).convert("RGB")
+        img = open_as_pil(path)
 
         inputs = cls._preprocessor(images=img, return_tensors="pt")
         if cls._device == "cuda" and torch.cuda.is_available():

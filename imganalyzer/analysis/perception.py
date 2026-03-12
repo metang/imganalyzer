@@ -187,19 +187,11 @@ def analyze(image_path: Path) -> dict[str, Any]:
     All scores are on a 0-10 scale.
     """
     import torch
-    from PIL import Image
+    from imganalyzer.readers import open_as_pil
 
     _holder.load()
 
-    # HEIC/HEIF support
-    try:
-        import pillow_heif
-        pillow_heif.register_heif_opener()
-    except ImportError:
-        pass
-
-    # Load and preprocess image
-    img = Image.open(image_path).convert("RGB")
+    img = open_as_pil(image_path)
     # Resize large images to avoid excessive memory usage
     MAX_DIM = 1280
     if max(img.size) > MAX_DIM:

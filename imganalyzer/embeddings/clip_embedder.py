@@ -23,7 +23,6 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from imganalyzer.readers.raw import _suppress_c_stderr
 
 CACHE_DIR = os.getenv("IMGANALYZER_MODEL_CACHE", str(Path.home() / ".cache" / "imganalyzer"))
 
@@ -72,29 +71,11 @@ class CLIPEmbedder:
         self._load_model()
         import torch
         from PIL import Image
-        from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
 
         path = Path(path)
-        suffix = path.suffix.lower()
 
-        # Check if this is a RAW camera file that Pillow cannot open directly.
-        try:
-            from imganalyzer.analyzer import RAW_EXTENSIONS
-            is_raw = suffix in RAW_EXTENSIONS
-        except ImportError:
-            is_raw = False
-
-        if is_raw:
-            import rawpy
-            with _suppress_c_stderr():
-                raw_ctx = rawpy.imread(str(path))
-            with raw_ctx as raw:
-                rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=False, output_bps=8)
-            img = Image.fromarray(rgb).convert("RGB")
-        else:
-            register_optional_pillow_opener(path)
-            with pillow_decode_guard(path):
-                img = Image.open(str(path)).convert("RGB")
+        from imganalyzer.readers import open_as_pil
+        img = open_as_pil(path)
 
         # Downsize to EMBED_MAX_LONG_EDGE on the long edge before CLIP pre-processing.
         # CLIP rescales to 224 px internally, so there is no quality loss.

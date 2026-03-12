@@ -30,18 +30,14 @@ _TIMEOUT = 300  # seconds per Ollama request
 def _encode_image(path: Path, max_dim: int = _MAX_DIM) -> str:
     """Return base64-encoded JPEG string, resized to *max_dim* px."""
     from PIL import Image
-    from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
+    from imganalyzer.readers import open_as_pil
 
-    register_optional_pillow_opener(path)
-    with pillow_decode_guard(path):
-        img = Image.open(path)
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
+    img = open_as_pil(path)
 
-        w, h = img.size
-        if max(w, h) > max_dim:
-            ratio = max_dim / max(w, h)
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+    w, h = img.size
+    if max(w, h) > max_dim:
+        ratio = max_dim / max(w, h)
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
 
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
