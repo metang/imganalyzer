@@ -51,28 +51,24 @@ class TestVRAMBudget:
 
     def test_exclusive_module_alone(self):
         vram = self._make()
-        assert vram.can_fit("blip2")
-        vram.reserve("blip2")
-        assert vram.used_gb == pytest.approx(_MODULE_VRAM_GB["blip2"])
-        # Nothing else can load while blip2 is loaded
-        assert not vram.can_fit("faces")
-        assert not vram.can_fit("embedding")
-        assert not vram.can_fit("objects")
+        assert vram.can_fit("perception")
+        # perception is now the only exclusive module
 
     def test_blip2_fits_on_8gb_budget(self):
-        """BLIP-2 phase should be runnable on 8 GB cards at 70% budget."""
-        vram = self._make(total=8.0, fraction=0.70)  # 5.6 GB budget
+        """blip2 now uses Ollama (0 VRAM) — always fits."""
+        vram = self._make(total=8.0, fraction=0.70)
         assert vram.can_fit("blip2")
 
     def test_blip2_does_not_fit_below_physical_requirement(self):
+        """blip2 now uses Ollama (0 VRAM) — always fits."""
         vram = self._make(total=4.0, fraction=0.70)
-        assert not vram.can_fit("blip2")
+        assert vram.can_fit("blip2")
 
     def test_exclusive_blocked_by_existing(self):
         vram = self._make()
         vram.reserve("faces")
-        # blip2 can't load while anything else is loaded
-        assert not vram.can_fit("blip2")
+        # perception can't load while anything else is loaded
+        assert not vram.can_fit("perception")
 
     def test_reserve_idempotent(self):
         vram = self._make()
@@ -97,7 +93,8 @@ class TestVRAMBudget:
 
     def test_is_exclusive(self):
         vram = self._make()
-        assert vram.is_exclusive("blip2")
+        assert vram.is_exclusive("perception")
+        assert not vram.is_exclusive("blip2")
         assert not vram.is_exclusive("faces")
         assert not vram.is_exclusive("embedding")
 
@@ -138,7 +135,7 @@ class TestResourceScheduler:
         vram = VRAMBudget(total_vram_gb=16.0, fraction=0.70)
         defaults = {
             "vram_budget": vram,
-            "gpu_batch_sizes": {"objects": 4, "blip2": 1, "embedding": 16},
+            "gpu_batch_sizes": {"objects": 4, "embedding": 16},
             "default_batch_size": 10,
             "cpu_workers": 4,
             "cloud_workers": 4,
@@ -148,16 +145,14 @@ class TestResourceScheduler:
 
     def test_gpu_phases(self):
         s = self._make()
-        assert len(s.gpu_phases) == 3
+        assert len(s.gpu_phases) == 2
         assert s.modules_for_phase(0) == ["objects"]
-        assert s.modules_for_phase(1) == ["blip2"]
-        assert s.modules_for_phase(2) == ["faces", "ocr", "embedding"]
+        assert s.modules_for_phase(1) == ["faces", "ocr", "embedding", "aesthetic"]
 
     def test_co_resident_phase(self):
         s = self._make()
         assert not s.is_co_resident_phase(0)  # objects alone
-        assert not s.is_co_resident_phase(1)  # blip2 alone
-        assert s.is_co_resident_phase(2)       # faces + ocr + embedding
+        assert s.is_co_resident_phase(1)       # faces + ocr + embedding + aesthetic
 
     def test_independent_gpu_modules(self):
         s = self._make()
@@ -166,15 +161,14 @@ class TestResourceScheduler:
     def test_batch_sizes(self):
         s = self._make()
         assert s.batch_size_for("objects") == 4
-        assert s.batch_size_for("blip2") == 1
         assert s.batch_size_for("embedding") == 16
         assert s.batch_size_for("faces") == 10  # falls back to default
 
     def test_batch_capable(self):
         s = self._make()
         assert s.is_batch_capable("objects")
-        assert s.is_batch_capable("blip2")
         assert s.is_batch_capable("embedding")
+        assert not s.is_batch_capable("blip2")
         assert not s.is_batch_capable("faces")
         assert not s.is_batch_capable("ocr")
 
@@ -185,10 +179,11 @@ class TestResourceScheduler:
     def test_module_classification(self):
         s = self._make()
         assert s.is_gpu("objects")
-        assert s.is_gpu("blip2")
+        assert s.is_gpu("aesthetic")
+        assert not s.is_gpu("blip2")
         assert not s.is_gpu("metadata")
         assert s.is_cloud("cloud_ai")
-        assert s.is_cloud("aesthetic")
+        assert s.is_cloud("blip2")
         assert s.is_local_io("metadata")
         assert s.is_local_io("technical")
         assert s.is_io("cloud_ai")
@@ -260,7 +255,7 @@ class TestResourceScheduler:
             ThreadPoolExecutor(max_workers=1) as cloud_pool,
         ):
             s.run_gpu_phase(
-                1,  # Phase 1 => ["blip2"]
+                0,  # Phase 0 => ["objects"]
                 claim_fn=_claim_fn,
                 process_batch_fn=_process_batch_fn,
                 process_single_fn=lambda _job: "done",
@@ -274,9 +269,9 @@ class TestResourceScheduler:
                 unload_fn=_unload_fn,
             )
 
-        assert "unload:blip2" in call_order
+        assert "unload:objects" in call_order
         assert "collect" in call_order
-        assert call_order.index("unload:blip2") < call_order.index("collect")
+        assert call_order.index("unload:objects") < call_order.index("collect")
         assert s.vram.loaded_modules == []
 
     def test_run_gpu_phase_cancels_queued_io_futures_on_shutdown(self):
@@ -454,29 +449,33 @@ class TestResourceScheduler:
 class TestCoResidencyFitCheck:
     """Verify that the declared co-resident phase actually fits."""
 
-    def test_phase2_fits_in_budget(self):
+    def test_phase1_fits_in_budget(self):
         vram = VRAMBudget(total_vram_gb=16.0, fraction=0.70)
-        phase2_modules = _GPU_PHASES[2]  # faces, ocr, embedding
-        total = sum(_MODULE_VRAM_GB.get(m, 0) for m in phase2_modules)
+        phase1_modules = _GPU_PHASES[1]  # faces, ocr, embedding, aesthetic
+        total = sum(_MODULE_VRAM_GB.get(m, 0) for m in phase1_modules)
         assert total < vram.budget_gb, (
-            f"Phase 2 modules ({phase2_modules}) need {total:.2f} GB "
+            f"Phase 1 modules ({phase1_modules}) need {total:.2f} GB "
             f"but budget is {vram.budget_gb:.2f} GB"
         )
         # Actually reserve them all
-        for mod in phase2_modules:
+        for mod in phase1_modules:
             assert vram.can_fit(mod)
             vram.reserve(mod)
 
-    def test_phase2_fits_on_8gb_card(self):
+    def test_phase1_fits_on_8gb_card(self):
         """Even an 8 GB card should handle co-residency at 70%."""
         vram = VRAMBudget(total_vram_gb=8.0, fraction=0.70)  # 5.6 GB budget
-        phase2_modules = _GPU_PHASES[2]
-        total = sum(_MODULE_VRAM_GB.get(m, 0) for m in phase2_modules)
+        phase1_modules = _GPU_PHASES[1]
+        total = sum(_MODULE_VRAM_GB.get(m, 0) for m in phase1_modules)
         assert total < vram.budget_gb
 
-    def test_blip2_exclusive_in_registry(self):
-        """BLIP-2 must be in the exclusive set."""
-        assert "blip2" in _EXCLUSIVE_MODULES
+    def test_perception_exclusive_in_registry(self):
+        """perception must be in the exclusive set."""
+        assert "perception" in _EXCLUSIVE_MODULES
+
+    def test_blip2_not_exclusive(self):
+        """blip2 runs via Ollama now, not exclusive GPU."""
+        assert "blip2" not in _EXCLUSIVE_MODULES
 
     def test_all_gpu_phases_have_known_modules(self):
         """Every module in _GPU_PHASES must have a VRAM entry."""

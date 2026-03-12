@@ -377,11 +377,11 @@ class ModuleRunner:
     def _run_blip2(self, image_id: int, path: Path) -> dict[str, Any]:
         image_data = self._cached_read_image(path, image_id)
 
-        from imganalyzer.pipeline.passes.blip2 import run_blip2
-        result = run_blip2(image_data, self.repo, image_id, self.conn)
+        from imganalyzer.pipeline.passes.ollama_ai import run_ollama_ai
+        result = run_ollama_ai(image_data, self.repo, image_id, self.conn, path=path)
 
         if self.verbose:
-            console.print(f"  [dim]BLIP-2 done for image {image_id}[/dim]")
+            console.print(f"  [dim]Qwen 3.5 caption done for image {image_id}[/dim]")
         return result
 
     def _run_objects(self, image_id: int, path: Path) -> dict[str, Any]:
@@ -427,41 +427,39 @@ class ModuleRunner:
         if local_data and local_data.get("has_people"):
             if self.verbose:
                 console.print(
-                    f"  [dim]Skipping cloud AI for image {image_id} (has people)[/dim]"
+                    f"  [dim]Skipping AI analysis for image {image_id} (has people)[/dim]"
                 )
             return {}
 
         image_data = self._cached_read_image(path, image_id)
 
-        from imganalyzer.analysis.ai.cloud import CloudAI
-        result = CloudAI(backend=self.cloud_provider).analyze(path, image_data)
+        from imganalyzer.analysis.ai.ollama import OllamaAI
+        result = OllamaAI().analyze(path, image_data)
 
         # Extract aesthetic fields from the combined response before storing
-        # cloud_ai data (mirrors the CLI split logic in cli.py:240-258).
         aesthetic_score = result.pop("aesthetic_score", None)
         aesthetic_label = result.pop("aesthetic_label", None)
         aesthetic_reason = result.pop("aesthetic_reason", None)
 
         with _transaction(self.conn):
-            self.repo.upsert_cloud_ai(image_id, self.cloud_provider, result)
-            # Store aesthetic data from the same LLM call — avoids a
-            # redundant second API request from _run_aesthetic().
+            self.repo.upsert_cloud_ai(image_id, "ollama-qwen3.5", result)
+            # Store aesthetic data from the same Ollama call
             if aesthetic_score is not None:
                 self.repo.upsert_aesthetic(image_id, {
                     "aesthetic_score": aesthetic_score,
                     "aesthetic_label": aesthetic_label or "",
                     "aesthetic_reason": aesthetic_reason or "",
-                    "provider": self.cloud_provider,
+                    "provider": "ollama-qwen3.5",
                 })
 
         if self.verbose:
             console.print(
-                f"  [dim]Cloud AI ({self.cloud_provider}) done for image {image_id}[/dim]"
+                f"  [dim]AI analysis (Qwen 3.5) done for image {image_id}[/dim]"
             )
         return result
 
     def _run_aesthetic(self, image_id: int, path: Path) -> dict[str, Any]:
-        # Aesthetic analysis uses a cloud model — skip for images with people
+        # Aesthetic analysis: skip for images with people (privacy guard)
         local_data = self.repo.get_analysis(image_id, "local_ai")
         if local_data and local_data.get("has_people"):
             if self.verbose:
@@ -470,9 +468,8 @@ class ModuleRunner:
                 )
             return {}
 
-        # If cloud_ai has a pending or running job for this image, it will
-        # write aesthetic data as part of its combined LLM response — skip
-        # to avoid a redundant (and racy) parallel API call.
+        # If cloud_ai (Ollama) has a pending/running job, it will write
+        # aesthetic data as part of its combined response — skip.
         cloud_ai_active = self.conn.execute(
             """SELECT 1 FROM job_queue
                WHERE image_id = ? AND module = 'cloud_ai'
@@ -483,19 +480,16 @@ class ModuleRunner:
         if cloud_ai_active:
             if self.verbose:
                 console.print(
-                    f"  [dim]Deferring aesthetic to cloud_ai for image {image_id}[/dim]"
+                    f"  [dim]Deferring aesthetic to AI analysis for image {image_id}[/dim]"
                 )
             return {}
 
-        # If cloud_ai already wrote aesthetic data for this image, skip the
-        # redundant API call.  This is the common case when both cloud_ai and
-        # aesthetic modules are enabled — cloud_ai now extracts aesthetic
-        # fields from its combined prompt response.
+        # If cloud_ai already wrote aesthetic data, skip.
         existing = self.repo.get_analysis(image_id, "aesthetic")
         if existing and existing.get("aesthetic_score") is not None:
             if self.verbose:
                 console.print(
-                    f"  [dim]Aesthetic already populated by cloud_ai for image {image_id}[/dim]"
+                    f"  [dim]Aesthetic already populated for image {image_id}[/dim]"
                 )
             return {
                 "aesthetic_score": existing["aesthetic_score"],
@@ -504,27 +498,18 @@ class ModuleRunner:
                 "provider": existing.get("provider", ""),
             }
 
-        image_data = self._cached_read_image(path, image_id)
-
-        # Fallback: if only aesthetic was selected (without cloud_ai), make
-        # the full cloud call and extract aesthetic fields.
-        from imganalyzer.analysis.ai.cloud import CloudAI
-        cloud = CloudAI(backend=self.cloud_provider)
-        result = cloud.analyze(path, image_data)
-
-        aesthetic_data = {
-            "aesthetic_score": result.get("aesthetic_score"),
-            "aesthetic_label": result.get("aesthetic_label"),
-            "aesthetic_reason": result.get("aesthetic_reason", ""),
-            "provider": self.cloud_provider,
-        }
+        # Fallback: use SigLIP-v2.5 for standalone aesthetic scoring
+        from imganalyzer.analysis.aesthetic import SigLIPAesthetic
+        aesthetic_data = SigLIPAesthetic.analyze(path)
 
         with _transaction(self.conn):
             self.repo.upsert_aesthetic(image_id, aesthetic_data)
 
         if self.verbose:
+            score = aesthetic_data.get("aesthetic_score", "?")
             console.print(
-                f"  [dim]Aesthetic analysis done for image {image_id}[/dim]"
+                f"  [dim]Aesthetic (SigLIP) done for image {image_id} "
+                f"(score={score})[/dim]"
             )
         return aesthetic_data
 
@@ -832,9 +817,8 @@ def unload_gpu_model(module: str) -> None:
     reloaded if a later pass needs it again (negligible cost — loading
     happens once per 500K-image run, not once per image).
 
-    With model unloading, peak VRAM drops from ~9.5 GB (all 5 models
-    co-resident) to ~4.7 GB (largest single model = BLIP-2), leaving
-    ample headroom for batch inference within the 14 GB ceiling.
+    With model unloading, peak VRAM drops significantly, leaving
+    ample headroom for batch inference within the GPU ceiling.
     """
     if module in ("blip2", "local_ai"):
         from imganalyzer.analysis.ai.local import LocalAI
@@ -851,6 +835,9 @@ def unload_gpu_model(module: str) -> None:
     if module == "embedding":
         from imganalyzer.embeddings.clip_embedder import CLIPEmbedder
         CLIPEmbedder._unload()
+    if module == "aesthetic":
+        from imganalyzer.analysis.aesthetic import SigLIPAesthetic
+        SigLIPAesthetic.unload()
 
 
 # ── XMP generation from DB data ───────────────────────────────────────────────

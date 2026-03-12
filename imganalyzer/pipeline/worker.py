@@ -6,7 +6,7 @@ can run concurrently when they fit within the VRAM budget.
 
 Processing strategy
 -------------------
-The worker uses a VRAM-budget-aware scheduler with three GPU phases:
+The worker uses a VRAM-budget-aware scheduler with GPU phases:
 
 Phase 0 — ``objects`` pass (GPU, serial):
   Drain ALL pending ``objects`` jobs first.  Once ``objects`` is done for an
@@ -14,12 +14,11 @@ Phase 0 — ``objects`` pass (GPU, serial):
   ``faces`` jobs are unblocked.  ``metadata`` / ``technical`` run concurrently
   in a thread pool throughout all phases.
 
-Phase 1 — ``blip2`` (GPU, exclusive):
-  BLIP-2 requires ~6 GB VRAM and runs alone (exclusive mode).
+Phase 1 — ``faces`` + ``ocr`` + ``embedding`` + ``aesthetic`` (GPU, co-resident):
+  These models (~4.75 GB total) run concurrently with separate CUDA streams.
+  ``aesthetic`` uses SigLIP-v2.5 (~1.5 GB).
 
-Phase 2 — ``faces`` + ``ocr`` + ``embedding`` (GPU, co-resident):
-  These small models (~2.75 GB total) run concurrently with separate CUDA
-  streams, saving two model load/unload cycles compared to serial execution.
+``blip2`` and ``cloud_ai`` now run via Ollama (IO-bound, not GPU-phased).
 
 Cloud / IO work runs in parallel thread pools throughout all phases, with
 the cloud pool boosted to 2× when GPU is idle.
@@ -63,11 +62,11 @@ from imganalyzer.pipeline.scheduler import ResourceScheduler
 console = Console()
 
 # Modules that use GPU — must run single-threaded on the main thread
-GPU_MODULES = {"local_ai", "embedding", "blip2", "objects", "ocr", "faces", "perception"}
+GPU_MODULES = {"local_ai", "embedding", "objects", "ocr", "faces", "perception", "aesthetic"}
 # Local I/O-bound modules — parallel, governed by `workers`
 LOCAL_IO_MODULES = {"metadata", "technical"}
-# Cloud API modules — parallel, governed by `cloud_workers`
-CLOUD_MODULES = {"cloud_ai", "aesthetic"}
+# Cloud/IO modules — parallel, governed by `cloud_workers`
+CLOUD_MODULES = {"cloud_ai", "blip2"}
 # Combined set (kept for backwards-compat references)
 IO_MODULES = LOCAL_IO_MODULES | CLOUD_MODULES
 
@@ -260,16 +259,12 @@ class Worker:
 
         # Initialize VRAM budget and scheduler
         vram = VRAMBudget()  # auto-detects GPU VRAM, applies 70% cap
-        # Cap PyTorch CUDA memory usage conservatively, but ensure the BLIP-2
-        # phase is not impossible on smaller cards (e.g. 8 GB).
+        # Cap PyTorch CUDA memory usage conservatively.
         # (MPS uses unified memory — no per-process fraction API.)
         try:
             import torch
             if torch.cuda.is_available():
                 fraction = 0.70
-                blip2_need = vram.vram_for("blip2")
-                if vram.total_gb > 0 and blip2_need > (fraction * vram.total_gb):
-                    fraction = min(0.92, (blip2_need + 0.25) / vram.total_gb)
                 torch.cuda.set_per_process_memory_fraction(fraction)
         except Exception:
             pass
@@ -444,13 +439,12 @@ class Worker:
             # ════════════════════════════════════════════════════════════════
             # GPU Phases (scheduler-driven)
             # Phase 0: objects (exclusive, unlocks dependencies)
-            # Phase 1: blip2 (exclusive, large model)
-            # Phase 2: faces + ocr + embedding (co-resident, ~2.75 GB)
+            # Phase 1: faces + ocr + embedding + aesthetic (co-resident)
+            # blip2 and cloud_ai run via Ollama in IO thread pool
             # ════════════════════════════════════════════════════════════════
             phase_labels = [
                 "Phase 0 — object detection (people flag)",
-                "Phase 1 — BLIP-2 captioning (exclusive GPU)",
-                "Phase 2 — faces + OCR + embeddings (co-resident GPU)",
+                "Phase 1 — faces + OCR + embeddings + aesthetic (co-resident GPU)",
             ]
 
             for phase_idx in range(len(scheduler.gpu_phases)):
@@ -594,10 +588,10 @@ class Worker:
     # to leave headroom for other applications and CUDA allocator overhead.
     _GPU_BATCH_SIZES: dict[str, int] = {
         "objects":   4,   # GroundingDINO mixed fp16/fp32, ~1.1 GB model
-        "blip2":     1,   # BLIP-2 fp16, ~4.7 GB model + beam search
         "embedding": 16,  # CLIP ViT-L/14 fp16, ~0.95 GB model
         "faces":     8,   # InsightFace ONNX — claim granularity for prefetch
         "ocr":       4,   # TrOCR — claim granularity for prefetch
+        "aesthetic": 4,   # SigLIP-v2.5 — claim granularity
     }
 
     def _process_job_batch(
@@ -622,7 +616,7 @@ class Worker:
             return batch_stats
 
         # Modules that support batched GPU inference
-        BATCH_MODULES = {"objects", "blip2", "embedding"}
+        BATCH_MODULES = {"objects", "embedding"}
         if module not in BATCH_MODULES:
             # Fallback: process each job individually
             for job in jobs:
@@ -710,11 +704,6 @@ class Worker:
                     valid_image_data, repo, valid_image_ids, runner.conn,
                     prompt=self.detection_prompt,
                     threshold=self.detection_threshold,
-                )
-            elif module == "blip2":
-                from imganalyzer.pipeline.passes.blip2 import run_blip2_batch
-                run_blip2_batch(
-                    valid_image_data, repo, valid_image_ids, runner.conn,
                 )
             elif module == "embedding":
                 runner.run_embedding_batch(valid_jobs)

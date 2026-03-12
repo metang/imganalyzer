@@ -85,14 +85,14 @@ function CloudResults({ xmp }: { xmp: XmpData }) {
             <ScoreBar value={xmp.aestheticScore} />
           </div>
         )}
-        {xmp.description && <Row label="Cloud Description" value={xmp.description} />}
-        {xmp.sceneType   && <Row label="Cloud Scene"       value={xmp.sceneType} />}
-        {xmp.mainSubject && <Row label="Cloud Subject"     value={xmp.mainSubject} />}
-        {xmp.lighting    && <Row label="Cloud Lighting"    value={xmp.lighting} />}
-        {xmp.mood        && <Row label="Cloud Mood"        value={xmp.mood} />}
+        {xmp.description && <Row label="Description" value={xmp.description} />}
+        {xmp.sceneType   && <Row label="Scene"       value={xmp.sceneType} />}
+        {xmp.mainSubject && <Row label="Subject"     value={xmp.mainSubject} />}
+        {xmp.lighting    && <Row label="Lighting"    value={xmp.lighting} />}
+        {xmp.mood        && <Row label="Mood"        value={xmp.mood} />}
         {xmp.keywords && xmp.keywords.length > 0 && (
           <div className="py-1 border-b border-neutral-800">
-            <span className="text-neutral-500 text-xs block mb-1">Cloud Keywords</span>
+            <span className="text-neutral-500 text-xs block mb-1">Keywords</span>
             <TagList items={xmp.keywords} />
           </div>
         )}
@@ -110,8 +110,8 @@ export function CloudSidebar({ imageName, state, onAnalyze }: CloudSidebarProps)
       <div className="px-4 py-3 border-b border-purple-900/60 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           <CloudIcon />
-          <span className="text-sm font-medium text-purple-300 shrink-0">Cloud AI</span>
-          <span className="text-[11px] text-neutral-600 truncate">· gpt-4.1</span>
+          <span className="text-sm font-medium text-purple-300 shrink-0">AI Analysis</span>
+          <span className="text-[11px] text-neutral-600 truncate">· Qwen 3.5</span>
         </div>
         {(state.status === 'idle' || state.status === 'error') && (
           <button
@@ -136,14 +136,14 @@ export function CloudSidebar({ imageName, state, onAnalyze }: CloudSidebarProps)
         {state.status === 'idle' && (
           <div className="px-4 space-y-3">
             <p className="text-neutral-600 text-xs leading-relaxed">
-              Compare with GitHub Copilot (gpt-4.1) cloud analysis.
+              Compare with Qwen 3.5 AI analysis.
             </p>
             <p className="text-neutral-700 text-[11px] truncate" title={imageName}>{imageName}</p>
             <button
               onClick={onAnalyze}
               className="w-full text-xs px-3 py-2 rounded bg-purple-900/50 hover:bg-purple-800/70 text-purple-300 border border-purple-800/50 transition-colors"
             >
-              Analyze with Cloud AI
+              Analyze with AI
             </button>
           </div>
         )}
@@ -152,7 +152,7 @@ export function CloudSidebar({ imageName, state, onAnalyze }: CloudSidebarProps)
           <div className="px-4 space-y-3">
             <div className="flex items-center gap-2 text-sm text-purple-300">
               <div className="w-4 h-4 border-2 border-purple-900 border-t-purple-400 rounded-full animate-spin shrink-0" />
-              Analyzing with gpt-4.1…
+              Analyzing with Qwen 3.5…
             </div>
             <p className="text-neutral-600 text-xs">Sending image to GitHub Copilot cloud…</p>
           </div>

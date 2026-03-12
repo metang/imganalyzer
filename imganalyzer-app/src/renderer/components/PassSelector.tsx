@@ -16,12 +16,12 @@ interface PassDef {
 const PASSES: PassDef[] = [
   { label: 'Metadata (EXIF / GPS / IPTC)',           uiKey: 'metadata',   moduleKey: 'metadata'  },
   { label: 'Technical (sharpness, exposure, noise)',  uiKey: 'technical',  moduleKey: 'technical' },
-  { label: 'Caption & Scene (BLIP-2)',                uiKey: 'caption',    moduleKey: 'blip2'     },
+  { label: 'Caption & Scene (Qwen 3.5)',             uiKey: 'caption',    moduleKey: 'blip2'     },
   { label: 'Object Detection (GroundingDINO)',        uiKey: 'objects',    moduleKey: 'objects'   },
   { label: 'OCR / Text (TrOCR)',                      uiKey: 'ocr',        moduleKey: 'ocr',       note: 'requires objects' },
   { label: 'Face Recognition (InsightFace)',          uiKey: 'faces',      moduleKey: 'faces',     note: 'requires objects' },
-  { label: 'Cloud AI',                                uiKey: 'cloud_ai',   moduleKey: 'cloud_ai',  note: 'requires objects' },
-  { label: 'Aesthetic Score',                         uiKey: 'aesthetic',  moduleKey: 'aesthetic', note: 'requires objects' },
+  { label: 'AI Analysis (Qwen 3.5)',                  uiKey: 'cloud_ai',   moduleKey: 'cloud_ai',  note: 'requires objects' },
+  { label: 'Aesthetic Score (SigLIP)',                uiKey: 'aesthetic',  moduleKey: 'aesthetic', note: 'requires objects' },
   { label: 'Embeddings',                              uiKey: 'embedding',  moduleKey: 'embedding' },
 ]
 
@@ -136,11 +136,11 @@ export function PassSelector({ value, onChange, disabled }: Props) {
           <span className="text-sm text-neutral-300 w-5 text-right">{workers}</span>
         </div>
 
-        {/* Cloud workers slider — cloud_ai & aesthetic */}
+        {/* AI workers slider — blip2 & cloud_ai (Ollama) */}
         <div className="flex items-center gap-3">
           <label className="text-sm text-neutral-300 w-36 shrink-0">
-            Cloud workers
-            <span className="block text-xs text-neutral-600 font-normal">cloud_ai, aesthetic</span>
+            AI workers
+            <span className="block text-xs text-neutral-600 font-normal">Qwen 3.5 (Ollama)</span>
           </label>
           <input
             type="range"
@@ -155,24 +155,8 @@ export function PassSelector({ value, onChange, disabled }: Props) {
           <span className="text-sm text-neutral-300 w-5 text-right">{cloudWorkers}</span>
         </div>
 
-        {/* Cloud provider dropdown */}
-        <div className="flex items-center gap-3">
-          <label className="text-sm text-neutral-300 w-36 shrink-0">Cloud provider</label>
-          <select
-            value={cloudProvider}
-            disabled={disabled}
-            onChange={(e) => onChange({ ...value, cloudProvider: e.target.value })}
-            className="
-              flex-1 px-2 py-1 rounded bg-neutral-800 border border-neutral-700
-              text-sm text-neutral-200 focus:outline-none focus:border-blue-500
-              disabled:opacity-50
-            "
-          >
-            {CLOUD_PROVIDERS.map((p) => (
-              <option key={p.value} value={p.value}>{p.label}</option>
-            ))}
-          </select>
-        </div>
+        {/* Cloud provider — hidden (using Ollama/Qwen 3.5 locally) */}
+        <input type="hidden" value={cloudProvider} />
 
         {/* Recursive toggle */}
         <label className="flex items-center gap-2.5 cursor-pointer select-none">

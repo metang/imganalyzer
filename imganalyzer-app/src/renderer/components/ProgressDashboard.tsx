@@ -49,11 +49,11 @@ const MODULE_LABELS: Record<string, string> = {
   metadata: 'Metadata',
   technical: 'Technical',
   local_ai: 'Local AI',
-  blip2: 'BLIP-2 Caption',
+  blip2: 'Qwen 3.5 Caption',
   objects: 'Objects (DINO)',
   ocr: 'OCR',
   faces: 'Faces',
-  cloud_ai: 'Cloud AI',
+  cloud_ai: 'AI Analysis',
   aesthetic: 'Aesthetic',
   embedding: 'Embeddings',
 }

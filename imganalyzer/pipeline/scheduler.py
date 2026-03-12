@@ -25,10 +25,10 @@ from imganalyzer.pipeline.vram_budget import VRAMBudget
 # ── Module classifications ────────────────────────────────────────────────────
 
 GPU_MODULES: frozenset[str] = frozenset({
-    "objects", "blip2", "ocr", "faces", "embedding", "perception",
+    "objects", "ocr", "faces", "embedding", "perception", "aesthetic",
 })
 LOCAL_IO_MODULES: frozenset[str] = frozenset({"metadata", "technical"})
-CLOUD_MODULES: frozenset[str] = frozenset({"cloud_ai", "aesthetic"})
+CLOUD_MODULES: frozenset[str] = frozenset({"cloud_ai", "blip2"})
 IO_MODULES: frozenset[str] = LOCAL_IO_MODULES | CLOUD_MODULES
 
 # Dependency graph: module -> prerequisite that must complete first.
@@ -40,21 +40,20 @@ _PREREQUISITES: dict[str, str] = {
 }
 
 # GPU modules that support batched forward passes.
-_BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "blip2", "embedding"})
+_BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "embedding"})
 
 # Ordered phases for GPU execution.  Within a phase, all modules can
 # be loaded simultaneously (VRAM permitting).  Between phases, all
 # models from the previous phase are unloaded.
 #
 # Phase 0: objects   (must run first — unlocks cloud/aesthetic/ocr/faces)
-# Phase 1: blip2     (exclusive — too large to share)
-# Phase 2: faces, ocr, embedding (co-resident — total ~2.75 GB)
+# Phase 1: faces, ocr, embedding, aesthetic (co-resident — total ~4.75 GB)
 #
+# blip2 and cloud_ai now run via Ollama (IO-bound, not GPU-phased)
 # perception runs independently during IO drain (not sequenced with above)
 _GPU_PHASES: list[list[str]] = [
     ["objects"],
-    ["blip2"],
-    ["faces", "ocr", "embedding"],
+    ["faces", "ocr", "embedding", "aesthetic"],
 ]
 
 # GPU modules that run independently alongside the IO drain rather than
