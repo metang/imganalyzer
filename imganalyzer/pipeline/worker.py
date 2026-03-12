@@ -783,24 +783,6 @@ class Worker:
                     queue.defer(job_id)
                 return "skipped"
 
-            # ── People guard for cloud/aesthetic (privacy) ───────────────────
-            # Primary source: analysis_objects.has_person (set by the objects pass).
-            # Fallback: analysis_local_ai.has_people (set by the legacy local_ai
-            # pass) for databases populated before the split-pass refactor.
-            if module in ("cloud_ai", "aesthetic"):
-                has_people = False
-                objects_data = repo.get_analysis(image_id, "objects")
-                if objects_data is not None:
-                    has_people = bool(objects_data.get("has_person"))
-                else:
-                    local_data = repo.get_analysis(image_id, "local_ai")
-                    if local_data:
-                        has_people = bool(local_data.get("has_people"))
-                if has_people:
-                    queue.mark_skipped(job_id, "has_people")
-                    _emit_result(path, module, "skipped", 0, "has_people")
-                    return "skipped"
-
             # ── Prime image cache from prefetch (IO/GPU overlap) ────────────
             prefetched = self._prefetch_cache.pop(image_id, None)
             if prefetched is not None:

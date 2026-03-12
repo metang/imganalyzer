@@ -422,15 +422,6 @@ class ModuleRunner:
         return result
 
     def _run_cloud_ai(self, image_id: int, path: Path) -> dict[str, Any]:
-        # People guard: skip cloud AI for images with people
-        local_data = self.repo.get_analysis(image_id, "local_ai")
-        if local_data and local_data.get("has_people"):
-            if self.verbose:
-                console.print(
-                    f"  [dim]Skipping AI analysis for image {image_id} (has people)[/dim]"
-                )
-            return {}
-
         image_data = self._cached_read_image(path, image_id)
 
         from imganalyzer.analysis.ai.ollama import OllamaAI
@@ -459,15 +450,6 @@ class ModuleRunner:
         return result
 
     def _run_aesthetic(self, image_id: int, path: Path) -> dict[str, Any]:
-        # Aesthetic analysis: skip for images with people (privacy guard)
-        local_data = self.repo.get_analysis(image_id, "local_ai")
-        if local_data and local_data.get("has_people"):
-            if self.verbose:
-                console.print(
-                    f"  [dim]Skipping aesthetic for image {image_id} (has people)[/dim]"
-                )
-            return {}
-
         # If cloud_ai (Ollama) has a pending/running job, it will write
         # aesthetic data as part of its combined response — skip.
         cloud_ai_active = self.conn.execute(
