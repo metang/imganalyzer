@@ -655,7 +655,7 @@ _DISTRIBUTED_CONTEXT_MODULES: dict[str, tuple[str, ...]] = {
     "aesthetic": ("objects", "local_ai"),
     "embedding": ("local_ai", "cloud_ai"),
 }
-_DISTRIBUTED_SEARCH_MODULES = {"metadata", "local_ai", "blip2", "faces", "cloud_ai"}
+_DISTRIBUTED_SEARCH_MODULES = {"metadata", "local_ai", "faces", "cloud_ai"}
 
 
 def _distributed_has_people(repo: Any, image_id: int) -> bool:

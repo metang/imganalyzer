@@ -29,7 +29,7 @@ from imganalyzer.pipeline.worker import _emit_result
 console = Console()
 
 # Modules that require local-AI packages (torch, transformers, etc.)
-_LOCAL_AI_MODULES = {"objects", "blip2", "local_ai", "faces", "embedding"}
+_LOCAL_AI_MODULES = {"objects", "local_ai", "faces", "embedding"}
 
 # Modules that always work (pure Python / stdlib)
 _ALWAYS_AVAILABLE_MODULES = {"metadata", "technical"}
@@ -90,7 +90,7 @@ def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
         import torch  # noqa: F401
         import transformers  # noqa: F401
 
-        available.extend(["objects", "blip2", "local_ai"])
+        available.extend(["objects", "local_ai"])
     except ImportError:
         pass
 
@@ -1051,14 +1051,14 @@ class DistributedWorker:
                         )
                         self._auto_update = False
                 # Fail fast when core local-AI deps are absent — the worker
-                # would just claim and skip every objects/blip2/ocr/faces job.
+                # would just claim and skip every objects/faces job.
                 local_ai_available = _LOCAL_AI_MODULES & set(self.supported_modules)
                 if not local_ai_available:
                     console.print(
                         "\n[bold red]ERROR: torch / transformers are not installed in "
                         "this Python environment.[/bold red]\n"
                         "[red]The worker cannot run any local-AI modules "
-                        "(objects, blip2, ocr, faces, embedding).[/red]\n\n"
+                        "(objects, faces, embedding).[/red]\n\n"
                         "You are likely running from the wrong conda environment.\n"
                         "  [bold]Current python:[/bold] "
                         + _current_python_info()

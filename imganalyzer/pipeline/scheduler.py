@@ -28,7 +28,7 @@ GPU_MODULES: frozenset[str] = frozenset({
     "objects", "faces", "embedding", "perception", "aesthetic",
 })
 LOCAL_IO_MODULES: frozenset[str] = frozenset({"metadata", "technical"})
-CLOUD_MODULES: frozenset[str] = frozenset({"cloud_ai", "blip2"})
+CLOUD_MODULES: frozenset[str] = frozenset({"cloud_ai"})
 IO_MODULES: frozenset[str] = LOCAL_IO_MODULES | CLOUD_MODULES
 
 # Dependency graph: module -> prerequisite that must complete first.
@@ -46,7 +46,7 @@ _BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "embedding"})
 # models from the previous phase are unloaded.
 #
 # Phase 0: objects       (must run first — unlocks deps, 2.4 GB)
-#          blip2/cloud_ai run concurrently via Ollama in IO thread pool
+#          cloud_ai runs concurrently via Ollama in IO thread pool
 # Phase 1: faces, embedding, aesthetic (co-resident — total ~3.45 GB)
 #          Ollama model is unloaded between Phase 0 and Phase 1
 #

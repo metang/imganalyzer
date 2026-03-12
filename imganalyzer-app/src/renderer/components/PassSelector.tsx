@@ -16,10 +16,9 @@ interface PassDef {
 const PASSES: PassDef[] = [
   { label: 'Metadata (EXIF / GPS / IPTC)',           uiKey: 'metadata',   moduleKey: 'metadata'  },
   { label: 'Technical (sharpness, exposure, noise)',  uiKey: 'technical',  moduleKey: 'technical' },
-  { label: 'Caption & Scene (Qwen 3.5)',             uiKey: 'caption',    moduleKey: 'blip2'     },
   { label: 'Object Detection (GroundingDINO)',        uiKey: 'objects',    moduleKey: 'objects'   },
   { label: 'Face Recognition (InsightFace)',          uiKey: 'faces',      moduleKey: 'faces',     note: 'requires objects' },
-  { label: 'AI Analysis (Qwen 3.5)',                  uiKey: 'cloud_ai',   moduleKey: 'cloud_ai',  note: 'requires objects' },
+  { label: 'Caption & Keywords (Qwen 3.5)',           uiKey: 'cloud_ai',   moduleKey: 'cloud_ai',  note: 'requires objects' },
   { label: 'Aesthetic Score (SigLIP)',                uiKey: 'aesthetic',  moduleKey: 'aesthetic', note: 'requires objects' },
   { label: 'Embeddings',                              uiKey: 'embedding',  moduleKey: 'embedding' },
 ]
@@ -135,7 +134,7 @@ export function PassSelector({ value, onChange, disabled }: Props) {
           <span className="text-sm text-neutral-300 w-5 text-right">{workers}</span>
         </div>
 
-        {/* AI workers slider — blip2 & cloud_ai (Ollama) */}
+        {/* AI workers slider — cloud_ai (Ollama) */}
         <div className="flex items-center gap-3">
           <label className="text-sm text-neutral-300 w-36 shrink-0">
             AI workers
@@ -189,7 +188,7 @@ export function PassSelector({ value, onChange, disabled }: Props) {
 export function defaultPassSelectorValue(): PassSelectorValue {
   return {
     selectedKeys: new Set<string>([
-      'metadata', 'technical', 'caption', 'objects', 'faces',
+      'metadata', 'technical', 'objects', 'faces',
       'cloud_ai', 'aesthetic', 'embedding',
     ]),
     workers: 2,

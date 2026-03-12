@@ -200,12 +200,6 @@ def persist_result_payload(
         write_local_ai_split_tables(conn, repo, image_id, data, wrap_transactions=False)
         return
 
-    if module == "blip2":
-        data = _clean_analysis_row(payload.get("data"))
-        if data:
-            repo.upsert_blip2(image_id, data)
-        return
-
     if module == "objects":
         data = _clean_analysis_row(payload.get("data"))
         if data:

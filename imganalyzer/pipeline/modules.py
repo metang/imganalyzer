@@ -282,8 +282,6 @@ class ModuleRunner:
             return self._run_technical(image_id, path)
         elif module == "local_ai":
             return self._run_local_ai(image_id, path)
-        elif module == "blip2":
-            return self._run_blip2(image_id, path)
         elif module == "objects":
             return self._run_objects(image_id, path)
         elif module == "faces":
@@ -372,16 +370,6 @@ class ModuleRunner:
             console.print(f"  [dim]Local AI analysis done for image {image_id}[/dim]")
         return result
 
-    def _run_blip2(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = self._cached_read_image(path, image_id)
-
-        from imganalyzer.pipeline.passes.ollama_ai import run_ollama_ai
-        result = run_ollama_ai(image_data, self.repo, image_id, self.conn, path=path)
-
-        if self.verbose:
-            console.print(f"  [dim]Qwen 3.5 caption done for image {image_id}[/dim]")
-        return result
-
     def _run_objects(self, image_id: int, path: Path) -> dict[str, Any]:
         image_data = self._cached_read_image(path, image_id)
 
@@ -422,6 +410,13 @@ class ModuleRunner:
 
         with _transaction(self.conn):
             self.repo.upsert_cloud_ai(image_id, "ollama-qwen3.5", result)
+            # Also write to analysis_blip2 for backward compat (merged pass)
+            blip2_fields = {}
+            for key in ("description", "scene_type", "main_subject", "lighting", "mood", "keywords"):
+                if key in result:
+                    blip2_fields[key] = result[key]
+            if blip2_fields:
+                self.repo.upsert_blip2(image_id, blip2_fields)
             # Store aesthetic data from the same Ollama call
             if aesthetic_score is not None:
                 self.repo.upsert_aesthetic(image_id, {
@@ -790,10 +785,10 @@ def unload_gpu_model(module: str) -> None:
     With model unloading, peak VRAM drops significantly, leaving
     ample headroom for batch inference within the GPU ceiling.
     """
-    if module in ("blip2", "cloud_ai"):
+    if module in ("cloud_ai",):
         from imganalyzer.analysis.ai.ollama import OllamaAI
         OllamaAI.unload_model()
-    if module in ("blip2", "local_ai"):
+    if module in ("local_ai",):
         from imganalyzer.analysis.ai.local import LocalAI
         LocalAI._unload()
     if module in ("objects", "local_ai"):

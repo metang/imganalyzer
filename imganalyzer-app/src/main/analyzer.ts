@@ -24,8 +24,8 @@ export interface AnalysisRunResult {
 
 // Stage keywords from progress notifications -> progress %
 const STAGE_MAP: Array<[RegExp, number, string]> = [
-  [/\[1\/4\]/, 5, 'Captioning'],
-  [/Loading BLIP-2|Qwen 3\.5|ollama/i, 8, 'Loading AI model\u2026'],
+  [/\[1\/4\]/, 5, 'Caption & Keywords'],
+  [/Loading.*Qwen 3\.5|ollama/i, 8, 'Loading AI model\u2026'],
   [/\[2\/4\]/, 40, 'Object detection'],
   [/Loading.*GroundingDINO|Loading.*object/i, 42, 'Loading GroundingDINO\u2026'],
   [/\[3\/4\]/, 65, 'Face detection & recognition'],

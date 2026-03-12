@@ -252,7 +252,6 @@ export type BatchModuleKey =
   | 'metadata'
   | 'technical'
   | 'local_ai'
-  | 'blip2'
   | 'objects'
   | 'faces'
   | 'cloud_ai'

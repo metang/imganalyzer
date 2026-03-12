@@ -10,15 +10,16 @@ The worker uses a VRAM-budget-aware scheduler with GPU phases:
 
 Phase 0 — ``objects`` pass (GPU, serial):
   Drain ALL pending ``objects`` jobs first.  Once ``objects`` is done for an
-  image, ``has_person`` is known → ``cloud_ai``, ``aesthetic``, ``ocr``, and
+  image, ``has_person`` is known → ``cloud_ai``, ``aesthetic``, and
   ``faces`` jobs are unblocked.  ``metadata`` / ``technical`` run concurrently
   in a thread pool throughout all phases.
 
-Phase 1 — ``faces`` + ``ocr`` + ``embedding`` + ``aesthetic`` (GPU, co-resident):
-  These models (~4.75 GB total) run concurrently with separate CUDA streams.
+Phase 1 — ``faces`` + ``embedding`` + ``aesthetic`` (GPU, co-resident):
+  These models (~3.45 GB total) run concurrently with separate CUDA streams.
   ``aesthetic`` uses SigLIP-v2.5 (~1.5 GB).
 
-``blip2`` and ``cloud_ai`` now run via Ollama (IO-bound, not GPU-phased).
+``cloud_ai`` runs via Ollama (IO-bound, not GPU-phased).  It produces
+captions, keywords, descriptions, and aesthetic scores in a single call.
 
 Cloud / IO work runs in parallel thread pools throughout all phases, with
 the cloud pool boosted to 2× when GPU is idle.
@@ -66,8 +67,8 @@ GPU_MODULES = {"local_ai", "embedding", "objects", "faces", "perception", "aesth
 # Local I/O-bound modules — parallel, governed by `workers`
 LOCAL_IO_MODULES = {"metadata", "technical"}
 # Cloud/IO modules — parallel, governed by `cloud_workers`
-# blip2 and cloud_ai call Ollama (uses GPU externally but IO-bound from pipeline)
-CLOUD_MODULES = {"cloud_ai", "blip2"}
+# cloud_ai calls Ollama (uses GPU externally but IO-bound from pipeline)
+CLOUD_MODULES = {"cloud_ai"}
 # Combined set (kept for backwards-compat references)
 IO_MODULES = LOCAL_IO_MODULES | CLOUD_MODULES
 
@@ -75,7 +76,7 @@ IO_MODULES = LOCAL_IO_MODULES | CLOUD_MODULES
 # The search index is rebuilt *once* per image after all its jobs complete,
 # rather than after every individual module write (saves ~3M FTS5 cycles
 # at 500K images with 6 text-producing modules each).
-_FTS_MODULES = {"metadata", "local_ai", "blip2", "faces", "cloud_ai"}
+_FTS_MODULES = {"metadata", "local_ai", "faces", "cloud_ai"}
 
 # The ``objects`` pass must complete for an image before cloud/aesthetic
 # may run (it provides ``has_person`` for the privacy gate).
@@ -530,13 +531,13 @@ class Worker:
                 # ════════════════════════════════════════════════════════════
                 # GPU Phases (scheduler-driven)
                 # Phase 0: objects (unlocks dependencies)
-                #   - blip2/cloud_ai (Ollama) run concurrently in IO pool
-                # Phase 1: faces + ocr + embedding + aesthetic (co-resident)
+                #   - cloud_ai (Ollama) runs concurrently in IO pool
+                # Phase 1: faces + embedding + aesthetic (co-resident)
                 #   - Ollama model unloaded before this phase starts
                 # ════════════════════════════════════════════════════════════
                 phase_labels = [
                     "Phase 0 — object detection + Ollama AI (concurrent)",
-                    "Phase 1 — faces + OCR + embeddings + aesthetic (co-resident GPU)",
+                    "Phase 1 — faces + embeddings + aesthetic (co-resident GPU)",
                 ]
 
                 for phase_idx in range(len(scheduler.gpu_phases)):
@@ -696,9 +697,9 @@ class Worker:
         stats: dict[str, int],
         image_ids: set[int] | None = None,
     ) -> None:
-        """Drain all pending blip2/cloud_ai (Ollama) IO jobs, then unload the model.
+        """Drain all pending cloud_ai (Ollama) IO jobs, then unload the model.
 
-        Called between GPU Phase 0 (objects) and Phase 1 (faces/ocr/etc.) so
+        Called between GPU Phase 0 (objects) and Phase 1 (faces/etc.) so
         that the Ollama model releases VRAM before Phase 1 models load.
         This means the Ollama model loads once, processes all images, unloads
         once — no per-image load/unload overhead.
@@ -707,7 +708,7 @@ class Worker:
         """
         from concurrent.futures import as_completed
 
-        ollama_modules = {"blip2", "cloud_ai"}
+        ollama_modules = {"cloud_ai"}
         has_ollama = any(
             self.queue.pending_count(module=mod, image_ids=image_ids) > 0
             for mod in ollama_modules

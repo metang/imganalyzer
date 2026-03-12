@@ -315,7 +315,6 @@ def _module_priority(module: str) -> int:
         "metadata":  100,
         "technical":  90,
         "objects":    85,   # highest GPU priority — unlocks cloud_ai/aesthetic
-        "blip2":      80,
         "local_ai":   80,
         "faces":      77,
         "cloud_ai":   70,

@@ -52,15 +52,15 @@ class TestVRAMBudget:
         assert vram.can_fit("perception")
         # perception is now the only exclusive module
 
-    def test_blip2_fits_on_8gb_budget(self):
-        """blip2 now uses Ollama (0 VRAM) — always fits."""
+    def test_cloud_ai_not_in_vram_budget(self):
+        """cloud_ai runs via Ollama (external GPU) — 0 VRAM, always fits."""
         vram = self._make(total=8.0, fraction=0.70)
-        assert vram.can_fit("blip2")
+        assert vram.can_fit("cloud_ai")
 
-    def test_blip2_does_not_fit_below_physical_requirement(self):
-        """blip2 now uses Ollama (0 VRAM) — always fits."""
+    def test_aesthetic_fits_on_small_budget(self):
+        """aesthetic (1.5 GB) fits on a 4 GB budget at 70% = 2.8 GB."""
         vram = self._make(total=4.0, fraction=0.70)
-        assert vram.can_fit("blip2")
+        assert vram.can_fit("aesthetic")
 
     def test_exclusive_blocked_by_existing(self):
         vram = self._make()
@@ -92,7 +92,7 @@ class TestVRAMBudget:
     def test_is_exclusive(self):
         vram = self._make()
         assert vram.is_exclusive("perception")
-        assert not vram.is_exclusive("blip2")
+        assert not vram.is_exclusive("cloud_ai")
         assert not vram.is_exclusive("faces")
         assert not vram.is_exclusive("embedding")
 
@@ -166,7 +166,7 @@ class TestResourceScheduler:
         s = self._make()
         assert s.is_batch_capable("objects")
         assert s.is_batch_capable("embedding")
-        assert not s.is_batch_capable("blip2")
+        assert not s.is_batch_capable("cloud_ai")
         assert not s.is_batch_capable("faces")
 
     def test_boosted_cloud_workers(self):
@@ -177,10 +177,8 @@ class TestResourceScheduler:
         s = self._make()
         assert s.is_gpu("objects")
         assert s.is_gpu("aesthetic")
-        assert not s.is_gpu("blip2")
         assert not s.is_gpu("metadata")
         assert s.is_cloud("cloud_ai")
-        assert s.is_cloud("blip2")
         assert s.is_local_io("metadata")
         assert s.is_local_io("technical")
         assert s.is_io("cloud_ai")
@@ -192,7 +190,6 @@ class TestResourceScheduler:
         assert s.prerequisite_for("faces") == "objects"
         assert s.prerequisite_for("aesthetic") == "objects"
         assert s.prerequisite_for("objects") is None
-        assert s.prerequisite_for("blip2") is None
         assert s.prerequisite_for("embedding") is None
 
     def test_shutdown_flag(self):
@@ -345,7 +342,7 @@ class TestResourceScheduler:
             ThreadPoolExecutor(max_workers=1) as cloud_pool,
         ):
             s.run_gpu_phase(
-                1,  # Phase 1 => ["blip2"]
+                1,  # Phase 1 => ["faces", "embedding", "aesthetic"]
                 claim_fn=_claim_fn,
                 process_batch_fn=_process_batch_fn,
                 process_single_fn=lambda _job: "done",
@@ -468,10 +465,6 @@ class TestCoResidencyFitCheck:
     def test_perception_exclusive_in_registry(self):
         """perception must be in the exclusive set."""
         assert "perception" in _EXCLUSIVE_MODULES
-
-    def test_blip2_not_exclusive(self):
-        """blip2 runs via Ollama now, not exclusive GPU."""
-        assert "blip2" not in _EXCLUSIVE_MODULES
 
     def test_all_gpu_phases_have_known_modules(self):
         """Every module in _GPU_PHASES must have a VRAM entry."""

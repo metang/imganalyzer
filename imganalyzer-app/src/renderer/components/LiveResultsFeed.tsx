@@ -18,7 +18,7 @@ const MODULE_LABELS: Record<string, string> = {
   blip2: 'caption',
   objects: 'objects',
   faces: 'faces',
-  cloud_ai: 'ai_analysis',
+  cloud_ai: 'caption',
   aesthetic: 'aesthetic',
   embedding: 'embedding',
   perception: 'perception',

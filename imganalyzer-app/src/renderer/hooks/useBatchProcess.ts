@@ -8,7 +8,6 @@ export const ALL_MODULE_KEYS = [
   'metadata',
   'technical',
   'local_ai',
-  'blip2',
   'objects',
   'faces',
   'cloud_ai',
