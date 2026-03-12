@@ -233,8 +233,13 @@ class Worker:
             local.runner = runner
         return local.conn, local.repo, local.queue, local.runner
 
-    def run(self, batch_size: int = 10) -> dict[str, int]:
+    def run(self, batch_size: int = 10, chunk_size: int = 0) -> dict[str, int]:
         """Main processing loop.  Blocks until queue is empty or Ctrl+C.
+
+        If *chunk_size* > 0, images are processed in chunks: each chunk runs
+        through all phases before moving to the next, so images become fully
+        analyzed incrementally.  ``chunk_size=0`` processes all images at once
+        (original behaviour).
 
         Returns summary: {done: N, failed: N, skipped: N}.
         """
@@ -250,12 +255,12 @@ class Worker:
             signal.signal(signal.SIGINT, self._handle_sigint)
 
         try:
-            return self._run_loop(batch_size)
+            return self._run_loop(batch_size, chunk_size=chunk_size)
         finally:
             if is_main and original_handler is not None:
                 signal.signal(signal.SIGINT, original_handler)
 
-    def _run_loop(self, batch_size: int) -> dict[str, int]:
+    def _run_loop(self, batch_size: int, chunk_size: int = 0) -> dict[str, int]:
         stats = {"done": 0, "failed": 0, "skipped": 0}
 
         # Initialize VRAM budget and scheduler
@@ -438,139 +443,223 @@ class Worker:
                     return None
 
             # ════════════════════════════════════════════════════════════════
-            # GPU Phases (scheduler-driven)
-            # Phase 0: objects (unlocks dependencies)
-            #   - blip2/cloud_ai (Ollama) run concurrently in IO thread pool
-            # Phase 1: faces + ocr + embedding + aesthetic (co-resident GPU)
-            #   - Ollama model unloaded before this phase starts
+            # Chunk loop — if chunk_size > 0, process images in fixed-size
+            # chunks so that each chunk is fully analyzed before the next.
+            # chunk_size == 0 → no chunking (original behaviour).
             # ════════════════════════════════════════════════════════════════
-            phase_labels = [
-                "Phase 0 — object detection + Ollama AI (concurrent)",
-                "Phase 1 — faces + OCR + embeddings + aesthetic (co-resident GPU)",
-            ]
+            all_image_ids = self.queue.get_pending_image_ids()
+            if chunk_size > 0 and len(all_image_ids) > chunk_size:
+                chunks = [
+                    set(all_image_ids[i : i + chunk_size])
+                    for i in range(0, len(all_image_ids), chunk_size)
+                ]
+            else:
+                # No chunking: single chunk with all images (or None = no filter)
+                chunks = [None]  # type: ignore[list-item]
 
-            for phase_idx in range(len(scheduler.gpu_phases)):
+            total_chunks = len(chunks)
+            if total_chunks > 1:
+                console.print(
+                    f"[cyan]Chunked processing: {total_chunks} chunks "
+                    f"of {chunk_size} images each[/cyan]"
+                )
+
+            for chunk_idx, chunk_ids in enumerate(chunks):
                 if self._shutdown.is_set():
                     break
 
-                phase_modules = scheduler.modules_for_phase(phase_idx)
-                has_pending = any(
-                    self.queue.pending_count(module=mod) > 0
-                    for mod in phase_modules
-                )
-                if not has_pending:
-                    # Even if no GPU work, drain Ollama IO before Phase 1
-                    if phase_idx == 0:
-                        self._drain_ollama_io(
-                            _claim_fn, _submit_io_jobs, _collect_futures,
-                            effective_cloud_workers, stats,
-                        )
-                    continue
-
-                console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
-
-                with (
-                    self.profiler.span("gpu_phase", phase=phase_idx),
-                    ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
-                    ThreadPoolExecutor(max_workers=effective_cloud_workers) as cloud_pool,
-                ):
-                    scheduler.run_gpu_phase(
-                        phase_idx,
-                        claim_fn=_claim_fn,
-                        process_batch_fn=self._process_job_batch,
-                        process_single_fn=self._process_job,
-                        submit_io_fn=_submit_io_jobs,
-                        collect_fn=_collect_futures,
-                        advance_fn=_advance_fn,
-                        flush_fn=self._maybe_periodic_flush,
-                        local_pool=local_pool,
-                        cloud_pool=cloud_pool,
-                        stats=stats,
-                        unload_fn=unload_gpu_model,
-                        prefetch_fn=_prefetch_image,
-                        cancel_futures_fn=_cancel_futures,
+                if total_chunks > 1:
+                    console.print(
+                        f"\n[bold cyan]━━ Chunk {chunk_idx + 1}/{total_chunks} "
+                        f"({len(chunk_ids)} images) ━━[/bold cyan]"  # type: ignore[arg-type]
                     )
 
-                # After Phase 0: drain remaining Ollama IO and unload model
-                # so Phase 1 GPU modules have full VRAM available.
-                if phase_idx == 0 and not self._shutdown.is_set():
-                    self._drain_ollama_io(
-                        _claim_fn, _submit_io_jobs, _collect_futures,
-                        effective_cloud_workers, stats,
+                # Build chunk-scoped claim function
+                def _chunk_claim_fn(batch_sz: int, module: str) -> list[dict[str, Any]]:
+                    _, _, tl_queue, _ = self._get_thread_db()
+                    return tl_queue.claim(
+                        batch_size=batch_sz, module=module, image_ids=chunk_ids,
                     )
 
-            # ════════════════════════════════════════════════════════════════
-            # IO drain + independent GPU modules (e.g. perception)
-            # Independent GPU modules have no prerequisite on other GPU
-            # phases and run on a background thread while cloud/IO jobs
-            # continue in the thread pool.
-            # ════════════════════════════════════════════════════════════════
-            if not self._shutdown.is_set():
-                boosted_cloud = (
-                    1 if self.cloud_provider == "copilot"
-                    else scheduler.boosted_cloud_workers()
-                )
+                # Chunk-scoped IO submit — same as _submit_io_jobs but uses chunk_ids filter
+                def _chunk_submit_io_jobs(
+                    local_pool: ThreadPoolExecutor,
+                    cloud_pool: ThreadPoolExecutor,
+                ) -> dict[Future, dict[str, Any]]:
+                    nonlocal _cloud_in_flight
+                    futures: dict[Future, dict[str, Any]] = {}
+                    for module_set, pool in (
+                        (LOCAL_IO_MODULES, local_pool),
+                        (CLOUD_MODULES, cloud_pool),
+                    ):
+                        for mod in module_set:
+                            if mod in CLOUD_MODULES:
+                                if _cloud_in_flight >= _max_cloud_in_flight:
+                                    continue
+                                cloud_claim = max(
+                                    1, _max_cloud_in_flight - _cloud_in_flight
+                                )
+                                jobs = self.queue.claim(
+                                    batch_size=cloud_claim, module=mod,
+                                    image_ids=chunk_ids,
+                                )
+                            else:
+                                jobs = self.queue.claim(
+                                    batch_size=batch_size, module=mod,
+                                    image_ids=chunk_ids,
+                                )
+                            for i, job in enumerate(jobs):
+                                if self._shutdown.is_set():
+                                    for j in range(i, len(jobs)):
+                                        self.queue.mark_pending(jobs[j]["id"])
+                                    return futures
+                                try:
+                                    fut = pool.submit(self._process_job, job)
+                                    futures[fut] = job
+                                    if job["module"] in CLOUD_MODULES:
+                                        _cloud_in_flight += 1
+                                except RuntimeError:
+                                    for j in range(i, len(jobs)):
+                                        self.queue.mark_pending(jobs[j]["id"])
+                                    return futures
+                    return futures
 
-                # Determine which independent GPU modules have pending work.
-                indie_gpu = [
-                    mod for mod in scheduler.independent_gpu_modules()
-                    if self.queue.pending_count(module=mod) > 0
+                # Use chunk-scoped functions when chunking, original otherwise
+                active_claim_fn = _chunk_claim_fn if chunk_ids is not None else _claim_fn
+                active_submit_io = _chunk_submit_io_jobs if chunk_ids is not None else _submit_io_jobs
+
+                # ════════════════════════════════════════════════════════════
+                # GPU Phases (scheduler-driven)
+                # Phase 0: objects (unlocks dependencies)
+                #   - blip2/cloud_ai (Ollama) run concurrently in IO pool
+                # Phase 1: faces + ocr + embedding + aesthetic (co-resident)
+                #   - Ollama model unloaded before this phase starts
+                # ════════════════════════════════════════════════════════════
+                phase_labels = [
+                    "Phase 0 — object detection + Ollama AI (concurrent)",
+                    "Phase 1 — faces + OCR + embeddings + aesthetic (co-resident GPU)",
                 ]
 
-                def _drain_indie_gpu(module: str) -> None:
-                    """Drain a single independent GPU module on a background thread."""
-                    while not self._shutdown.is_set():
-                        jobs = _claim_fn(1, module)
-                        if not jobs:
-                            break
-                        for job in jobs:
-                            self._process_job(job)
+                for phase_idx in range(len(scheduler.gpu_phases)):
+                    if self._shutdown.is_set():
+                        break
 
-                with (
-                    self.profiler.span("io_drain"),
-                    ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
-                    ThreadPoolExecutor(max_workers=boosted_cloud)      as cloud_pool,
-                ):
-                    if indie_gpu:
-                        console.print(
-                            f"[dim]IO drain + GPU ({', '.join(indie_gpu)}) — "
-                            f"cloud threads boosted to {boosted_cloud}[/dim]"
-                        )
-                    else:
-                        console.print(
-                            f"[dim]IO drain — cloud threads boosted to {boosted_cloud}[/dim]"
+                    phase_modules = scheduler.modules_for_phase(phase_idx)
+                    has_pending = any(
+                        self.queue.pending_count(module=mod, image_ids=chunk_ids) > 0
+                        for mod in phase_modules
+                    )
+                    if not has_pending:
+                        # Even if no GPU work, drain Ollama IO before Phase 1
+                        if phase_idx == 0:
+                            self._drain_ollama_io(
+                                active_claim_fn, active_submit_io, _collect_futures,
+                                effective_cloud_workers, stats,
+                                image_ids=chunk_ids,
+                            )
+                        continue
+
+                    console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
+
+                    with (
+                        self.profiler.span("gpu_phase", phase=phase_idx),
+                        ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
+                        ThreadPoolExecutor(max_workers=effective_cloud_workers) as cloud_pool,
+                    ):
+                        scheduler.run_gpu_phase(
+                            phase_idx,
+                            claim_fn=active_claim_fn,
+                            process_batch_fn=self._process_job_batch,
+                            process_single_fn=self._process_job,
+                            submit_io_fn=active_submit_io,
+                            collect_fn=_collect_futures,
+                            advance_fn=_advance_fn,
+                            flush_fn=self._maybe_periodic_flush,
+                            local_pool=local_pool,
+                            cloud_pool=cloud_pool,
+                            stats=stats,
+                            unload_fn=unload_gpu_model,
+                            prefetch_fn=_prefetch_image,
+                            cancel_futures_fn=_cancel_futures,
                         )
 
-                    # Start independent GPU modules on background threads.
-                    gpu_threads: list[threading.Thread] = []
-                    for mod in indie_gpu:
-                        t = threading.Thread(
-                            target=_drain_indie_gpu,
-                            args=(mod,),
-                            daemon=True,
-                            name=f"gpu-indie-{mod}",
+                    # After Phase 0: drain remaining Ollama IO and unload model
+                    # so Phase 1 GPU modules have full VRAM available.
+                    if phase_idx == 0 and not self._shutdown.is_set():
+                        self._drain_ollama_io(
+                            active_claim_fn, active_submit_io, _collect_futures,
+                            effective_cloud_workers, stats,
+                            image_ids=chunk_ids,
                         )
-                        gpu_threads.append(t)
-                        t.start()
 
-                    scheduler.run_io_drain(
-                        submit_io_fn=_submit_io_jobs,
-                        collect_fn=_collect_futures,
-                        flush_fn=self._maybe_periodic_flush,
-                        local_pool=local_pool,
-                        cloud_pool=cloud_pool,
-                        cancel_futures_fn=_cancel_futures,
+                # ════════════════════════════════════════════════════════════
+                # IO drain + independent GPU modules (e.g. perception)
+                # ════════════════════════════════════════════════════════════
+                if not self._shutdown.is_set():
+                    boosted_cloud = (
+                        1 if self.cloud_provider == "copilot"
+                        else scheduler.boosted_cloud_workers()
                     )
 
-                    # IO drain finished — wait for independent GPU threads.
-                    # Keep submitting IO jobs that may have been enqueued while
-                    # GPU was still processing (e.g. by a concurrent rebuild).
-                    for t in gpu_threads:
-                        while t.is_alive():
-                            new = _submit_io_jobs(local_pool, cloud_pool)
-                            if new:
-                                _collect_futures(new)
-                            t.join(timeout=1.0)
+                    indie_gpu = [
+                        mod for mod in scheduler.independent_gpu_modules()
+                        if self.queue.pending_count(module=mod, image_ids=chunk_ids) > 0
+                    ]
+
+                    def _drain_indie_gpu(module: str) -> None:
+                        while not self._shutdown.is_set():
+                            jobs = active_claim_fn(1, module)
+                            if not jobs:
+                                break
+                            for job in jobs:
+                                self._process_job(job)
+
+                    with (
+                        self.profiler.span("io_drain"),
+                        ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
+                        ThreadPoolExecutor(max_workers=boosted_cloud)      as cloud_pool,
+                    ):
+                        if indie_gpu:
+                            console.print(
+                                f"[dim]IO drain + GPU ({', '.join(indie_gpu)}) — "
+                                f"cloud threads boosted to {boosted_cloud}[/dim]"
+                            )
+                        else:
+                            console.print(
+                                f"[dim]IO drain — cloud threads boosted to {boosted_cloud}[/dim]"
+                            )
+
+                        gpu_threads: list[threading.Thread] = []
+                        for mod in indie_gpu:
+                            t = threading.Thread(
+                                target=_drain_indie_gpu,
+                                args=(mod,),
+                                daemon=True,
+                                name=f"gpu-indie-{mod}",
+                            )
+                            gpu_threads.append(t)
+                            t.start()
+
+                        scheduler.run_io_drain(
+                            submit_io_fn=active_submit_io,
+                            collect_fn=_collect_futures,
+                            flush_fn=self._maybe_periodic_flush,
+                            local_pool=local_pool,
+                            cloud_pool=cloud_pool,
+                            cancel_futures_fn=_cancel_futures,
+                        )
+
+                        for t in gpu_threads:
+                            while t.is_alive():
+                                new = active_submit_io(local_pool, cloud_pool)
+                                if new:
+                                    _collect_futures(new)
+                                t.join(timeout=1.0)
+
+                if total_chunks > 1 and not self._shutdown.is_set():
+                    console.print(
+                        f"[green]Chunk {chunk_idx + 1}/{total_chunks} complete ✓[/green]"
+                    )
 
         if self._shutdown.is_set():
             console.print("\n[yellow]Paused.[/yellow] Run `imganalyzer run` to resume.")
@@ -606,6 +695,7 @@ class Worker:
         collect_fn: Any,
         cloud_workers: int,
         stats: dict[str, int],
+        image_ids: set[int] | None = None,
     ) -> None:
         """Drain all pending blip2/cloud_ai (Ollama) IO jobs, then unload the model.
 
@@ -613,12 +703,14 @@ class Worker:
         that the Ollama model releases VRAM before Phase 1 models load.
         This means the Ollama model loads once, processes all images, unloads
         once — no per-image load/unload overhead.
+
+        If *image_ids* is given, only drain Ollama jobs for those images (chunking).
         """
         from concurrent.futures import as_completed
 
         ollama_modules = {"blip2", "cloud_ai"}
         has_ollama = any(
-            self.queue.pending_count(module=mod) > 0
+            self.queue.pending_count(module=mod, image_ids=image_ids) > 0
             for mod in ollama_modules
         )
         if not has_ollama:

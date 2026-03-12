@@ -101,23 +101,50 @@ class JobQueue:
 
     # ── Claim (atomic) ─────────────────────────────────────────────────────
 
+    def get_pending_image_ids(
+        self,
+        modules: list[str] | None = None,
+    ) -> list[int]:
+        """Return distinct image_ids with pending jobs, ordered by image_id.
+
+        If *modules* is given, only consider jobs for those modules.
+        """
+        where = "WHERE status = 'pending'"
+        params: list[Any] = []
+        if modules:
+            placeholders = ",".join("?" * len(modules))
+            where += f" AND module IN ({placeholders})"
+            params.extend(modules)
+        rows = self.conn.execute(
+            f"SELECT DISTINCT image_id FROM job_queue {where} ORDER BY image_id",
+            params,
+        ).fetchall()
+        return [r["image_id"] for r in rows]
+
     def claim(
         self,
         batch_size: int = 1,
         module: str | None = None,
         node_id: str = "master",
         node_role: str = "master",
+        image_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Atomically claim up to *batch_size* pending jobs.
 
         Returns list of job dicts with keys: id, image_id, module, attempts.
         Jobs are returned in priority order (highest first, then oldest).
+
+        If *image_ids* is given, only claim jobs for those images (chunking).
         """
         where = "WHERE status = 'pending'"
         params: list[Any] = []
         if module:
             where += " AND module = ?"
             params.append(module)
+        if image_ids is not None:
+            placeholders = ",".join("?" * len(image_ids))
+            where += f" AND image_id IN ({placeholders})"
+            params.extend(image_ids)
         params.append(batch_size)
 
         # Use BEGIN IMMEDIATE to prevent concurrent claims from selecting
@@ -160,8 +187,13 @@ class JobQueue:
         module: str | None = None,
         modules: list[str] | None = None,
         exclude_modules: list[str] | None = None,
+        prefer_module: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Atomically claim jobs and create leases for distributed workers."""
+        """Atomically claim jobs and create leases for distributed workers.
+
+        If *prefer_module* is given, jobs for that module are sorted first
+        (module affinity) to minimize model switching across claims.
+        """
         where = "WHERE status = 'pending'"
         params: list[Any] = []
         if module:
@@ -175,6 +207,13 @@ class JobQueue:
             excl_ph = ",".join("?" * len(exclude_modules))
             where += f" AND module NOT IN ({excl_ph})"
             params.extend(exclude_modules)
+
+        # Module affinity: prefer same module to minimize model switching
+        if prefer_module and not module:
+            order = "(CASE WHEN module = ? THEN 0 ELSE 1 END), priority DESC, queued_at ASC"
+            params.append(prefer_module)
+        else:
+            order = "priority DESC, queued_at ASC"
         params.append(batch_size)
 
         self.conn.execute("BEGIN IMMEDIATE")
@@ -183,7 +222,7 @@ class JobQueue:
                 f"""SELECT id, image_id, module, attempts
                     FROM job_queue
                     {where}
-                    ORDER BY priority DESC, queued_at ASC
+                    ORDER BY {order}
                     LIMIT ?""",
                 params,
             ).fetchall()
@@ -593,22 +632,24 @@ class JobQueue:
         self,
         module: str | None = None,
         modules: list[str] | None = None,
+        image_ids: set[int] | None = None,
     ) -> int:
+        where = "WHERE status = 'pending'"
+        params: list[Any] = []
         if module:
-            row = self.conn.execute(
-                "SELECT COUNT(*) as cnt FROM job_queue WHERE status = 'pending' AND module = ?",
-                [module],
-            ).fetchone()
+            where += " AND module = ?"
+            params.append(module)
         elif modules:
             placeholders = ",".join("?" * len(modules))
-            row = self.conn.execute(
-                f"SELECT COUNT(*) as cnt FROM job_queue WHERE status = 'pending' AND module IN ({placeholders})",
-                modules,
-            ).fetchone()
-        else:
-            row = self.conn.execute(
-                "SELECT COUNT(*) as cnt FROM job_queue WHERE status = 'pending'"
-            ).fetchone()
+            where += f" AND module IN ({placeholders})"
+            params.extend(modules)
+        if image_ids is not None:
+            id_ph = ",".join("?" * len(image_ids))
+            where += f" AND image_id IN ({id_ph})"
+            params.extend(image_ids)
+        row = self.conn.execute(
+            f"SELECT COUNT(*) as cnt FROM job_queue {where}", params
+        ).fetchone()
         return row["cnt"]
 
     # ── Cleanup ────────────────────────────────────────────────────────────

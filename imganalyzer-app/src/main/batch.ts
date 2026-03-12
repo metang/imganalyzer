@@ -757,7 +757,8 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       recursive = true,
       noHash = false,
       cloudWorkers = 4,
-      profile = false
+      profile = false,
+      chunkSize = 500
     ): Promise<void> => {
       sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash, profile }
       sessionStartMs = Date.now()
@@ -778,6 +779,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           verbose: true,
           staleTimeout: 0,
           profile,
+          chunkSize,
         })
       } catch (err) {
         isRunActive = false

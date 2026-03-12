@@ -41,6 +41,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         15: _migrate_v15,
         16: _migrate_v16,
         17: _migrate_v17,
+        18: _migrate_v18,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -674,4 +675,14 @@ def _migrate_v17(conn: sqlite3.Connection) -> None:
             analyzed_at           TEXT
         )
     """)
+
+
+# ── Migration v18: Worker module affinity tracking ────────────────────────────
+
+def _migrate_v18(conn: sqlite3.Connection) -> None:
+    """Add last_module column to worker_nodes for module-affinity scheduling."""
+    try:
+        conn.execute("ALTER TABLE worker_nodes ADD COLUMN last_module TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
 

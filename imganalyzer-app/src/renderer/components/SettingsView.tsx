@@ -162,6 +162,9 @@ export function SettingsView() {
               targetPrefix: mapping.targetPrefix,
             })),
         },
+        processing: {
+          chunkSize: Number(settings.processing.chunkSize),
+        },
       }
       const bundle = await window.api.saveAppSettings(input)
       applyBundle(bundle)
@@ -324,6 +327,41 @@ export function SettingsView() {
           <p className="text-xs text-neutral-500">
             Source: directory={settings.thumbnailCache.source.directory}, size={settings.thumbnailCache.source.maxGB}
           </p>
+        </section>
+
+        {/* ── Processing ──────────────────────────────────────── */}
+        <section className="rounded-xl border border-neutral-800 bg-neutral-900/60 p-5 flex flex-col gap-4">
+          <div>
+            <h2 className="text-base font-semibold text-neutral-100">Processing</h2>
+            <p className="text-sm text-neutral-400">
+              Configure batch processing behaviour.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-2" style={{ maxWidth: 260 }}>
+            <label className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+              Chunk size
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={10000}
+              step={100}
+              value={settings.processing.chunkSize}
+              onChange={(e) => updateSettings((current) => ({
+                ...current,
+                processing: {
+                  ...current.processing,
+                  chunkSize: Math.max(0, Math.min(10000, Number(e.target.value) || 0)),
+                },
+              }))}
+              className="px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-700 text-sm text-neutral-100 w-full"
+            />
+            <p className="text-xs text-neutral-500">
+              Process images in chunks of this size so each chunk is fully analyzed before the next.
+              Set to 0 to process all images at once (no chunking). Default: 500.
+            </p>
+          </div>
         </section>
 
         <section className="rounded-xl border border-neutral-800 bg-neutral-900/60 p-5 flex flex-col gap-5">

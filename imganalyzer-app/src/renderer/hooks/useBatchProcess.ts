@@ -53,6 +53,7 @@ export interface BatchConfig {
   recursive: boolean
   noHash: boolean
   profile: boolean
+  chunkSize: number
 }
 
 export interface UseBatchProcessReturn {
@@ -168,7 +169,8 @@ export function useBatchProcess(): UseBatchProcessReturn {
         config.recursive,
         config.noHash,
         config.cloudWorkers,
-        config.profile
+        config.profile,
+        config.chunkSize
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))

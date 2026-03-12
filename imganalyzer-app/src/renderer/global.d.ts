@@ -6,6 +6,7 @@ import type {
   AppSettingsBundle,
   AppSettingsInput,
   CoordinatorStatus,
+  ProcessingSettings,
   ThumbnailCacheConfig,
   ThumbnailCacheConfigInput,
   WorkerPathMapping,
@@ -67,6 +68,7 @@ export type {
   AppSettingsBundle,
   AppSettingsInput,
   CoordinatorStatus,
+  ProcessingSettings,
   ThumbnailCacheConfig,
   ThumbnailCacheConfigInput,
   WorkerPathMapping,
@@ -471,7 +473,8 @@ declare global {
         recursive: boolean,
         noHash: boolean,
         cloudWorkers: number,
-        profile: boolean
+        profile: boolean,
+        chunkSize: number
       ): Promise<void>
       batchPause(): Promise<void>
       batchResume(): Promise<void>

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { PassSelector, defaultPassSelectorValue, resolveModuleKeys } from './PassSelector'
 import type { PassSelectorValue } from './PassSelector'
 import { ProgressDashboard } from './ProgressDashboard'
@@ -241,6 +241,13 @@ export function BatchConfigView({ batch, initialFolder = '', onBatchStarted }: B
   const [folder, setFolder] = useState(initialFolder)
   const [passSel, setPassSel] = useState<PassSelectorValue>(defaultPassSelectorValue)
   const [profile, setProfile] = useState(false)
+  const [chunkSize, setChunkSize] = useState(500)
+
+  useEffect(() => {
+    window.api.getAppSettings().then((bundle) => {
+      setChunkSize(bundle.settings.processing?.chunkSize ?? 500)
+    }).catch(() => {})
+  }, [])
 
   const phase = stats.status === 'ingesting' ? 'ingesting' : 'config'
 
@@ -255,13 +262,14 @@ export function BatchConfigView({ batch, initialFolder = '', onBatchStarted }: B
       recursive: passSel.recursive,
       noHash: passSel.noHash,
       profile,
+      chunkSize,
     }).then(() => {
       // startBatch resolves after ingest; if something was enqueued the status
       // will have moved to 'running' — let the parent switch tabs.
     })
     // Switch the parent to Running tab as soon as ingest begins
     onBatchStarted?.()
-  }, [batch, folder, passSel, profile, onBatchStarted])
+  }, [batch, folder, passSel, profile, chunkSize, onBatchStarted])
 
   if (phase === 'ingesting') {
     return (

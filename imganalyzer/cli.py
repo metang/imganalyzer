@@ -561,6 +561,7 @@ def run_queue(
     cloud_provider: str = typer.Option("openai", "--cloud", help="Cloud AI provider for cloud_ai/aesthetic modules"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     batch_size: int = typer.Option(10, "--batch-size", help="Jobs to claim per batch"),
+    chunk_size: int = typer.Option(500, "--chunk-size", help="Process images in chunks of this size (0=no chunking)"),
     no_xmp: bool = typer.Option(False, "--no-xmp", help="Skip XMP sidecar generation after processing"),
     detection_prompt: Optional[str] = typer.Option(None, "--detection-prompt"),
     detection_threshold: Optional[float] = typer.Option(None, "--detection-threshold", min=0.0, max=1.0),
@@ -605,7 +606,7 @@ def run_queue(
         retry_failed=retry_failed,
         profile=profile,
     )
-    worker.run(batch_size=batch_size)
+    worker.run(batch_size=batch_size, chunk_size=chunk_size)
 
 
 @app.command(name="run-distributed-worker")

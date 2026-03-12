@@ -1569,6 +1569,98 @@ class TestJobQueue:
         assert row is not None
         assert row["status"] == "pending"
 
+    def test_get_pending_image_ids(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        id1 = repo.register_image(file_path="/photos/a.jpg")
+        id2 = repo.register_image(file_path="/photos/b.jpg")
+        id3 = repo.register_image(file_path="/photos/c.jpg")
+        queue.enqueue(id1, "metadata")
+        queue.enqueue(id2, "objects")
+        queue.enqueue(id3, "metadata")
+        queue.enqueue(id3, "objects")
+
+        ids = queue.get_pending_image_ids()
+        assert sorted(ids) == sorted([id1, id2, id3])
+
+        ids_meta = queue.get_pending_image_ids(modules=["metadata"])
+        assert sorted(ids_meta) == sorted([id1, id3])
+
+    def test_claim_with_image_ids_filter(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        id1 = repo.register_image(file_path="/photos/a.jpg")
+        id2 = repo.register_image(file_path="/photos/b.jpg")
+        queue.enqueue(id1, "metadata")
+        queue.enqueue(id2, "metadata")
+
+        # Only claim jobs for id1
+        jobs = queue.claim(batch_size=10, image_ids={id1})
+        assert len(jobs) == 1
+        assert jobs[0]["image_id"] == id1
+
+        # id2 is still pending
+        jobs2 = queue.claim(batch_size=10)
+        assert len(jobs2) == 1
+        assert jobs2[0]["image_id"] == id2
+
+    def test_pending_count_with_image_ids_filter(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        id1 = repo.register_image(file_path="/photos/a.jpg")
+        id2 = repo.register_image(file_path="/photos/b.jpg")
+        queue.enqueue(id1, "metadata")
+        queue.enqueue(id1, "objects")
+        queue.enqueue(id2, "metadata")
+
+        assert queue.pending_count(image_ids={id1}) == 2
+        assert queue.pending_count(module="metadata", image_ids={id1}) == 1
+        assert queue.pending_count(image_ids={id2}) == 1
+        assert queue.pending_count() == 3  # backward compat
+
+    def test_claim_leased_prefer_module(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["worker-1", "Worker 1", "linux", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/affinity.jpg")
+        queue.enqueue(img_id, "metadata", priority=50)
+        queue.enqueue(img_id, "objects", priority=100)  # higher priority
+
+        # Without prefer_module, objects (priority 100) comes first
+        claimed = queue.claim_leased(worker_id="worker-1", batch_size=2)
+        assert claimed[0]["module"] == "objects"
+        # Release them
+        for c in claimed:
+            queue.release_leased(c["id"], c["lease_token"])
+
+        # With prefer_module="metadata", metadata comes first despite lower priority
+        claimed = queue.claim_leased(worker_id="worker-1", batch_size=2, prefer_module="metadata")
+        assert claimed[0]["module"] == "metadata"
+
 
 class TestWorkerFlushRecovery:
     def test_flush_fts_requeues_failed_ids(self, tmp_path):

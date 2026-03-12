@@ -347,6 +347,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
     verbose = params.get("verbose", True)
     write_xmp = not params.get("noXmp", True)
     batch_size = params.get("batchSize", 10)
+    chunk_size = params.get("chunkSize", 500)
     detection_prompt = params.get("detectionPrompt")
     detection_threshold = params.get("detectionThreshold")
     face_threshold = params.get("faceThreshold")
@@ -398,7 +399,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
             from imganalyzer.pipeline import worker as worker_mod
             worker_mod._result_notify = lambda payload: _send_notification("run/result", payload)
             try:
-                result = worker.run(batch_size=batch_size)
+                result = worker.run(batch_size=batch_size, chunk_size=chunk_size)
                 _send_notification("run/done", result)
             except Exception as exc:
                 _send_notification("run/error", {"error": str(exc)})
@@ -716,6 +717,18 @@ def _handle_jobs_claim(params: dict) -> dict:
         requested,
         queue.pending_count(module_filter, modules=modules_filter),
     )
+
+    # Module affinity: look up last_module for this worker to minimize
+    # model switching across consecutive claims.
+    prefer_module: str | None = None
+    try:
+        wrow = conn.execute(
+            "SELECT last_module FROM worker_nodes WHERE id = ?", [worker_id]
+        ).fetchone()
+        if wrow and wrow["last_module"]:
+            prefer_module = str(wrow["last_module"])
+    except Exception:
+        pass  # table may lack last_module column in older schema
     # Scan far enough in one request to rotate past large blocked backlogs
     # (for example hundreds of faces/ocr jobs waiting on objects) instead of
     # forcing remote workers to idle through many empty polls.
@@ -740,6 +753,7 @@ def _handle_jobs_claim(params: dict) -> dict:
             module=module_filter,
             modules=modules_filter,
             exclude_modules=excl,
+            prefer_module=prefer_module,
         )
         if not claimed:
             break
@@ -816,6 +830,19 @@ def _handle_jobs_claim(params: dict) -> dict:
 
         if len(claimed) < claim_size:
             break
+
+    # Update worker's last_module for affinity on next claim
+    if jobs:
+        last_mod = jobs[-1]["module"]
+        try:
+            conn.execute(
+                "UPDATE worker_nodes SET last_module = ? WHERE id = ?",
+                [last_mod, worker_id],
+            )
+            conn.commit()
+        except Exception:
+            pass  # non-critical — schema may lack column
+
     return {"jobs": jobs}
 
 

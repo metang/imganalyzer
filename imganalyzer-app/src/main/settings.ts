@@ -33,14 +33,20 @@ export interface WorkerPathMapping {
   targetPrefix: string
 }
 
+export interface ProcessingSettings {
+  chunkSize: number
+}
+
 export interface AppSettings {
   thumbnailCache: ThumbnailCacheConfig
   distributed: DistributedCoordinatorSettings
+  processing: ProcessingSettings
 }
 
 export interface AppSettingsInput {
   thumbnailCache?: ThumbnailCacheConfigInput
   distributed?: Partial<DistributedCoordinatorSettings>
+  processing?: Partial<ProcessingSettings>
 }
 
 export interface WorkerSetupInfo {
@@ -67,6 +73,7 @@ interface StoredAppSettings {
     maxGB?: number
   }
   distributed?: Partial<DistributedCoordinatorSettings>
+  processing?: Partial<ProcessingSettings>
 }
 
 const SETTINGS_FILE = 'app-settings.json'
@@ -77,6 +84,7 @@ const DEFAULT_THUMB_CACHE_GB = 300
 const DEFAULT_THUMB_CACHE_DIR = resolve(join(homedir(), '.cache', 'imganalyzer', 'thumbs'))
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 const DEFAULT_COORDINATOR_PORT = 8765
+const DEFAULT_CHUNK_SIZE = 500
 
 let cachedBundle: AppSettingsBundle | null = null
 
@@ -322,6 +330,9 @@ async function resolveBundle(force = false): Promise<AppSettingsBundle> {
   const settings: AppSettings = {
     thumbnailCache: resolveThumbnailCacheConfig(stored.thumbnailCache),
     distributed: normalizeDistributedSettings(stored.distributed),
+    processing: {
+      chunkSize: stored.processing?.chunkSize ?? DEFAULT_CHUNK_SIZE,
+    },
   }
 
   cachedBundle = {
@@ -344,6 +355,7 @@ export async function updateAppSettings(input: AppSettingsInput): Promise<AppSet
   const next: StoredAppSettings = {
     thumbnailCache: { ...(stored.thumbnailCache ?? {}) },
     distributed: { ...(stored.distributed ?? {}) },
+    processing: { ...(stored.processing ?? {}) },
   }
 
   if (input.thumbnailCache) {
@@ -393,6 +405,16 @@ export async function updateAppSettings(input: AppSettingsInput): Promise<AppSet
         }
         return { sourcePrefix, targetPrefix }
       })
+    }
+  }
+
+  if (input.processing) {
+    if (input.processing.chunkSize !== undefined) {
+      const cs = Number(input.processing.chunkSize)
+      if (!Number.isInteger(cs) || cs < 0 || cs > 10000) {
+        throw new Error('Chunk size must be an integer between 0 and 10000')
+      }
+      next.processing!.chunkSize = cs
     }
   }
 
