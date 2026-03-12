@@ -10,8 +10,8 @@ interface Props {
   onClearCompleted(): void
 }
 
-function fmtMs(ms: number): string {
-  if (ms <= 0) return '—'
+function fmtMs(ms: number | undefined): string {
+  if (!ms || ms <= 0) return '—'
   if (ms < 1000) return `${Math.round(ms)}ms`
   const s = ms / 1000
   if (s < 60) return `${s.toFixed(1)}s`
@@ -20,8 +20,8 @@ function fmtMs(ms: number): string {
   return `${m}m ${rem}s`
 }
 
-function fmtRate(imgPerSec: number): string {
-  if (imgPerSec <= 0) return '—'
+function fmtRate(imgPerSec: number | undefined): string {
+  if (!imgPerSec || imgPerSec <= 0) return '—'
   return `${imgPerSec.toFixed(1)} img/s`
 }
 
@@ -274,6 +274,8 @@ export function ProgressDashboard({
       done: c.done + b.done,
       failed: c.failed + b.failed,
       skipped: c.skipped + b.skipped,
+      imagesPerSec: (c.imagesPerSec ?? 0) + (b.imagesPerSec ?? 0),
+      avgMsPerImage: c.avgMsPerImage ?? b.avgMsPerImage ?? 0,
     }
     delete mergedModules.blip2
   } else if (mergedModules.blip2 && !mergedModules.cloud_ai) {
