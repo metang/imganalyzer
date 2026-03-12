@@ -21,6 +21,21 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+
+def _get_hf_token() -> str | None:
+    """Return a HuggingFace token from the environment or cached login."""
+    import os
+
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        return token
+    try:
+        from huggingface_hub import get_token
+        return get_token()
+    except Exception:
+        return None
+
+
 # ── Label mapping (0-10 scale) ────────────────────────────────────────────────
 
 _LABEL_THRESHOLDS: list[tuple[float, str]] = [
@@ -59,15 +74,12 @@ class _ModelHolder:
     def loaded(self) -> bool:
         return self._loaded
 
-    def load(self) -> None:
-        if self._loaded:
-            return
+    # Local cache for quantized weights (avoids re-quantising on every start).
+    _QUANT_CACHE = Path.home() / ".cache" / "imganalyzer" / "unipercept_4bit"
 
+    def _apply_monkey_patches(self) -> None:
+        """Apply transformers 5.0 compat patches (idempotent)."""
         import torch
-        from transformers import AutoTokenizer, BitsAndBytesConfig
-        import torchvision.transforms as T
-        from torchvision.transforms.functional import InterpolationMode
-
         from unipercept_reward.internvl.model.internvl_chat.modeling_unipercept import (
             InternVLChatModel,
         )
@@ -76,7 +88,6 @@ class _ModelHolder:
         )
         from unipercept_reward.internvl.model.internvl_chat import modeling_intern_vit
 
-        # ── Monkey-patches for transformers 5.0 compatibility ──
         # 1. Config diffing calls __init__() with no args; default llm_config
         #    has architectures=[''] which raises ValueError.
         InternVLChatConfig.has_no_defaults_at_init = True
@@ -95,29 +106,93 @@ class _ModelHolder:
         if not hasattr(InternVLChatModel, "all_tied_weights_keys"):
             InternVLChatModel.all_tied_weights_keys = {}
 
-        # ── Load model ──
-        model_path = "Thunderbolt215215/UniPercept"
-        log.info("Loading UniPercept model from %s …", model_path)
+    def load(self) -> None:
+        if self._loaded:
+            return
 
-        quant_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_quant_type="nf4",
+        import torch
+        from transformers import AutoTokenizer, BitsAndBytesConfig
+        import torchvision.transforms as T
+        from torchvision.transforms.functional import InterpolationMode
+
+        from unipercept_reward.internvl.model.internvl_chat.modeling_unipercept import (
+            InternVLChatModel,
         )
 
-        self.model = InternVLChatModel.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            use_flash_attn=False,
-            trust_remote_code=True,
-            quantization_config=quant_config,
-            device_map="auto",
-            max_memory={0: "14GiB", "cpu": "24GiB"},
-        ).eval()
+        self._apply_monkey_patches()
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True, use_fast=False,
-        )
+        hf_token = _get_hf_token()
+        cache_dir = self._QUANT_CACHE
+        use_cache = cache_dir.exists() and (cache_dir / "config.json").exists()
+
+        if use_cache:
+            # ── Fast path: load pre-quantized weights from local cache ──
+            log.info("Loading cached quantized UniPercept from %s …", cache_dir)
+            self.model = InternVLChatModel.from_pretrained(
+                str(cache_dir),
+                torch_dtype=torch.bfloat16,
+                use_flash_attn=False,
+                trust_remote_code=True,
+                device_map="auto",
+                max_memory={0: "14GiB", "cpu": "24GiB"},
+            ).eval()
+
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                str(cache_dir), trust_remote_code=True, use_fast=False,
+            )
+        else:
+            # ── First-time: quantize from HuggingFace Hub, then cache ──
+            model_path = "Thunderbolt215215/UniPercept"
+            log.info(
+                "First-time load: quantizing UniPercept from %s "
+                "(this may take several minutes) …",
+                model_path,
+            )
+
+            if hf_token is None:
+                log.warning(
+                    "No HuggingFace token found. UniPercept is a gated model — "
+                    "run `huggingface-cli login` to authenticate."
+                )
+
+            quant_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4",
+            )
+
+            try:
+                self.model = InternVLChatModel.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.bfloat16,
+                    use_flash_attn=False,
+                    trust_remote_code=True,
+                    quantization_config=quant_config,
+                    device_map="auto",
+                    max_memory={0: "14GiB", "cpu": "24GiB"},
+                    token=hf_token,
+                ).eval()
+
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_path, trust_remote_code=True, use_fast=False,
+                    token=hf_token,
+                )
+            except OSError as exc:
+                if "gated repo" in str(exc) or "401" in str(exc):
+                    raise OSError(
+                        "Cannot access gated model Thunderbolt215215/UniPercept. "
+                        "1) Run `huggingface-cli login` with a valid token. "
+                        "2) Accept the model license at "
+                        "https://huggingface.co/Thunderbolt215215/UniPercept"
+                    ) from exc
+                raise
+
+            # Persist quantized weights so future loads are fast.
+            log.info("Caching quantized model to %s …", cache_dir)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            self.model.save_pretrained(str(cache_dir))
+            self.tokenizer.save_pretrained(str(cache_dir))
+            log.info("Quantized model cached — subsequent loads will be fast")
 
         self.gen_cfg = {"max_new_tokens": 512, "do_sample": False}
 
