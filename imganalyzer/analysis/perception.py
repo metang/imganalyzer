@@ -187,6 +187,7 @@ def analyze(image_path: Path) -> dict[str, Any]:
     All scores are on a 0-10 scale.
     """
     import torch
+    from PIL import Image
     from imganalyzer.readers import open_as_pil
 
     _holder.load()
