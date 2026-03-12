@@ -40,14 +40,12 @@ class TestVRAMBudget:
 
     def test_can_fit_small_models(self):
         vram = self._make()
-        # All three small models fit together: 1.0 + 1.3 + 0.95 = 3.25 GB
+        # Small models fit together: 1.0 + 0.95 = 1.95 GB
         assert vram.can_fit("faces")
         vram.reserve("faces")
-        assert vram.can_fit("ocr")
-        vram.reserve("ocr")
         assert vram.can_fit("embedding")
         vram.reserve("embedding")
-        assert vram.used_gb == pytest.approx(3.25)
+        assert vram.used_gb == pytest.approx(1.95)
 
     def test_exclusive_module_alone(self):
         vram = self._make()
@@ -89,7 +87,7 @@ class TestVRAMBudget:
         vram = self._make(total=2.0, fraction=0.70)  # 1.4 GB budget
         vram.reserve("embedding")  # 0.95 GB
         with pytest.raises(RuntimeError, match="Cannot load"):
-            vram.reserve("ocr")  # 1.3 GB — would exceed 1.4 GB
+            vram.reserve("faces")  # 1.0 GB — would exceed 1.4 GB
 
     def test_is_exclusive(self):
         vram = self._make()
@@ -147,12 +145,12 @@ class TestResourceScheduler:
         s = self._make()
         assert len(s.gpu_phases) == 2
         assert s.modules_for_phase(0) == ["objects"]
-        assert s.modules_for_phase(1) == ["faces", "ocr", "embedding", "aesthetic"]
+        assert s.modules_for_phase(1) == ["faces", "embedding", "aesthetic"]
 
     def test_co_resident_phase(self):
         s = self._make()
         assert not s.is_co_resident_phase(0)  # objects alone
-        assert s.is_co_resident_phase(1)       # faces + ocr + embedding + aesthetic
+        assert s.is_co_resident_phase(1)       # faces + embedding + aesthetic
 
     def test_independent_gpu_modules(self):
         s = self._make()
@@ -170,7 +168,6 @@ class TestResourceScheduler:
         assert s.is_batch_capable("embedding")
         assert not s.is_batch_capable("blip2")
         assert not s.is_batch_capable("faces")
-        assert not s.is_batch_capable("ocr")
 
     def test_boosted_cloud_workers(self):
         s = self._make(cloud_workers=4, cloud_boost_factor=2)
@@ -193,7 +190,6 @@ class TestResourceScheduler:
         s = self._make()
         assert s.prerequisite_for("cloud_ai") == "objects"
         assert s.prerequisite_for("faces") == "objects"
-        assert s.prerequisite_for("ocr") == "objects"
         assert s.prerequisite_for("aesthetic") == "objects"
         assert s.prerequisite_for("objects") is None
         assert s.prerequisite_for("blip2") is None
@@ -451,7 +447,7 @@ class TestCoResidencyFitCheck:
 
     def test_phase1_fits_in_budget(self):
         vram = VRAMBudget(total_vram_gb=16.0, fraction=0.70)
-        phase1_modules = _GPU_PHASES[1]  # faces, ocr, embedding, aesthetic
+        phase1_modules = _GPU_PHASES[1]  # faces, embedding, aesthetic
         total = sum(_MODULE_VRAM_GB.get(m, 0) for m in phase1_modules)
         assert total < vram.budget_gb, (
             f"Phase 1 modules ({phase1_modules}) need {total:.2f} GB "

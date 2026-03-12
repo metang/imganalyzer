@@ -212,12 +212,6 @@ def persist_result_payload(
             repo.upsert_objects(image_id, data)
         return
 
-    if module == "ocr":
-        data = _clean_analysis_row(payload.get("data"))
-        if data:
-            repo.upsert_ocr(image_id, data)
-        return
-
     if module == "faces":
         data = _clean_analysis_row(payload.get("data"))
         if not data:

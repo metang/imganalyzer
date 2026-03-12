@@ -286,8 +286,6 @@ class ModuleRunner:
             return self._run_blip2(image_id, path)
         elif module == "objects":
             return self._run_objects(image_id, path)
-        elif module == "ocr":
-            return self._run_ocr(image_id, path)
         elif module == "faces":
             return self._run_faces(image_id, path)
         elif module == "cloud_ai":
@@ -396,16 +394,6 @@ class ModuleRunner:
 
         if self.verbose:
             console.print(f"  [dim]Object detection done for image {image_id}[/dim]")
-        return result
-
-    def _run_ocr(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = self._cached_read_image(path, image_id)
-
-        from imganalyzer.pipeline.passes.ocr import run_ocr
-        result = run_ocr(image_data, self.repo, image_id, self.conn)
-
-        if self.verbose:
-            console.print(f"  [dim]OCR done for image {image_id}[/dim]")
         return result
 
     def _run_faces(self, image_id: int, path: Path) -> dict[str, Any]:
@@ -811,9 +799,6 @@ def unload_gpu_model(module: str) -> None:
     if module in ("objects", "local_ai"):
         from imganalyzer.analysis.ai.objects import ObjectDetector
         ObjectDetector._unload()
-    if module in ("ocr", "local_ai"):
-        from imganalyzer.analysis.ai.ocr import OCRAnalyzer
-        OCRAnalyzer._unload()
     if module in ("faces", "local_ai"):
         from imganalyzer.analysis.ai.faces import FaceAnalyzer
         FaceAnalyzer._unload()

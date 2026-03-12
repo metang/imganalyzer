@@ -28,10 +28,8 @@ const STAGE_MAP: Array<[RegExp, number, string]> = [
   [/Loading BLIP-2|Qwen 3\.5|ollama/i, 8, 'Loading AI model\u2026'],
   [/\[2\/4\]/, 40, 'Object detection'],
   [/Loading.*GroundingDINO|Loading.*object/i, 42, 'Loading GroundingDINO\u2026'],
-  [/\[3\/4\]/, 62, 'OCR \u2014 reading text'],
-  [/Loading TrOCR/i, 64, 'Loading TrOCR\u2026'],
-  [/\[4\/4\]/, 75, 'Face detection & recognition'],
-  [/buffalo_l|Loading.*face/i, 77, 'Loading InsightFace\u2026'],
+  [/\[3\/4\]/, 65, 'Face detection & recognition'],
+  [/buffalo_l|Loading.*face/i, 67, 'Loading InsightFace\u2026'],
   [/XMP written|Done\./i, 100, 'Done'],
 ]
 

@@ -514,7 +514,7 @@ def ingest(
     modules: Optional[str] = typer.Option(
         None, "--modules", "-m",
         help="Comma-separated modules to enqueue (default: all). "
-             "Options: metadata,technical,local_ai,blip2,objects,ocr,faces,cloud_ai,aesthetic,perception,embedding",
+             "Options: metadata,technical,local_ai,blip2,objects,faces,cloud_ai,aesthetic,perception,embedding",
     ),
     force: bool = typer.Option(False, "--force", help="Re-enqueue even if already analyzed"),
     no_recursive: bool = typer.Option(False, "--no-recursive", help="Don't scan subfolders"),
@@ -1826,7 +1826,7 @@ def profile_report(
     """, [run_id]).fetchall()
 
     if phase_stats:
-        phase_names = {0: "objects", 1: "blip2", 2: "faces+ocr+embed"}
+        phase_names = {0: "objects", 1: "blip2", 2: "faces+embed"}
         tbl = Table(title="GPU Phase Timing")
         tbl.add_column("Phase", style="magenta")
         tbl.add_column("Duration (s)", justify="right")

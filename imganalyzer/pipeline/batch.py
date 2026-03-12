@@ -111,7 +111,6 @@ class BatchProcessor:
                     ("local_ai", "analysis_local_ai"),
                     ("blip2", "analysis_blip2"),
                     ("objects", "analysis_objects"),
-                    ("ocr", "analysis_ocr"),
                     ("faces", "analysis_faces"),
                     ("aesthetic", "analysis_aesthetic"),
                 ):
@@ -318,7 +317,6 @@ def _module_priority(module: str) -> int:
         "objects":    85,   # highest GPU priority — unlocks cloud_ai/aesthetic
         "blip2":      80,
         "local_ai":   80,
-        "ocr":        78,
         "faces":      77,
         "cloud_ai":   70,
         "aesthetic":  60,

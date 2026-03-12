@@ -18,7 +18,6 @@ const PASSES: PassDef[] = [
   { label: 'Technical (sharpness, exposure, noise)',  uiKey: 'technical',  moduleKey: 'technical' },
   { label: 'Caption & Scene (Qwen 3.5)',             uiKey: 'caption',    moduleKey: 'blip2'     },
   { label: 'Object Detection (GroundingDINO)',        uiKey: 'objects',    moduleKey: 'objects'   },
-  { label: 'OCR / Text (TrOCR)',                      uiKey: 'ocr',        moduleKey: 'ocr',       note: 'requires objects' },
   { label: 'Face Recognition (InsightFace)',          uiKey: 'faces',      moduleKey: 'faces',     note: 'requires objects' },
   { label: 'AI Analysis (Qwen 3.5)',                  uiKey: 'cloud_ai',   moduleKey: 'cloud_ai',  note: 'requires objects' },
   { label: 'Aesthetic Score (SigLIP)',                uiKey: 'aesthetic',  moduleKey: 'aesthetic', note: 'requires objects' },
@@ -190,7 +189,7 @@ export function PassSelector({ value, onChange, disabled }: Props) {
 export function defaultPassSelectorValue(): PassSelectorValue {
   return {
     selectedKeys: new Set<string>([
-      'metadata', 'technical', 'caption', 'objects', 'ocr', 'faces',
+      'metadata', 'technical', 'caption', 'objects', 'faces',
       'cloud_ai', 'aesthetic', 'embedding',
     ]),
     workers: 2,

@@ -254,7 +254,6 @@ export type BatchModuleKey =
   | 'local_ai'
   | 'blip2'
   | 'objects'
-  | 'ocr'
   | 'faces'
   | 'cloud_ai'
   | 'aesthetic'

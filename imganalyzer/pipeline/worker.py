@@ -62,7 +62,7 @@ from imganalyzer.pipeline.scheduler import ResourceScheduler
 console = Console()
 
 # Modules that use GPU — must run single-threaded on the main thread
-GPU_MODULES = {"local_ai", "embedding", "objects", "ocr", "faces", "perception", "aesthetic"}
+GPU_MODULES = {"local_ai", "embedding", "objects", "faces", "perception", "aesthetic"}
 # Local I/O-bound modules — parallel, governed by `workers`
 LOCAL_IO_MODULES = {"metadata", "technical"}
 # Cloud/IO modules — parallel, governed by `cloud_workers`
@@ -79,11 +79,10 @@ _FTS_MODULES = {"metadata", "local_ai", "blip2", "faces", "cloud_ai"}
 
 # The ``objects`` pass must complete for an image before cloud/aesthetic
 # may run (it provides ``has_person`` for the privacy gate).
-# ``ocr`` and ``faces`` also depend on ``objects`` for their gate flags.
+# ``faces`` also depends on ``objects`` for gate flags.
 _PREREQUISITES: dict[str, str] = {
     "cloud_ai": "objects",
     "aesthetic": "objects",
-    "ocr": "objects",
     "faces": "objects",
     "embedding": "objects",
 }
@@ -751,7 +750,6 @@ class Worker:
         "objects":   4,   # GroundingDINO mixed fp16/fp32, ~1.1 GB model
         "embedding": 16,  # CLIP ViT-L/14 fp16, ~0.95 GB model
         "faces":     8,   # InsightFace ONNX — claim granularity for prefetch
-        "ocr":       4,   # TrOCR — claim granularity for prefetch
         "aesthetic": 4,   # SigLIP-v2.5 — claim granularity
     }
 

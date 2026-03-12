@@ -29,7 +29,7 @@ from imganalyzer.pipeline.worker import _emit_result
 console = Console()
 
 # Modules that require local-AI packages (torch, transformers, etc.)
-_LOCAL_AI_MODULES = {"objects", "blip2", "local_ai", "ocr", "faces", "embedding"}
+_LOCAL_AI_MODULES = {"objects", "blip2", "local_ai", "faces", "embedding"}
 
 # Modules that always work (pure Python / stdlib)
 _ALWAYS_AVAILABLE_MODULES = {"metadata", "technical"}
@@ -90,7 +90,7 @@ def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
         import torch  # noqa: F401
         import transformers  # noqa: F401
 
-        available.extend(["objects", "blip2", "local_ai", "ocr"])
+        available.extend(["objects", "blip2", "local_ai"])
     except ImportError:
         pass
 

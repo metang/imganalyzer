@@ -10,7 +10,6 @@ export const ALL_MODULE_KEYS = [
   'local_ai',
   'blip2',
   'objects',
-  'ocr',
   'faces',
   'cloud_ai',
   'aesthetic',

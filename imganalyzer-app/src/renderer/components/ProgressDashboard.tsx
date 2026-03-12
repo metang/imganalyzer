@@ -51,7 +51,6 @@ const MODULE_LABELS: Record<string, string> = {
   local_ai: 'Local AI',
   blip2: 'Qwen 3.5 Caption',
   objects: 'Objects (DINO)',
-  ocr: 'OCR',
   faces: 'Faces',
   cloud_ai: 'AI Analysis',
   aesthetic: 'Aesthetic',
