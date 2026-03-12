@@ -27,15 +27,16 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function ScoreBar({ value, max = 10 }: { value: number; max?: number }) {
-  const pct = Math.min(100, (value / max) * 100)
+function ScoreBar({ value, max = 10 }: { value: number | undefined; max?: number }) {
+  const v = value ?? 0
+  const pct = Math.min(100, (v / max) * 100)
   const color = pct >= 70 ? 'bg-green-500' : pct >= 40 ? 'bg-yellow-500' : 'bg-red-500'
   return (
     <div className="flex items-center gap-2">
       <div className="flex-1 h-1.5 bg-neutral-700 rounded-full overflow-hidden">
         <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
       </div>
-      <span className="text-xs text-neutral-300 tabular-nums w-8 text-right">{value.toFixed(1)}</span>
+      <span className="text-xs text-neutral-300 tabular-nums w-8 text-right">{v.toFixed(1)}</span>
     </div>
   )
 }
