@@ -11,6 +11,19 @@ const STATUS_COLORS: Record<BatchResult['status'], string> = {
   skipped: 'text-yellow-400',
 }
 
+const MODULE_LABELS: Record<string, string> = {
+  metadata: 'metadata',
+  technical: 'technical',
+  local_ai: 'local_ai',
+  blip2: 'caption',
+  objects: 'objects',
+  faces: 'faces',
+  cloud_ai: 'ai_analysis',
+  aesthetic: 'aesthetic',
+  embedding: 'embedding',
+  perception: 'perception',
+}
+
 const STATUS_LABELS: Record<BatchResult['status'], string> = {
   done:    'done',
   failed:  'fail',
@@ -91,7 +104,7 @@ export function LiveResultsFeed({ results }: Props) {
             {r.nodeLabel}
           </span>
           {/* Module name — fixed width */}
-          <span className="w-20 shrink-0 text-neutral-500">{r.module}</span>
+          <span className="w-20 shrink-0 text-neutral-500">{MODULE_LABELS[r.module] ?? r.module}</span>
           {/* Filename — shrinks to make room for error */}
           <span
             className="shrink-0 text-neutral-300 truncate max-w-[180px]"
