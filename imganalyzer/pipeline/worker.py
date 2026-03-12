@@ -66,6 +66,7 @@ GPU_MODULES = {"local_ai", "embedding", "objects", "ocr", "faces", "perception",
 # Local I/O-bound modules — parallel, governed by `workers`
 LOCAL_IO_MODULES = {"metadata", "technical"}
 # Cloud/IO modules — parallel, governed by `cloud_workers`
+# blip2 and cloud_ai call Ollama (uses GPU externally but IO-bound from pipeline)
 CLOUD_MODULES = {"cloud_ai", "blip2"}
 # Combined set (kept for backwards-compat references)
 IO_MODULES = LOCAL_IO_MODULES | CLOUD_MODULES
@@ -438,12 +439,13 @@ class Worker:
 
             # ════════════════════════════════════════════════════════════════
             # GPU Phases (scheduler-driven)
-            # Phase 0: objects (exclusive, unlocks dependencies)
-            # Phase 1: faces + ocr + embedding + aesthetic (co-resident)
-            # blip2 and cloud_ai run via Ollama in IO thread pool
+            # Phase 0: objects (unlocks dependencies)
+            #   - blip2/cloud_ai (Ollama) run concurrently in IO thread pool
+            # Phase 1: faces + ocr + embedding + aesthetic (co-resident GPU)
+            #   - Ollama model unloaded before this phase starts
             # ════════════════════════════════════════════════════════════════
             phase_labels = [
-                "Phase 0 — object detection (people flag)",
+                "Phase 0 — object detection + Ollama AI (concurrent)",
                 "Phase 1 — faces + OCR + embeddings + aesthetic (co-resident GPU)",
             ]
 
@@ -457,6 +459,12 @@ class Worker:
                     for mod in phase_modules
                 )
                 if not has_pending:
+                    # Even if no GPU work, drain Ollama IO before Phase 1
+                    if phase_idx == 0:
+                        self._drain_ollama_io(
+                            _claim_fn, _submit_io_jobs, _collect_futures,
+                            effective_cloud_workers, stats,
+                        )
                     continue
 
                 console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
@@ -481,6 +489,14 @@ class Worker:
                         unload_fn=unload_gpu_model,
                         prefetch_fn=_prefetch_image,
                         cancel_futures_fn=_cancel_futures,
+                    )
+
+                # After Phase 0: drain remaining Ollama IO and unload model
+                # so Phase 1 GPU modules have full VRAM available.
+                if phase_idx == 0 and not self._shutdown.is_set():
+                    self._drain_ollama_io(
+                        _claim_fn, _submit_io_jobs, _collect_futures,
+                        effective_cloud_workers, stats,
                     )
 
             # ════════════════════════════════════════════════════════════════
@@ -582,6 +598,59 @@ class Worker:
         self.profiler.end_run()
 
         return stats
+
+    def _drain_ollama_io(
+        self,
+        claim_fn: Any,
+        submit_io_fn: Any,
+        collect_fn: Any,
+        cloud_workers: int,
+        stats: dict[str, int],
+    ) -> None:
+        """Drain all pending blip2/cloud_ai (Ollama) IO jobs, then unload the model.
+
+        Called between GPU Phase 0 (objects) and Phase 1 (faces/ocr/etc.) so
+        that the Ollama model releases VRAM before Phase 1 models load.
+        This means the Ollama model loads once, processes all images, unloads
+        once — no per-image load/unload overhead.
+        """
+        from concurrent.futures import as_completed
+
+        ollama_modules = {"blip2", "cloud_ai"}
+        has_ollama = any(
+            self.queue.pending_count(module=mod) > 0
+            for mod in ollama_modules
+        )
+        if not has_ollama:
+            # Still unload in case Ollama was used during Phase 0 IO
+            from imganalyzer.analysis.ai.ollama import OllamaAI
+            OllamaAI.unload_model()
+            return
+
+        console.print("[dim]Draining Ollama AI jobs before GPU Phase 1…[/dim]")
+
+        with ThreadPoolExecutor(max_workers=cloud_workers) as pool:
+            while not self._shutdown.is_set():
+                futures: dict[Any, dict[str, Any]] = {}
+                for mod in ollama_modules:
+                    jobs = claim_fn(10, mod)
+                    for job in jobs:
+                        fut = pool.submit(self._process_job, job)
+                        futures[fut] = job
+                if not futures:
+                    break
+                for fut in as_completed(futures):
+                    job = futures[fut]
+                    try:
+                        status = fut.result()
+                        stats[status] = stats.get(status, 0) + 1
+                    except Exception:
+                        stats["failed"] = stats.get("failed", 0) + 1
+
+        # Unload Ollama model to free VRAM for Phase 1
+        from imganalyzer.analysis.ai.ollama import OllamaAI
+        OllamaAI.unload_model()
+        console.print("[dim]Ollama model unloaded — VRAM freed for GPU Phase 1[/dim]")
 
     # ── GPU batch sizes per module ──────────────────────────────────────
     # Tuned to stay within ~70% of GPU VRAM (e.g. ~11 GB on a 16 GB card)

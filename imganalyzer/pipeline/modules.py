@@ -802,6 +802,9 @@ def unload_gpu_model(module: str) -> None:
     With model unloading, peak VRAM drops significantly, leaving
     ample headroom for batch inference within the GPU ceiling.
     """
+    if module in ("blip2", "cloud_ai"):
+        from imganalyzer.analysis.ai.ollama import OllamaAI
+        OllamaAI.unload_model()
     if module in ("blip2", "local_ai"):
         from imganalyzer.analysis.ai.local import LocalAI
         LocalAI._unload()

@@ -83,6 +83,31 @@ class OllamaAI:
         self.url = (url or os.environ.get("OLLAMA_URL", _DEFAULT_URL)).rstrip("/")
         self._prompt = _build_prompt()
 
+    @classmethod
+    def unload_model(cls) -> None:
+        """Tell Ollama to unload the model from GPU, freeing VRAM."""
+        from urllib import request as urllib_request
+        from urllib.error import URLError
+
+        model = os.environ.get("OLLAMA_MODEL", _DEFAULT_MODEL)
+        url = os.environ.get("OLLAMA_URL", _DEFAULT_URL).rstrip("/")
+        payload = json.dumps({
+            "model": model,
+            "keep_alive": 0,
+        }).encode("utf-8")
+        try:
+            req = urllib_request.Request(
+                f"{url}/api/generate",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib_request.urlopen(req, timeout=30) as resp:
+                resp.read()
+            log.info("Ollama model %s unloaded from GPU", model)
+        except (URLError, OSError) as exc:
+            log.warning("Failed to unload Ollama model: %s", exc)
+
     def analyze(self, path: Path, image_data: dict[str, Any]) -> dict[str, Any]:
         """Analyze a single image via Ollama.
 

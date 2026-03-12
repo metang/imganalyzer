@@ -46,10 +46,11 @@ _BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "embedding"})
 # be loaded simultaneously (VRAM permitting).  Between phases, all
 # models from the previous phase are unloaded.
 #
-# Phase 0: objects   (must run first — unlocks cloud/aesthetic/ocr/faces)
+# Phase 0: objects       (must run first — unlocks deps, 2.4 GB)
+#          blip2/cloud_ai run concurrently via Ollama in IO thread pool
 # Phase 1: faces, ocr, embedding, aesthetic (co-resident — total ~4.75 GB)
+#          Ollama model is unloaded between Phase 0 and Phase 1
 #
-# blip2 and cloud_ai now run via Ollama (IO-bound, not GPU-phased)
 # perception runs independently during IO drain (not sequenced with above)
 _GPU_PHASES: list[list[str]] = [
     ["objects"],
