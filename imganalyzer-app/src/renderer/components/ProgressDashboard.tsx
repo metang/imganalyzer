@@ -49,7 +49,6 @@ const MODULE_LABELS: Record<string, string> = {
   metadata: 'Metadata',
   technical: 'Technical',
   local_ai: 'Local AI',
-  blip2: 'Caption & Keywords',
   objects: 'Objects (DINO)',
   faces: 'Faces',
   cloud_ai: 'Caption & Keywords',
@@ -264,7 +263,7 @@ export function ProgressDashboard({
   const hasPending = totals.pending > 0
   const showResume = isPaused || (!isRunning && hasPending)
 
-  const failedModules = Object.entries(modules)
+  const failedModules = Object.entries(mergedModules)
     .filter(([, s]) => s && s.failed > 0)
     .map(([mod]) => mod)
 
@@ -272,7 +271,25 @@ export function ProgressDashboard({
   const canClearQueue = !isRunning && !isPaused && totalPasses > 0
   const canClearCompleted = (totals.done + totals.skipped) > 0
 
-  const moduleEntries = Object.entries(modules).filter(
+  // Merge legacy blip2 stats into cloud_ai (they are now a single pass)
+  const mergedModules = { ...modules }
+  if (mergedModules.blip2 && mergedModules.cloud_ai) {
+    const b = mergedModules.blip2
+    const c = mergedModules.cloud_ai
+    mergedModules.cloud_ai = {
+      pending: c.pending + b.pending,
+      running: c.running + b.running,
+      done: c.done + b.done,
+      failed: c.failed + b.failed,
+      skipped: c.skipped + b.skipped,
+    }
+    delete mergedModules.blip2
+  } else if (mergedModules.blip2 && !mergedModules.cloud_ai) {
+    mergedModules.cloud_ai = mergedModules.blip2
+    delete mergedModules.blip2
+  }
+
+  const moduleEntries = Object.entries(mergedModules).filter(
     (entry): entry is [string, BatchModuleStats] => entry[1] != null
   )
 
