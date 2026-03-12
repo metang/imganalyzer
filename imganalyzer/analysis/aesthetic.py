@@ -39,12 +39,21 @@ class SigLIPAesthetic:
     _device: str = "cpu"
 
     @classmethod
-    def load(cls, device: str = "cuda") -> None:
-        """Load the SigLIP aesthetic model onto *device*."""
+    def load(cls, device: str | None = None) -> None:
+        """Load the SigLIP aesthetic model onto *device*.
+
+        When *device* is ``None`` (the default), auto-detects the best
+        available backend via :func:`imganalyzer.device.get_device`.
+        """
         if cls._model is not None:
             return  # already loaded
 
         import torch
+        from imganalyzer.device import get_device
+
+        if device is None:
+            device = get_device()
+
         try:
             from aesthetic_predictor_v2_5 import convert_v2_5_from_siglip
         except ImportError as exc:
@@ -59,8 +68,9 @@ class SigLIPAesthetic:
             low_cpu_mem_usage=True,
             trust_remote_code=True,
         )
-        if device == "cuda" and torch.cuda.is_available():
-            cls._model = cls._model.to(torch.bfloat16).cuda()
+        if device != "cpu":
+            dtype = torch.float16 if device == "mps" else torch.bfloat16
+            cls._model = cls._model.to(dtype).to(device)
         log.info("SigLIP aesthetic model loaded on %s", device)
 
     @classmethod
@@ -79,8 +89,9 @@ class SigLIPAesthetic:
         img = open_as_pil(path)
 
         inputs = cls._preprocessor(images=img, return_tensors="pt")
-        if cls._device == "cuda" and torch.cuda.is_available():
-            inputs = {k: v.to(torch.bfloat16).cuda() for k, v in inputs.items()}
+        if cls._device != "cpu":
+            dtype = torch.float16 if cls._device == "mps" else torch.bfloat16
+            inputs = {k: v.to(dtype).to(cls._device) for k, v in inputs.items()}
 
         with torch.inference_mode():
             score = cls._model(**inputs).logits.squeeze().float().cpu().item()
@@ -98,14 +109,13 @@ class SigLIPAesthetic:
     @classmethod
     def unload(cls) -> None:
         """Free GPU memory."""
-        import torch
         import gc
+        from imganalyzer.device import empty_cache
 
         del cls._model
         del cls._preprocessor
         cls._model = None
         cls._preprocessor = None
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_cache()
         log.info("SigLIP aesthetic model unloaded")
