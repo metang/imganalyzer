@@ -85,10 +85,10 @@ const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellPro
     }
   }, [item.file_path])
 
-  // Aesthetic score badge color
-  const scoreColor = item.aesthetic_score !== null
-    ? item.aesthetic_score >= 7 ? 'bg-green-500/80'
-      : item.aesthetic_score >= 5 ? 'bg-yellow-500/80'
+  // Top-level badge uses IAA (Aesthetic Appeal)
+  const scoreColor = item.perception_iaa !== null
+    ? item.perception_iaa >= 7 ? 'bg-green-500/80'
+      : item.perception_iaa >= 5 ? 'bg-yellow-500/80'
       : 'bg-red-500/80'
     : null
 
@@ -135,10 +135,10 @@ const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellPro
         />
       )}
 
-      {/* Aesthetic score badge */}
-      {item.aesthetic_score !== null && scoreColor && (
+      {/* IAA score badge */}
+      {item.perception_iaa !== null && scoreColor && (
         <div className={`absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold text-white ${scoreColor} shadow`}>
-          {item.aesthetic_score.toFixed(1)}
+          {item.perception_iaa.toFixed(1)}
         </div>
       )}
 

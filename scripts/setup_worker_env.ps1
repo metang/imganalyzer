@@ -45,6 +45,11 @@ function Require-Command($Name) {
         Write-Error "Error: '$Name' is required but not installed."
     }
 }
+function Assert-LastExit([string]$Step) {
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Step failed with exit code $LASTEXITCODE."
+    }
+}
 Require-Command 'conda'
 Require-Command 'git'
 
@@ -96,6 +101,7 @@ Write-Host "==> Installing worker dependencies in env '$EnvName'..."
 Push-Location $RepoDir
 
 conda run -n $EnvName python -m pip install -U pip setuptools wheel
+Assert-LastExit "Upgrade pip/setuptools/wheel"
 
 # On Windows with an NVIDIA GPU, install PyTorch with CUDA from the official
 # PyTorch index to get the latest GPU-enabled wheels (2.5+).
@@ -110,13 +116,19 @@ if ($StaleLibs) {
 }
 Write-Host "==> Installing PyTorch with CUDA support..."
 conda run -n $EnvName python -m pip install "torch>=2.5" torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+Assert-LastExit "Install PyTorch CUDA wheels"
 
 $Extras = "local-ai,$CloudProvider"
 Write-Host "==> Installing editable package with extras: [$Extras]"
 conda run -n $EnvName python -m pip install -e ".[$Extras]"
+Assert-LastExit "Install imganalyzer editable package with extras"
+
+Write-Host "==> Ensuring SigLIP aesthetic dependency is installed..."
+conda run -n $EnvName python -m pip install -U aesthetic-predictor-v2-5
+Assert-LastExit "Install aesthetic-predictor-v2-5"
 
 # ── Verify imports ───────────────────────────────────────────────────────────
-Write-Host "==> Verifying local AI imports (torch + insightface + onnxruntime)..."
+Write-Host "==> Verifying local AI imports (torch + aesthetic + insightface + onnxruntime)..."
 conda run -n $EnvName python -c @"
 import torch, numpy as np
 print('torch', torch.__version__, '/ numpy', np.__version__)
@@ -127,12 +139,15 @@ else:
     print('WARNING: CUDA not available - GPU acceleration disabled')
 import transformers
 print('transformers', transformers.__version__)
+import aesthetic_predictor_v2_5
+print('aesthetic_predictor_v2_5 ok')
 import open_clip
 print('open_clip ok')
 import insightface, onnxruntime as ort
 print('insightface', insightface.__version__)
 print('onnxruntime', ort.__version__)
 "@
+Assert-LastExit "Verify local AI imports"
 
 Write-Host "==> Running capability probe..."
 conda run -n $EnvName python -c @"
@@ -144,6 +159,7 @@ missing = sorted(set(ALL_MODULES) - set(modules))
 if missing:
     print('WARNING: Unavailable modules:', ', '.join(missing))
 "@
+Assert-LastExit "Run capability probe"
 
 Write-Host "==> Verifying cloud provider import ($CloudProvider)..."
 switch ($CloudProvider) {
@@ -152,6 +168,7 @@ switch ($CloudProvider) {
     'anthropic' { conda run -n $EnvName python -c "import anthropic; print('anthropic ok')" }
     'google'    { conda run -n $EnvName python -c "from google.cloud import vision; print('google vision ok')" }
 }
+Assert-LastExit "Verify cloud provider import"
 
 Pop-Location
 

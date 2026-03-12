@@ -261,6 +261,7 @@ export function BatchConfigView({ batch, initialFolder = '', onBatchStarted }: B
       cloudProvider: passSel.cloudProvider,
       recursive: passSel.recursive,
       noHash: passSel.noHash,
+      forceReprocess: passSel.forceReprocess,
       profile,
       chunkSize,
     }).then(() => {

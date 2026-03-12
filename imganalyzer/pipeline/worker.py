@@ -10,8 +10,8 @@ The worker uses a VRAM-budget-aware scheduler with GPU phases:
 
 Phase 0 — ``objects`` pass (GPU, serial):
   Drain ALL pending ``objects`` jobs first.  Once ``objects`` is done for an
-  image, ``has_person`` is known → ``cloud_ai``, ``aesthetic``, and
-  ``faces`` jobs are unblocked.  ``metadata`` / ``technical`` run concurrently
+  image, ``has_person`` is known → ``cloud_ai`` and ``faces`` jobs are
+  unblocked.  ``metadata`` / ``technical`` run concurrently
   in a thread pool throughout all phases.
 
 Phase 1 — ``faces`` + ``embedding`` + ``aesthetic`` (GPU, co-resident):
@@ -78,12 +78,10 @@ IO_MODULES = LOCAL_IO_MODULES | CLOUD_MODULES
 # at 500K images with 6 text-producing modules each).
 _FTS_MODULES = {"metadata", "local_ai", "faces", "cloud_ai"}
 
-# The ``objects`` pass must complete for an image before cloud/aesthetic
-# may run (it provides ``has_person`` for the privacy gate).
-# ``faces`` also depends on ``objects`` for gate flags.
+# The ``objects`` pass must complete for an image before cloud/faces/embedding
+# may run (it provides detection-derived gating/context).
 _PREREQUISITES: dict[str, str] = {
     "cloud_ai": "objects",
-    "aesthetic": "objects",
     "faces": "objects",
     "embedding": "objects",
 }
@@ -291,6 +289,15 @@ class Worker:
             cloud_workers=effective_cloud_workers,
             shutdown_event=self._shutdown,
         )
+
+        # Backward compatibility: old queues may still carry pending `blip2`
+        # jobs, but the active pipeline runs this pass as `cloud_ai`.
+        remapped = self.queue.remap_pending_modules({"blip2": "cloud_ai"})
+        if remapped["updated"] or remapped["deleted"]:
+            console.print(
+                "[yellow]Migrated legacy queue modules:[/yellow] "
+                f"updated={remapped['updated']} deleted_duplicates={remapped['deleted']}"
+            )
 
         # Recover stale jobs from previous crashes
         recovered = self.queue.recover_stale(self.stale_timeout)
@@ -982,7 +989,8 @@ class Worker:
             _emit_result(path, module, "skipped", elapsed, f"missing dependency: {exc}")
             if self.verbose:
                 console.print(
-                    f"  [yellow]Skipped:[/yellow] {path} module={module}: missing dependency"
+                    f"  [yellow]Skipped:[/yellow] {path} module={module}: "
+                    f"missing dependency ({exc})"
                 )
             return "skipped"
 

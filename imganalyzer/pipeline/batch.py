@@ -148,8 +148,8 @@ class BatchProcessor:
                         analyzed_set.add((r["image_id"], "cloud_ai"))
 
                 # Also check job_queue for done/skipped jobs — these may have
-                # no analysis data (e.g. cloud_ai/aesthetic skipped due to
-                # has_people guard) but should not be re-enqueued.
+                # no analysis data (e.g. cloud_ai skipped due to has_people
+                # guard) but should not be re-enqueued.
                 id_placeholders = ",".join("?" * len(existing_ids))
                 for mod in target_modules:
                     rows = self.conn.execute(

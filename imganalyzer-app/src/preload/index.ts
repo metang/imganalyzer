@@ -56,9 +56,10 @@ contextBridge.exposeInMainWorld('api', {
     folder: string,
     modules: string[],
     recursive: boolean,
-    noHash: boolean
+    noHash: boolean,
+    forceReprocess = false
   ): Promise<{ registered: number; enqueued: number; skipped: number }> =>
-    ipcRenderer.invoke('batch:ingest', folder, modules, recursive, noHash),
+    ipcRenderer.invoke('batch:ingest', folder, modules, recursive, noHash, forceReprocess),
 
   batchStart: (
     folder: string,
@@ -69,9 +70,10 @@ contextBridge.exposeInMainWorld('api', {
     noHash: boolean,
     cloudWorkers: number,
     profile: boolean,
-    chunkSize: number
+    chunkSize: number,
+    forceReprocess = false
   ): Promise<void> =>
-    ipcRenderer.invoke('batch:start', folder, modules, workers, cloudProvider, recursive, noHash, cloudWorkers, profile, chunkSize),
+    ipcRenderer.invoke('batch:start', folder, modules, workers, cloudProvider, recursive, noHash, cloudWorkers, profile, chunkSize, forceReprocess),
 
   batchPause: (): Promise<void> =>
     ipcRenderer.invoke('batch:pause'),

@@ -50,6 +50,7 @@ export interface BatchConfig {
   cloudProvider: string
   recursive: boolean
   noHash: boolean
+  forceReprocess: boolean
   profile: boolean
   chunkSize: number
 }
@@ -149,7 +150,8 @@ export function useBatchProcess(): UseBatchProcessReturn {
         config.folder,
         config.modules,
         config.recursive,
-        config.noHash
+        config.noHash,
+        config.forceReprocess
       )
       setIngestSummary(summary)
 
@@ -168,7 +170,8 @@ export function useBatchProcess(): UseBatchProcessReturn {
         config.noHash,
         config.cloudWorkers,
         config.profile,
-        config.chunkSize
+        config.chunkSize,
+        config.forceReprocess
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))

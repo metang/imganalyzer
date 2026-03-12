@@ -1633,6 +1633,52 @@ class TestJobQueue:
         assert queue.pending_count(image_ids={id2}) == 1
         assert queue.pending_count() == 3  # backward compat
 
+    def test_remap_pending_modules_converts_legacy_blip2_jobs(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        id1 = repo.register_image(file_path="/photos/legacy-1.jpg")
+        id2 = repo.register_image(file_path="/photos/legacy-2.jpg")
+        id3 = repo.register_image(file_path="/photos/legacy-3.jpg")
+        id4 = repo.register_image(file_path="/photos/legacy-4.jpg")
+
+        queue.enqueue(id1, "blip2")
+        queue.enqueue(id2, "blip2")
+        queue.enqueue(id3, "blip2")
+        queue.enqueue(id2, "cloud_ai")  # target row already exists -> source should be deleted
+        done_legacy = queue.enqueue(id4, "blip2")
+        assert done_legacy is not None
+        queue.mark_done(done_legacy)
+
+        queue.claim(batch_size=1, module="blip2")  # ensure running rows also remap
+
+        remapped = queue.remap_pending_modules({"blip2": "cloud_ai"})
+        assert remapped == {"updated": 2, "deleted": 1}
+
+        active_legacy = conn.execute(
+            """SELECT COUNT(*) AS cnt FROM job_queue
+               WHERE module = 'blip2' AND status IN ('pending', 'running')"""
+        ).fetchone()
+        assert active_legacy is not None
+        assert active_legacy["cnt"] == 0
+
+        done_legacy_rows = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM job_queue WHERE module = 'blip2' AND status = 'done'"
+        ).fetchone()
+        assert done_legacy_rows is not None
+        assert done_legacy_rows["cnt"] == 1
+
+        cloud_rows = conn.execute(
+            """SELECT COUNT(*) AS cnt FROM job_queue
+               WHERE module = 'cloud_ai' AND status IN ('pending', 'running')"""
+        ).fetchone()
+        assert cloud_rows is not None
+        assert cloud_rows["cnt"] == 3
+
     def test_claim_leased_prefer_module(self, tmp_path):
         from imganalyzer.db.repository import Repository
         from imganalyzer.db.queue import JobQueue
@@ -1661,6 +1707,176 @@ class TestJobQueue:
         claimed = queue.claim_leased(worker_id="worker-1", batch_size=2, prefer_module="metadata")
         assert claimed[0]["module"] == "metadata"
 
+
+class TestModuleRunnerAestheticForce:
+    def test_should_run_aesthetic_when_perception_missing(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.pipeline.modules import ModuleRunner
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        image_path = tmp_path / "aesthetic-should-run.jpg"
+        image_path.write_bytes(b"dummy")
+        image_id = repo.register_image(file_path=str(image_path))
+        repo.upsert_aesthetic(image_id, {
+            "aesthetic_score": 6.5,
+            "aesthetic_label": "Good",
+            "aesthetic_reason": "",
+            "provider": "siglip-v2.5",
+        })
+
+        runner = ModuleRunner(conn=conn, repo=repo, force=False, verbose=True)
+        assert runner.should_run(image_id, "aesthetic") is True
+
+        repo.upsert_perception(image_id, {
+            "perception_iaa": 6.2,
+            "perception_iaa_label": "Good",
+            "perception_iqa": 6.1,
+            "perception_iqa_label": "Good",
+            "perception_ista": 6.0,
+            "perception_ista_label": "Good",
+        })
+        assert runner.should_run(image_id, "aesthetic") is False
+
+        # Synthetic mirrored values should be treated as invalid and reprocessed.
+        repo.upsert_perception(image_id, {
+            "perception_iaa": 6.5,
+            "perception_iaa_label": "Good",
+            "perception_iqa": 6.5,
+            "perception_iqa_label": "Good",
+            "perception_ista": 6.5,
+            "perception_ista_label": "Good",
+        })
+        assert runner.should_run(image_id, "aesthetic") is True
+
+    def test_aesthetic_uses_cached_row_when_not_forced(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.pipeline.modules import ModuleRunner
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        image_path = tmp_path / "cached-aesthetic.jpg"
+        image_path.write_bytes(b"dummy")
+        image_id = repo.register_image(file_path=str(image_path))
+        repo.upsert_aesthetic(image_id, {
+            "aesthetic_score": 6.4,
+            "aesthetic_label": "Good",
+            "aesthetic_reason": "cached",
+            "provider": "cached-provider",
+        })
+        repo.upsert_perception(image_id, {
+            "perception_iaa": 6.2,
+            "perception_iaa_label": "Good",
+            "perception_iqa": 6.1,
+            "perception_iqa_label": "Good",
+            "perception_ista": 6.0,
+            "perception_ista_label": "Good",
+        })
+
+        runner = ModuleRunner(conn=conn, repo=repo, force=False, verbose=True)
+        with patch(
+            "imganalyzer.analysis.aesthetic.SigLIPAesthetic.analyze",
+            side_effect=AssertionError("SigLIP should not run when force=False and row exists"),
+        ):
+            result = runner.run(image_id, "aesthetic")
+
+        assert result["aesthetic_score"] == 6.4
+        assert result["provider"] == "cached-provider"
+
+    def test_aesthetic_recomputes_when_forced(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.pipeline.modules import ModuleRunner
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        image_path = tmp_path / "forced-aesthetic.jpg"
+        image_path.write_bytes(b"dummy")
+        image_id = repo.register_image(file_path=str(image_path))
+        repo.upsert_aesthetic(image_id, {
+            "aesthetic_score": 5.1,
+            "aesthetic_label": "Average",
+            "aesthetic_reason": "old",
+            "provider": "old-provider",
+        })
+
+        refreshed = {
+            "aesthetic_score": 8.9,
+            "aesthetic_label": "Excellent",
+            "aesthetic_reason": "forced-rerun",
+            "provider": "siglip-v2.5",
+        }
+        perception = {
+            "perception_iaa": 8.4,
+            "perception_iaa_label": "Excellent",
+            "perception_iqa": 8.1,
+            "perception_iqa_label": "Excellent",
+            "perception_ista": 7.8,
+            "perception_ista_label": "Very Good",
+        }
+        runner = ModuleRunner(conn=conn, repo=repo, force=True, verbose=True)
+        with patch(
+            "imganalyzer.analysis.aesthetic.SigLIPAesthetic.analyze",
+            return_value=refreshed,
+        ) as mocked_siglip:
+            with patch("imganalyzer.analysis.perception.analyze", return_value=perception) as mocked_perception:
+                result = runner.run(image_id, "aesthetic")
+
+        mocked_siglip.assert_called_once_with(image_path)
+        mocked_perception.assert_called_once_with(image_path)
+        assert result["aesthetic_score"] == refreshed["aesthetic_score"]
+        assert result["provider"] == refreshed["provider"]
+
+        stored = repo.get_analysis(image_id, "aesthetic")
+        assert stored is not None
+        assert stored["aesthetic_score"] == refreshed["aesthetic_score"]
+        assert stored["provider"] == refreshed["provider"]
+        stored_perception = repo.get_analysis(image_id, "perception")
+        assert stored_perception is not None
+        assert stored_perception["perception_iaa"] == perception["perception_iaa"]
+        assert stored_perception["perception_iqa"] == perception["perception_iqa"]
+        assert stored_perception["perception_ista"] == perception["perception_ista"]
+        assert stored_perception["perception_iaa_label"] == perception["perception_iaa_label"]
+
+    def test_aesthetic_backfills_perception_without_rerunning_siglip(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.pipeline.modules import ModuleRunner
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        image_path = tmp_path / "backfill-perception.jpg"
+        image_path.write_bytes(b"dummy")
+        image_id = repo.register_image(file_path=str(image_path))
+        repo.upsert_aesthetic(image_id, {
+            "aesthetic_score": 7.0,
+            "aesthetic_label": "Very Good",
+            "aesthetic_reason": "cached",
+            "provider": "siglip-v2.5",
+        })
+        perception = {
+            "perception_iaa": 7.4,
+            "perception_iaa_label": "Very Good",
+            "perception_iqa": 7.1,
+            "perception_iqa_label": "Very Good",
+            "perception_ista": 6.6,
+            "perception_ista_label": "Good",
+        }
+
+        runner = ModuleRunner(conn=conn, repo=repo, force=False, verbose=True)
+        with patch(
+            "imganalyzer.analysis.aesthetic.SigLIPAesthetic.analyze",
+            side_effect=AssertionError("SigLIP should not run for perception backfill"),
+        ):
+            with patch("imganalyzer.analysis.perception.analyze", return_value=perception) as mocked:
+                result = runner.run(image_id, "aesthetic")
+
+        mocked.assert_called_once_with(image_path)
+        assert result["aesthetic_score"] == 7.0
+        stored_perception = repo.get_analysis(image_id, "perception")
+        assert stored_perception is not None
+        assert stored_perception["perception_iaa"] == perception["perception_iaa"]
+        assert stored_perception["perception_iqa"] == perception["perception_iqa"]
+        assert stored_perception["perception_ista"] == perception["perception_ista"]
+        assert stored_perception["perception_iaa_label"] == perception["perception_iaa_label"]
 
 class TestWorkerFlushRecovery:
     def test_flush_fts_requeues_failed_ids(self, tmp_path):

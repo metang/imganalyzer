@@ -109,8 +109,9 @@ bash scripts/setup_worker_env.sh ~/imganalyzer-worker
 ```
 
 Both scripts create/reuse a Conda env (`imganalyzer` on Windows, `imganalyzer312`
-on macOS/Linux), install `imganalyzer[local-ai,<provider>]` from source, and
-verify local AI and cloud-provider imports. Default provider is `copilot`.
+on macOS/Linux), install `imganalyzer[local-ai,<provider>]` from source, ensure
+`aesthetic-predictor-v2-5` is installed, and verify local AI + cloud-provider
+imports. Default provider is `copilot`.
 Override defaults with environment variables:
 - `IMGANALYZER_ENV_NAME`
 - `IMGANALYZER_PYTHON_VERSION`

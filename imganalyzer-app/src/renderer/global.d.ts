@@ -461,7 +461,8 @@ declare global {
         folder: string,
         modules: string[],
         recursive: boolean,
-        noHash: boolean
+        noHash: boolean,
+        forceReprocess?: boolean
       ): Promise<{ registered: number; enqueued: number; skipped: number }>
       batchStart(
         folder: string,
@@ -472,7 +473,8 @@ declare global {
         noHash: boolean,
         cloudWorkers: number,
         profile: boolean,
-        chunkSize: number
+        chunkSize: number,
+        forceReprocess?: boolean
       ): Promise<void>
       batchPause(): Promise<void>
       batchResume(): Promise<void>

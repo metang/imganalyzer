@@ -188,7 +188,7 @@ class TestResourceScheduler:
         s = self._make()
         assert s.prerequisite_for("cloud_ai") == "objects"
         assert s.prerequisite_for("faces") == "objects"
-        assert s.prerequisite_for("aesthetic") == "objects"
+        assert s.prerequisite_for("aesthetic") is None
         assert s.prerequisite_for("objects") is None
         assert s.prerequisite_for("embedding") is None
 

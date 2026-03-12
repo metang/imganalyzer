@@ -34,7 +34,6 @@ IO_MODULES: frozenset[str] = LOCAL_IO_MODULES | CLOUD_MODULES
 # Dependency graph: module -> prerequisite that must complete first.
 _PREREQUISITES: dict[str, str] = {
     "cloud_ai":  "objects",
-    "aesthetic": "objects",
     "faces":     "objects",
 }
 
@@ -45,7 +44,7 @@ _BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "embedding"})
 # be loaded simultaneously (VRAM permitting).  Between phases, all
 # models from the previous phase are unloaded.
 #
-# Phase 0: objects       (must run first — unlocks deps, 2.4 GB)
+# Phase 0: objects       (must run first — unlocks cloud/faces deps, 2.4 GB)
 #          cloud_ai runs concurrently via Ollama in IO thread pool
 # Phase 1: faces, embedding, aesthetic (co-resident — total ~3.45 GB)
 #          Ollama model is unloaded between Phase 0 and Phase 1

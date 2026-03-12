@@ -243,10 +243,51 @@ class ModuleRunner:
         self._image_cache_path = path
         self._image_cache_data = data
 
+    @staticmethod
+    def _has_perception_scores(row: dict[str, Any] | None) -> bool:
+        if not row:
+            return False
+        return all(
+            row.get(key) is not None
+            for key in ("perception_iaa", "perception_iqa", "perception_ista")
+        )
+
+    @staticmethod
+    def _is_synthetic_perception(
+        perception_row: dict[str, Any] | None,
+        aesthetic_score: Any,
+    ) -> bool:
+        if not perception_row or aesthetic_score is None:
+            return False
+        try:
+            iaa = float(perception_row.get("perception_iaa"))
+            iqa = float(perception_row.get("perception_iqa"))
+            ista = float(perception_row.get("perception_ista"))
+            aes = float(aesthetic_score)
+        except (TypeError, ValueError):
+            return False
+        eps = 1e-6
+        return (
+            abs(iaa - iqa) < eps
+            and abs(iqa - ista) < eps
+            and abs(iaa - aes) < eps
+        )
+
     def should_run(self, image_id: int, module: str) -> bool:
         """Return False if the module is already analyzed and force is off."""
         if self.force:
             return True
+        if module == "aesthetic":
+            aesthetic_row = self.repo.get_analysis(image_id, "aesthetic")
+            has_aesthetic = bool(aesthetic_row and aesthetic_row.get("aesthetic_score") is not None)
+            if not has_aesthetic:
+                return True
+            perception = self.repo.get_analysis(image_id, "perception")
+            if not self._has_perception_scores(perception):
+                return True
+            if self._is_synthetic_perception(perception, aesthetic_row.get("aesthetic_score")):
+                return True
+            return False
         return not self.repo.is_analyzed(image_id, module)
 
     def run(self, image_id: int, module: str) -> dict[str, Any]:
@@ -433,42 +474,61 @@ class ModuleRunner:
         return result
 
     def _run_aesthetic(self, image_id: int, path: Path) -> dict[str, Any]:
-        # If cloud_ai (Ollama) has a pending/running job, it will write
-        # aesthetic data as part of its combined response — skip.
-        cloud_ai_active = self.conn.execute(
-            """SELECT 1 FROM job_queue
-               WHERE image_id = ? AND module = 'cloud_ai'
-                 AND status IN ('pending', 'running')
-               LIMIT 1""",
-            (image_id,),
-        ).fetchone()
-        if cloud_ai_active:
-            if self.verbose:
-                console.print(
-                    f"  [dim]Deferring aesthetic to AI analysis for image {image_id}[/dim]"
-                )
-            return {}
+        existing_aesthetic = self.repo.get_analysis(image_id, "aesthetic")
+        existing_perception = self.repo.get_analysis(image_id, "perception")
+        has_aesthetic = bool(existing_aesthetic and existing_aesthetic.get("aesthetic_score") is not None)
+        has_perception = self._has_perception_scores(existing_perception)
+        synthetic_perception = self._is_synthetic_perception(
+            existing_perception,
+            existing_aesthetic.get("aesthetic_score") if existing_aesthetic else None,
+        )
 
-        # If cloud_ai already wrote aesthetic data, skip.
-        existing = self.repo.get_analysis(image_id, "aesthetic")
-        if existing and existing.get("aesthetic_score") is not None:
-            if self.verbose:
-                console.print(
-                    f"  [dim]Aesthetic already populated for image {image_id}[/dim]"
-                )
-            return {
-                "aesthetic_score": existing["aesthetic_score"],
-                "aesthetic_label": existing.get("aesthetic_label", ""),
-                "aesthetic_reason": existing.get("aesthetic_reason", ""),
-                "provider": existing.get("provider", ""),
+        need_siglip = self.force or not has_aesthetic
+        need_perception = self.force or (not has_perception) or synthetic_perception
+        cached_aesthetic: dict[str, Any] | None = None
+
+        if not self.force:
+            if has_aesthetic and has_perception and not synthetic_perception:
+                if self.verbose:
+                    console.print(
+                        f"  [dim]Aesthetic + perception already populated for image {image_id}[/dim]"
+                    )
+                return {
+                    "aesthetic_score": existing_aesthetic["aesthetic_score"],
+                    "aesthetic_label": existing_aesthetic.get("aesthetic_label", ""),
+                    "aesthetic_reason": existing_aesthetic.get("aesthetic_reason", ""),
+                    "provider": existing_aesthetic.get("provider", ""),
+                }
+        if has_aesthetic:
+            cached_aesthetic = {
+                "aesthetic_score": existing_aesthetic["aesthetic_score"],
+                "aesthetic_label": existing_aesthetic.get("aesthetic_label", ""),
+                "aesthetic_reason": existing_aesthetic.get("aesthetic_reason", ""),
+                "provider": existing_aesthetic.get("provider", ""),
             }
 
-        # Fallback: use SigLIP-v2.5 for standalone aesthetic scoring
-        from imganalyzer.analysis.aesthetic import SigLIPAesthetic
-        aesthetic_data = SigLIPAesthetic.analyze(path)
+        if need_siglip:
+            from imganalyzer.analysis.aesthetic import SigLIPAesthetic
+            aesthetic_data = SigLIPAesthetic.analyze(path)
+        else:
+            aesthetic_data = cached_aesthetic or {}
+
+        perception_data: dict[str, Any] | None = None
+        if need_perception:
+            try:
+                from imganalyzer.analysis.perception import analyze as perception_analyze
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Perception dependency missing. Install `unipercept-reward` in the "
+                    "imganalyzer runtime environment."
+                ) from exc
+            perception_data = perception_analyze(path)
 
         with _transaction(self.conn):
-            self.repo.upsert_aesthetic(image_id, aesthetic_data)
+            if need_siglip:
+                self.repo.upsert_aesthetic(image_id, aesthetic_data)
+            if perception_data is not None:
+                self.repo.upsert_perception(image_id, perception_data)
 
         if self.verbose:
             score = aesthetic_data.get("aesthetic_score", "?")
@@ -476,6 +536,14 @@ class ModuleRunner:
                 f"  [dim]Aesthetic (SigLIP) done for image {image_id} "
                 f"(score={score})[/dim]"
             )
+            if perception_data is not None:
+                iaa = perception_data.get("perception_iaa", "?")
+                iqa = perception_data.get("perception_iqa", "?")
+                ista = perception_data.get("perception_ista", "?")
+                console.print(
+                    "  [dim]Perception metrics (UniPercept) populated "
+                    f"(IAA={iaa}, IQA={iqa}, ISTA={ista})[/dim]"
+                )
         return aesthetic_data
 
     def _run_perception(self, image_id: int, path: Path) -> dict[str, Any]:

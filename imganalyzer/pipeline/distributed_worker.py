@@ -929,7 +929,7 @@ class DistributedWorker:
             )
             console.print(
                 f"  [yellow]⊘[/yellow] [bold]{module}[/bold] skipped (missing dependency) in "
-                f"{elapsed / 1000:.1f}s ← {short_path}"
+                f"{elapsed / 1000:.1f}s ← {short_path} ({exc})"
             )
             return "skipped"
 

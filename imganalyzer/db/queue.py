@@ -574,6 +574,70 @@ class JobQueue:
         self.conn.commit()
         return cur.rowcount
 
+    def remap_pending_modules(
+        self,
+        mapping: dict[str, str],
+        statuses: tuple[str, ...] = ("pending", "running"),
+    ) -> dict[str, int]:
+        """Remap legacy module keys for active queue rows.
+
+        For each ``source -> target`` mapping:
+        1) Delete source rows when a target row already exists for the same image.
+        2) Rename remaining source rows to target.
+
+        This lets newer workers resume old queues (e.g. ``blip2`` -> ``cloud_ai``)
+        without hitting UNIQUE(image_id, module) conflicts.
+        """
+        normalized = {
+            str(source): str(target)
+            for source, target in mapping.items()
+            if source and target and source != target
+        }
+        if not normalized:
+            return {"updated": 0, "deleted": 0}
+        if not statuses:
+            return {"updated": 0, "deleted": 0}
+
+        status_placeholders = ",".join("?" * len(statuses))
+        updated = 0
+        deleted = 0
+
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for source, target in normalized.items():
+                deleted_cur = self.conn.execute(
+                    f"""DELETE FROM job_queue
+                        WHERE module = ?
+                          AND status IN ({status_placeholders})
+                          AND EXISTS (
+                              SELECT 1
+                              FROM job_queue q2
+                              WHERE q2.image_id = job_queue.image_id
+                                AND q2.module = ?
+                          )""",
+                    [source, *statuses, target],
+                )
+                deleted += deleted_cur.rowcount
+
+                updated_cur = self.conn.execute(
+                    f"""UPDATE job_queue
+                        SET module = ?,
+                            started_at = NULL,
+                            last_node_id = NULL,
+                            last_node_role = NULL
+                        WHERE module = ?
+                          AND status IN ({status_placeholders})""",
+                    [target, source, *statuses],
+                )
+                updated += updated_cur.rowcount
+
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        return {"updated": updated, "deleted": deleted}
+
     # ── Recover stale running jobs (crash recovery) ────────────────────────
 
     def recover_stale(self, timeout_minutes: int = 10) -> int:

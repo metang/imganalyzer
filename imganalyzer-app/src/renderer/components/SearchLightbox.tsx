@@ -46,15 +46,17 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function ScoreBar({ value, max = 10 }: { value: number; max?: number }) {
-  const pct = Math.min(100, (value / max) * 100)
+function ScoreBar({ value, max = 10 }: { value: number | null | undefined; max?: number }) {
+  const v = typeof value === 'number' && Number.isFinite(value) ? value : 0
+  const safeMax = max > 0 ? max : 1
+  const pct = Math.min(100, (v / safeMax) * 100)
   const color = pct >= 70 ? 'bg-green-500' : pct >= 40 ? 'bg-yellow-500' : 'bg-red-500'
   return (
     <div className="flex items-center gap-2">
       <div className="flex-1 h-1.5 bg-neutral-700 rounded-full overflow-hidden">
         <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
       </div>
-      <span className="text-xs text-neutral-300 tabular-nums w-8 text-right">{value.toFixed(1)}</span>
+      <span className="text-xs text-neutral-300 tabular-nums w-8 text-right">{v.toFixed(1)}</span>
     </div>
   )
 }
@@ -86,7 +88,7 @@ function AnalysisSidebar({
       {/* Header */}
       <div className="px-4 py-3 border-b border-neutral-800">
         <span className="text-sm font-medium truncate text-neutral-200 block" title={filename}>{filename}</span>
-        {item.score !== null && (
+        {item.score != null && (
           <span className="text-xs text-neutral-500">Match: {(item.score * 100).toFixed(0)}%</span>
         )}
         <button
@@ -101,47 +103,31 @@ function AnalysisSidebar({
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto pt-3">
 
-        {/* Aesthetic */}
-        {item.aesthetic_score !== null && (
+        {/* Perception quality metrics */}
+        {(item.perception_iaa != null || item.perception_iqa != null || item.perception_ista != null) && (
           <Section title="Aesthetic">
-            <div className="py-1 border-b border-neutral-800">
-              <div className="flex justify-between mb-1">
-                <span className="text-neutral-500 text-xs">Score</span>
-                {item.aesthetic_label && <span className="text-xs text-neutral-400">{item.aesthetic_label}</span>}
-              </div>
-              <ScoreBar value={item.aesthetic_score} max={10} />
-            </div>
-            {item.aesthetic_reason && (
-              <Row label="Reason" value={item.aesthetic_reason} />
-            )}
-          </Section>
-        )}
-
-        {/* Perception */}
-        {(item.perception_iaa !== null || item.perception_iqa !== null || item.perception_ista !== null) && (
-          <Section title="Perception">
-            {item.perception_iaa !== null && (
+            {item.perception_iaa != null && (
               <div className="py-1 border-b border-neutral-800">
                 <div className="flex justify-between mb-1">
-                  <span className="text-neutral-500 text-xs">Aesthetic Appeal</span>
+                  <span className="text-neutral-500 text-xs">IAA · Aesthetic Appeal</span>
                   {item.perception_iaa_label && <span className="text-xs text-neutral-400">{item.perception_iaa_label}</span>}
                 </div>
                 <ScoreBar value={item.perception_iaa} max={10} />
               </div>
             )}
-            {item.perception_iqa !== null && (
+            {item.perception_iqa != null && (
               <div className="py-1 border-b border-neutral-800">
                 <div className="flex justify-between mb-1">
-                  <span className="text-neutral-500 text-xs">Image Quality</span>
+                  <span className="text-neutral-500 text-xs">IQA · Image Quality</span>
                   {item.perception_iqa_label && <span className="text-xs text-neutral-400">{item.perception_iqa_label}</span>}
                 </div>
                 <ScoreBar value={item.perception_iqa} max={10} />
               </div>
             )}
-            {item.perception_ista !== null && (
+            {item.perception_ista != null && (
               <div className="py-1 border-b border-neutral-800">
                 <div className="flex justify-between mb-1">
-                  <span className="text-neutral-500 text-xs">Structure & Texture</span>
+                  <span className="text-neutral-500 text-xs">ISTA · Structure & Texture</span>
                   {item.perception_ista_label && <span className="text-xs text-neutral-400">{item.perception_ista_label}</span>}
                 </div>
                 <ScoreBar value={item.perception_ista} max={10} />
@@ -153,16 +139,14 @@ function AnalysisSidebar({
         {/* AI Analysis */}
         {(item.description || item.scene_type || item.main_subject || item.lighting || item.mood ||
           item.detected_objects?.length || item.keywords?.length || item.ocr_text ||
-          item.cloud_description ||
-          item.has_people !== null) && (
+          item.has_people != null) && (
           <Section title="AI Analysis">
             {item.description && <Row label="Description" value={item.description} />}
-            {item.cloud_description && <Row label="AI Description" value={item.cloud_description} />}
             {item.scene_type && <Row label="Scene" value={item.scene_type} />}
             {item.main_subject && <Row label="Subject" value={item.main_subject} />}
             {item.lighting && <Row label="Lighting" value={item.lighting} />}
             {item.mood && <Row label="Mood" value={item.mood} />}
-            {item.has_people !== null && <Row label="Has People" value={item.has_people ? 'Yes' : 'No'} />}
+            {item.has_people != null && <Row label="Has People" value={item.has_people ? 'Yes' : 'No'} />}
             {item.ocr_text && <Row label="OCR Text" value={item.ocr_text} />}
             {item.detected_objects && item.detected_objects.length > 0 && (
               <div className="py-1 border-b border-neutral-800">
@@ -180,9 +164,9 @@ function AnalysisSidebar({
         )}
 
         {/* Faces */}
-        {(item.face_count !== null || (item.face_identities && item.face_identities.length > 0)) && (
+        {(item.face_count != null || (item.face_identities && item.face_identities.length > 0)) && (
           <Section title="Faces">
-            {item.face_count !== null && <Row label="Count" value={item.face_count} />}
+            {item.face_count != null && <Row label="Count" value={item.face_count} />}
             {item.face_identities && item.face_identities.length > 0 && (
               <div className="py-1 border-b border-neutral-800">
                 <span className="text-neutral-500 text-xs block mb-1">Identities</span>
@@ -193,11 +177,11 @@ function AnalysisSidebar({
         )}
 
         {/* Technical */}
-        {(item.sharpness_score !== null || item.exposure_ev !== null || item.noise_level !== null ||
-          item.snr_db !== null || item.dynamic_range_stops !== null ||
+        {(item.sharpness_score != null || item.exposure_ev != null || item.noise_level != null ||
+          item.snr_db != null || item.dynamic_range_stops != null ||
           item.dominant_colors?.length) && (
           <Section title="Technical">
-            {item.sharpness_score !== null && (
+            {item.sharpness_score != null && (
               <div className="py-1 border-b border-neutral-800">
                 <div className="flex justify-between mb-1">
                   <span className="text-neutral-500 text-xs">Sharpness</span>
@@ -206,23 +190,23 @@ function AnalysisSidebar({
                 <ScoreBar value={item.sharpness_score} max={100} />
               </div>
             )}
-            {item.exposure_ev !== null && (
+            {item.exposure_ev != null && (
               <Row label="Exposure EV" value={`${item.exposure_ev > 0 ? '+' : ''}${item.exposure_ev.toFixed(2)}${item.exposure_label ? ` (${item.exposure_label})` : ''}`} />
             )}
-            {item.noise_level !== null && (
+            {item.noise_level != null && (
               <Row label="Noise" value={`${item.noise_level.toFixed(3)}${item.noise_label ? ` (${item.noise_label})` : ''}`} />
             )}
-            {item.snr_db !== null && <Row label="SNR" value={`${item.snr_db.toFixed(1)} dB`} />}
-            {item.dynamic_range_stops !== null && (
+            {item.snr_db != null && <Row label="SNR" value={`${item.snr_db.toFixed(1)} dB`} />}
+            {item.dynamic_range_stops != null && (
               <Row label="Dynamic Range" value={`${item.dynamic_range_stops.toFixed(1)} stops`} />
             )}
-            {item.highlight_clipping_pct !== null && (
+            {item.highlight_clipping_pct != null && (
               <Row label="Highlight Clip" value={`${item.highlight_clipping_pct.toFixed(2)}%`} />
             )}
-            {item.shadow_clipping_pct !== null && (
+            {item.shadow_clipping_pct != null && (
               <Row label="Shadow Clip" value={`${item.shadow_clipping_pct.toFixed(2)}%`} />
             )}
-            {item.avg_saturation !== null && (
+            {item.avg_saturation != null && (
               <Row label="Saturation" value={item.avg_saturation.toFixed(2)} />
             )}
             {item.dominant_colors && item.dominant_colors.length > 0 && (
@@ -244,8 +228,8 @@ function AnalysisSidebar({
         {/* Camera / EXIF */}
         {(item.camera_make || item.camera_model || item.lens_model || item.f_number || item.exposure_time ||
           item.focal_length || item.iso || item.date_time_original ||
-          item.width !== null || item.height !== null ||
-          item.gps_latitude !== null || item.gps_longitude !== null ||
+          item.width != null || item.height != null ||
+          item.gps_latitude != null || item.gps_longitude != null ||
           item.location_city || item.location_state || item.location_country) && (
           <Section title="Camera">
             {(item.camera_make || item.camera_model) && (
@@ -257,10 +241,10 @@ function AnalysisSidebar({
             {item.focal_length && <Row label="Focal Length" value={`${item.focal_length} mm`} />}
             {item.iso && <Row label="ISO" value={item.iso} />}
             {item.date_time_original && <Row label="Date" value={item.date_time_original} />}
-            {(item.width !== null || item.height !== null) && (
+            {(item.width != null || item.height != null) && (
               <Row label="Dimensions" value={`${item.width ?? '?'} × ${item.height ?? '?'}`} />
             )}
-            {(item.gps_latitude !== null || item.gps_longitude !== null) && (
+            {(item.gps_latitude != null || item.gps_longitude != null) && (
               <Row label="GPS" value={`${item.gps_latitude}, ${item.gps_longitude}`} />
             )}
             {(item.location_city || item.location_country) && (
@@ -273,7 +257,7 @@ function AnalysisSidebar({
         <Section title="File">
           <Row label="Image ID" value={item.image_id} />
           <Row label="Path" value={<span className="break-all text-[10px]">{item.file_path}</span>} />
-          {item.file_size !== null && (
+          {item.file_size != null && (
             <Row label="Size" value={`${(item.file_size / 1024 / 1024).toFixed(1)} MB`} />
           )}
         </Section>

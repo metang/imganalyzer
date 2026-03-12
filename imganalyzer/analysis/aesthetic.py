@@ -45,7 +45,14 @@ class SigLIPAesthetic:
             return  # already loaded
 
         import torch
-        from aesthetic_predictor_v2_5 import convert_v2_5_from_siglip
+        try:
+            from aesthetic_predictor_v2_5 import convert_v2_5_from_siglip
+        except ImportError as exc:
+            raise ImportError(
+                "SigLIP aesthetic dependency missing. Install with "
+                "`pip install aesthetic-predictor-v2-5` "
+                "or `pip install -e \".[local-ai]\"`."
+            ) from exc
 
         cls._device = device
         cls._model, cls._preprocessor = convert_v2_5_from_siglip(

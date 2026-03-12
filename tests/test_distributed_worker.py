@@ -824,6 +824,141 @@ def test_persist_cloud_ai_payload_ignores_provider_primary_key(tmp_path):
     conn.close()
 
 
+def test_extract_cloud_ai_payload_includes_blip2(tmp_path):
+    from imganalyzer.pipeline.distributed_payloads import extract_result_payload
+
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+    image_id = repo.register_image(file_path="/nas/photos/cloud-sync-source.jpg")
+
+    repo.upsert_cloud_ai(image_id, "openai", {
+        "description": "provider description",
+        "keywords": ["provider", "tags"],
+    })
+    repo.upsert_blip2(image_id, {
+        "description": "caption from cloud pass",
+        "scene_type": "indoor",
+        "keywords": ["caption", "keyword"],
+    })
+
+    payload = extract_result_payload(conn, repo, image_id=image_id, module="cloud_ai")
+    assert "blip2" in payload
+    assert payload["blip2"]["description"] == "caption from cloud pass"
+    assert payload["blip2"]["scene_type"] == "indoor"
+    conn.close()
+
+
+def test_persist_cloud_ai_payload_writes_blip2_caption_fields(tmp_path):
+    from imganalyzer.pipeline.distributed_payloads import persist_result_payload
+
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+    image_id = repo.register_image(file_path="/nas/photos/cloud-sync-target.jpg")
+
+    persist_result_payload(
+        conn,
+        repo,
+        image_id=image_id,
+        module="cloud_ai",
+        payload={
+            "data": {
+                "providers": [
+                    {
+                        "provider": "openai",
+                        "description": "provider description",
+                        "keywords": ["provider", "tags"],
+                    }
+                ]
+            },
+            "blip2": {
+                "description": "caption from worker",
+                "scene_type": "portrait",
+                "keywords": ["boy", "computer"],
+            },
+        },
+    )
+
+    blip2_row = conn.execute(
+        "SELECT description, scene_type, keywords FROM analysis_blip2 WHERE image_id = ?",
+        [image_id],
+    ).fetchone()
+    assert blip2_row is not None
+    assert blip2_row["description"] == "caption from worker"
+    assert blip2_row["scene_type"] == "portrait"
+    assert "boy" in str(blip2_row["keywords"])
+    conn.close()
+
+
+def test_extract_aesthetic_payload_includes_perception(tmp_path):
+    from imganalyzer.pipeline.distributed_payloads import extract_result_payload
+
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+
+    image_id = repo.register_image(file_path="/nas/photos/aesthetic-sync.jpg")
+    repo.upsert_aesthetic(image_id, {
+        "aesthetic_score": 6.4,
+        "aesthetic_label": "Good",
+        "aesthetic_reason": "",
+        "provider": "siglip-v2.5",
+    })
+    repo.upsert_perception(image_id, {
+        "perception_iaa": 6.9,
+        "perception_iaa_label": "Good",
+        "perception_iqa": 5.8,
+        "perception_iqa_label": "Average",
+        "perception_ista": 7.1,
+        "perception_ista_label": "Very Good",
+    })
+
+    payload = extract_result_payload(conn, repo, image_id=image_id, module="aesthetic")
+    assert payload["data"]["aesthetic_score"] == 6.4
+    assert payload["perception"]["perception_iaa"] == 6.9
+    assert payload["perception"]["perception_iqa"] == 5.8
+    assert payload["perception"]["perception_ista"] == 7.1
+    conn.close()
+
+
+def test_persist_aesthetic_payload_persists_perception(tmp_path):
+    from imganalyzer.pipeline.distributed_payloads import persist_result_payload
+
+    conn = _make_test_db(tmp_path)
+    repo = Repository(conn)
+
+    image_id = repo.register_image(file_path="/nas/photos/aesthetic-sync-apply.jpg")
+    persist_result_payload(
+        conn,
+        repo,
+        image_id=image_id,
+        module="aesthetic",
+        payload={
+            "data": {
+                "aesthetic_score": 5.7,
+                "aesthetic_label": "Average",
+                "aesthetic_reason": "",
+            },
+            "perception": {
+                "perception_iaa": 6.0,
+                "perception_iaa_label": "Good",
+                "perception_iqa": 5.1,
+                "perception_iqa_label": "Average",
+                "perception_ista": 4.6,
+                "perception_ista_label": "Average",
+            },
+        },
+    )
+
+    stored_aesthetic = repo.get_analysis(image_id, "aesthetic")
+    stored_perception = repo.get_analysis(image_id, "perception")
+    assert stored_aesthetic is not None
+    assert stored_perception is not None
+    assert stored_aesthetic["aesthetic_score"] == 5.7
+    assert stored_perception["perception_iaa"] == 6.0
+    assert stored_perception["perception_iqa"] == 5.1
+    assert stored_perception["perception_ista"] == 4.6
+    conn.close()
+
+
 def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkeypatch):
     db_path = tmp_path / "server-status.db"
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)

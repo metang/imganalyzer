@@ -346,6 +346,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
     cloud_provider = params.get("cloudProvider", "copilot")
     verbose = params.get("verbose", True)
     write_xmp = not params.get("noXmp", True)
+    force = params.get("force", False)
     batch_size = params.get("batchSize", 10)
     chunk_size = params.get("chunkSize", 500)
     detection_prompt = params.get("detectionPrompt")
@@ -381,7 +382,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
                 conn=conn,
                 workers=workers,
                 cloud_workers=cloud_workers,
-                force=False,
+                force=force,
                 cloud_provider=cloud_provider,
                 detection_prompt=detection_prompt,
                 detection_threshold=detection_threshold,
@@ -675,17 +676,6 @@ def _build_distributed_job_context(repo: Any, image_id: int, module: str) -> dic
     return {"modules": modules}
 
 
-def _has_active_cloud_ai_job(conn: sqlite3.Connection, image_id: int) -> bool:
-    row = conn.execute(
-        """SELECT 1
-           FROM job_queue
-           WHERE image_id = ? AND module = 'cloud_ai' AND status IN ('pending', 'running')
-           LIMIT 1""",
-        [image_id],
-    ).fetchone()
-    return row is not None
-
-
 def _handle_jobs_claim(params: dict) -> dict:
     """Lease pending jobs to a worker for distributed execution."""
     from imganalyzer.db.queue import JobQueue
@@ -790,12 +780,8 @@ def _handle_jobs_claim(params: dict) -> dict:
                     queue.release_leased(job["id"], job["lease_token"])
                 continue
 
-            if module_name in ("cloud_ai", "aesthetic") and _distributed_has_people(repo, image_id):
+            if module_name == "cloud_ai" and _distributed_has_people(repo, image_id):
                 queue.mark_skipped_leased(job["id"], job["lease_token"], "has_people")
-                continue
-
-            if module_name == "aesthetic" and _has_active_cloud_ai_job(conn, image_id):
-                queue.release_leased(job["id"], job["lease_token"])
                 continue
 
             batch_valid_modules.add(module_name)
@@ -1419,6 +1405,12 @@ def _handle_search(params: dict) -> dict:
                 "aesthetic_score": row["aesthetic_score"],
                 "aesthetic_label": row["aesthetic_label"],
                 "aesthetic_reason": row["aesthetic_reason"],
+                "perception_iaa": row["perception_iaa"],
+                "perception_iaa_label": row["perception_iaa_label"],
+                "perception_iqa": row["perception_iqa"],
+                "perception_iqa_label": row["perception_iqa_label"],
+                "perception_ista": row["perception_ista"],
+                "perception_ista_label": row["perception_ista_label"],
             })
         if score_lookup is not None and sort_by == "relevance":
             records.sort(key=lambda record: -(record["score"] or 0.0))
@@ -1984,6 +1976,12 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
             "aesthetic_score": row["aesthetic_score"],
             "aesthetic_label": row["aesthetic_label"],
             "aesthetic_reason": row["aesthetic_reason"],
+            "perception_iaa": row["perception_iaa"],
+            "perception_iaa_label": row["perception_iaa_label"],
+            "perception_iqa": row["perception_iqa"],
+            "perception_iqa_label": row["perception_iqa_label"],
+            "perception_ista": row["perception_ista"],
+            "perception_ista_label": row["perception_ista_label"],
             "_normalized_path": row["normalized_path"],
         })
 

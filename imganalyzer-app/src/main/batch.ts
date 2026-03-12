@@ -41,6 +41,7 @@ export interface SessionConfig {
   cloudProvider: string
   recursive: boolean
   noHash: boolean
+  forceReprocess: boolean
   profile: boolean
 }
 
@@ -718,7 +719,8 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       folder: string,
       modules: string[],
       recursive: boolean,
-      noHash: boolean
+      noHash: boolean,
+      forceReprocess = false
     ): Promise<{ registered: number; enqueued: number; skipped: number }> => {
       batchStatus = 'ingesting'
       monitorOnly = false
@@ -733,6 +735,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           modules: modules.join(','),
           recursive,
           computeHash: !noHash,
+          force: forceReprocess,
         }) as { registered?: number; enqueued?: number; skipped?: number }
         return {
           registered: result.registered ?? 0,
@@ -758,9 +761,10 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       noHash = false,
       cloudWorkers = 4,
       profile = false,
-      chunkSize = 500
+      chunkSize = 500,
+      forceReprocess = false
     ): Promise<void> => {
-      sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash, profile }
+      sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash, forceReprocess, profile }
       sessionStartMs = Date.now()
       resetSessionCounters()
       currentRunId++
@@ -778,6 +782,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           noXmp: true,
           verbose: true,
           staleTimeout: 0,
+          force: forceReprocess,
           profile,
           chunkSize,
         })
@@ -833,6 +838,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
         noXmp: true,
         verbose: true,
         staleTimeout: 0,
+        force: sessionConfig?.forceReprocess ?? false,
         profile: sessionConfig?.profile ?? false,
       }
       await rpc.call('run', runParams)
@@ -914,10 +920,11 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           workers: w,
           cloudWorkers: cw,
           cloudProvider: cloud,
-          recursive: true,
-          noHash: false,
-          profile: false,
-        }
+            recursive: true,
+            noHash: false,
+            forceReprocess: false,
+            profile: false,
+          }
       }
 
       sessionStartMs = Date.now()

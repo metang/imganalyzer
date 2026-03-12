@@ -19,7 +19,7 @@ const PASSES: PassDef[] = [
   { label: 'Object Detection (GroundingDINO)',        uiKey: 'objects',    moduleKey: 'objects'   },
   { label: 'Face Recognition (InsightFace)',          uiKey: 'faces',      moduleKey: 'faces',     note: 'requires objects' },
   { label: 'Caption & Keywords (Qwen 3.5)',           uiKey: 'cloud_ai',   moduleKey: 'cloud_ai',  note: 'requires objects' },
-  { label: 'Aesthetic Score (SigLIP)',                uiKey: 'aesthetic',  moduleKey: 'aesthetic', note: 'requires objects' },
+  { label: 'Aesthetic Score (SigLIP)',                uiKey: 'aesthetic',  moduleKey: 'aesthetic' },
   { label: 'Embeddings',                              uiKey: 'embedding',  moduleKey: 'embedding' },
 ]
 
@@ -42,6 +42,7 @@ export interface PassSelectorValue {
   cloudProvider: string
   recursive: boolean
   noHash: boolean
+  forceReprocess: boolean
 }
 
 /**
@@ -67,7 +68,7 @@ interface Props {
 }
 
 export function PassSelector({ value, onChange, disabled }: Props) {
-  const { selectedKeys, workers, cloudWorkers, cloudProvider, recursive, noHash } = value
+  const { selectedKeys, workers, cloudWorkers, cloudProvider, recursive, noHash, forceReprocess } = value
 
   const toggleKey = (uiKey: string) => {
     const next = new Set(selectedKeys)
@@ -179,6 +180,19 @@ export function PassSelector({ value, onChange, disabled }: Props) {
           />
           <span className="text-sm text-neutral-300">Skip hash computation (faster ingest)</span>
         </label>
+
+        <label className="flex items-center gap-2.5 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={forceReprocess}
+            disabled={disabled}
+            onChange={(e) => onChange({ ...value, forceReprocess: e.target.checked })}
+            className="w-4 h-4 rounded accent-blue-500 disabled:opacity-50"
+          />
+          <span className="text-sm text-neutral-300">
+            Force reprocess selected passes (ignore existing analysis)
+          </span>
+        </label>
       </div>
     </div>
   )
@@ -196,5 +210,6 @@ export function defaultPassSelectorValue(): PassSelectorValue {
     cloudProvider: 'copilot',
     recursive: true,
     noHash: false,
+    forceReprocess: false,
   }
 }
