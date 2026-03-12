@@ -725,6 +725,84 @@ def test_server_jobs_claim_skips_when_prerequisite_failed(tmp_path, monkeypatch)
     assert row["skip_reason"] == "prerequisite_objects_failed"
 
 
+def test_server_jobs_claim_skips_already_analyzed_without_force_marker(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-claim-already-analyzed.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/nas/photos/already-aesthetic.jpg")
+    repo.upsert_aesthetic(image_id, {
+        "aesthetic_score": 6.2,
+        "aesthetic_label": "Good",
+        "aesthetic_reason": "",
+    })
+    job_id = queue.enqueue(image_id, "aesthetic")
+    assert job_id is not None
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "aesthetic"})
+    assert result["jobs"] == []
+
+    check = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    check.row_factory = sqlite3.Row
+    row = check.execute(
+        "SELECT status, skip_reason FROM job_queue WHERE id = ?",
+        [job_id],
+    ).fetchone()
+    check.close()
+    assert row is not None
+    assert row["status"] == "skipped"
+    assert row["skip_reason"] == "already_analyzed"
+
+
+def test_server_jobs_claim_honors_force_marker_from_queue(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-claim-force-marker.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/nas/photos/force-aesthetic.jpg")
+    repo.upsert_aesthetic(image_id, {
+        "aesthetic_score": 5.5,
+        "aesthetic_label": "Average",
+        "aesthetic_reason": "",
+    })
+    job_id = queue.enqueue(image_id, "aesthetic", force=True)
+    assert job_id is not None
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "aesthetic"})
+    assert len(result["jobs"]) == 1
+    assert result["jobs"][0]["id"] == job_id
+    assert result["jobs"][0]["module"] == "aesthetic"
+
+    check = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    check.row_factory = sqlite3.Row
+    row = check.execute(
+        "SELECT status, skip_reason FROM job_queue WHERE id = ?",
+        [job_id],
+    ).fetchone()
+    check.close()
+    assert row is not None
+    assert row["status"] == "running"
+    assert row["skip_reason"] is None
+
+
 def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
     db_path = tmp_path / "server-complete.db"
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)

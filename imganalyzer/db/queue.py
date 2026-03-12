@@ -64,9 +64,9 @@ class JobQueue:
             self.conn.execute(
                 """UPDATE job_queue
                    SET status = 'pending', attempts = 0, error_message = NULL,
-                       skip_reason = NULL, started_at = NULL, completed_at = NULL,
-                       queued_at = ?, priority = ?,
-                       last_node_id = NULL, last_node_role = NULL
+                        skip_reason = NULL, started_at = NULL, completed_at = NULL,
+                        queued_at = ?, priority = ?,
+                        last_node_id = NULL, last_node_role = 'force'
                     WHERE id = ?""",
                 [_now(), priority, existing["id"]],
             )
@@ -75,9 +75,9 @@ class JobQueue:
             return existing["id"]
 
         cur = self.conn.execute(
-            """INSERT INTO job_queue (image_id, module, priority, status, queued_at)
-               VALUES (?, ?, ?, 'pending', ?)""",
-            [image_id, module, priority, _now()],
+            """INSERT INTO job_queue (image_id, module, priority, status, queued_at, last_node_role)
+               VALUES (?, ?, ?, 'pending', ?, ?)""",
+            [image_id, module, priority, _now(), "force" if force else None],
         )
         if _auto_commit:
             self.conn.commit()
@@ -219,7 +219,7 @@ class JobQueue:
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             rows = self.conn.execute(
-                f"""SELECT id, image_id, module, attempts
+                f"""SELECT id, image_id, module, attempts, last_node_role
                     FROM job_queue
                     {where}
                     ORDER BY {order}

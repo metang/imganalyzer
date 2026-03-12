@@ -762,8 +762,9 @@ def _handle_jobs_claim(params: dict) -> dict:
 
             image_id = int(job["image_id"])
             module_name = str(job["module"])
+            job_force = force or str(job.get("last_node_role") or "").lower() == "force"
 
-            if not force and repo.is_analyzed(image_id, module_name):
+            if not job_force and repo.is_analyzed(image_id, module_name):
                 queue.mark_skipped_leased(job["id"], job["lease_token"], "already_analyzed")
                 continue
 
