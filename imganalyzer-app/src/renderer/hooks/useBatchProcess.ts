@@ -10,8 +10,7 @@ export const ALL_MODULE_KEYS = [
   'caption',
   'objects',
   'faces',
-  'cloud_ai',
-  'aesthetic',
+  'perception',
   'embedding',
 ] as const
 
@@ -46,8 +45,6 @@ export interface BatchConfig {
   folder: string
   modules: ModuleKey[]
   workers: number
-  cloudWorkers: number
-  cloudProvider: string
   recursive: boolean
   noHash: boolean
   forceReprocess: boolean
@@ -71,7 +68,7 @@ export interface UseBatchProcessReturn {
 
   startBatch(config: BatchConfig): Promise<void>
   /** Resume any pending/running jobs left over from a previous session. */
-  resumePending(workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<boolean>
+  resumePending(workers?: number): Promise<boolean>
   /** Monitor existing jobs already being processed elsewhere (for example by a distributed worker). */
   monitorExisting(): Promise<boolean>
   /** Re-enqueue all failed jobs for the given modules and re-run. */
@@ -165,10 +162,8 @@ export function useBatchProcess(): UseBatchProcessReturn {
         config.folder,
         config.modules,
         config.workers,
-        config.cloudProvider,
         config.recursive,
         config.noHash,
-        config.cloudWorkers,
         config.profile,
         config.chunkSize,
         config.forceReprocess
@@ -208,7 +203,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
    * any exist, re-spawn the worker process.  Returns true if jobs were found
    * and the worker was resumed, false otherwise.
    */
-  const resumePending = useCallback(async (workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<boolean> => {
+  const resumePending = useCallback(async (workers?: number): Promise<boolean> => {
     try {
       const { pending, running } = await window.api.batchCheckPending()
       if (pending + running === 0) return false
@@ -217,7 +212,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
       // The 1-second poll tick will overwrite with real stats.
       setStats((prev) => ({ ...prev, status: 'running' as BatchStatus, monitorOnly: false }))
 
-      await window.api.batchResumePending(workers, cloudProvider, cloudWorkers)
+      await window.api.batchResumePending(workers)
       return true
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))

@@ -2631,6 +2631,28 @@ def _serve_http_jsonrpc(
     global _http_transport
     _http_transport = True
 
+    # Remap any legacy module names in the queue so distributed workers
+    # (which only know current module names) can claim existing jobs.
+    try:
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _get_db()
+        q = JobQueue(conn)
+        remapped = q.remap_pending_modules({
+            "blip2": "caption",
+            "cloud_ai": "caption",
+            "local_ai": "caption",
+            "aesthetic": "perception",
+        })
+        total = remapped.get("updated", 0) + remapped.get("deleted", 0)
+        if total:
+            sys.stderr.write(
+                f"[coordinator] Remapped {total} legacy queue jobs "
+                f"(updated={remapped['updated']}, deduped={remapped['deleted']})\n"
+            )
+    except Exception as exc:
+        sys.stderr.write(f"[coordinator] Queue remap failed: {exc}\n")
+
     normalized_path = rpc_path.strip() or "/jsonrpc"
     if not normalized_path.startswith("/"):
         normalized_path = f"/{normalized_path}"

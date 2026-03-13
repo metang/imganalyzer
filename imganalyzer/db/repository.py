@@ -32,10 +32,10 @@ MODULE_TABLE_MAP: dict[str, str] = {
     "embedding":  "embeddings",
 }
 
-# Active pipeline modules.  Legacy modules (blip2, cloud_ai, aesthetic, local_ai)
+# Active pipeline modules.  Legacy modules (blip2, cloud_ai, aesthetic, local_ai, ocr)
 # stay in MODULE_TABLE_MAP for backward-compatible reads of existing analysis data
 # but are excluded here so they are never enqueued or processed.
-_LEGACY_MODULES = frozenset({"blip2", "cloud_ai", "aesthetic", "local_ai"})
+_LEGACY_MODULES = frozenset({"blip2", "cloud_ai", "aesthetic", "local_ai", "ocr"})
 ALL_MODULES = [m for m in MODULE_TABLE_MAP if m not in _LEGACY_MODULES]
 
 

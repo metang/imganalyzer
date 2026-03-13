@@ -257,8 +257,6 @@ export function BatchConfigView({ batch, initialFolder = '', onBatchStarted }: B
       folder,
       modules,
       workers: passSel.workers,
-      cloudWorkers: passSel.cloudWorkers,
-      cloudProvider: passSel.cloudProvider,
       recursive: passSel.recursive,
       noHash: passSel.noHash,
       forceReprocess: passSel.forceReprocess,

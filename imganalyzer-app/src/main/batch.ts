@@ -37,8 +37,6 @@ export interface SessionConfig {
   folder: string
   modules: string[]
   workers: number
-  cloudWorkers: number
-  cloudProvider: string
   recursive: boolean
   noHash: boolean
   forceReprocess: boolean
@@ -345,7 +343,6 @@ function computeRollingRate(entries: CompletionEntry[], now: number): number {
 function computeMetrics(
   remainingPasses: number,
   workers: number,
-  cloudWorkers: number
 ): { imagesPerSec: number; avgMsPerImage: number; estimatedMs: number } {
   const now = Date.now()
   pruneCompletionWindow(now)
@@ -357,7 +354,7 @@ function computeMetrics(
       ? lastN.reduce((sum, e) => sum + e.durationMs, 0) / lastN.length
       : 0
 
-  const effectiveWorkers = Math.max(1, workers + cloudWorkers)
+  const effectiveWorkers = Math.max(1, workers)
   const estimatedMs =
     imagesPerSec > 0 && remainingPasses > 0
       ? (remainingPasses / imagesPerSec) * 1000
@@ -479,7 +476,6 @@ async function doPoll(): Promise<void> {
     const data = await rpc.call('status', {}) as ServerStatusPayload
 
     const workers = sessionConfig?.workers ?? 1
-    const cloudWorkers = sessionConfig?.cloudWorkers ?? 4
     const pending = data.totals.pending ?? 0
     const running = data.totals.running ?? 0
     const remainingPasses = pending + running
@@ -496,7 +492,7 @@ async function doPoll(): Promise<void> {
       syncRecentResults(data.recent_results ?? [])
     }
 
-    const metrics = computeMetrics(remainingPasses, workers, cloudWorkers)
+    const metrics = computeMetrics(remainingPasses, workers)
     const moduleMetrics = computeModuleMetrics()
 
     if (monitorOnly) {
@@ -756,15 +752,13 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       folder: string,
       modules: string[],
       workers: number,
-      cloudProvider = 'copilot',
       recursive = true,
       noHash = false,
-      cloudWorkers = 4,
       profile = false,
       chunkSize = 500,
       forceReprocess = false
     ): Promise<void> => {
-      sessionConfig = { folder, modules, workers, cloudWorkers, cloudProvider, recursive, noHash, forceReprocess, profile }
+      sessionConfig = { folder, modules, workers, recursive, noHash, forceReprocess, profile }
       sessionStartMs = Date.now()
       resetSessionCounters()
       currentRunId++
@@ -777,8 +771,6 @@ export function registerBatchHandlers(win: BrowserWindow): void {
         await ensureServerRunning()
         await rpc.call('run', {
           workers,
-          cloudWorkers,
-          cloudProvider,
           noXmp: true,
           verbose: true,
           staleTimeout: 0,
@@ -818,8 +810,6 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     // Use session config if available, otherwise fall back to sensible defaults
     // (e.g. after crash recovery when sessionConfig was never populated).
     const w     = sessionConfig?.workers       ?? 1
-    const cw    = sessionConfig?.cloudWorkers  ?? 4
-    const cloud = sessionConfig?.cloudProvider ?? 'copilot'
 
     currentRunId++
     if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
@@ -833,8 +823,6 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       // stuck as 'running' in the DB, and they need immediate recovery.
       const runParams: Record<string, unknown> = {
         workers: w,
-        cloudWorkers: cw,
-        cloudProvider: cloud,
         noXmp: true,
         verbose: true,
         staleTimeout: 0,
@@ -904,12 +892,10 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   // ── batch:resume-pending ──────────────────────────────────────────────────
   ipcMain.handle(
     'batch:resume-pending',
-    async (_evt, workers = 1, cloudProvider = 'copilot', cloudWorkers = 4): Promise<void> => {
+    async (_evt, workers = 1): Promise<void> => {
       if (batchStatus === 'running') return
 
-      const w  = sessionConfig?.workers      ?? workers
-      const cw = sessionConfig?.cloudWorkers ?? cloudWorkers
-      const cloud = sessionConfig?.cloudProvider ?? cloudProvider
+      const w  = sessionConfig?.workers ?? workers
 
       // Populate sessionConfig if it wasn't set (crash recovery / fresh start)
       // so that subsequent batch:resume calls have it available.
@@ -918,13 +904,11 @@ export function registerBatchHandlers(win: BrowserWindow): void {
           folder: '',
           modules: [],
           workers: w,
-          cloudWorkers: cw,
-          cloudProvider: cloud,
-            recursive: true,
-            noHash: false,
-            forceReprocess: false,
-            profile: false,
-          }
+          recursive: true,
+          noHash: false,
+          forceReprocess: false,
+          profile: false,
+        }
       }
 
       sessionStartMs = Date.now()
@@ -941,8 +925,6 @@ export function registerBatchHandlers(win: BrowserWindow): void {
         // previous crash, regardless of how recently they were claimed.
         await rpc.call('run', {
           workers: w,
-          cloudWorkers: cw,
-          cloudProvider: cloud,
           noXmp: true,
           verbose: true,
           staleTimeout: 0,
@@ -1013,9 +995,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       }
 
       // Spawn the worker to process the newly-enqueued jobs
-      const w  = sessionConfig?.workers      ?? 1
-      const cw = sessionConfig?.cloudWorkers ?? 4
-      const cloud = sessionConfig?.cloudProvider ?? 'copilot'
+      const w  = sessionConfig?.workers ?? 1
 
       sessionStartMs = Date.now()
       resetSessionCounters()
@@ -1029,8 +1009,6 @@ export function registerBatchHandlers(win: BrowserWindow): void {
         await ensureServerRunning()
         await rpc.call('run', {
           workers: w,
-          cloudWorkers: cw,
-          cloudProvider: cloud,
           noXmp: true,
           verbose: true,
           staleTimeout: 0,
@@ -1064,9 +1042,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       // no need to spawn another one.
       if (batchStatus === 'running') return
 
-      const w  = sessionConfig?.workers      ?? 1
-      const cw = sessionConfig?.cloudWorkers ?? 4
-      const cloud = sessionConfig?.cloudProvider ?? 'copilot'
+      const w  = sessionConfig?.workers ?? 1
 
       sessionStartMs = Date.now()
       resetSessionCounters()
@@ -1079,8 +1055,6 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       try {
         await rpc.call('run', {
           workers: w,
-          cloudWorkers: cw,
-          cloudProvider: cloud,
           noXmp: true,
           verbose: true,
           staleTimeout: 0,
@@ -1104,7 +1078,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   // ── batch:queue-clear-all ─────────────────────────────────────────────────
   // Only clears pending/running/failed jobs. Done and skipped rows are
   // preserved so that re-ingest correctly skips already-processed images
-  // (especially modules skipped at runtime like cloud_ai/aesthetic with
+  // (especially modules skipped at runtime like perception with
   // has_people guard, which have no analysis-table data).
   ipcMain.handle('batch:queue-clear-all', async (): Promise<{ deleted: number }> => {
     if (batchStatus === 'running' || batchStatus === 'paused') {

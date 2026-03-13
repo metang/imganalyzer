@@ -51,8 +51,7 @@ const MODULE_LABELS: Record<string, string> = {
   caption: 'Caption',
   objects: 'Objects (DINO)',
   faces: 'Faces',
-  cloud_ai: 'Caption & Keywords',
-  aesthetic: 'Aesthetic',
+  perception: 'Perception',
   embedding: 'Embeddings',
 }
 
@@ -263,24 +262,46 @@ export function ProgressDashboard({
   const hasPending = totals.pending > 0
   const showResume = isPaused || (!isRunning && hasPending)
 
-  // Merge legacy blip2 stats into cloud_ai (they are now a single pass)
+  // Merge legacy blip2/cloud_ai/local_ai stats into caption
   const mergedModules: Record<string, BatchModuleStats> = { ...modules }
-  if (mergedModules.blip2 && mergedModules.cloud_ai) {
-    const b = mergedModules.blip2
-    const c = mergedModules.cloud_ai
-    mergedModules.cloud_ai = {
-      pending: c.pending + b.pending,
-      running: c.running + b.running,
-      done: c.done + b.done,
-      failed: c.failed + b.failed,
-      skipped: c.skipped + b.skipped,
-      imagesPerSec: (c.imagesPerSec ?? 0) + (b.imagesPerSec ?? 0),
-      avgMsPerImage: c.avgMsPerImage ?? b.avgMsPerImage ?? 0,
+  for (const legacy of ['blip2', 'cloud_ai', 'local_ai'] as const) {
+    if (mergedModules[legacy]) {
+      if (mergedModules.caption) {
+        const l = mergedModules[legacy]!
+        const c = mergedModules.caption
+        mergedModules.caption = {
+          pending: c.pending + l.pending,
+          running: c.running + l.running,
+          done: c.done + l.done,
+          failed: c.failed + l.failed,
+          skipped: c.skipped + l.skipped,
+          imagesPerSec: (c.imagesPerSec ?? 0) + (l.imagesPerSec ?? 0),
+          avgMsPerImage: c.avgMsPerImage ?? l.avgMsPerImage ?? 0,
+        }
+      } else {
+        mergedModules.caption = mergedModules[legacy]
+      }
+      delete mergedModules[legacy]
     }
-    delete mergedModules.blip2
-  } else if (mergedModules.blip2 && !mergedModules.cloud_ai) {
-    mergedModules.cloud_ai = mergedModules.blip2
-    delete mergedModules.blip2
+  }
+  // Merge legacy aesthetic stats into perception
+  if (mergedModules.aesthetic) {
+    if (mergedModules.perception) {
+      const a = mergedModules.aesthetic
+      const p = mergedModules.perception
+      mergedModules.perception = {
+        pending: p.pending + a.pending,
+        running: p.running + a.running,
+        done: p.done + a.done,
+        failed: p.failed + a.failed,
+        skipped: p.skipped + a.skipped,
+        imagesPerSec: (p.imagesPerSec ?? 0) + (a.imagesPerSec ?? 0),
+        avgMsPerImage: p.avgMsPerImage ?? a.avgMsPerImage ?? 0,
+      }
+    } else {
+      mergedModules.perception = mergedModules.aesthetic
+    }
+    delete mergedModules.aesthetic
   }
 
   const failedModules = Object.entries(mergedModules)

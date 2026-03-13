@@ -17,7 +17,7 @@ from typing import Optional
 # Peak VRAM (GB) per module including model weights + batch activations.
 # Tuned for the default _GPU_BATCH_SIZES in worker.py.
 _MODULE_VRAM_GB: dict[str, float] = {
-    "caption":   7.0,   # qwen3.5:9b Q4_K_M via Ollama (~6.6 model + 0.4 KV cache)
+    "caption":   8.7,   # qwen3.5:9b Q4_K_M via Ollama (8.7 GB per `ollama ps`)
     "objects":    2.4,   # GroundingDINO mixed fp16/fp32, batch=4
     "faces":     1.0,   # InsightFace buffalo_l ONNX (1 GB arena cap)
     "embedding": 0.95,  # CLIP ViT-L/14 fp16, batch=16

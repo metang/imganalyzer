@@ -468,10 +468,8 @@ declare global {
         folder: string,
         modules: string[],
         workers: number,
-        cloudProvider: string,
         recursive: boolean,
         noHash: boolean,
-        cloudWorkers: number,
         profile: boolean,
         chunkSize: number,
         forceReprocess?: boolean
@@ -481,7 +479,7 @@ declare global {
       batchStop(folder: string): Promise<void>
       batchCheckPending(): Promise<{ pending: number; running: number }>
       batchMonitorExisting(): Promise<boolean>
-      batchResumePending(workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<void>
+      batchResumePending(workers?: number): Promise<void>
       batchRetryFailed(modules: string[]): Promise<void>
       batchRebuildModule(module: string): Promise<void>
       batchQueueClearAll(): Promise<{ deleted: number }>

@@ -65,15 +65,13 @@ contextBridge.exposeInMainWorld('api', {
     folder: string,
     modules: string[],
     workers: number,
-    cloudProvider: string,
     recursive: boolean,
     noHash: boolean,
-    cloudWorkers: number,
     profile: boolean,
     chunkSize: number,
     forceReprocess = false
   ): Promise<void> =>
-    ipcRenderer.invoke('batch:start', folder, modules, workers, cloudProvider, recursive, noHash, cloudWorkers, profile, chunkSize, forceReprocess),
+    ipcRenderer.invoke('batch:start', folder, modules, workers, recursive, noHash, profile, chunkSize, forceReprocess),
 
   batchPause: (): Promise<void> =>
     ipcRenderer.invoke('batch:pause'),
@@ -90,8 +88,8 @@ contextBridge.exposeInMainWorld('api', {
   batchMonitorExisting: (): Promise<boolean> =>
     ipcRenderer.invoke('batch:monitor-existing'),
 
-  batchResumePending: (workers?: number, cloudProvider?: string, cloudWorkers?: number): Promise<void> =>
-    ipcRenderer.invoke('batch:resume-pending', workers, cloudProvider, cloudWorkers),
+  batchResumePending: (workers?: number): Promise<void> =>
+    ipcRenderer.invoke('batch:resume-pending', workers),
 
   batchRetryFailed: (modules: string[]): Promise<void> =>
     ipcRenderer.invoke('batch:retry-failed', modules),

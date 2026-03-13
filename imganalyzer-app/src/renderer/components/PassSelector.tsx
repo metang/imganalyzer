@@ -18,15 +18,9 @@ const PASSES: PassDef[] = [
   { label: 'Technical (sharpness, exposure, noise)',  uiKey: 'technical',  moduleKey: 'technical' },
   { label: 'Object Detection (GroundingDINO)',        uiKey: 'objects',    moduleKey: 'objects'   },
   { label: 'Face Recognition (InsightFace)',          uiKey: 'faces',      moduleKey: 'faces',     note: 'requires objects' },
-  { label: 'Caption & Keywords (Qwen 3.5)',           uiKey: 'cloud_ai',   moduleKey: 'cloud_ai',  note: 'requires objects' },
-  { label: 'Aesthetic Score (SigLIP)',                uiKey: 'aesthetic',  moduleKey: 'aesthetic' },
+  { label: 'Caption & Keywords (Qwen 3.5)',           uiKey: 'caption',    moduleKey: 'caption'  },
+  { label: 'Perception (UniPercept)',                  uiKey: 'perception', moduleKey: 'perception' },
   { label: 'Embeddings',                              uiKey: 'embedding',  moduleKey: 'embedding' },
-]
-
-const CLOUD_PROVIDERS = [
-  { value: 'copilot',   label: 'GitHub Copilot' },
-  { value: 'openai',    label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
 ]
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -38,8 +32,6 @@ const CLOUD_PROVIDERS = [
 export interface PassSelectorValue {
   selectedKeys: Set<string>
   workers: number
-  cloudWorkers: number
-  cloudProvider: string
   recursive: boolean
   noHash: boolean
   forceReprocess: boolean
@@ -68,7 +60,7 @@ interface Props {
 }
 
 export function PassSelector({ value, onChange, disabled }: Props) {
-  const { selectedKeys, workers, cloudWorkers, cloudProvider, recursive, noHash, forceReprocess } = value
+  const { selectedKeys, workers, recursive, noHash, forceReprocess } = value
 
   const toggleKey = (uiKey: string) => {
     const next = new Set(selectedKeys)
@@ -116,10 +108,10 @@ export function PassSelector({ value, onChange, disabled }: Props) {
       <div className="flex flex-col gap-3">
         <p className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">Options</p>
 
-        {/* Local workers slider — metadata & technical */}
+        {/* Workers slider — metadata & technical thread pool */}
         <div className="flex items-center gap-3">
           <label className="text-sm text-neutral-300 w-36 shrink-0">
-            Local workers
+            Workers
             <span className="block text-xs text-neutral-600 font-normal">metadata, technical</span>
           </label>
           <input
@@ -134,28 +126,6 @@ export function PassSelector({ value, onChange, disabled }: Props) {
           />
           <span className="text-sm text-neutral-300 w-5 text-right">{workers}</span>
         </div>
-
-        {/* AI workers slider — cloud_ai (Ollama) */}
-        <div className="flex items-center gap-3">
-          <label className="text-sm text-neutral-300 w-36 shrink-0">
-            AI workers
-            <span className="block text-xs text-neutral-600 font-normal">Qwen 3.5 (Ollama)</span>
-          </label>
-          <input
-            type="range"
-            min={1}
-            max={16}
-            step={1}
-            value={cloudWorkers}
-            disabled={disabled}
-            onChange={(e) => onChange({ ...value, cloudWorkers: Number(e.target.value) })}
-            className="flex-1 accent-blue-500 disabled:opacity-50"
-          />
-          <span className="text-sm text-neutral-300 w-5 text-right">{cloudWorkers}</span>
-        </div>
-
-        {/* Cloud provider — hidden (using Ollama/Qwen 3.5 locally) */}
-        <input type="hidden" value={cloudProvider} />
 
         {/* Recursive toggle */}
         <label className="flex items-center gap-2.5 cursor-pointer select-none">
@@ -198,16 +168,14 @@ export function PassSelector({ value, onChange, disabled }: Props) {
   )
 }
 
-/** Default value — all passes enabled, 2 local workers, 4 cloud workers. */
+/** Default value — all passes enabled, 2 workers. */
 export function defaultPassSelectorValue(): PassSelectorValue {
   return {
     selectedKeys: new Set<string>([
       'metadata', 'technical', 'objects', 'faces',
-      'cloud_ai', 'aesthetic', 'embedding',
+      'caption', 'perception', 'embedding',
     ]),
     workers: 2,
-    cloudWorkers: 4,
-    cloudProvider: 'copilot',
     recursive: true,
     noHash: false,
     forceReprocess: false,

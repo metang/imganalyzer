@@ -102,8 +102,17 @@ def _probe_available_modules() -> list[str]:
         with _req.urlopen(req, timeout=5) as resp:
             resp.read()
         available.append("caption")
-    except (URLError, OSError, Exception):
-        pass
+    except (URLError, OSError) as exc:
+        import sys as _sys
+
+        _sys.stderr.write(
+            f"[probe] caption unavailable: Ollama not reachable at "
+            f"{_os.environ.get('OLLAMA_URL', 'http://localhost:11434')} ({exc})\n"
+        )
+    except Exception as exc:
+        import sys as _sys
+
+        _sys.stderr.write(f"[probe] caption unavailable: {exc}\n")
 
     # faces needs insightface
     try:
