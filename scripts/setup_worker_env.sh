@@ -131,8 +131,24 @@ if [[ -d "$TORCH_LIB_DIR" ]]; then
   fi
 fi
 
-echo "==> Verifying local AI imports (torch + unipercept + insightface + onnxruntime)..."
-conda run -n "$ENV_NAME" python -c "
+if [[ "$OS_NAME" == "Darwin" ]]; then
+  echo "==> Verifying local AI imports (torch + insightface + onnxruntime; UniPercept skipped on Apple Silicon)..."
+  conda run -n "$ENV_NAME" python -c "
+import torch, numpy as np
+print('torch', torch.__version__, '/ numpy', np.__version__)
+# Smoke-test: catch numpy ABI mismatches that only surface at runtime
+_ = torch.tensor([1.0])
+import transformers
+print('transformers', transformers.__version__)
+import open_clip
+print('open_clip ok')
+import insightface, onnxruntime as ort
+print('insightface', insightface.__version__)
+print('onnxruntime', ort.__version__)
+"
+else
+  echo "==> Verifying local AI imports (torch + unipercept + insightface + onnxruntime)..."
+  conda run -n "$ENV_NAME" python -c "
 import torch, numpy as np
 print('torch', torch.__version__, '/ numpy', np.__version__)
 # Smoke-test: catch numpy ABI mismatches that only surface at runtime
@@ -147,6 +163,7 @@ import insightface, onnxruntime as ort
 print('insightface', insightface.__version__)
 print('onnxruntime', ort.__version__)
 "
+fi
 
 echo "==> Running capability probe..."
 conda run -n "$ENV_NAME" python -c "

@@ -110,8 +110,9 @@ bash scripts/setup_worker_env.sh ~/imganalyzer-worker
 
 Both scripts create/reuse a Conda env (`imganalyzer` on Windows, `imganalyzer312`
 on macOS/Linux), install `imganalyzer[local-ai,<provider>]` from source, and
-verify local AI (`torch`, `unipercept_reward`, `insightface`, `onnxruntime`) +
-cloud-provider imports. Default provider is `copilot`.
+verify local AI (`torch`, `insightface`, `onnxruntime`) + cloud-provider imports.
+`unipercept_reward` is verified on CUDA-capable hosts (non-Darwin). Default
+provider is `copilot`.
 Override defaults with environment variables:
 - `IMGANALYZER_ENV_NAME`
 - `IMGANALYZER_PYTHON_VERSION`

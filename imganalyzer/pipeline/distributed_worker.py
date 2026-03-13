@@ -1046,6 +1046,19 @@ class DistributedWorker:
                 console.print(
                     f"[dim]Supported modules:[/dim] {', '.join(self.supported_modules)}"
                 )
+                is_apple_silicon = (
+                    platform.system() == "Darwin"
+                    and platform.machine().lower() in {"arm64", "aarch64"}
+                )
+                if is_apple_silicon and (
+                    "aesthetic" not in self.supported_modules
+                    or "perception" not in self.supported_modules
+                ):
+                    console.print(
+                        "[dim]Apple Silicon worker detected: "
+                        "aesthetic/perception are CUDA-only and will be handled by "
+                        "CUDA workers or the coordinator.[/dim]"
+                    )
                 if missing:
                     console.print(
                         f"[yellow]Unavailable modules (missing deps):[/yellow] {', '.join(missing)}"
