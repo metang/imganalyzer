@@ -56,6 +56,35 @@ db = get_db()
 - Uncollected futures with exceptions are silently swallowed.
 - Always emit result notifications for both success AND failure cases.
 
+### 6. Scheduler/pipeline module changes require 3 mandatory steps
+Any change that renames, adds, or removes a pipeline module **must** complete all three steps:
+
+1. **Update scheduler & worker code**
+   - `imganalyzer/pipeline/scheduler.py`: Update `_GPU_PHASES`, `INDEPENDENT_GPU_MODULES`, `_PREREQUISITES`, module sets.
+   - `imganalyzer/pipeline/worker.py`: Update `GPU_MODULES`, `_PREREQUISITES`, docstrings, phase labels.
+   - `imganalyzer/pipeline/modules.py`: Add/remove module runner and `unload_gpu_model()` handler.
+   - `imganalyzer/db/repository.py`: Update `MODULE_TABLE_MAP`, `_LEGACY_MODULES`, and `ALL_MODULES`.
+   - `imganalyzer/pipeline/vram_budget.py`: Update `_MODULE_VRAM_GB` entries.
+
+2. **Ensure distributed worker compatibility**
+   - `imganalyzer/pipeline/distributed_worker.py`: Update `_probe_available_modules()` — it checks Ollama for caption, CUDA for perception, etc. If a module isn't probed, workers won't advertise it.
+   - `imganalyzer-app/src/renderer/components/PassSelector.tsx`: Update UI module keys/labels.
+   - `imganalyzer-app/src/renderer/components/ProgressDashboard.tsx`: Update `MODULE_LABELS`.
+
+3. **Migrate the live job queue**
+   - Add old→new mapping to `remap_pending_modules()` calls in **both**:
+     - `worker.py` `_run_loop()` (~line 306)
+     - `server.py` `_serve_http_jsonrpc()` (~line 2648)
+   - Run the remap on the production database to convert existing pending jobs:
+     ```python
+     from imganalyzer.db.queue import JobQueue
+     q = JobQueue(conn)
+     q.remap_pending_modules({"old_name": "new_name"})
+     q.recover_stale(timeout_minutes=0)  # clear stuck running jobs
+     ```
+
+**Why all 3 steps?** Missing step 1 crashes the coordinator. Missing step 2 causes workers to silently skip jobs ("no claimable pending modules"). Missing step 3 leaves old module names in the queue that no worker recognizes.
+
 ## Architecture Reminders
 
 ### Notification Pipeline (5 stages)
