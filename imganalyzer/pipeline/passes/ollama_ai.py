@@ -1,9 +1,4 @@
-"""Ollama AI pass — runs qwen3.5 via Ollama as the ``blip2`` module key.
-
-Drop-in replacement for the BLIP-2 captioning pass.  Also writes
-aesthetic fields to ``analysis_aesthetic`` (same piggy-back pattern
-that cloud_ai used).
-"""
+"""Ollama AI pass — runs qwen3.5 via Ollama as the ``blip2`` module key."""
 from __future__ import annotations
 
 import sqlite3
@@ -33,28 +28,15 @@ def run_ollama_ai(
 
     result = OllamaAI().analyze(path, image_data)
 
-    # Split aesthetic fields before writing to blip2 table
-    aesthetic_score = result.pop("aesthetic_score", None)
-    aesthetic_label = result.pop("aesthetic_label", None)
-    aesthetic_reason = result.pop("aesthetic_reason", None)
+    # Keep this payload caption-focused. Aesthetic metrics come from UniPercept.
+    result.pop("aesthetic_score", None)
+    result.pop("aesthetic_label", None)
+    result.pop("aesthetic_reason", None)
 
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_blip2(image_id, result)
-        if aesthetic_score is not None:
-            repo.upsert_aesthetic(image_id, {
-                "aesthetic_score": aesthetic_score,
-                "aesthetic_label": aesthetic_label or "",
-                "aesthetic_reason": aesthetic_reason or "",
-                "provider": "ollama-qwen3.5",
-            })
         repo.update_search_index(image_id)
-
-    # Re-attach aesthetic for return value
-    if aesthetic_score is not None:
-        result["aesthetic_score"] = aesthetic_score
-        result["aesthetic_label"] = aesthetic_label
-        result["aesthetic_reason"] = aesthetic_reason
 
     return result
 
@@ -78,25 +60,13 @@ def run_ollama_ai_for_cloud(
 
     result = OllamaAI().analyze(path, image_data)
 
-    aesthetic_score = result.pop("aesthetic_score", None)
-    aesthetic_label = result.pop("aesthetic_label", None)
-    aesthetic_reason = result.pop("aesthetic_reason", None)
+    result.pop("aesthetic_score", None)
+    result.pop("aesthetic_label", None)
+    result.pop("aesthetic_reason", None)
 
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_cloud_ai(image_id, "ollama-qwen3.5", result)
-        if aesthetic_score is not None:
-            repo.upsert_aesthetic(image_id, {
-                "aesthetic_score": aesthetic_score,
-                "aesthetic_label": aesthetic_label or "",
-                "aesthetic_reason": aesthetic_reason or "",
-                "provider": "ollama-qwen3.5",
-            })
         repo.update_search_index(image_id)
-
-    if aesthetic_score is not None:
-        result["aesthetic_score"] = aesthetic_score
-        result["aesthetic_label"] = aesthetic_label
-        result["aesthetic_reason"] = aesthetic_reason
 
     return result

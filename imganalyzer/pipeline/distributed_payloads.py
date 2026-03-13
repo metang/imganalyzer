@@ -69,10 +69,6 @@ def seed_job_context(
     if isinstance(objects, dict) and objects:
         repo.upsert_objects(image_id, _clean_analysis_row(objects))
 
-    aesthetic = modules.get("aesthetic")
-    if isinstance(aesthetic, dict) and aesthetic:
-        repo.upsert_aesthetic(image_id, _clean_analysis_row(aesthetic))
-
     perception = modules.get("perception")
     if isinstance(perception, dict) and perception:
         repo.upsert_perception(image_id, _clean_analysis_row(perception))
@@ -129,19 +125,13 @@ def extract_result_payload(
 
     if module == "cloud_ai":
         payload["data"] = repo.get_analysis(image_id, "cloud_ai") or {"providers": []}
-        aesthetic = repo.get_analysis(image_id, "aesthetic")
-        if aesthetic:
-            payload["aesthetic"] = _clean_analysis_row(aesthetic)
         blip2 = repo.get_analysis(image_id, "blip2")
         if blip2:
             payload["blip2"] = _clean_analysis_row(blip2)
         return payload
 
     if module == "aesthetic":
-        payload["data"] = _clean_analysis_row(repo.get_analysis(image_id, "aesthetic"))
-        perception = repo.get_analysis(image_id, "perception")
-        if perception:
-            payload["perception"] = _clean_analysis_row(perception)
+        payload["data"] = _clean_analysis_row(repo.get_analysis(image_id, "perception"))
         return payload
 
     data = repo.get_analysis(image_id, module)
@@ -261,9 +251,6 @@ def persist_result_payload(
                     if not provider:
                         continue
                     repo.upsert_cloud_ai(image_id, provider, _clean_analysis_row(provider_row))
-        aesthetic = payload.get("aesthetic")
-        if isinstance(aesthetic, dict) and aesthetic:
-            repo.upsert_aesthetic(image_id, _clean_analysis_row(aesthetic))
         blip2 = payload.get("blip2")
         if isinstance(blip2, dict) and blip2:
             repo.upsert_blip2(image_id, _clean_analysis_row(blip2))
@@ -271,9 +258,7 @@ def persist_result_payload(
 
     if module == "aesthetic":
         data = _clean_analysis_row(payload.get("data"))
-        if data:
-            repo.upsert_aesthetic(image_id, data)
-        perception = _clean_analysis_row(payload.get("perception"))
+        perception = data or _clean_analysis_row(payload.get("perception"))
         if perception:
             repo.upsert_perception(image_id, perception)
         return

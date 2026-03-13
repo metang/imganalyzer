@@ -29,13 +29,13 @@ from imganalyzer.pipeline.worker import _emit_result
 console = Console()
 
 # Modules that require local-AI packages (torch, transformers, etc.)
-_LOCAL_AI_MODULES = {"objects", "local_ai", "faces", "embedding"}
+_LOCAL_AI_MODULES = {"objects", "local_ai", "faces", "embedding", "perception", "aesthetic"}
 
 # Modules that always work (pure Python / stdlib)
 _ALWAYS_AVAILABLE_MODULES = {"metadata", "technical"}
 
 # Modules that require a cloud SDK (checked separately per provider)
-_CLOUD_MODULES = {"cloud_ai", "aesthetic"}
+_CLOUD_MODULES = {"cloud_ai"}
 _TRANSIENT_DB_LOCK_MARKERS = (
     "database is locked",
     "database table is locked",
@@ -113,7 +113,7 @@ def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
     except ImportError:
         pass
 
-    # cloud_ai / aesthetic need a cloud SDK
+    # cloud_ai needs a cloud SDK
     provider = (cloud_provider or "").lower()
     cloud_ok = False
     if provider == "copilot":
@@ -140,7 +140,19 @@ def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
         cloud_ok = True  # unknown provider — optimistic, let it fail at runtime
 
     if cloud_ok:
-        available.extend(["cloud_ai", "aesthetic"])
+        available.append("cloud_ai")
+
+    # perception/aesthetic need UniPercept dependency and CUDA runtime.
+    try:
+        import torch
+        import transformers  # noqa: F401
+
+        if torch.cuda.is_available():
+            import unipercept_reward  # noqa: F401
+
+            available.extend(["perception", "aesthetic"])
+    except ImportError:
+        pass
 
     return sorted(set(available))
 
@@ -1058,7 +1070,7 @@ class DistributedWorker:
                         "\n[bold red]ERROR: torch / transformers are not installed in "
                         "this Python environment.[/bold red]\n"
                         "[red]The worker cannot run any local-AI modules "
-                        "(objects, faces, embedding).[/red]\n\n"
+                        "(objects, faces, embedding, perception, aesthetic).[/red]\n\n"
                         "You are likely running from the wrong conda environment.\n"
                         "  [bold]Current python:[/bold] "
                         + _current_python_info()

@@ -734,10 +734,13 @@ def test_server_jobs_claim_skips_already_analyzed_without_force_marker(tmp_path,
     queue = JobQueue(conn)
 
     image_id = repo.register_image(file_path="/nas/photos/already-aesthetic.jpg")
-    repo.upsert_aesthetic(image_id, {
-        "aesthetic_score": 6.2,
-        "aesthetic_label": "Good",
-        "aesthetic_reason": "",
+    repo.upsert_perception(image_id, {
+        "perception_iaa": 6.2,
+        "perception_iaa_label": "Good",
+        "perception_iqa": 6.0,
+        "perception_iqa_label": "Good",
+        "perception_ista": 5.9,
+        "perception_ista_label": "Average",
     })
     job_id = queue.enqueue(image_id, "aesthetic")
     assert job_id is not None
@@ -772,10 +775,13 @@ def test_server_jobs_claim_honors_force_marker_from_queue(tmp_path, monkeypatch)
     queue = JobQueue(conn)
 
     image_id = repo.register_image(file_path="/nas/photos/force-aesthetic.jpg")
-    repo.upsert_aesthetic(image_id, {
-        "aesthetic_score": 5.5,
-        "aesthetic_label": "Average",
-        "aesthetic_reason": "",
+    repo.upsert_perception(image_id, {
+        "perception_iaa": 5.5,
+        "perception_iaa_label": "Average",
+        "perception_iqa": 5.4,
+        "perception_iqa_label": "Average",
+        "perception_ista": 5.3,
+        "perception_ista_label": "Average",
     })
     job_id = queue.enqueue(image_id, "aesthetic", force=True)
     assert job_id is not None
@@ -967,19 +973,13 @@ def test_persist_cloud_ai_payload_writes_blip2_caption_fields(tmp_path):
     conn.close()
 
 
-def test_extract_aesthetic_payload_includes_perception(tmp_path):
+def test_extract_aesthetic_payload_uses_perception_data(tmp_path):
     from imganalyzer.pipeline.distributed_payloads import extract_result_payload
 
     conn = _make_test_db(tmp_path)
     repo = Repository(conn)
 
     image_id = repo.register_image(file_path="/nas/photos/aesthetic-sync.jpg")
-    repo.upsert_aesthetic(image_id, {
-        "aesthetic_score": 6.4,
-        "aesthetic_label": "Good",
-        "aesthetic_reason": "",
-        "provider": "siglip-v2.5",
-    })
     repo.upsert_perception(image_id, {
         "perception_iaa": 6.9,
         "perception_iaa_label": "Good",
@@ -990,10 +990,9 @@ def test_extract_aesthetic_payload_includes_perception(tmp_path):
     })
 
     payload = extract_result_payload(conn, repo, image_id=image_id, module="aesthetic")
-    assert payload["data"]["aesthetic_score"] == 6.4
-    assert payload["perception"]["perception_iaa"] == 6.9
-    assert payload["perception"]["perception_iqa"] == 5.8
-    assert payload["perception"]["perception_ista"] == 7.1
+    assert payload["data"]["perception_iaa"] == 6.9
+    assert payload["data"]["perception_iqa"] == 5.8
+    assert payload["data"]["perception_ista"] == 7.1
     conn.close()
 
 
@@ -1011,11 +1010,6 @@ def test_persist_aesthetic_payload_persists_perception(tmp_path):
         module="aesthetic",
         payload={
             "data": {
-                "aesthetic_score": 5.7,
-                "aesthetic_label": "Average",
-                "aesthetic_reason": "",
-            },
-            "perception": {
                 "perception_iaa": 6.0,
                 "perception_iaa_label": "Good",
                 "perception_iqa": 5.1,
@@ -1026,11 +1020,8 @@ def test_persist_aesthetic_payload_persists_perception(tmp_path):
         },
     )
 
-    stored_aesthetic = repo.get_analysis(image_id, "aesthetic")
     stored_perception = repo.get_analysis(image_id, "perception")
-    assert stored_aesthetic is not None
     assert stored_perception is not None
-    assert stored_aesthetic["aesthetic_score"] == 5.7
     assert stored_perception["perception_iaa"] == 6.0
     assert stored_perception["perception_iqa"] == 5.1
     assert stored_perception["perception_ista"] == 4.6

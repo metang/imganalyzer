@@ -653,7 +653,7 @@ def _handle_workers_list(_params: dict) -> dict:
 _DISTRIBUTED_CONTEXT_MODULES: dict[str, tuple[str, ...]] = {
     "faces": ("objects",),
     "cloud_ai": ("objects", "local_ai"),
-    "aesthetic": ("objects", "local_ai"),
+    "aesthetic": (),
     "embedding": ("local_ai", "cloud_ai"),
 }
 _DISTRIBUTED_SEARCH_MODULES = {"metadata", "local_ai", "faces", "cloud_ai"}
@@ -665,6 +665,16 @@ def _distributed_has_people(repo: Any, image_id: int) -> bool:
         return bool(objects_data.get("has_person"))
     local_data = repo.get_analysis(image_id, "local_ai")
     return bool(local_data and local_data.get("has_people"))
+
+
+def _has_perception_scores(repo: Any, image_id: int) -> bool:
+    perception = repo.get_analysis(image_id, "perception")
+    if not perception:
+        return False
+    return all(
+        perception.get(key) is not None
+        for key in ("perception_iaa", "perception_iqa", "perception_ista")
+    )
 
 
 def _build_distributed_job_context(repo: Any, image_id: int, module: str) -> dict[str, Any]:
@@ -764,7 +774,12 @@ def _handle_jobs_claim(params: dict) -> dict:
             module_name = str(job["module"])
             job_force = force or str(job.get("last_node_role") or "").lower() == "force"
 
-            if not job_force and repo.is_analyzed(image_id, module_name):
+            already_analyzed = (
+                _has_perception_scores(repo, image_id)
+                if module_name == "aesthetic"
+                else repo.is_analyzed(image_id, module_name)
+            )
+            if not job_force and already_analyzed:
                 queue.mark_skipped_leased(job["id"], job["lease_token"], "already_analyzed")
                 continue
 
@@ -1255,10 +1270,10 @@ def _handle_search(params: dict) -> dict:
         base_conditions.append("CAST(m.iso AS REAL) <= ?")
         base_params.append(iso_max)
     if aesthetic_min is not None:
-        base_conditions.append("ae.aesthetic_score >= ?")
+        base_conditions.append("COALESCE(ap.perception_iaa, ae.aesthetic_score) >= ?")
         base_params.append(aesthetic_min)
     if aesthetic_max is not None:
-        base_conditions.append("ae.aesthetic_score <= ?")
+        base_conditions.append("COALESCE(ap.perception_iaa, ae.aesthetic_score) <= ?")
         base_params.append(aesthetic_max)
     if sharpness_min is not None:
         base_conditions.append("t.sharpness_score >= ?")
@@ -1313,7 +1328,9 @@ def _handle_search(params: dict) -> dict:
             ORDER BY ca.analyzed_at DESC, ca.id DESC
             LIMIT 1
         ) AS cloud_description,
-        ae.aesthetic_score, ae.aesthetic_label, ae.aesthetic_reason,
+        COALESCE(ap.perception_iaa, ae.aesthetic_score) AS aesthetic_score,
+        COALESCE(ap.perception_iaa_label, ae.aesthetic_label) AS aesthetic_label,
+        NULL AS aesthetic_reason,
         ap.perception_iaa, ap.perception_iaa_label,
         ap.perception_iqa, ap.perception_iqa_label,
         ap.perception_ista, ap.perception_ista_label
@@ -1486,15 +1503,22 @@ def _handle_search(params: dict) -> dict:
         if sort_by == "best":
             return (
                 " ORDER BY "
-                "((COALESCE(ae.aesthetic_score, 0) * 12.0) + "
+                "((COALESCE(ap.perception_iaa, ae.aesthetic_score, 0) * 12.0) + "
                 "(COALESCE(t.sharpness_score, 0) * 0.25) - "
                 "(COALESCE(t.noise_level, 0) * 120.0)) DESC, "
-                "ae.aesthetic_score DESC, t.sharpness_score DESC, i.id DESC"
+                "COALESCE(ap.perception_iaa, ae.aesthetic_score) DESC, "
+                "t.sharpness_score DESC, i.id DESC"
             )
         if sort_by == "aesthetic":
-            return " ORDER BY ae.aesthetic_score DESC, t.sharpness_score DESC, i.id DESC"
+            return (
+                " ORDER BY COALESCE(ap.perception_iaa, ae.aesthetic_score) DESC, "
+                "t.sharpness_score DESC, i.id DESC"
+            )
         if sort_by == "sharpness":
-            return " ORDER BY t.sharpness_score DESC, ae.aesthetic_score DESC, i.id DESC"
+            return (
+                " ORDER BY t.sharpness_score DESC, "
+                "COALESCE(ap.perception_iaa, ae.aesthetic_score) DESC, i.id DESC"
+            )
         if sort_by == "cleanest":
             return " ORDER BY t.noise_level ASC, t.sharpness_score DESC, i.id DESC"
         if sort_by == "newest":
@@ -1713,6 +1737,7 @@ def _processed_exists_clause(alias: str = "i") -> str:
         EXISTS(SELECT 1 FROM analysis_ocr ocr WHERE ocr.image_id     = {alias}.id) OR
         EXISTS(SELECT 1 FROM analysis_faces af WHERE af.image_id     = {alias}.id) OR
         EXISTS(SELECT 1 FROM analysis_cloud_ai ca WHERE ca.image_id  = {alias}.id) OR
+        EXISTS(SELECT 1 FROM analysis_perception ap WHERE ap.image_id = {alias}.id) OR
         EXISTS(SELECT 1 FROM analysis_aesthetic ae WHERE ae.image_id = {alias}.id) OR
         EXISTS(SELECT 1 FROM embeddings em WHERE em.image_id         = {alias}.id)
     )"""
@@ -1874,7 +1899,9 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
             ORDER BY ca.analyzed_at DESC, ca.id DESC
             LIMIT 1
         ) AS cloud_description,
-        ae.aesthetic_score, ae.aesthetic_label, ae.aesthetic_reason,
+        COALESCE(ap.perception_iaa, ae.aesthetic_score) AS aesthetic_score,
+        COALESCE(ap.perception_iaa_label, ae.aesthetic_label) AS aesthetic_label,
+        NULL AS aesthetic_reason,
         ap.perception_iaa, ap.perception_iaa_label,
         ap.perception_iqa, ap.perception_iqa_label,
         ap.perception_ista, ap.perception_ista_label

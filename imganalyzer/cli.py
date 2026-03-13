@@ -239,23 +239,12 @@ def _persist_result_to_db(
                     repo.upsert_local_ai(image_id, data)
                 elif ai_backend in ("openai", "anthropic", "google", "copilot"):
                     cloud_data = dict(result.ai_analysis)
-                    # Strip aesthetic fields — they go to analysis_aesthetic, not analysis_cloud_ai
-                    aesthetic_score = cloud_data.pop("aesthetic_score", None)
-                    aesthetic_label = cloud_data.pop("aesthetic_label", None)
-                    aesthetic_reason = cloud_data.pop("aesthetic_reason", None)
+                    # Keep cloud output caption-focused; aesthetic metrics come
+                    # from the dedicated UniPercept pass.
+                    cloud_data.pop("aesthetic_score", None)
+                    cloud_data.pop("aesthetic_label", None)
+                    cloud_data.pop("aesthetic_reason", None)
                     repo.upsert_cloud_ai(image_id, ai_backend, cloud_data)
-                    # Copilot also returns aesthetic fields — store them separately.
-                    # People guard: do not store aesthetic scores for images with people.
-                    if ai_backend == "copilot" and aesthetic_score is not None:
-                        local_data = repo.get_analysis(image_id, "local_ai")
-                        has_people = bool(local_data and local_data.get("has_people"))
-                        if not has_people:
-                            repo.upsert_aesthetic(image_id, {
-                                "aesthetic_score": aesthetic_score,
-                                "aesthetic_label": aesthetic_label or "",
-                                "aesthetic_reason": aesthetic_reason or "",
-                                "provider": "copilot/gpt-4.1",
-                            })
 
             repo.update_search_index(image_id)
             conn.execute("COMMIT")

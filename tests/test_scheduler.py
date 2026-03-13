@@ -50,7 +50,7 @@ class TestVRAMBudget:
     def test_exclusive_module_alone(self):
         vram = self._make()
         assert vram.can_fit("perception")
-        # perception is now the only exclusive module
+        assert vram.can_fit("aesthetic")
 
     def test_cloud_ai_not_in_vram_budget(self):
         """cloud_ai runs via Ollama (external GPU) — 0 VRAM, always fits."""
@@ -58,9 +58,9 @@ class TestVRAMBudget:
         assert vram.can_fit("cloud_ai")
 
     def test_aesthetic_fits_on_small_budget(self):
-        """aesthetic (1.5 GB) fits on a 4 GB budget at 70% = 2.8 GB."""
+        """aesthetic uses UniPercept and does not fit on a 4 GB GPU."""
         vram = self._make(total=4.0, fraction=0.70)
-        assert vram.can_fit("aesthetic")
+        assert not vram.can_fit("aesthetic")
 
     def test_exclusive_blocked_by_existing(self):
         vram = self._make()
@@ -92,6 +92,7 @@ class TestVRAMBudget:
     def test_is_exclusive(self):
         vram = self._make()
         assert vram.is_exclusive("perception")
+        assert vram.is_exclusive("aesthetic")
         assert not vram.is_exclusive("cloud_ai")
         assert not vram.is_exclusive("faces")
         assert not vram.is_exclusive("embedding")
@@ -145,16 +146,17 @@ class TestResourceScheduler:
         s = self._make()
         assert len(s.gpu_phases) == 2
         assert s.modules_for_phase(0) == ["objects"]
-        assert s.modules_for_phase(1) == ["faces", "embedding", "aesthetic"]
+        assert s.modules_for_phase(1) == ["faces", "embedding"]
 
     def test_co_resident_phase(self):
         s = self._make()
         assert not s.is_co_resident_phase(0)  # objects alone
-        assert s.is_co_resident_phase(1)       # faces + embedding + aesthetic
+        assert s.is_co_resident_phase(1)       # faces + embedding
 
     def test_independent_gpu_modules(self):
         s = self._make()
         assert "perception" in s.independent_gpu_modules()
+        assert "aesthetic" in s.independent_gpu_modules()
 
     def test_batch_sizes(self):
         s = self._make()
@@ -342,7 +344,7 @@ class TestResourceScheduler:
             ThreadPoolExecutor(max_workers=1) as cloud_pool,
         ):
             s.run_gpu_phase(
-                1,  # Phase 1 => ["faces", "embedding", "aesthetic"]
+                1,  # Phase 1 => ["faces", "embedding"]
                 claim_fn=_claim_fn,
                 process_batch_fn=_process_batch_fn,
                 process_single_fn=lambda _job: "done",
@@ -444,7 +446,7 @@ class TestCoResidencyFitCheck:
 
     def test_phase1_fits_in_budget(self):
         vram = VRAMBudget(total_vram_gb=16.0, fraction=0.70)
-        phase1_modules = _GPU_PHASES[1]  # faces, embedding, aesthetic
+        phase1_modules = _GPU_PHASES[1]  # faces, embedding
         total = sum(_MODULE_VRAM_GB.get(m, 0) for m in phase1_modules)
         assert total < vram.budget_gb, (
             f"Phase 1 modules ({phase1_modules}) need {total:.2f} GB "
@@ -463,8 +465,9 @@ class TestCoResidencyFitCheck:
         assert total < vram.budget_gb
 
     def test_perception_exclusive_in_registry(self):
-        """perception must be in the exclusive set."""
+        """UniPercept-backed modules must be in the exclusive set."""
         assert "perception" in _EXCLUSIVE_MODULES
+        assert "aesthetic" in _EXCLUSIVE_MODULES
 
     def test_all_gpu_phases_have_known_modules(self):
         """Every module in _GPU_PHASES must have a VRAM entry."""

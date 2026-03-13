@@ -123,12 +123,8 @@ Write-Host "==> Installing editable package with extras: [$Extras]"
 conda run -n $EnvName python -m pip install -e ".[$Extras]"
 Assert-LastExit "Install imganalyzer editable package with extras"
 
-Write-Host "==> Ensuring SigLIP aesthetic dependency is installed..."
-conda run -n $EnvName python -m pip install -U aesthetic-predictor-v2-5
-Assert-LastExit "Install aesthetic-predictor-v2-5"
-
 # ── Verify imports ───────────────────────────────────────────────────────────
-Write-Host "==> Verifying local AI imports (torch + aesthetic + insightface + onnxruntime)..."
+Write-Host "==> Verifying local AI imports (torch + unipercept + insightface + onnxruntime)..."
 conda run -n $EnvName python -c @"
 import torch, numpy as np
 print('torch', torch.__version__, '/ numpy', np.__version__)
@@ -139,8 +135,8 @@ else:
     print('WARNING: CUDA not available - GPU acceleration disabled')
 import transformers
 print('transformers', transformers.__version__)
-import aesthetic_predictor_v2_5
-print('aesthetic_predictor_v2_5 ok')
+import unipercept_reward
+print('unipercept_reward ok')
 import open_clip
 print('open_clip ok')
 import insightface, onnxruntime as ort

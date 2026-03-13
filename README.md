@@ -109,9 +109,9 @@ bash scripts/setup_worker_env.sh ~/imganalyzer-worker
 ```
 
 Both scripts create/reuse a Conda env (`imganalyzer` on Windows, `imganalyzer312`
-on macOS/Linux), install `imganalyzer[local-ai,<provider>]` from source, ensure
-`aesthetic-predictor-v2-5` is installed, and verify local AI + cloud-provider
-imports. Default provider is `copilot`.
+on macOS/Linux), install `imganalyzer[local-ai,<provider>]` from source, and
+verify local AI (`torch`, `unipercept_reward`, `insightface`, `onnxruntime`) +
+cloud-provider imports. Default provider is `copilot`.
 Override defaults with environment variables:
 - `IMGANALYZER_ENV_NAME`
 - `IMGANALYZER_PYTHON_VERSION`
@@ -168,7 +168,7 @@ allow rules must be added in domain Group Policy.
 Useful worker options:
 
 - `--module metadata` to dedicate a worker to a single module
-- `--cloud copilot` to process `cloud_ai` and `aesthetic` with Copilot backend (match your batch provider)
+- `--cloud copilot` to process `cloud_ai` with Copilot backend (match your batch provider)
 - `--lease-ttl 300` to request longer job leases
 - `--heartbeat-interval 15` to refresh worker and lease liveness more often
 - `--path-mapping "SOURCE_PREFIX=LOCAL_PREFIX"` to remap shared-NAS paths on a worker with a different mount root

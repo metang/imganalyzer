@@ -21,11 +21,11 @@ _MODULE_VRAM_GB: dict[str, float] = {
     "faces":     1.0,   # InsightFace buffalo_l ONNX (1 GB arena cap)
     "embedding": 0.95,  # CLIP ViT-L/14 fp16, batch=16
     "perception": 15.6, # UniPercept 4-bit NF4 quantized
-    "aesthetic": 1.5,   # SigLIP-v2.5 aesthetic predictor bfloat16
+    "aesthetic": 15.6,  # UniPercept-backed aesthetic pass
 }
 
 # Modules that must run alone (peak VRAM > 50% of a typical budget).
-_EXCLUSIVE_MODULES: frozenset[str] = frozenset({"perception"})
+_EXCLUSIVE_MODULES: frozenset[str] = frozenset({"perception", "aesthetic"})
 
 # Default VRAM reservation fraction (matches set_per_process_memory_fraction).
 _DEFAULT_FRACTION = 0.70

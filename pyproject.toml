@@ -41,7 +41,7 @@ local-ai = [
     "transformers>=4.40",
     "torch>=2.5",
     "accelerate>=0.29",
-    "aesthetic-predictor-v2-5",
+    "unipercept-reward",
     "open_clip_torch>=2.24",
     "huggingface_hub>=0.23",
     "insightface>=0.7",

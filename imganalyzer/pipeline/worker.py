@@ -14,12 +14,13 @@ Phase 0 — ``objects`` pass (GPU, serial):
   unblocked.  ``metadata`` / ``technical`` run concurrently
   in a thread pool throughout all phases.
 
-Phase 1 — ``faces`` + ``embedding`` + ``aesthetic`` (GPU, co-resident):
-  These models (~3.45 GB total) run concurrently with separate CUDA streams.
-  ``aesthetic`` uses SigLIP-v2.5 (~1.5 GB).
+Phase 1 — ``faces`` + ``embedding`` (GPU, co-resident):
+  These models (~1.95 GB total) run concurrently with separate CUDA streams.
+  ``aesthetic`` / ``perception`` (UniPercept) run as independent exclusive
+  GPU modules during the IO drain.
 
 ``cloud_ai`` runs via Ollama (IO-bound, not GPU-phased).  It produces
-captions, keywords, descriptions, and aesthetic scores in a single call.
+captions, keywords, and descriptions in a single call.
 
 Cloud / IO work runs in parallel thread pools throughout all phases, with
 the cloud pool boosted to 2× when GPU is idle.
@@ -539,12 +540,12 @@ class Worker:
                 # GPU Phases (scheduler-driven)
                 # Phase 0: objects (unlocks dependencies)
                 #   - cloud_ai (Ollama) runs concurrently in IO pool
-                # Phase 1: faces + embedding + aesthetic (co-resident)
+                # Phase 1: faces + embedding (co-resident)
                 #   - Ollama model unloaded before this phase starts
                 # ════════════════════════════════════════════════════════════
                 phase_labels = [
                     "Phase 0 — object detection + Ollama AI (concurrent)",
-                    "Phase 1 — faces + embeddings + aesthetic (co-resident GPU)",
+                    "Phase 1 — faces + embeddings (co-resident GPU)",
                 ]
 
                 for phase_idx in range(len(scheduler.gpu_phases)):
@@ -600,7 +601,7 @@ class Worker:
                         )
 
                 # ════════════════════════════════════════════════════════════
-                # IO drain + independent GPU modules (e.g. perception)
+                # IO drain + independent GPU modules (e.g. perception/aesthetic)
                 # ════════════════════════════════════════════════════════════
                 if not self._shutdown.is_set():
                     boosted_cloud = (
@@ -758,7 +759,7 @@ class Worker:
         "objects":   4,   # GroundingDINO mixed fp16/fp32, ~1.1 GB model
         "embedding": 16,  # CLIP ViT-L/14 fp16, ~0.95 GB model
         "faces":     8,   # InsightFace ONNX — claim granularity for prefetch
-        "aesthetic": 4,   # SigLIP-v2.5 — claim granularity
+        "aesthetic": 1,   # UniPercept — heavy model, claim one-at-a-time
     }
 
     def _process_job_batch(

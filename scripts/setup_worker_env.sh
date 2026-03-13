@@ -110,9 +110,6 @@ EXTRAS="local-ai,$WORKER_CLOUD_PROVIDER"
 echo "==> Installing editable package with extras: [$EXTRAS]"
 conda run -n "$ENV_NAME" python -m pip install -e ".[${EXTRAS}]"
 
-echo "==> Ensuring SigLIP aesthetic dependency is installed..."
-conda run -n "$ENV_NAME" python -m pip install -U aesthetic-predictor-v2-5
-
 # ── Post-install: detect broken libtorch symlinks ────────────────────────────
 # If conda torch was ever installed and later replaced by pip torch, broken
 # symlinks can be left behind. Detect and fix before the verification step.
@@ -134,7 +131,7 @@ if [[ -d "$TORCH_LIB_DIR" ]]; then
   fi
 fi
 
-echo "==> Verifying local AI imports (torch + aesthetic + insightface + onnxruntime)..."
+echo "==> Verifying local AI imports (torch + unipercept + insightface + onnxruntime)..."
 conda run -n "$ENV_NAME" python -c "
 import torch, numpy as np
 print('torch', torch.__version__, '/ numpy', np.__version__)
@@ -142,8 +139,8 @@ print('torch', torch.__version__, '/ numpy', np.__version__)
 _ = torch.tensor([1.0])
 import transformers
 print('transformers', transformers.__version__)
-import aesthetic_predictor_v2_5
-print('aesthetic_predictor_v2_5 ok')
+import unipercept_reward
+print('unipercept_reward ok')
 import open_clip
 print('open_clip ok')
 import insightface, onnxruntime as ort

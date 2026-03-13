@@ -46,19 +46,19 @@ _BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "embedding"})
 #
 # Phase 0: objects       (must run first — unlocks cloud/faces deps, 2.4 GB)
 #          cloud_ai runs concurrently via Ollama in IO thread pool
-# Phase 1: faces, embedding, aesthetic (co-resident — total ~3.45 GB)
+# Phase 1: faces, embedding (co-resident — total ~1.95 GB)
 #          Ollama model is unloaded between Phase 0 and Phase 1
 #
-# perception runs independently during IO drain (not sequenced with above)
+# perception/aesthetic run independently during IO drain (not sequenced with above)
 _GPU_PHASES: list[list[str]] = [
     ["objects"],
-    ["faces", "embedding", "aesthetic"],
+    ["faces", "embedding"],
 ]
 
 # GPU modules that run independently alongside the IO drain rather than
 # in the sequential phase pipeline.  They have no prerequisites on other
 # GPU modules and can coexist with cloud thread-pool work.
-INDEPENDENT_GPU_MODULES: frozenset[str] = frozenset({"perception"})
+INDEPENDENT_GPU_MODULES: frozenset[str] = frozenset({"perception", "aesthetic"})
 
 
 class ResourceScheduler:

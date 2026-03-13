@@ -252,72 +252,13 @@ class ModuleRunner:
             for key in ("perception_iaa", "perception_iqa", "perception_ista")
         )
 
-    @staticmethod
-    def _is_synthetic_perception(
-        perception_row: dict[str, Any] | None,
-        aesthetic_score: Any,
-    ) -> bool:
-        if not perception_row or aesthetic_score is None:
-            return False
-        try:
-            iaa = float(perception_row.get("perception_iaa"))
-            iqa = float(perception_row.get("perception_iqa"))
-            ista = float(perception_row.get("perception_ista"))
-            aes = float(aesthetic_score)
-        except (TypeError, ValueError):
-            return False
-        eps = 1e-6
-        return (
-            abs(iaa - iqa) < eps
-            and abs(iqa - ista) < eps
-            and abs(iaa - aes) < eps
-        )
-
-    @staticmethod
-    def _build_synthetic_perception(aesthetic_data: dict[str, Any]) -> dict[str, Any]:
-        score = float(aesthetic_data["aesthetic_score"])
-        score = round(max(0.0, min(10.0, score)), 2)
-        try:
-            from imganalyzer.analysis.perception import score_to_label
-            label = score_to_label(score)
-        except ImportError:
-            label = str(aesthetic_data.get("aesthetic_label") or "Average")
-        return {
-            "perception_iaa": score,
-            "perception_iaa_label": label,
-            "perception_iqa": score,
-            "perception_iqa_label": label,
-            "perception_ista": score,
-            "perception_ista_label": label,
-        }
-
-    @staticmethod
-    def _is_perception_runtime_unavailable(exc: Exception) -> bool:
-        msg = str(exc).lower()
-        markers = (
-            "requires cuda",
-            "no cuda device is available",
-            "device 0 is not available",
-            "available devices are []",
-            "no gpu found",
-        )
-        return any(marker in msg for marker in markers)
-
     def should_run(self, image_id: int, module: str) -> bool:
         """Return False if the module is already analyzed and force is off."""
         if self.force:
             return True
         if module == "aesthetic":
-            aesthetic_row = self.repo.get_analysis(image_id, "aesthetic")
-            has_aesthetic = bool(aesthetic_row and aesthetic_row.get("aesthetic_score") is not None)
-            if not has_aesthetic:
-                return True
             perception = self.repo.get_analysis(image_id, "perception")
-            if not self._has_perception_scores(perception):
-                return True
-            if self._is_synthetic_perception(perception, aesthetic_row.get("aesthetic_score")):
-                return True
-            return False
+            return not self._has_perception_scores(perception)
         return not self.repo.is_analyzed(image_id, module)
 
     def run(self, image_id: int, module: str) -> dict[str, Any]:
@@ -474,10 +415,11 @@ class ModuleRunner:
         from imganalyzer.analysis.ai.ollama import OllamaAI
         result = OllamaAI().analyze(path, image_data)
 
-        # Extract aesthetic fields from the combined response before storing
-        aesthetic_score = result.pop("aesthetic_score", None)
-        aesthetic_label = result.pop("aesthetic_label", None)
-        aesthetic_reason = result.pop("aesthetic_reason", None)
+        # Keep cloud payload focused on captions/keywords. Aesthetic surfaces now
+        # come from UniPercept via the dedicated aesthetic/perception pass.
+        result.pop("aesthetic_score", None)
+        result.pop("aesthetic_label", None)
+        result.pop("aesthetic_reason", None)
 
         with _transaction(self.conn):
             self.repo.upsert_cloud_ai(image_id, "ollama-qwen3.5", result)
@@ -488,14 +430,6 @@ class ModuleRunner:
                     blip2_fields[key] = result[key]
             if blip2_fields:
                 self.repo.upsert_blip2(image_id, blip2_fields)
-            # Store aesthetic data from the same Ollama call
-            if aesthetic_score is not None:
-                self.repo.upsert_aesthetic(image_id, {
-                    "aesthetic_score": aesthetic_score,
-                    "aesthetic_label": aesthetic_label or "",
-                    "aesthetic_reason": aesthetic_reason or "",
-                    "provider": "ollama-qwen3.5",
-                })
 
         if self.verbose:
             console.print(
@@ -504,92 +438,28 @@ class ModuleRunner:
         return result
 
     def _run_aesthetic(self, image_id: int, path: Path) -> dict[str, Any]:
-        existing_aesthetic = self.repo.get_analysis(image_id, "aesthetic")
-        existing_perception = self.repo.get_analysis(image_id, "perception")
-        has_aesthetic = bool(existing_aesthetic and existing_aesthetic.get("aesthetic_score") is not None)
-        has_perception = self._has_perception_scores(existing_perception)
-        synthetic_perception = self._is_synthetic_perception(
-            existing_perception,
-            existing_aesthetic.get("aesthetic_score") if existing_aesthetic else None,
-        )
+        try:
+            from imganalyzer.analysis.perception import analyze as perception_analyze
+        except ImportError as exc:
+            raise RuntimeError(
+                "Perception dependency missing. Install `unipercept-reward` in the "
+                "imganalyzer runtime environment."
+            ) from exc
 
-        need_siglip = self.force or not has_aesthetic
-        need_perception = self.force or (not has_perception) or synthetic_perception
-        cached_aesthetic: dict[str, Any] | None = None
-
-        if not self.force:
-            if has_aesthetic and has_perception and not synthetic_perception:
-                if self.verbose:
-                    console.print(
-                        f"  [dim]Aesthetic + perception already populated for image {image_id}[/dim]"
-                    )
-                return {
-                    "aesthetic_score": existing_aesthetic["aesthetic_score"],
-                    "aesthetic_label": existing_aesthetic.get("aesthetic_label", ""),
-                    "aesthetic_reason": existing_aesthetic.get("aesthetic_reason", ""),
-                    "provider": existing_aesthetic.get("provider", ""),
-                }
-        if has_aesthetic:
-            cached_aesthetic = {
-                "aesthetic_score": existing_aesthetic["aesthetic_score"],
-                "aesthetic_label": existing_aesthetic.get("aesthetic_label", ""),
-                "aesthetic_reason": existing_aesthetic.get("aesthetic_reason", ""),
-                "provider": existing_aesthetic.get("provider", ""),
-            }
-
-        if need_siglip:
-            from imganalyzer.analysis.aesthetic import SigLIPAesthetic
-            aesthetic_data = SigLIPAesthetic.analyze(path)
-        else:
-            aesthetic_data = cached_aesthetic or {}
-
-        perception_data: dict[str, Any] | None = None
-        if need_perception:
-            try:
-                from imganalyzer.analysis.perception import analyze as perception_analyze
-            except ImportError as exc:
-                raise RuntimeError(
-                    "Perception dependency missing. Install `unipercept-reward` in the "
-                    "imganalyzer runtime environment."
-                ) from exc
-            try:
-                perception_data = perception_analyze(path)
-            except Exception as exc:
-                if not self._is_perception_runtime_unavailable(exc):
-                    raise
-                if aesthetic_data.get("aesthetic_score") is None:
-                    raise RuntimeError(
-                        "Perception runtime unavailable and cannot synthesize fallback "
-                        "because aesthetic_score is missing."
-                    ) from exc
-                perception_data = self._build_synthetic_perception(aesthetic_data)
-                if self.verbose:
-                    console.print(
-                        "  [yellow]Perception unavailable at runtime; "
-                        "backfilling synthetic perception from aesthetic score[/yellow]"
-                    )
+        result = perception_analyze(path)
 
         with _transaction(self.conn):
-            if need_siglip:
-                self.repo.upsert_aesthetic(image_id, aesthetic_data)
-            if perception_data is not None:
-                self.repo.upsert_perception(image_id, perception_data)
+            self.repo.upsert_perception(image_id, result)
 
         if self.verbose:
-            score = aesthetic_data.get("aesthetic_score", "?")
+            iaa = result.get("perception_iaa", "?")
+            iqa = result.get("perception_iqa", "?")
+            ista = result.get("perception_ista", "?")
             console.print(
-                f"  [dim]Aesthetic (SigLIP) done for image {image_id} "
-                f"(score={score})[/dim]"
+                f"  [dim]Aesthetic (UniPercept) done for image {image_id} "
+                f"(IAA={iaa}, IQA={iqa}, ISTA={ista})[/dim]"
             )
-            if perception_data is not None:
-                iaa = perception_data.get("perception_iaa", "?")
-                iqa = perception_data.get("perception_iqa", "?")
-                ista = perception_data.get("perception_ista", "?")
-                console.print(
-                    "  [dim]Perception metrics (UniPercept) populated "
-                    f"(IAA={iaa}, IQA={iqa}, ISTA={ista})[/dim]"
-                )
-        return aesthetic_data
+        return result
 
     def _run_perception(self, image_id: int, path: Path) -> dict[str, Any]:
         from imganalyzer.analysis.perception import analyze as perception_analyze
@@ -913,9 +783,9 @@ def unload_gpu_model(module: str) -> None:
     if module == "embedding":
         from imganalyzer.embeddings.clip_embedder import CLIPEmbedder
         CLIPEmbedder._unload()
-    if module == "aesthetic":
-        from imganalyzer.analysis.aesthetic import SigLIPAesthetic
-        SigLIPAesthetic.unload()
+    if module in ("aesthetic", "perception"):
+        from imganalyzer.analysis.perception import unload_model
+        unload_model()
 
 
 # ── XMP generation from DB data ───────────────────────────────────────────────

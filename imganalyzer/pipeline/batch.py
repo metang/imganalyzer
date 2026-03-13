@@ -112,7 +112,7 @@ class BatchProcessor:
                     ("blip2", "analysis_blip2"),
                     ("objects", "analysis_objects"),
                     ("faces", "analysis_faces"),
-                    ("aesthetic", "analysis_aesthetic"),
+                    ("aesthetic", "analysis_perception"),
                 ):
                     if module_name not in target_modules:
                         continue
