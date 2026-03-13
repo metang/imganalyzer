@@ -273,6 +273,36 @@ class ModuleRunner:
             and abs(iaa - aes) < eps
         )
 
+    @staticmethod
+    def _build_synthetic_perception(aesthetic_data: dict[str, Any]) -> dict[str, Any]:
+        score = float(aesthetic_data["aesthetic_score"])
+        score = round(max(0.0, min(10.0, score)), 2)
+        try:
+            from imganalyzer.analysis.perception import score_to_label
+            label = score_to_label(score)
+        except ImportError:
+            label = str(aesthetic_data.get("aesthetic_label") or "Average")
+        return {
+            "perception_iaa": score,
+            "perception_iaa_label": label,
+            "perception_iqa": score,
+            "perception_iqa_label": label,
+            "perception_ista": score,
+            "perception_ista_label": label,
+        }
+
+    @staticmethod
+    def _is_perception_runtime_unavailable(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        markers = (
+            "requires cuda",
+            "no cuda device is available",
+            "device 0 is not available",
+            "available devices are []",
+            "no gpu found",
+        )
+        return any(marker in msg for marker in markers)
+
     def should_run(self, image_id: int, module: str) -> bool:
         """Return False if the module is already analyzed and force is off."""
         if self.force:
@@ -522,7 +552,22 @@ class ModuleRunner:
                     "Perception dependency missing. Install `unipercept-reward` in the "
                     "imganalyzer runtime environment."
                 ) from exc
-            perception_data = perception_analyze(path)
+            try:
+                perception_data = perception_analyze(path)
+            except Exception as exc:
+                if not self._is_perception_runtime_unavailable(exc):
+                    raise
+                if aesthetic_data.get("aesthetic_score") is None:
+                    raise RuntimeError(
+                        "Perception runtime unavailable and cannot synthesize fallback "
+                        "because aesthetic_score is missing."
+                    ) from exc
+                perception_data = self._build_synthetic_perception(aesthetic_data)
+                if self.verbose:
+                    console.print(
+                        "  [yellow]Perception unavailable at runtime; "
+                        "backfilling synthetic perception from aesthetic score[/yellow]"
+                    )
 
         with _transaction(self.conn):
             if need_siglip:

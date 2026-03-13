@@ -111,6 +111,10 @@ class _ModelHolder:
             return
 
         import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "UniPercept requires CUDA, but no CUDA device is available."
+            )
         from transformers import AutoTokenizer, BitsAndBytesConfig
         import torchvision.transforms as T
         from torchvision.transforms.functional import InterpolationMode

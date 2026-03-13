@@ -1878,6 +1878,44 @@ class TestModuleRunnerAestheticForce:
         assert stored_perception["perception_ista"] == perception["perception_ista"]
         assert stored_perception["perception_iaa_label"] == perception["perception_iaa_label"]
 
+    def test_aesthetic_falls_back_to_synthetic_perception_when_runtime_unavailable(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.pipeline.modules import ModuleRunner
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        image_path = tmp_path / "perception-runtime-unavailable.jpg"
+        image_path.write_bytes(b"dummy")
+        image_id = repo.register_image(file_path=str(image_path))
+
+        refreshed = {
+            "aesthetic_score": 7.3,
+            "aesthetic_label": "Very Good",
+            "aesthetic_reason": "siglip",
+            "provider": "siglip-v2.5",
+        }
+        runner = ModuleRunner(conn=conn, repo=repo, force=False, verbose=True)
+        with patch(
+            "imganalyzer.analysis.aesthetic.SigLIPAesthetic.analyze",
+            return_value=refreshed,
+        ):
+            with patch(
+                "imganalyzer.analysis.perception.analyze",
+                side_effect=RuntimeError(
+                    "UniPercept requires CUDA, but no CUDA device is available."
+                ),
+            ):
+                result = runner.run(image_id, "aesthetic")
+
+        assert result["aesthetic_score"] == refreshed["aesthetic_score"]
+        assert result["provider"] == refreshed["provider"]
+        stored_perception = repo.get_analysis(image_id, "perception")
+        assert stored_perception is not None
+        assert stored_perception["perception_iaa"] == refreshed["aesthetic_score"]
+        assert stored_perception["perception_iqa"] == refreshed["aesthetic_score"]
+        assert stored_perception["perception_ista"] == refreshed["aesthetic_score"]
+        assert runner.should_run(image_id, "aesthetic") is True
+
 class TestWorkerFlushRecovery:
     def test_flush_fts_requeues_failed_ids(self, tmp_path):
         from imganalyzer.pipeline.worker import Worker
