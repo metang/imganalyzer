@@ -105,7 +105,13 @@ class JobQueue:
         self,
         modules: list[str] | None = None,
     ) -> list[int]:
-        """Return distinct image_ids with pending jobs, ordered by image_id.
+        """Return distinct image_ids with pending jobs.
+
+        Images are ordered by number of pending jobs **descending** so that
+        images needing the most work appear first.  This ensures that the
+        first chunk contains fresh images requiring all pipeline modules
+        rather than nearly-complete images that only need one deferred
+        module (e.g. perception).
 
         If *modules* is given, only consider jobs for those modules.
         """
@@ -116,7 +122,10 @@ class JobQueue:
             where += f" AND module IN ({placeholders})"
             params.extend(modules)
         rows = self.conn.execute(
-            f"SELECT DISTINCT image_id FROM job_queue {where} ORDER BY image_id",
+            f"""SELECT image_id, COUNT(*) AS cnt
+                FROM job_queue {where}
+                GROUP BY image_id
+                ORDER BY cnt DESC, image_id ASC""",
             params,
         ).fetchall()
         return [r["image_id"] for r in rows]
