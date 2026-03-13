@@ -781,6 +781,7 @@ class DistributedWorker:
 
         modules = status.get("modules", {})
         active: list[str] = []
+        pending_modules: list[str] = []
         if isinstance(modules, dict):
             for module_name, module_stats in modules.items():
                 if not isinstance(module_stats, dict):
@@ -789,6 +790,8 @@ class DistributedWorker:
                 running_count = int(module_stats.get("running", 0) or 0)
                 if pending_count <= 0 and running_count <= 0:
                     continue
+                if pending_count > 0:
+                    pending_modules.append(module_name)
                 summary = f"{module_name}"
                 if running_count > 0:
                     summary += f" r{running_count}"
@@ -801,6 +804,25 @@ class DistributedWorker:
         summary = f"queue pending={pending}, running={running}"
         if active:
             summary += f"; active={', '.join(active)}"
+        claimable_modules: set[str] | None = None
+        if self.module_filter:
+            claimable_modules = {self.module_filter}
+        elif self.supported_modules is not None:
+            claimable_modules = set(self.supported_modules)
+        if claimable_modules is not None and pending_modules:
+            claimable_pending = sorted(set(pending_modules) & claimable_modules)
+            if not claimable_pending:
+                pending_preview = ", ".join(sorted(set(pending_modules))[:4])
+                if self.module_filter:
+                    summary += (
+                        f"; no claimable pending modules for worker filter "
+                        f"'{self.module_filter}' (pending: {pending_preview})"
+                    )
+                else:
+                    summary += (
+                        "; no claimable pending modules for this worker "
+                        f"(pending: {pending_preview})"
+                    )
         return summary
 
     def _process_claimed_job(self, job: dict[str, Any]) -> str:

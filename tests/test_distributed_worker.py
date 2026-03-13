@@ -459,6 +459,40 @@ def test_coordinator_client_bypasses_env_proxy_for_private_hosts(monkeypatch):
     assert getattr(proxy_handler, "proxies", None) == {}
 
 
+def test_queue_summary_reports_when_pending_modules_are_unclaimable():
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/")
+    worker.supported_modules = ["cloud_ai", "metadata", "objects"]
+    worker._coordinator_call = lambda _method, _params: {
+        "totals": {"pending": 42, "running": 1},
+        "modules": {
+            "aesthetic": {"pending": 41, "running": 1},
+            "perception": {"pending": 1, "running": 0},
+        },
+    }  # type: ignore[method-assign]
+
+    summary = worker._coordinator_queue_summary()
+    assert summary is not None
+    assert "no claimable pending modules for this worker" in summary
+    assert "aesthetic" in summary
+    assert "perception" in summary
+
+
+def test_queue_summary_omits_unclaimable_hint_when_supported_pending_exists():
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/")
+    worker.supported_modules = ["cloud_ai", "metadata", "objects"]
+    worker._coordinator_call = lambda _method, _params: {
+        "totals": {"pending": 7, "running": 0},
+        "modules": {
+            "objects": {"pending": 2, "running": 0},
+            "aesthetic": {"pending": 5, "running": 0},
+        },
+    }  # type: ignore[method-assign]
+
+    summary = worker._coordinator_queue_summary()
+    assert summary is not None
+    assert "no claimable pending modules for this worker" not in summary
+
+
 def test_server_get_db_is_thread_local(tmp_path, monkeypatch):
     db_path = tmp_path / "server-thread-local.db"
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
