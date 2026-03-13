@@ -474,12 +474,13 @@ class Worker:
 
                 # ════════════════════════════════════════════════════════════
                 # GPU Phases (scheduler-driven)
-                # Phase 0: objects (unlocks dependencies)
-                # Phase 1: faces + embedding (co-resident)
+                # Phase 0: caption (qwen3.5 via Ollama)
+                # Phase 1: objects (unlocks faces dependency)
+                # Phase 2: faces + embedding (co-resident)
                 # ════════════════════════════════════════════════════════════
                 phase_labels = [
-                    "Phase 0 — object detection",
-                    "Phase 1 — faces + embeddings (co-resident GPU)",
+                    f"Phase {i} — {', '.join(scheduler.modules_for_phase(i))}"
+                    for i in range(len(scheduler.gpu_phases))
                 ]
 
                 for phase_idx in range(len(scheduler.gpu_phases)):
