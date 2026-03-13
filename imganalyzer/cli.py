@@ -151,8 +151,8 @@ def analyze(
             skipped += 1
             continue
 
-        # For cloud AI with --no-xmp: skip images that already have an aesthetic row in the DB
-        # (avoids redundant cloud calls on re-runs).
+        # For AI with --no-xmp: skip images that already have a perception row in the DB
+        # (avoids redundant AI calls on re-runs).
         if no_xmp and not detect_people and ai in ("openai", "anthropic", "google", "copilot") and not overwrite:
             try:
                 from imganalyzer.db.connection import get_db as _get_db
@@ -161,7 +161,7 @@ def analyze(
                 _repo = _Repo(_conn)
                 _img = _repo.get_image_by_path(str(img_path.resolve()))
                 if _img is not None:
-                    _ae = _repo.get_analysis(_img["id"], "aesthetic")
+                    _ae = _repo.get_analysis(_img["id"], "perception")
                     if _ae is not None:
                         skipped += 1
                         continue
@@ -233,10 +233,10 @@ def _persist_result_to_db(
 
             if result.ai_analysis:
                 if detect_people or ai_backend == "local":
-                    # People detection pre-pass or full local AI — both go to local_ai table.
+                    # People detection pre-pass or full local AI — both go to caption table.
                     data = dict(result.ai_analysis)
                     data.setdefault("has_people", bool(data.get("face_count", 0) > 0))
-                    repo.upsert_local_ai(image_id, data)
+                    repo.upsert_caption(image_id, data)
                 elif ai_backend in ("openai", "anthropic", "google", "copilot"):
                     cloud_data = dict(result.ai_analysis)
                     # Keep cloud output caption-focused; aesthetic metrics come
@@ -503,7 +503,7 @@ def ingest(
     modules: Optional[str] = typer.Option(
         None, "--modules", "-m",
         help="Comma-separated modules to enqueue (default: all). "
-             "Options: metadata,technical,local_ai,objects,faces,cloud_ai,aesthetic,perception,embedding",
+             "Options: metadata,technical,caption,objects,faces,perception,embedding",
     ),
     force: bool = typer.Option(False, "--force", help="Re-enqueue even if already analyzed"),
     no_recursive: bool = typer.Option(False, "--no-recursive", help="Don't scan subfolders"),
@@ -545,9 +545,7 @@ def ingest(
 @app.command(name="run")
 def run_queue(
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel workers (metadata/technical modules)"),
-    cloud_workers: int = typer.Option(4, "--cloud-workers", help="Number of parallel workers for cloud AI modules (cloud_ai, aesthetic)"),
     force: bool = typer.Option(False, "--force", help="Ignore cache, re-run everything"),
-    cloud_provider: str = typer.Option("openai", "--cloud", help="Cloud AI provider for cloud_ai/aesthetic modules"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     batch_size: int = typer.Option(10, "--batch-size", help="Jobs to claim per batch"),
     chunk_size: int = typer.Option(500, "--chunk-size", help="Process images in chunks of this size (0=no chunking)"),
@@ -584,9 +582,7 @@ def run_queue(
     worker = Worker(
         conn=conn,
         workers=workers,
-        cloud_workers=cloud_workers,
         force=force,
-        cloud_provider=cloud_provider,
         detection_prompt=detection_prompt,
         detection_threshold=detection_threshold,
         face_match_threshold=face_threshold,
@@ -623,11 +619,6 @@ def run_distributed_worker(
     module: Optional[str] = typer.Option(None, "--module", help="Optional single-module filter when claiming jobs"),
     path_mapping: list[str] | None = typer.Option(None, "--path-mapping", help="Repeatable source-to-local prefix remap rule: SOURCE_PREFIX=LOCAL_PREFIX"),
     force: bool = typer.Option(False, "--force", help="Ignore cache and re-run analyzed modules"),
-    cloud_provider: str = typer.Option(
-        "copilot",
-        "--cloud",
-        help="Cloud AI provider for cloud_ai/aesthetic modules (copilot/openai/anthropic/google)",
-    ),
     no_xmp: bool = typer.Option(False, "--no-xmp", help="Tell the coordinator not to write XMP sidecars for jobs completed by this worker"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose worker logging"),
     detection_prompt: Optional[str] = typer.Option(None, "--detection-prompt"),
@@ -668,7 +659,6 @@ def run_distributed_worker(
         lease_ttl_seconds=lease_ttl,
         module_filter=module,
         force=force,
-        cloud_provider=cloud_provider,
         detection_prompt=detection_prompt,
         detection_threshold=detection_threshold,
         face_match_threshold=face_threshold,
@@ -760,7 +750,7 @@ def status(
     table.add_column("Failed", justify="right", style="red")
     table.add_column("Skipped", justify="right", style="yellow")
 
-    for module in ("metadata", "technical", "local_ai", "cloud_ai", "aesthetic", "embedding"):
+    for module in ("metadata", "technical", "caption", "objects", "faces", "perception", "embedding"):
         stats = module_stats.get(module, {})
         table.add_row(
             module,
@@ -844,7 +834,7 @@ def queue_clear(
 def rebuild(
     module: str = typer.Argument(
         ...,
-        help="Module to rebuild: metadata, technical, local_ai, cloud_ai, aesthetic, perception, embedding",
+        help="Module to rebuild: metadata, technical, caption, objects, faces, perception, embedding",
     ),
     image: Optional[str] = typer.Option(
         None, "--image", help="Rebuild for a single image (file path)"
@@ -862,7 +852,7 @@ def rebuild(
     Example::
 
         imganalyzer rebuild technical
-        imganalyzer rebuild local_ai --image /photos/sunset.jpg
+        imganalyzer rebuild caption --image /photos/sunset.jpg
         imganalyzer rebuild aesthetic --failed-only
     """
     from dotenv import load_dotenv
@@ -924,8 +914,8 @@ def set_override(
     table_name: Optional[str] = typer.Option(
         None, "--table",
         help="Target table (auto-detected if omitted): "
-             "analysis_metadata, analysis_technical, analysis_local_ai, "
-             "analysis_cloud_ai, analysis_aesthetic",
+             "analysis_metadata, analysis_technical, analysis_caption, "
+             "analysis_perception",
     ),
     note: Optional[str] = typer.Option(None, "--note", help="Note for the override"),
 ) -> None:
@@ -1362,7 +1352,7 @@ def search_json_cmd(
             FROM images i
             LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
             LEFT JOIN analysis_technical t  ON t.image_id  = i.id
-            LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
+            LEFT JOIN analysis_caption   la ON la.image_id = i.id
             LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
             {where_clause}
         """
@@ -1421,7 +1411,7 @@ def search_json_cmd(
             FROM images i
             LEFT JOIN analysis_metadata  m  ON m.image_id  = i.id
             LEFT JOIN analysis_technical t  ON t.image_id  = i.id
-            LEFT JOIN analysis_local_ai  la ON la.image_id = i.id
+            LEFT JOIN analysis_caption   la ON la.image_id = i.id
             LEFT JOIN analysis_aesthetic ae ON ae.image_id = i.id
             {where_clause}
             LIMIT ? OFFSET ?
@@ -1552,16 +1542,16 @@ _FIELD_TABLE_MAP: dict[str, str] = {
     "noise_label": "analysis_technical",
     "snr_db": "analysis_technical",
     "dynamic_range_stops": "analysis_technical",
-    # local AI fields
-    "description": "analysis_local_ai",
-    "scene_type": "analysis_local_ai",
-    "main_subject": "analysis_local_ai",
-    "lighting": "analysis_local_ai",
-    "mood": "analysis_local_ai",
-    "keywords": "analysis_local_ai",
-    "detected_objects": "analysis_local_ai",
-    "face_count": "analysis_local_ai",
-    "face_identities": "analysis_local_ai",
+    # caption fields
+    "description": "analysis_caption",
+    "scene_type": "analysis_caption",
+    "main_subject": "analysis_caption",
+    "lighting": "analysis_caption",
+    "mood": "analysis_caption",
+    "keywords": "analysis_caption",
+    "detected_objects": "analysis_caption",
+    "face_count": "analysis_caption",
+    "face_identities": "analysis_caption",
     # aesthetic fields
     "aesthetic_score": "analysis_aesthetic",
     "aesthetic_label": "analysis_aesthetic",

@@ -7,7 +7,7 @@ import type { BatchStats, BatchResult, BatchStatus, BatchIngestProgress } from '
 export const ALL_MODULE_KEYS = [
   'metadata',
   'technical',
-  'local_ai',
+  'caption',
   'objects',
   'faces',
   'cloud_ai',

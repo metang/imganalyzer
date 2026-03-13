@@ -61,9 +61,9 @@ def seed_job_context(
 
     modules = context.get("modules", {}) if isinstance(context, dict) else {}
 
-    local_ai = modules.get("local_ai")
+    local_ai = modules.get("caption") or modules.get("local_ai")
     if isinstance(local_ai, dict) and local_ai:
-        repo.upsert_local_ai(image_id, _clean_analysis_row(local_ai))
+        repo.upsert_caption(image_id, _clean_analysis_row(local_ai))
 
     objects = modules.get("objects")
     if isinstance(objects, dict) and objects:
@@ -72,18 +72,6 @@ def seed_job_context(
     perception = modules.get("perception")
     if isinstance(perception, dict) and perception:
         repo.upsert_perception(image_id, _clean_analysis_row(perception))
-
-    cloud_ai = modules.get("cloud_ai")
-    if isinstance(cloud_ai, dict):
-        providers = cloud_ai.get("providers", [])
-        if isinstance(providers, list):
-            for provider_row in providers:
-                if not isinstance(provider_row, dict):
-                    continue
-                provider = str(provider_row.get("provider", "")).strip()
-                if not provider:
-                    continue
-                repo.upsert_cloud_ai(image_id, provider, _clean_analysis_row(provider_row))
 
     conn.commit()
 
@@ -121,17 +109,6 @@ def extract_result_payload(
             for row in rows
             if row["vector"] is not None
         ]
-        return payload
-
-    if module == "cloud_ai":
-        payload["data"] = repo.get_analysis(image_id, "cloud_ai") or {"providers": []}
-        blip2 = repo.get_analysis(image_id, "blip2")
-        if blip2:
-            payload["blip2"] = _clean_analysis_row(blip2)
-        return payload
-
-    if module == "aesthetic":
-        payload["data"] = _clean_analysis_row(repo.get_analysis(image_id, "perception"))
         return payload
 
     data = repo.get_analysis(image_id, module)
@@ -196,11 +173,11 @@ def persist_result_payload(
             repo.upsert_technical(image_id, data)
         return
 
-    if module == "local_ai":
+    if module in ("caption", "local_ai"):
         data = _clean_analysis_row(payload.get("data"))
         if not data:
             return
-        repo.upsert_local_ai(image_id, data)
+        repo.upsert_caption(image_id, data)
         write_local_ai_split_tables(conn, repo, image_id, data, wrap_transactions=False)
         return
 
@@ -237,30 +214,6 @@ def persist_result_payload(
                     }
                 )
             repo.upsert_face_occurrences(image_id, decoded)
-        return
-
-    if module == "cloud_ai":
-        cloud_data = payload.get("data", {})
-        if isinstance(cloud_data, dict):
-            providers = cloud_data.get("providers", [])
-            if isinstance(providers, list):
-                for provider_row in providers:
-                    if not isinstance(provider_row, dict):
-                        continue
-                    provider = str(provider_row.get("provider", "")).strip()
-                    if not provider:
-                        continue
-                    repo.upsert_cloud_ai(image_id, provider, _clean_analysis_row(provider_row))
-        blip2 = payload.get("blip2")
-        if isinstance(blip2, dict) and blip2:
-            repo.upsert_blip2(image_id, _clean_analysis_row(blip2))
-        return
-
-    if module == "aesthetic":
-        data = _clean_analysis_row(payload.get("data"))
-        perception = data or _clean_analysis_row(payload.get("perception"))
-        if perception:
-            repo.upsert_perception(image_id, perception)
         return
 
     if module == "embedding":

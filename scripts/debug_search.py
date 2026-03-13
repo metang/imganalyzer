@@ -97,7 +97,7 @@ def _reconstruct_desc_text(conn, image_id: int) -> str:
     parts: list[str] = []
 
     local = conn.execute(
-        "SELECT description, scene_type, main_subject FROM analysis_local_ai WHERE image_id = ?",
+        "SELECT description, scene_type, main_subject FROM analysis_caption WHERE image_id = ?",
         [image_id],
     ).fetchone()
     if local:
@@ -125,12 +125,12 @@ def section_overview(conn) -> None:
     total_images = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
     p(f"Total images in DB:          {total_images}")
 
-    has_local  = conn.execute("SELECT COUNT(DISTINCT image_id) FROM analysis_local_ai").fetchone()[0]
+    has_local  = conn.execute("SELECT COUNT(DISTINCT image_id) FROM analysis_caption").fetchone()[0]
     has_cloud  = conn.execute("SELECT COUNT(DISTINCT image_id) FROM analysis_cloud_ai").fetchone()[0]
     has_img_e  = conn.execute("SELECT COUNT(*) FROM embeddings WHERE embedding_type='image_clip'").fetchone()[0]
     has_desc_e = conn.execute("SELECT COUNT(*) FROM embeddings WHERE embedding_type='description_clip'").fetchone()[0]
 
-    p(f"Images with local_ai:        {has_local}")
+    p(f"Images with caption:         {has_local}")
     p(f"Images with cloud_ai:        {has_cloud}")
     p()
     p(f"Embeddings — image_clip:     {has_img_e}")
@@ -282,7 +282,7 @@ def section_staleness(conn, image_scored: list, desc_scored: list) -> None:
     # Take top 10 from each list
     check_ids = list({r["image_id"] for r in (image_scored[:10] + desc_scored[:10])})
 
-    p(f"{'image_id':>8}  {'emb_img_at':>20}  {'emb_desc_at':>20}  {'local_ai_at':>20}  {'cloud_ai_at':>20}  stale?")
+    p(f"{'image_id':>8}  {'emb_img_at':>20}  {'emb_desc_at':>20}  {'caption_at':>20}  {'cloud_ai_at':>20}  stale?")
     hr()
 
     for image_id in check_ids:
@@ -294,8 +294,8 @@ def section_staleness(conn, image_scored: list, desc_scored: list) -> None:
             "SELECT computed_at FROM embeddings WHERE image_id=? AND embedding_type='description_clip'",
             [image_id],
         ).fetchone()
-        local_ai = conn.execute(
-            "SELECT analyzed_at FROM analysis_local_ai WHERE image_id=?", [image_id]
+        caption = conn.execute(
+            "SELECT analyzed_at FROM analysis_caption WHERE image_id=?", [image_id]
         ).fetchone()
         cloud_ai = conn.execute(
             "SELECT MAX(analyzed_at) AS analyzed_at FROM analysis_cloud_ai WHERE image_id=?",
@@ -304,19 +304,19 @@ def section_staleness(conn, image_scored: list, desc_scored: list) -> None:
 
         emb_img_at   = str(emb_img["computed_at"])   if emb_img  else "(none)"
         emb_desc_at  = str(emb_desc["computed_at"])  if emb_desc else "(none)"
-        local_ai_at  = str(local_ai["analyzed_at"])  if local_ai else "(none)"
+        caption_at  = str(caption["analyzed_at"])  if caption else "(none)"
         cloud_ai_at  = str(cloud_ai["analyzed_at"])  if cloud_ai and cloud_ai["analyzed_at"] else "(none)"
 
         # Determine staleness: description_clip computed before most recent AI analysis?
         stale = False
         relevant_emb_at = emb_desc_at if emb_desc else emb_img_at
-        for ai_at in (local_ai_at, cloud_ai_at):
+        for ai_at in (caption_at, cloud_ai_at):
             if ai_at != "(none)" and relevant_emb_at != "(none)":
                 if relevant_emb_at < ai_at:
                     stale = True
 
         flag = "⚠ STALE" if stale else "ok"
-        p(f"{image_id:>8}  {emb_img_at:>20}  {emb_desc_at:>20}  {local_ai_at:>20}  {cloud_ai_at:>20}  {flag}")
+        p(f"{image_id:>8}  {emb_img_at:>20}  {emb_desc_at:>20}  {caption_at:>20}  {cloud_ai_at:>20}  {flag}")
 
 
 # ── Section 4: RRF comparison ─────────────────────────────────────────────────
@@ -427,7 +427,7 @@ def section_pagination(conn, query: str, limit: int = 200) -> None:
     sql = f"""
         SELECT i.id AS image_id, i.file_path
         FROM images i
-        LEFT JOIN analysis_local_ai la ON la.image_id = i.id
+        LEFT JOIN analysis_caption la ON la.image_id = i.id
         WHERE i.id IN ({id_placeholders})
         LIMIT ? OFFSET 0
     """
@@ -504,7 +504,7 @@ def section_description_quality(conn, query: str, limit: int) -> None:
         p(f"\n  [{rank_label}]  image_id={image_id}  cosine={sim:.4f}")
         p(f"  file: {Path(file_path).name}")
         local = conn.execute(
-            "SELECT description, scene_type, main_subject, keywords FROM analysis_local_ai WHERE image_id=?",
+            "SELECT description, scene_type, main_subject, keywords FROM analysis_caption WHERE image_id=?",
             [image_id],
         ).fetchone()
         if local:

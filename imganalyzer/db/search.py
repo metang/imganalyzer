@@ -565,14 +565,14 @@ class SearchEngine:
                 SELECT la.image_id,
                        la.description AS local_desc,
                        ca.description AS cloud_desc
-                FROM analysis_local_ai la
+                FROM analysis_caption la
                 LEFT JOIN analysis_cloud_ai ca ON ca.image_id = la.image_id
                 UNION ALL
                 SELECT ca.image_id,
                        NULL AS local_desc,
                        ca.description AS cloud_desc
                 FROM analysis_cloud_ai ca
-                WHERE ca.image_id NOT IN (SELECT image_id FROM analysis_local_ai)
+                WHERE ca.image_id NOT IN (SELECT image_id FROM analysis_caption)
             )
             GROUP BY image_id
             HAVING total_len >= ?

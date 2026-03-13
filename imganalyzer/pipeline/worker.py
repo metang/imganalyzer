@@ -8,22 +8,19 @@ Processing strategy
 -------------------
 The worker uses a VRAM-budget-aware scheduler with GPU phases:
 
-Phase 0 — ``objects`` pass (GPU, serial):
+Phase 0 — ``caption`` pass (GPU, serial):
+  qwen3.5 via Ollama generates descriptions, keywords, scene classification,
+  and aesthetic scoring.  The Ollama model is unloaded after this phase.
+
+Phase 1 — ``objects`` pass (GPU, serial):
   Drain ALL pending ``objects`` jobs first.  Once ``objects`` is done for an
-  image, ``has_person`` is known → ``cloud_ai`` and ``faces`` jobs are
-  unblocked.  ``metadata`` / ``technical`` run concurrently
-  in a thread pool throughout all phases.
+  image, ``faces`` jobs are unblocked.  ``metadata`` / ``technical`` run
+  concurrently in a thread pool throughout all phases.
 
-Phase 1 — ``faces`` + ``embedding`` (GPU, co-resident):
+Phase 2 — ``faces`` + ``embedding`` (GPU, co-resident):
   These models (~1.95 GB total) run concurrently with separate CUDA streams.
-  ``aesthetic`` / ``perception`` (UniPercept) run as independent exclusive
-  GPU modules during the IO drain.
-
-``cloud_ai`` runs via Ollama (IO-bound, not GPU-phased).  It produces
-captions, keywords, and descriptions in a single call.
-
-Cloud / IO work runs in parallel thread pools throughout all phases, with
-the cloud pool boosted to 2× when GPU is idle.
+  ``perception`` (UniPercept) runs as an independent exclusive GPU module
+  during the IO drain.
 
 Structured output
 -----------------
@@ -31,7 +28,6 @@ Each completed job emits a ``[RESULT]`` line to stdout so that the Electron
 GUI can parse per-job progress without depending on Rich formatting:
 
     [RESULT] {"path": "/a/b.jpg", "module": "technical", "status": "done", "ms": 45}
-    [RESULT] {"path": "/a/b.jpg", "module": "cloud_ai",  "status": "skipped", "ms": 0, "error": "prerequisite not met: objects"}
     [RESULT] {"path": "/a/b.jpg", "module": "objects",   "status": "failed",  "ms": 812, "error": "CUDA OOM"}
 
 These lines are always emitted (regardless of --verbose) and are JSON-safe
@@ -64,25 +60,21 @@ from imganalyzer.pipeline.scheduler import ResourceScheduler
 console = Console()
 
 # Modules that use GPU — must run single-threaded on the main thread
-GPU_MODULES = {"local_ai", "embedding", "objects", "faces", "perception", "aesthetic"}
+GPU_MODULES = {"caption", "embedding", "objects", "faces", "perception"}
 # Local I/O-bound modules — parallel, governed by `workers`
 LOCAL_IO_MODULES = {"metadata", "technical"}
-# Cloud/IO modules — parallel, governed by `cloud_workers`
-# cloud_ai calls Ollama (uses GPU externally but IO-bound from pipeline)
-CLOUD_MODULES = {"cloud_ai"}
-# Combined set (kept for backwards-compat references)
-IO_MODULES = LOCAL_IO_MODULES | CLOUD_MODULES
+# Combined IO set
+IO_MODULES = LOCAL_IO_MODULES
 
 # Modules whose output contributes to the FTS5 search index.
 # The search index is rebuilt *once* per image after all its jobs complete,
 # rather than after every individual module write (saves ~3M FTS5 cycles
 # at 500K images with 6 text-producing modules each).
-_FTS_MODULES = {"metadata", "local_ai", "faces", "cloud_ai"}
+_FTS_MODULES = {"metadata", "caption", "faces"}
 
-# The ``objects`` pass must complete for an image before cloud/faces/embedding
+# The ``objects`` pass must complete for an image before faces/embedding
 # may run (it provides detection-derived gating/context).
 _PREREQUISITES: dict[str, str] = {
-    "cloud_ai": "objects",
     "faces": "objects",
     "embedding": "objects",
 }
@@ -137,9 +129,7 @@ class Worker:
         self,
         conn: sqlite3.Connection,
         workers: int = min(os.cpu_count() or 1, 8),
-        cloud_workers: int = 4,
         force: bool = False,
-        cloud_provider: str = "openai",
         detection_prompt: str | None = None,
         detection_threshold: float | None = None,
         face_match_threshold: float | None = None,
@@ -156,13 +146,11 @@ class Worker:
 
         # Per-worker-thread config (no conn stored here — opened fresh per thread)
         self.force = force
-        self.cloud_provider = cloud_provider
         self.detection_prompt = detection_prompt
         self.detection_threshold = detection_threshold
         self.face_match_threshold = face_match_threshold
 
         self.workers = max(1, workers)
-        self.cloud_workers = max(1, cloud_workers)
         self.verbose = verbose
         self.stale_timeout = stale_timeout_minutes
         self.write_xmp = write_xmp
@@ -219,7 +207,6 @@ class Worker:
                 conn=conn,
                 repo=repo,
                 force=self.force,
-                cloud_provider=self.cloud_provider,
                 detection_prompt=self.detection_prompt,
                 detection_threshold=self.detection_threshold,
                 face_match_threshold=self.face_match_threshold,
@@ -274,26 +261,22 @@ class Worker:
         except Exception:
             pass
 
-        effective_cloud_workers = self.cloud_workers
-        if self.cloud_provider == "copilot" and effective_cloud_workers > 1:
-            effective_cloud_workers = 1
-            if self.verbose:
-                console.print(
-                    "[dim]Cloud AI provider 'copilot' running with 1 worker for stability[/dim]"
-                )
-
         scheduler = ResourceScheduler(
             vram_budget=vram,
             gpu_batch_sizes=self._GPU_BATCH_SIZES,
             default_batch_size=batch_size,
             cpu_workers=self.workers,
-            cloud_workers=effective_cloud_workers,
             shutdown_event=self._shutdown,
         )
 
-        # Backward compatibility: old queues may still carry pending `blip2`
-        # jobs, but the active pipeline runs this pass as `cloud_ai`.
-        remapped = self.queue.remap_pending_modules({"blip2": "cloud_ai"})
+        # Backward compatibility: remap legacy queue modules to their
+        # current replacements (blip2/cloud_ai/local_ai → caption, aesthetic → perception).
+        remapped = self.queue.remap_pending_modules({
+            "blip2": "caption",
+            "cloud_ai": "caption",
+            "local_ai": "caption",
+            "aesthetic": "perception",
+        })
         if remapped["updated"] or remapped["deleted"]:
             console.print(
                 "[yellow]Migrated legacy queue modules:[/yellow] "
@@ -334,57 +317,34 @@ class Worker:
         ) as progress:
             task = progress.add_task("Processing", total=total_pending)
 
-            # ── Helper: submit IO jobs to their pools ─────────────────────────
-            # Cap cloud futures to avoid blocking GPU phase transitions.
-            # Without a cap, thousands of cloud jobs queue up in the
-            # single-thread executor and shutdown(wait=True) stalls for hours.
-            _cloud_in_flight = 0
-            _max_cloud_in_flight = effective_cloud_workers * 2
+            # ── Helper: submit IO jobs to their pool ──────────────────────────
 
             def _submit_io_jobs(
                 local_pool: ThreadPoolExecutor,
                 cloud_pool: ThreadPoolExecutor,
             ) -> dict[Future, dict[str, Any]]:
-                """Claim and submit a batch of local-IO and cloud jobs."""
-                nonlocal _cloud_in_flight
+                """Claim and submit a batch of local-IO jobs."""
                 futures: dict[Future, dict[str, Any]] = {}
-                for module_set, pool in (
-                    (LOCAL_IO_MODULES, local_pool),
-                    (CLOUD_MODULES, cloud_pool),
-                ):
-                    for mod in module_set:
-                        if mod in CLOUD_MODULES:
-                            if _cloud_in_flight >= _max_cloud_in_flight:
-                                continue
-                            cloud_claim = max(
-                                1, _max_cloud_in_flight - _cloud_in_flight
-                            )
-                            jobs = self.queue.claim(
-                                batch_size=cloud_claim, module=mod
-                            )
-                        else:
-                            jobs = self.queue.claim(
-                                batch_size=batch_size, module=mod
-                            )
-                        for i, job in enumerate(jobs):
-                            if self._shutdown.is_set():
-                                for j in range(i, len(jobs)):
-                                    self.queue.mark_pending(jobs[j]["id"])
-                                return futures
-                            try:
-                                fut = pool.submit(self._process_job, job)
-                                futures[fut] = job
-                                if job["module"] in CLOUD_MODULES:
-                                    _cloud_in_flight += 1
-                            except RuntimeError:
-                                for j in range(i, len(jobs)):
-                                    self.queue.mark_pending(jobs[j]["id"])
-                                return futures
+                for mod in LOCAL_IO_MODULES:
+                    jobs = self.queue.claim(
+                        batch_size=batch_size, module=mod
+                    )
+                    for i, job in enumerate(jobs):
+                        if self._shutdown.is_set():
+                            for j in range(i, len(jobs)):
+                                self.queue.mark_pending(jobs[j]["id"])
+                            return futures
+                        try:
+                            fut = local_pool.submit(self._process_job, job)
+                            futures[fut] = job
+                        except RuntimeError:
+                            for j in range(i, len(jobs)):
+                                self.queue.mark_pending(jobs[j]["id"])
+                            return futures
                 return futures
 
             # ── Helper: collect results from futures ──────────────────────────
             def _collect_futures(futures: dict[Future, dict[str, Any]]) -> None:
-                nonlocal _cloud_in_flight
                 for fut, job in futures.items():
                     try:
                         result_status = fut.result()
@@ -398,20 +358,14 @@ class Worker:
                         image_row = self.repo.get_image(job["image_id"])
                         path = image_row["file_path"] if image_row else f"id={job['image_id']}"
                         _emit_result(path, job["module"], "failed", 0, error_msg)
-                    finally:
-                        if job["module"] in CLOUD_MODULES:
-                            _cloud_in_flight -= 1
                     progress.advance(task)
 
             def _cancel_futures(futures: dict[Future, dict[str, Any]]) -> None:
-                nonlocal _cloud_in_flight
                 for fut, job in list(futures.items()):
                     if fut.done():
                         continue
                     if fut.cancel():
                         self.queue.mark_pending(job["id"])
-                        if job["module"] in CLOUD_MODULES:
-                            _cloud_in_flight -= 1
                         futures.pop(fut, None)
 
             # ── Helper: claim jobs from queue ─────────────────────────────────
@@ -494,42 +448,24 @@ class Worker:
                     local_pool: ThreadPoolExecutor,
                     cloud_pool: ThreadPoolExecutor,
                 ) -> dict[Future, dict[str, Any]]:
-                    nonlocal _cloud_in_flight
                     futures: dict[Future, dict[str, Any]] = {}
-                    for module_set, pool in (
-                        (LOCAL_IO_MODULES, local_pool),
-                        (CLOUD_MODULES, cloud_pool),
-                    ):
-                        for mod in module_set:
-                            if mod in CLOUD_MODULES:
-                                if _cloud_in_flight >= _max_cloud_in_flight:
-                                    continue
-                                cloud_claim = max(
-                                    1, _max_cloud_in_flight - _cloud_in_flight
-                                )
-                                jobs = self.queue.claim(
-                                    batch_size=cloud_claim, module=mod,
-                                    image_ids=chunk_ids,
-                                )
-                            else:
-                                jobs = self.queue.claim(
-                                    batch_size=batch_size, module=mod,
-                                    image_ids=chunk_ids,
-                                )
-                            for i, job in enumerate(jobs):
-                                if self._shutdown.is_set():
-                                    for j in range(i, len(jobs)):
-                                        self.queue.mark_pending(jobs[j]["id"])
-                                    return futures
-                                try:
-                                    fut = pool.submit(self._process_job, job)
-                                    futures[fut] = job
-                                    if job["module"] in CLOUD_MODULES:
-                                        _cloud_in_flight += 1
-                                except RuntimeError:
-                                    for j in range(i, len(jobs)):
-                                        self.queue.mark_pending(jobs[j]["id"])
-                                    return futures
+                    for mod in LOCAL_IO_MODULES:
+                        jobs = self.queue.claim(
+                            batch_size=batch_size, module=mod,
+                            image_ids=chunk_ids,
+                        )
+                        for i, job in enumerate(jobs):
+                            if self._shutdown.is_set():
+                                for j in range(i, len(jobs)):
+                                    self.queue.mark_pending(jobs[j]["id"])
+                                return futures
+                            try:
+                                fut = local_pool.submit(self._process_job, job)
+                                futures[fut] = job
+                            except RuntimeError:
+                                for j in range(i, len(jobs)):
+                                    self.queue.mark_pending(jobs[j]["id"])
+                                return futures
                     return futures
 
                 # Use chunk-scoped functions when chunking, original otherwise
@@ -539,12 +475,10 @@ class Worker:
                 # ════════════════════════════════════════════════════════════
                 # GPU Phases (scheduler-driven)
                 # Phase 0: objects (unlocks dependencies)
-                #   - cloud_ai (Ollama) runs concurrently in IO pool
                 # Phase 1: faces + embedding (co-resident)
-                #   - Ollama model unloaded before this phase starts
                 # ════════════════════════════════════════════════════════════
                 phase_labels = [
-                    "Phase 0 — object detection + Ollama AI (concurrent)",
+                    "Phase 0 — object detection",
                     "Phase 1 — faces + embeddings (co-resident GPU)",
                 ]
 
@@ -558,21 +492,14 @@ class Worker:
                         for mod in phase_modules
                     )
                     if not has_pending:
-                        # Even if no GPU work, drain Ollama IO before Phase 1
-                        if phase_idx == 0:
-                            self._drain_ollama_io(
-                                active_claim_fn, active_submit_io, _collect_futures,
-                                effective_cloud_workers, stats,
-                                image_ids=chunk_ids,
-                            )
                         continue
 
                     console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
 
                     with (
                         self.profiler.span("gpu_phase", phase=phase_idx),
-                        ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
-                        ThreadPoolExecutor(max_workers=effective_cloud_workers) as cloud_pool,
+                        ThreadPoolExecutor(max_workers=self.workers)  as local_pool,
+                        ThreadPoolExecutor(max_workers=1)             as cloud_pool,
                     ):
                         scheduler.run_gpu_phase(
                             phase_idx,
@@ -591,24 +518,10 @@ class Worker:
                             cancel_futures_fn=_cancel_futures,
                         )
 
-                    # After Phase 0: drain remaining Ollama IO and unload model
-                    # so Phase 1 GPU modules have full VRAM available.
-                    if phase_idx == 0 and not self._shutdown.is_set():
-                        self._drain_ollama_io(
-                            active_claim_fn, active_submit_io, _collect_futures,
-                            effective_cloud_workers, stats,
-                            image_ids=chunk_ids,
-                        )
-
                 # ════════════════════════════════════════════════════════════
-                # IO drain + independent GPU modules (e.g. perception/aesthetic)
+                # IO drain + independent GPU modules (e.g. perception)
                 # ════════════════════════════════════════════════════════════
                 if not self._shutdown.is_set():
-                    boosted_cloud = (
-                        1 if self.cloud_provider == "copilot"
-                        else scheduler.boosted_cloud_workers()
-                    )
-
                     indie_gpu = [
                         mod for mod in scheduler.independent_gpu_modules()
                         if self.queue.pending_count(module=mod, image_ids=chunk_ids) > 0
@@ -624,18 +537,15 @@ class Worker:
 
                     with (
                         self.profiler.span("io_drain"),
-                        ThreadPoolExecutor(max_workers=self.workers)       as local_pool,
-                        ThreadPoolExecutor(max_workers=boosted_cloud)      as cloud_pool,
+                        ThreadPoolExecutor(max_workers=self.workers)  as local_pool,
+                        ThreadPoolExecutor(max_workers=1)             as cloud_pool,
                     ):
                         if indie_gpu:
                             console.print(
-                                f"[dim]IO drain + GPU ({', '.join(indie_gpu)}) — "
-                                f"cloud threads boosted to {boosted_cloud}[/dim]"
+                                f"[dim]IO drain + GPU ({', '.join(indie_gpu)})[/dim]"
                             )
                         else:
-                            console.print(
-                                f"[dim]IO drain — cloud threads boosted to {boosted_cloud}[/dim]"
-                            )
+                            console.print("[dim]IO drain[/dim]")
 
                         gpu_threads: list[threading.Thread] = []
                         for mod in indie_gpu:
@@ -696,62 +606,6 @@ class Worker:
 
         return stats
 
-    def _drain_ollama_io(
-        self,
-        claim_fn: Any,
-        submit_io_fn: Any,
-        collect_fn: Any,
-        cloud_workers: int,
-        stats: dict[str, int],
-        image_ids: set[int] | None = None,
-    ) -> None:
-        """Drain all pending cloud_ai (Ollama) IO jobs, then unload the model.
-
-        Called between GPU Phase 0 (objects) and Phase 1 (faces/etc.) so
-        that the Ollama model releases VRAM before Phase 1 models load.
-        This means the Ollama model loads once, processes all images, unloads
-        once — no per-image load/unload overhead.
-
-        If *image_ids* is given, only drain Ollama jobs for those images (chunking).
-        """
-        from concurrent.futures import as_completed
-
-        ollama_modules = {"cloud_ai"}
-        has_ollama = any(
-            self.queue.pending_count(module=mod, image_ids=image_ids) > 0
-            for mod in ollama_modules
-        )
-        if not has_ollama:
-            # Still unload in case Ollama was used during Phase 0 IO
-            from imganalyzer.analysis.ai.ollama import OllamaAI
-            OllamaAI.unload_model()
-            return
-
-        console.print("[dim]Draining Ollama AI jobs before GPU Phase 1…[/dim]")
-
-        with ThreadPoolExecutor(max_workers=cloud_workers) as pool:
-            while not self._shutdown.is_set():
-                futures: dict[Any, dict[str, Any]] = {}
-                for mod in ollama_modules:
-                    jobs = claim_fn(10, mod)
-                    for job in jobs:
-                        fut = pool.submit(self._process_job, job)
-                        futures[fut] = job
-                if not futures:
-                    break
-                for fut in as_completed(futures):
-                    job = futures[fut]
-                    try:
-                        status = fut.result()
-                        stats[status] = stats.get(status, 0) + 1
-                    except Exception:
-                        stats["failed"] = stats.get("failed", 0) + 1
-
-        # Unload Ollama model to free VRAM for Phase 1
-        from imganalyzer.analysis.ai.ollama import OllamaAI
-        OllamaAI.unload_model()
-        console.print("[dim]Ollama model unloaded — VRAM freed for GPU Phase 1[/dim]")
-
     # ── GPU batch sizes per module ──────────────────────────────────────
     # Tuned to stay within ~70% of GPU VRAM (e.g. ~11 GB on a 16 GB card)
     # to leave headroom for other applications and CUDA allocator overhead.
@@ -759,7 +613,6 @@ class Worker:
         "objects":   4,   # GroundingDINO mixed fp16/fp32, ~1.1 GB model
         "embedding": 16,  # CLIP ViT-L/14 fp16, ~0.95 GB model
         "faces":     8,   # InsightFace ONNX — claim granularity for prefetch
-        "aesthetic": 1,   # UniPercept — heavy model, claim one-at-a-time
     }
 
     def _process_job_batch(
@@ -771,7 +624,7 @@ class Worker:
 
         Returns a stats dict: ``{done: N, failed: N, skipped: N}``.
 
-        For modules with batch support (objects, blip2, embedding) this
+        For modules with batch support (objects, embedding) this
         method reads all images, runs a single batched GPU call, and
         writes all results atomically.  If batching fails (OOM etc.) the
         batch method's internal fallback handles per-image sequential
@@ -960,8 +813,7 @@ class Worker:
             result = runner.run(image_id, module)
             elapsed = int(time.time() * 1000) - start_ms
             queue.mark_done(job_id)
-            # For cloud_ai, include keywords in the result notification
-            kw = result.get("keywords") if module == "cloud_ai" and result else None
+            kw = result.get("keywords") if module == "caption" and result else None
             _emit_result(path, module, "done", elapsed, keywords=kw)
 
             # Track image for XMP generation after all jobs finish

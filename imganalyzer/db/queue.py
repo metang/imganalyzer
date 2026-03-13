@@ -585,7 +585,7 @@ class JobQueue:
         1) Delete source rows when a target row already exists for the same image.
         2) Rename remaining source rows to target.
 
-        This lets newer workers resume old queues (e.g. ``blip2`` -> ``cloud_ai``)
+        This lets newer workers resume old queues (e.g. ``local_ai`` -> ``caption``)
         without hitting UNIQUE(image_id, module) conflicts.
         """
         normalized = {

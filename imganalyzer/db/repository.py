@@ -20,7 +20,8 @@ def _now() -> str:
 MODULE_TABLE_MAP: dict[str, str] = {
     "metadata":   "analysis_metadata",
     "technical":  "analysis_technical",
-    "local_ai":   "analysis_local_ai",
+    "caption":    "analysis_caption",
+    "local_ai":   "analysis_caption",   # legacy alias
     "blip2":      "analysis_blip2",
     "objects":    "analysis_objects",
     "ocr":        "analysis_ocr",
@@ -31,7 +32,11 @@ MODULE_TABLE_MAP: dict[str, str] = {
     "embedding":  "embeddings",
 }
 
-ALL_MODULES = list(MODULE_TABLE_MAP.keys())
+# Active pipeline modules.  Legacy modules (blip2, cloud_ai, aesthetic, local_ai)
+# stay in MODULE_TABLE_MAP for backward-compatible reads of existing analysis data
+# but are excluded here so they are never enqueued or processed.
+_LEGACY_MODULES = frozenset({"blip2", "cloud_ai", "aesthetic", "local_ai"})
+ALL_MODULES = [m for m in MODULE_TABLE_MAP if m not in _LEGACY_MODULES]
 
 
 class Repository:
@@ -190,8 +195,8 @@ class Repository:
             f"INSERT INTO analysis_technical ({col_str}) VALUES ({placeholders})", vals
         )
 
-    def upsert_local_ai(self, image_id: int, data: dict[str, Any]) -> None:
-        """Atomic write of the full local AI analysis result."""
+    def upsert_caption(self, image_id: int, data: dict[str, Any]) -> None:
+        """Atomic write of the caption analysis result (description, keywords, etc.)."""
         for key in ("keywords", "detected_objects", "face_identities"):
             if key in data and isinstance(data[key], list):
                 data[key] = json.dumps(data[key])
@@ -200,16 +205,19 @@ class Repository:
         # Coerce has_people to int
         if "has_people" in data:
             data["has_people"] = 1 if data["has_people"] else 0
-        data = self._filter_to_known_columns("analysis_local_ai", data)
-        data = self._apply_override_mask(image_id, "analysis_local_ai", data)
-        self.conn.execute("DELETE FROM analysis_local_ai WHERE image_id = ?", [image_id])
+        data = self._filter_to_known_columns("analysis_caption", data)
+        data = self._apply_override_mask(image_id, "analysis_caption", data)
+        self.conn.execute("DELETE FROM analysis_caption WHERE image_id = ?", [image_id])
         cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]
         placeholders = ", ".join(["?"] * len(cols))
         col_str = ", ".join(cols)
         vals = [image_id] + list(data.values()) + [_now()]
         self.conn.execute(
-            f"INSERT INTO analysis_local_ai ({col_str}) VALUES ({placeholders})", vals
+            f"INSERT INTO analysis_caption ({col_str}) VALUES ({placeholders})", vals
         )
+
+    # Legacy alias for backward compatibility
+    upsert_local_ai = upsert_caption
 
     def upsert_cloud_ai(
         self, image_id: int, provider: str, data: dict[str, Any]
@@ -850,8 +858,7 @@ class Repository:
                 WHERE face_identities IS NOT NULL AND face_identities != '[]'
                 UNION
                 SELECT image_id, face_identities
-                FROM analysis_local_ai
-                WHERE face_identities IS NOT NULL AND face_identities != '[]'
+                FROM analysis_caption                WHERE face_identities IS NOT NULL AND face_identities != '[]'
             )
             SELECT
                 je.value       AS canonical_name,
@@ -871,7 +878,7 @@ class Repository:
     ) -> list[dict[str, Any]]:
         """Return images containing a specific face identity name.
 
-        Queries both ``analysis_faces`` and ``analysis_local_ai`` using
+        Queries both ``analysis_faces`` and ``analysis_caption`` using
         ``json_each()`` for reliable JSON-array matching.
         """
         limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
@@ -886,7 +893,7 @@ class Repository:
                 WHERE je.value = ?
                 UNION
                 SELECT DISTINCT la.image_id
-                FROM analysis_local_ai la, json_each(la.face_identities) je
+                FROM analysis_caption la, json_each(la.face_identities) je
                 WHERE je.value = ?
             )
             SELECT
@@ -896,7 +903,7 @@ class Repository:
             FROM matched m
             JOIN images i ON i.id = m.image_id
             LEFT JOIN analysis_faces    af2 ON af2.image_id = m.image_id
-            LEFT JOIN analysis_local_ai la2 ON la2.image_id = m.image_id
+            LEFT JOIN analysis_caption la2 ON la2.image_id = m.image_id
             ORDER BY i.file_path
             {limit_clause}
             """,
@@ -926,7 +933,7 @@ class Repository:
             FROM matched m
             JOIN images i ON i.id = m.image_id
             LEFT JOIN analysis_faces af ON af.image_id = m.image_id
-            LEFT JOIN analysis_local_ai la ON la.image_id = m.image_id
+            LEFT JOIN analysis_caption la ON la.image_id = m.image_id
             ORDER BY i.file_path
             {limit_clause}
             """,
@@ -956,7 +963,7 @@ class Repository:
             FROM matched m
             JOIN images i ON i.id = m.image_id
             LEFT JOIN analysis_faces af ON af.image_id = m.image_id
-            LEFT JOIN analysis_local_ai la ON la.image_id = m.image_id
+            LEFT JOIN analysis_caption la ON la.image_id = m.image_id
             ORDER BY i.file_path
             {limit_clause}
             """,
@@ -1354,9 +1361,9 @@ class Repository:
         faces_parts: list[str] = []
         exif_parts: list[str] = []
 
-        # Local AI (legacy full-pipeline table)
+        # Caption analysis (description, keywords, scene, etc.)
         local = self.conn.execute(
-            "SELECT * FROM analysis_local_ai WHERE image_id = ?", [image_id]
+            "SELECT * FROM analysis_caption WHERE image_id = ?", [image_id]
         ).fetchone()
         if local:
             if local["description"]:
@@ -1380,7 +1387,7 @@ class Repository:
             if local["lighting"]:
                 kw_parts.append(local["lighting"])
 
-        # BLIP-2 individual pass (supplement local_ai or used alone)
+        # BLIP-2 individual pass (supplement caption or used alone)
         blip2 = self.conn.execute(
             "SELECT * FROM analysis_blip2 WHERE image_id = ?", [image_id]
         ).fetchone() if self._table_exists("analysis_blip2") else None
@@ -1519,7 +1526,7 @@ class Repository:
         if img:
             result["image"] = img
 
-        for module in ("metadata", "technical", "local_ai", "blip2", "objects", "ocr", "faces", "aesthetic", "perception"):
+        for module in ("metadata", "technical", "caption", "blip2", "objects", "ocr", "faces", "aesthetic", "perception"):
             data = self.get_analysis(image_id, module)
             if data:
                 # Apply overrides on top

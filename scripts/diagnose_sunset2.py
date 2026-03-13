@@ -32,7 +32,7 @@ for rank, (iid, sim) in enumerate(img_sims[:20]):
     row = conn.execute(
         """SELECT la.description, la.scene_type, ca.description AS cloud_desc
            FROM images i
-           LEFT JOIN analysis_local_ai la ON la.image_id=i.id
+           LEFT JOIN analysis_caption la ON la.image_id=i.id
            LEFT JOIN analysis_cloud_ai ca ON ca.image_id=i.id
            WHERE i.id=? LIMIT 1""", [iid]).fetchone()
     d = (row["cloud_desc"] or row["description"] or "") if row else ""
@@ -96,7 +96,7 @@ for rank, (iid, score) in enumerate(fused[:20]):
     row = conn.execute(
         """SELECT la.description, ca.description AS cloud_desc
            FROM images i
-           LEFT JOIN analysis_local_ai la ON la.image_id=i.id
+           LEFT JOIN analysis_caption la ON la.image_id=i.id
            LEFT JOIN analysis_cloud_ai ca ON ca.image_id=i.id
            WHERE i.id=? LIMIT 1""", [iid]).fetchone()
     d = (row["cloud_desc"] or row["description"] or "") if row else ""
@@ -114,7 +114,7 @@ sunset_keywords = ["sunset", "sunrise", "dusk", "golden hour", "sun low", "sun o
 sunset_rows = conn.execute("""
     SELECT i.id, la.description, la.scene_type, ca.description AS cloud_desc
     FROM images i
-    LEFT JOIN analysis_local_ai la ON la.image_id=i.id
+    LEFT JOIN analysis_caption la ON la.image_id=i.id
     LEFT JOIN analysis_cloud_ai ca ON ca.image_id=i.id
     WHERE lower(la.description) LIKE '%sunset%'
        OR lower(la.description) LIKE '%sunrise%'

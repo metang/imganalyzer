@@ -29,13 +29,10 @@ from imganalyzer.pipeline.worker import _emit_result
 console = Console()
 
 # Modules that require local-AI packages (torch, transformers, etc.)
-_LOCAL_AI_MODULES = {"objects", "local_ai", "faces", "embedding", "perception", "aesthetic"}
+_LOCAL_AI_MODULES = {"objects", "caption", "faces", "embedding", "perception"}
 
 # Modules that always work (pure Python / stdlib)
 _ALWAYS_AVAILABLE_MODULES = {"metadata", "technical"}
-
-# Modules that require a cloud SDK (checked separately per provider)
-_CLOUD_MODULES = {"cloud_ai"}
 _TRANSIENT_DB_LOCK_MARKERS = (
     "database is locked",
     "database table is locked",
@@ -76,7 +73,7 @@ def _current_python_info() -> str:
     return ", ".join(parts)
 
 
-def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
+def _probe_available_modules() -> list[str]:
     """Probe which analysis modules this worker can actually run.
 
     Checks for required dependencies at startup so the worker only claims
@@ -90,8 +87,22 @@ def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
         import torch  # noqa: F401
         import transformers  # noqa: F401
 
-        available.extend(["objects", "local_ai"])
+        available.append("objects")
     except ImportError:
+        pass
+
+    # caption needs Ollama server running with a vision model
+    try:
+        from urllib import request as _req
+        from urllib.error import URLError
+        import os as _os
+
+        ollama_url = _os.environ.get("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+        req = _req.Request(f"{ollama_url}/api/tags", method="GET")
+        with _req.urlopen(req, timeout=5) as resp:
+            resp.read()
+        available.append("caption")
+    except (URLError, OSError, Exception):
         pass
 
     # faces needs insightface
@@ -113,36 +124,7 @@ def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
     except ImportError:
         pass
 
-    # cloud_ai needs a cloud SDK
-    provider = (cloud_provider or "").lower()
-    cloud_ok = False
-    if provider == "copilot":
-        cloud_ok = True  # copilot uses CLI subprocess, no extra package needed
-    elif provider == "openai":
-        try:
-            import openai  # noqa: F401
-            cloud_ok = True
-        except ImportError:
-            pass
-    elif provider == "anthropic":
-        try:
-            import anthropic  # noqa: F401
-            cloud_ok = True
-        except ImportError:
-            pass
-    elif provider == "google":
-        try:
-            import google.cloud.vision  # noqa: F401
-            cloud_ok = True
-        except ImportError:
-            pass
-    else:
-        cloud_ok = True  # unknown provider — optimistic, let it fail at runtime
-
-    if cloud_ok:
-        available.append("cloud_ai")
-
-    # perception/aesthetic need UniPercept dependency and CUDA runtime.
+    # perception needs UniPercept dependency and CUDA runtime.
     try:
         import torch
         import transformers  # noqa: F401
@@ -150,7 +132,7 @@ def _probe_available_modules(cloud_provider: str = "copilot") -> list[str]:
         if torch.cuda.is_available():
             import unipercept_reward  # noqa: F401
 
-            available.extend(["perception", "aesthetic"])
+            available.append("perception")
     except ImportError:
         pass
 
@@ -276,7 +258,6 @@ class DistributedWorker:
         lease_ttl_seconds: int = 120,
         module_filter: str | None = None,
         force: bool = False,
-        cloud_provider: str = "copilot",
         detection_prompt: str | None = None,
         detection_threshold: float | None = None,
         face_match_threshold: float | None = None,
@@ -298,7 +279,6 @@ class DistributedWorker:
         self.lease_ttl_seconds = max(5, lease_ttl_seconds)
         self.module_filter = module_filter.strip() if module_filter else None
         self.force = force
-        self.cloud_provider = cloud_provider
         self.detection_prompt = detection_prompt
         self.detection_threshold = detection_threshold
         self.face_match_threshold = face_match_threshold
@@ -316,7 +296,7 @@ class DistributedWorker:
         if self.module_filter:
             self.supported_modules: list[str] | None = None  # single-module mode
         else:
-            self.supported_modules = _probe_available_modules(cloud_provider)
+            self.supported_modules = _probe_available_modules()
 
         self._shutdown = threading.Event()
         self._active_leases: dict[int, str] = {}
@@ -533,7 +513,6 @@ class DistributedWorker:
                 conn=conn,
                 repo=repo,
                 force=self.force,
-                cloud_provider=self.cloud_provider,
                 detection_prompt=self.detection_prompt,
                 detection_threshold=self.detection_threshold,
                 face_match_threshold=self.face_match_threshold,
@@ -919,7 +898,7 @@ class DistributedWorker:
             elapsed = int((time.monotonic() - started_monotonic) * 1000)
             if not bool(done.get("ok")):
                 raise RuntimeError(f"Coordinator rejected completion for job {job_id}")
-            keywords = result.get("keywords") if module == "cloud_ai" and result else None
+            keywords = result.get("keywords") if module == "caption" and result else None
             self._safe_emit_result(
                 path=path,
                 module=module,
@@ -1072,13 +1051,10 @@ class DistributedWorker:
                     platform.system() == "Darwin"
                     and platform.machine().lower() in {"arm64", "aarch64"}
                 )
-                if is_apple_silicon and (
-                    "aesthetic" not in self.supported_modules
-                    or "perception" not in self.supported_modules
-                ):
+                if is_apple_silicon and "perception" not in self.supported_modules:
                     console.print(
                         "[dim]Apple Silicon worker detected: "
-                        "aesthetic/perception are CUDA-only and will be handled by "
+                        "perception is CUDA-only and will be handled by "
                         "CUDA workers or the coordinator.[/dim]"
                     )
                 if missing:
@@ -1098,14 +1074,14 @@ class DistributedWorker:
                         )
                         self._auto_update = False
                 # Fail fast when core local-AI deps are absent — the worker
-                # would just claim and skip every objects/faces job.
+                # would just claim and skip every GPU job.
                 local_ai_available = _LOCAL_AI_MODULES & set(self.supported_modules)
                 if not local_ai_available:
                     console.print(
                         "\n[bold red]ERROR: torch / transformers are not installed in "
                         "this Python environment.[/bold red]\n"
-                        "[red]The worker cannot run any local-AI modules "
-                        "(objects, faces, embedding, perception, aesthetic).[/red]\n\n"
+                        "[red]The worker cannot run any GPU modules "
+                        "(caption, objects, faces, embedding, perception).[/red]\n\n"
                         "You are likely running from the wrong conda environment.\n"
                         "  [bold]Current python:[/bold] "
                         + _current_python_info()
@@ -1115,9 +1091,7 @@ class DistributedWorker:
                         "  [bold]conda activate imganalyzer312[/bold]\n"
                         "  imganalyzer run-distributed-worker ...\n\n"
                         "Or, to set up a fresh worker environment:\n"
-                        "  [bold]bash scripts/setup_worker_env.sh[/bold]\n\n"
-                        "[dim]To intentionally run only cloud modules, pass "
-                        "--module cloud_ai[/dim]"
+                        "  [bold]bash scripts/setup_worker_env.sh[/bold]"
                     )
                     raise SystemExit(1)
             while not self._shutdown.is_set():

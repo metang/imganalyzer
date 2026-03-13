@@ -173,7 +173,7 @@ class TestStandardReader:
 # ── Analyzer control path ─────────────────────────────────────────────────────
 
 class TestAnalyzer:
-    def test_cancel_event_stops_before_local_ai(self, tmp_path):
+    def test_cancel_event_stops_before_caption(self, tmp_path):
         from imganalyzer.analyzer import AnalysisCancelled, Analyzer
 
         image_path = tmp_path / "cancel.jpg"
@@ -261,7 +261,7 @@ class TestAnalyzer:
         try:
             repo = Repository(conn)
             image_id = repo.register_image(str(image_path.resolve()))
-            repo.upsert_local_ai(image_id, {"has_people": True})
+            repo.upsert_caption(image_id, {"has_people": True})
             conn.commit()
 
             # Prime the global singleton on the main thread so the background
@@ -1200,13 +1200,13 @@ class TestDatabaseLayer:
         colors = _json.loads(data["dominant_colors"])
         assert len(colors) == 2
 
-    def test_upsert_local_ai_with_people(self, tmp_path):
+    def test_upsert_caption_with_people(self, tmp_path):
         from imganalyzer.db.repository import Repository
         conn = _make_test_db(tmp_path)
         repo = Repository(conn)
 
         img_id = repo.register_image(file_path="/photos/portrait.jpg")
-        repo.upsert_local_ai(img_id, {
+        repo.upsert_caption(img_id, {
             "description": "A portrait of a woman",
             "scene_type": "portrait",
             "keywords": ["person", "portrait"],
@@ -1216,7 +1216,7 @@ class TestDatabaseLayer:
         })
         conn.commit()
 
-        data = repo.get_analysis(img_id, "local_ai")
+        data = repo.get_analysis(img_id, "caption")
         assert data is not None
         assert data["has_people"] == 1  # stored as int
         assert data["face_count"] == 1
@@ -1649,14 +1649,14 @@ class TestJobQueue:
         queue.enqueue(id1, "blip2")
         queue.enqueue(id2, "blip2")
         queue.enqueue(id3, "blip2")
-        queue.enqueue(id2, "cloud_ai")  # target row already exists -> source should be deleted
+        queue.enqueue(id2, "caption")  # target row already exists -> source should be deleted
         done_legacy = queue.enqueue(id4, "blip2")
         assert done_legacy is not None
         queue.mark_done(done_legacy)
 
         queue.claim(batch_size=1, module="blip2")  # ensure running rows also remap
 
-        remapped = queue.remap_pending_modules({"blip2": "cloud_ai"})
+        remapped = queue.remap_pending_modules({"blip2": "caption"})
         assert remapped == {"updated": 2, "deleted": 1}
 
         active_legacy = conn.execute(
@@ -1672,12 +1672,12 @@ class TestJobQueue:
         assert done_legacy_rows is not None
         assert done_legacy_rows["cnt"] == 1
 
-        cloud_rows = conn.execute(
+        target_rows = conn.execute(
             """SELECT COUNT(*) AS cnt FROM job_queue
-               WHERE module = 'cloud_ai' AND status IN ('pending', 'running')"""
+               WHERE module = 'caption' AND status IN ('pending', 'running')"""
         ).fetchone()
-        assert cloud_rows is not None
-        assert cloud_rows["cnt"] == 3
+        assert target_rows is not None
+        assert target_rows["cnt"] == 3
 
     def test_claim_leased_prefer_module(self, tmp_path):
         from imganalyzer.db.repository import Repository
@@ -1708,110 +1708,12 @@ class TestJobQueue:
         assert claimed[0]["module"] == "metadata"
 
 
-class TestModuleRunnerAestheticForce:
-    def test_should_run_aesthetic_when_perception_missing(self, tmp_path):
-        from imganalyzer.db.repository import Repository
-        from imganalyzer.pipeline.modules import ModuleRunner
-
-        conn = _make_test_db(tmp_path)
-        repo = Repository(conn)
-        image_path = tmp_path / "aesthetic-should-run.jpg"
-        image_path.write_bytes(b"dummy")
-        image_id = repo.register_image(file_path=str(image_path))
-        runner = ModuleRunner(conn=conn, repo=repo, force=False, verbose=True)
-        assert runner.should_run(image_id, "aesthetic") is True
-
-        repo.upsert_perception(image_id, {
-            "perception_iaa": 6.2,
-            "perception_iaa_label": "Good",
-            "perception_iqa": 6.1,
-            "perception_iqa_label": "Good",
-            "perception_ista": 6.0,
-            "perception_ista_label": "Good",
-        })
-        assert runner.should_run(image_id, "aesthetic") is False
-
-    def test_aesthetic_runs_unipercept_and_persists_scores(self, tmp_path):
-        from imganalyzer.db.repository import Repository
-        from imganalyzer.pipeline.modules import ModuleRunner
-
-        conn = _make_test_db(tmp_path)
-        repo = Repository(conn)
-        image_path = tmp_path / "aesthetic-unipercept.jpg"
-        image_path.write_bytes(b"dummy")
-        image_id = repo.register_image(file_path=str(image_path))
-        perception = {
-            "perception_iaa": 6.9,
-            "perception_iaa_label": "Good",
-            "perception_iqa": 5.8,
-            "perception_iqa_label": "Average",
-            "perception_ista": 7.1,
-            "perception_ista_label": "Very Good",
-        }
-
-        runner = ModuleRunner(conn=conn, repo=repo, force=False, verbose=True)
-        with patch(
-            "imganalyzer.analysis.perception.analyze",
-            return_value=perception,
-        ) as mocked:
-            result = runner.run(image_id, "aesthetic")
-
-        mocked.assert_called_once_with(image_path)
-        assert result["perception_iaa"] == perception["perception_iaa"]
-        assert result["perception_iqa"] == perception["perception_iqa"]
-        assert result["perception_ista"] == perception["perception_ista"]
-
-        stored_perception = repo.get_analysis(image_id, "perception")
-        assert stored_perception is not None
-        assert stored_perception["perception_iaa"] == perception["perception_iaa"]
-        assert stored_perception["perception_iqa"] == perception["perception_iqa"]
-        assert stored_perception["perception_ista"] == perception["perception_ista"]
-
-    def test_aesthetic_recomputes_when_forced(self, tmp_path):
-        from imganalyzer.db.repository import Repository
-        from imganalyzer.pipeline.modules import ModuleRunner
-
-        conn = _make_test_db(tmp_path)
-        repo = Repository(conn)
-        image_path = tmp_path / "forced-aesthetic.jpg"
-        image_path.write_bytes(b"dummy")
-        image_id = repo.register_image(file_path=str(image_path))
-        repo.upsert_perception(image_id, {
-            "perception_iaa": 5.2,
-            "perception_iaa_label": "Average",
-            "perception_iqa": 5.0,
-            "perception_iqa_label": "Average",
-            "perception_ista": 5.4,
-            "perception_ista_label": "Average",
-        })
-
-        perception = {
-            "perception_iaa": 8.4,
-            "perception_iaa_label": "Excellent",
-            "perception_iqa": 8.1,
-            "perception_iqa_label": "Excellent",
-            "perception_ista": 7.8,
-            "perception_ista_label": "Very Good",
-        }
-        runner = ModuleRunner(conn=conn, repo=repo, force=True, verbose=True)
-        with patch("imganalyzer.analysis.perception.analyze", return_value=perception) as mocked_perception:
-            result = runner.run(image_id, "aesthetic")
-
-        mocked_perception.assert_called_once_with(image_path)
-        assert result["perception_iaa"] == perception["perception_iaa"]
-        stored_perception = repo.get_analysis(image_id, "perception")
-        assert stored_perception is not None
-        assert stored_perception["perception_iaa"] == perception["perception_iaa"]
-        assert stored_perception["perception_iqa"] == perception["perception_iqa"]
-        assert stored_perception["perception_ista"] == perception["perception_ista"]
-        assert stored_perception["perception_iaa_label"] == perception["perception_iaa_label"]
-
 class TestWorkerFlushRecovery:
     def test_flush_fts_requeues_failed_ids(self, tmp_path):
         from imganalyzer.pipeline.worker import Worker
 
         conn = _make_test_db(tmp_path)
-        worker = Worker(conn, workers=1, cloud_workers=1)
+        worker = Worker(conn, workers=1)
         worker._fts_dirty = {101, 102}
 
         def _update_search_index(image_id: int) -> None:
@@ -1828,7 +1730,7 @@ class TestWorkerFlushRecovery:
         from imganalyzer.pipeline.worker import Worker
 
         conn = _make_test_db(tmp_path)
-        worker = Worker(conn, workers=1, cloud_workers=1, write_xmp=True)
+        worker = Worker(conn, workers=1, write_xmp=True)
         worker._xmp_candidates = {201, 202}
 
         def _write_xmp(_repo, image_id: int):
@@ -1858,7 +1760,7 @@ class TestWorkerFlushRecovery:
         assert first_job is not None
         assert second_job is not None
 
-        worker = Worker(conn, workers=1, cloud_workers=1)
+        worker = Worker(conn, workers=1)
 
         class FakeRunner:
             def should_run(self, _image_id: int, _module: str) -> bool:
@@ -1908,7 +1810,7 @@ class TestWorkerFlushRecovery:
         assert objects_job is not None
         assert faces_job is not None
 
-        worker = Worker(conn, workers=1, cloud_workers=1)
+        worker = Worker(conn, workers=1)
 
         class FakeRunner:
             def should_run(self, _image_id: int, _module: str) -> bool:
@@ -1947,7 +1849,7 @@ class TestWorkerFlushRecovery:
         assert faces_job is not None
         queue.mark_failed(objects_job, "ImportError: PyTorch not installed")
 
-        worker = Worker(conn, workers=1, cloud_workers=1)
+        worker = Worker(conn, workers=1)
 
         class FakeRunner:
             def should_run(self, _image_id: int, _module: str) -> bool:
@@ -1979,7 +1881,7 @@ class TestSearchIndex:
         repo = Repository(conn)
 
         img_id = repo.register_image(file_path="/photos/sunset.jpg")
-        repo.upsert_local_ai(img_id, {
+        repo.upsert_caption(img_id, {
             "description": "A beautiful sunset over the ocean",
             "scene_type": "landscape",
             "main_subject": "sunset",
@@ -2314,7 +2216,7 @@ class TestPersistResultToDB:
         repo.upsert_technical(image_id, dict(result.technical))
         data = dict(result.ai_analysis)
         data.setdefault("has_people", bool(data.get("face_count", 0) > 0))
-        repo.upsert_local_ai(image_id, data)
+        repo.upsert_caption(image_id, data)
         repo.update_search_index(image_id)
         conn.execute("COMMIT")
 
@@ -2328,7 +2230,7 @@ class TestPersistResultToDB:
         tech = repo.get_analysis(image_id, "technical")
         assert tech["sharpness_score"] == 80.0
 
-        local = repo.get_analysis(image_id, "local_ai")
+        local = repo.get_analysis(image_id, "caption")
         assert local["description"] == "A landscape"
         assert local["has_people"] == 0  # False stored as 0
 
@@ -2478,27 +2380,31 @@ class TestProbeAvailableModules:
         from imganalyzer.pipeline.distributed_worker import _probe_available_modules
 
         monkeypatch.delenv("PYTORCH_ENABLE_MPS_FALLBACK", raising=False)
-        _probe_available_modules(cloud_provider="copilot")
+        _probe_available_modules()
         assert os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") == "1"
 
     def test_always_includes_metadata_and_technical(self):
         from imganalyzer.pipeline.distributed_worker import _probe_available_modules
 
-        modules = _probe_available_modules(cloud_provider="copilot")
+        modules = _probe_available_modules()
         assert "metadata" in modules
         assert "technical" in modules
 
     def test_copilot_provider_includes_cloud_modules(self):
         from imganalyzer.pipeline.distributed_worker import _probe_available_modules
 
-        modules = _probe_available_modules(cloud_provider="copilot")
-        assert "cloud_ai" in modules
-        assert "aesthetic" in modules
+        modules = _probe_available_modules()
+        # cloud_ai and aesthetic are legacy — should NOT be probed
+        assert "cloud_ai" not in modules
+        assert "aesthetic" not in modules
+        # basic always-available modules should be present
+        assert "metadata" in modules
+        assert "technical" in modules
 
     def test_returns_sorted_unique_list(self):
         from imganalyzer.pipeline.distributed_worker import _probe_available_modules
 
-        modules = _probe_available_modules(cloud_provider="copilot")
+        modules = _probe_available_modules()
         assert modules == sorted(set(modules))
 
 
@@ -2521,16 +2427,16 @@ class TestClaimLeasedModulesFilter:
         img_id = repo.register_image(file_path="/photos/test.jpg")
         queue.enqueue(img_id, "objects")
         queue.enqueue(img_id, "metadata")
-        queue.enqueue(img_id, "cloud_ai")
+        queue.enqueue(img_id, "caption")
 
-        # Only claim metadata and cloud_ai (not objects)
+        # Only claim metadata and caption (not objects)
         claimed = queue.claim_leased(
             worker_id="w1", lease_ttl_seconds=120, batch_size=10,
-            modules=["metadata", "cloud_ai"],
+            modules=["metadata", "caption"],
         )
         claimed_modules = {c["module"] for c in claimed}
         assert "metadata" in claimed_modules
-        assert "cloud_ai" in claimed_modules
+        assert "caption" in claimed_modules
         assert "objects" not in claimed_modules
 
     def test_pending_count_with_modules_filter(self, tmp_path):
@@ -2544,8 +2450,8 @@ class TestClaimLeasedModulesFilter:
         img_id = repo.register_image(file_path="/photos/test.jpg")
         queue.enqueue(img_id, "objects")
         queue.enqueue(img_id, "metadata")
-        queue.enqueue(img_id, "cloud_ai")
+        queue.enqueue(img_id, "caption")
 
-        assert queue.pending_count(modules=["metadata", "cloud_ai"]) == 2
+        assert queue.pending_count(modules=["metadata", "caption"]) == 2
         assert queue.pending_count(modules=["objects"]) == 1
         assert queue.pending_count() == 3

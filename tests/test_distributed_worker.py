@@ -461,30 +461,28 @@ def test_coordinator_client_bypasses_env_proxy_for_private_hosts(monkeypatch):
 
 def test_queue_summary_reports_when_pending_modules_are_unclaimable():
     worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/")
-    worker.supported_modules = ["cloud_ai", "metadata", "objects"]
+    worker.supported_modules = ["caption", "metadata", "objects"]
     worker._coordinator_call = lambda _method, _params: {
         "totals": {"pending": 42, "running": 1},
         "modules": {
-            "aesthetic": {"pending": 41, "running": 1},
-            "perception": {"pending": 1, "running": 0},
+            "perception": {"pending": 42, "running": 1},
         },
     }  # type: ignore[method-assign]
 
     summary = worker._coordinator_queue_summary()
     assert summary is not None
     assert "no claimable pending modules for this worker" in summary
-    assert "aesthetic" in summary
     assert "perception" in summary
 
 
 def test_queue_summary_omits_unclaimable_hint_when_supported_pending_exists():
     worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/")
-    worker.supported_modules = ["cloud_ai", "metadata", "objects"]
+    worker.supported_modules = ["caption", "metadata", "objects"]
     worker._coordinator_call = lambda _method, _params: {
         "totals": {"pending": 7, "running": 0},
         "modules": {
             "objects": {"pending": 2, "running": 0},
-            "aesthetic": {"pending": 5, "running": 0},
+            "perception": {"pending": 5, "running": 0},
         },
     }  # type: ignore[method-assign]
 
@@ -582,7 +580,7 @@ def test_open_job_sandbox_uses_claim_context_without_shared_db(monkeypatch):
             "image": {"width": 640, "height": 480, "format": "jpeg"},
             "context": {
                 "modules": {
-                    "local_ai": {
+                    "caption": {
                         "description": "sunset over water",
                         "scene_type": "landscape",
                         "main_subject": "harbor",
@@ -593,7 +591,7 @@ def test_open_job_sandbox_uses_claim_context_without_shared_db(monkeypatch):
     )
 
     assert repo.get_image(7)["file_path"] == "/nas/photos/image.jpg"
-    assert repo.get_analysis(7, "local_ai")["description"] == "sunset over water"
+    assert repo.get_analysis(7, "caption")["description"] == "sunset over water"
     conn.close()
 
 
@@ -609,8 +607,7 @@ def test_server_jobs_claim_packages_embedding_context(tmp_path, monkeypatch):
     repo.upsert_objects(
         image_id, {"detected_objects": [], "has_person": False, "has_text": False}
     )
-    repo.upsert_local_ai(image_id, {"description": "red boat", "scene_type": "harbor"})
-    repo.upsert_cloud_ai(image_id, "openai", {"description": "dock at sunset"})
+    repo.upsert_caption(image_id, {"description": "red boat", "scene_type": "harbor"})
     queue.enqueue(image_id, "embedding")
     conn.close()
 
@@ -623,8 +620,7 @@ def test_server_jobs_claim_packages_embedding_context(tmp_path, monkeypatch):
 
     assert len(result["jobs"]) == 1
     job = result["jobs"][0]
-    assert job["context"]["modules"]["local_ai"]["description"] == "red boat"
-    assert job["context"]["modules"]["cloud_ai"]["providers"][0]["description"] == "dock at sunset"
+    assert job["context"]["modules"]["caption"]["description"] == "red boat"
 
 
 def test_server_jobs_skip_cascades_corrupt_file_to_pending_sibling_jobs(tmp_path, monkeypatch):
@@ -767,7 +763,7 @@ def test_server_jobs_claim_skips_already_analyzed_without_force_marker(tmp_path,
     repo = Repository(conn)
     queue = JobQueue(conn)
 
-    image_id = repo.register_image(file_path="/nas/photos/already-aesthetic.jpg")
+    image_id = repo.register_image(file_path="/nas/photos/already-perception.jpg")
     repo.upsert_perception(image_id, {
         "perception_iaa": 6.2,
         "perception_iaa_label": "Good",
@@ -776,7 +772,7 @@ def test_server_jobs_claim_skips_already_analyzed_without_force_marker(tmp_path,
         "perception_ista": 5.9,
         "perception_ista_label": "Average",
     })
-    job_id = queue.enqueue(image_id, "aesthetic")
+    job_id = queue.enqueue(image_id, "perception")
     assert job_id is not None
     conn.close()
 
@@ -785,7 +781,7 @@ def test_server_jobs_claim_skips_already_analyzed_without_force_marker(tmp_path,
 
     server._db_local = threading.local()
     server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
-    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "aesthetic"})
+    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "perception"})
     assert result["jobs"] == []
 
     check = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
@@ -899,167 +895,6 @@ def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
     status_row = check_conn.execute("SELECT status FROM job_queue WHERE id = ?", [job_id]).fetchone()
     assert status_row["status"] == "done"
     check_conn.close()
-
-
-def test_persist_cloud_ai_payload_ignores_provider_primary_key(tmp_path):
-    from imganalyzer.pipeline.distributed_payloads import persist_result_payload
-
-    conn = _make_test_db(tmp_path)
-    repo = Repository(conn)
-
-    first_image_id = repo.register_image(file_path="/nas/photos/existing.jpg")
-    repo.upsert_cloud_ai(first_image_id, "openai", {"description": "existing row"})
-
-    second_image_id = repo.register_image(file_path="/nas/photos/new.jpg")
-    persist_result_payload(
-        conn,
-        repo,
-        image_id=second_image_id,
-        module="cloud_ai",
-        payload={
-            "data": {
-                "providers": [
-                    {
-                        "id": 1,
-                        "provider": "openai",
-                        "description": "new row",
-                        "keywords": ["sunset"],
-                    }
-                ]
-            }
-        },
-    )
-
-    cloud_rows = conn.execute(
-        """SELECT image_id, provider, description
-           FROM analysis_cloud_ai
-           ORDER BY image_id""",
-    ).fetchall()
-    assert [(row["image_id"], row["provider"], row["description"]) for row in cloud_rows] == [
-        (first_image_id, "openai", "existing row"),
-        (second_image_id, "openai", "new row"),
-    ]
-    conn.close()
-
-
-def test_extract_cloud_ai_payload_includes_blip2(tmp_path):
-    from imganalyzer.pipeline.distributed_payloads import extract_result_payload
-
-    conn = _make_test_db(tmp_path)
-    repo = Repository(conn)
-    image_id = repo.register_image(file_path="/nas/photos/cloud-sync-source.jpg")
-
-    repo.upsert_cloud_ai(image_id, "openai", {
-        "description": "provider description",
-        "keywords": ["provider", "tags"],
-    })
-    repo.upsert_blip2(image_id, {
-        "description": "caption from cloud pass",
-        "scene_type": "indoor",
-        "keywords": ["caption", "keyword"],
-    })
-
-    payload = extract_result_payload(conn, repo, image_id=image_id, module="cloud_ai")
-    assert "blip2" in payload
-    assert payload["blip2"]["description"] == "caption from cloud pass"
-    assert payload["blip2"]["scene_type"] == "indoor"
-    conn.close()
-
-
-def test_persist_cloud_ai_payload_writes_blip2_caption_fields(tmp_path):
-    from imganalyzer.pipeline.distributed_payloads import persist_result_payload
-
-    conn = _make_test_db(tmp_path)
-    repo = Repository(conn)
-    image_id = repo.register_image(file_path="/nas/photos/cloud-sync-target.jpg")
-
-    persist_result_payload(
-        conn,
-        repo,
-        image_id=image_id,
-        module="cloud_ai",
-        payload={
-            "data": {
-                "providers": [
-                    {
-                        "provider": "openai",
-                        "description": "provider description",
-                        "keywords": ["provider", "tags"],
-                    }
-                ]
-            },
-            "blip2": {
-                "description": "caption from worker",
-                "scene_type": "portrait",
-                "keywords": ["boy", "computer"],
-            },
-        },
-    )
-
-    blip2_row = conn.execute(
-        "SELECT description, scene_type, keywords FROM analysis_blip2 WHERE image_id = ?",
-        [image_id],
-    ).fetchone()
-    assert blip2_row is not None
-    assert blip2_row["description"] == "caption from worker"
-    assert blip2_row["scene_type"] == "portrait"
-    assert "boy" in str(blip2_row["keywords"])
-    conn.close()
-
-
-def test_extract_aesthetic_payload_uses_perception_data(tmp_path):
-    from imganalyzer.pipeline.distributed_payloads import extract_result_payload
-
-    conn = _make_test_db(tmp_path)
-    repo = Repository(conn)
-
-    image_id = repo.register_image(file_path="/nas/photos/aesthetic-sync.jpg")
-    repo.upsert_perception(image_id, {
-        "perception_iaa": 6.9,
-        "perception_iaa_label": "Good",
-        "perception_iqa": 5.8,
-        "perception_iqa_label": "Average",
-        "perception_ista": 7.1,
-        "perception_ista_label": "Very Good",
-    })
-
-    payload = extract_result_payload(conn, repo, image_id=image_id, module="aesthetic")
-    assert payload["data"]["perception_iaa"] == 6.9
-    assert payload["data"]["perception_iqa"] == 5.8
-    assert payload["data"]["perception_ista"] == 7.1
-    conn.close()
-
-
-def test_persist_aesthetic_payload_persists_perception(tmp_path):
-    from imganalyzer.pipeline.distributed_payloads import persist_result_payload
-
-    conn = _make_test_db(tmp_path)
-    repo = Repository(conn)
-
-    image_id = repo.register_image(file_path="/nas/photos/aesthetic-sync-apply.jpg")
-    persist_result_payload(
-        conn,
-        repo,
-        image_id=image_id,
-        module="aesthetic",
-        payload={
-            "data": {
-                "perception_iaa": 6.0,
-                "perception_iaa_label": "Good",
-                "perception_iqa": 5.1,
-                "perception_iqa_label": "Average",
-                "perception_ista": 4.6,
-                "perception_ista_label": "Average",
-            },
-        },
-    )
-
-    stored_perception = repo.get_analysis(image_id, "perception")
-    assert stored_perception is not None
-    assert stored_perception["perception_iaa"] == 6.0
-    assert stored_perception["perception_iqa"] == 5.1
-    assert stored_perception["perception_ista"] == 4.6
-    conn.close()
 
 
 def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkeypatch):

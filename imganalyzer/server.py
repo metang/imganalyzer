@@ -342,8 +342,6 @@ def _handle_run(req_id: int | str, params: dict) -> None:
     _run_cancel.clear()
 
     workers = params.get("workers", 1)
-    cloud_workers = params.get("cloudWorkers", 4)
-    cloud_provider = params.get("cloudProvider", "copilot")
     verbose = params.get("verbose", True)
     write_xmp = not params.get("noXmp", True)
     force = params.get("force", False)
@@ -381,9 +379,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
             worker_kwargs = dict(
                 conn=conn,
                 workers=workers,
-                cloud_workers=cloud_workers,
                 force=force,
-                cloud_provider=cloud_provider,
                 detection_prompt=detection_prompt,
                 detection_threshold=detection_threshold,
                 face_match_threshold=face_threshold,
@@ -652,29 +648,9 @@ def _handle_workers_list(_params: dict) -> dict:
 
 _DISTRIBUTED_CONTEXT_MODULES: dict[str, tuple[str, ...]] = {
     "faces": ("objects",),
-    "cloud_ai": ("objects", "local_ai"),
-    "aesthetic": (),
-    "embedding": ("local_ai", "cloud_ai"),
+    "embedding": ("caption",),
 }
-_DISTRIBUTED_SEARCH_MODULES = {"metadata", "local_ai", "faces", "cloud_ai"}
-
-
-def _distributed_has_people(repo: Any, image_id: int) -> bool:
-    objects_data = repo.get_analysis(image_id, "objects")
-    if objects_data is not None:
-        return bool(objects_data.get("has_person"))
-    local_data = repo.get_analysis(image_id, "local_ai")
-    return bool(local_data and local_data.get("has_people"))
-
-
-def _has_perception_scores(repo: Any, image_id: int) -> bool:
-    perception = repo.get_analysis(image_id, "perception")
-    if not perception:
-        return False
-    return all(
-        perception.get(key) is not None
-        for key in ("perception_iaa", "perception_iqa", "perception_ista")
-    )
+_DISTRIBUTED_SEARCH_MODULES = {"metadata", "caption", "faces"}
 
 
 def _build_distributed_job_context(repo: Any, image_id: int, module: str) -> dict[str, Any]:
@@ -774,11 +750,7 @@ def _handle_jobs_claim(params: dict) -> dict:
             module_name = str(job["module"])
             job_force = force or str(job.get("last_node_role") or "").lower() == "force"
 
-            already_analyzed = (
-                _has_perception_scores(repo, image_id)
-                if module_name == "aesthetic"
-                else repo.is_analyzed(image_id, module_name)
-            )
+            already_analyzed = repo.is_analyzed(image_id, module_name)
             if not job_force and already_analyzed:
                 queue.mark_skipped_leased(job["id"], job["lease_token"], "already_analyzed")
                 continue
@@ -794,10 +766,6 @@ def _handle_jobs_claim(params: dict) -> dict:
                     )
                 else:
                     queue.release_leased(job["id"], job["lease_token"])
-                continue
-
-            if module_name == "cloud_ai" and _distributed_has_people(repo, image_id):
-                queue.mark_skipped_leased(job["id"], job["lease_token"], "has_people")
                 continue
 
             batch_valid_modules.add(module_name)
@@ -1001,10 +969,8 @@ def _handle_jobs_complete(params: dict) -> dict:
         node_id, node_role, node_label = _worker_node_info(conn, job_id)
         duration_ms = _job_duration_ms(conn, job_id)
         kw: list[str] | None = None
-        if module_name == "cloud_ai":
-            providers = (payload.get("data") or {}).get("providers", [])
-            if providers and isinstance(providers, list):
-                kw = providers[0].get("keywords")
+        if module_name == "caption":
+            kw = (payload.get("data") or {}).get("keywords")
         note: dict[str, Any] = {
             "path": file_path,
             "module": module_name,
@@ -1340,7 +1306,7 @@ def _handle_search(params: dict) -> dict:
         FROM images i
         LEFT JOIN analysis_metadata    m  ON m.image_id  = i.id
         LEFT JOIN analysis_technical   t  ON t.image_id  = i.id
-        LEFT JOIN analysis_local_ai    la ON la.image_id = i.id
+        LEFT JOIN analysis_caption     la ON la.image_id = i.id
         LEFT JOIN analysis_blip2       b2 ON b2.image_id = i.id
         LEFT JOIN analysis_objects     ob ON ob.image_id = i.id
         LEFT JOIN analysis_ocr        ocr ON ocr.image_id = i.id
@@ -1731,7 +1697,7 @@ def _processed_exists_clause(alias: str = "i") -> str:
     return f"""(
         EXISTS(SELECT 1 FROM analysis_metadata m  WHERE m.image_id  = {alias}.id) OR
         EXISTS(SELECT 1 FROM analysis_technical t WHERE t.image_id  = {alias}.id) OR
-        EXISTS(SELECT 1 FROM analysis_local_ai la WHERE la.image_id = {alias}.id) OR
+        EXISTS(SELECT 1 FROM analysis_caption la WHERE la.image_id = {alias}.id) OR
         EXISTS(SELECT 1 FROM analysis_blip2 b2 WHERE b2.image_id    = {alias}.id) OR
         EXISTS(SELECT 1 FROM analysis_objects ob WHERE ob.image_id   = {alias}.id) OR
         EXISTS(SELECT 1 FROM analysis_ocr ocr WHERE ocr.image_id     = {alias}.id) OR
@@ -1911,7 +1877,7 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
         FROM images i
         LEFT JOIN analysis_metadata    m  ON m.image_id  = i.id
         LEFT JOIN analysis_technical   t  ON t.image_id  = i.id
-        LEFT JOIN analysis_local_ai    la ON la.image_id = i.id
+        LEFT JOIN analysis_caption     la ON la.image_id = i.id
         LEFT JOIN analysis_blip2       b2 ON b2.image_id = i.id
         LEFT JOIN analysis_objects     ob ON ob.image_id = i.id
         LEFT JOIN analysis_ocr        ocr ON ocr.image_id = i.id

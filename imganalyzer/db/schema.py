@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 19
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -42,6 +42,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         16: _migrate_v16,
         17: _migrate_v17,
         18: _migrate_v18,
+        19: _migrate_v19,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -125,8 +126,8 @@ def _migrate_v1(conn: sqlite3.Connection) -> None:
             analyzed_at             TEXT
         );
 
-        -- ── analysis_local_ai ─────────────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS analysis_local_ai (
+        -- ── analysis_caption ──────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS analysis_caption (
             image_id            INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
             description         TEXT,
             scene_type          TEXT,
@@ -685,4 +686,19 @@ def _migrate_v18(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE worker_nodes ADD COLUMN last_module TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
+
+
+def _migrate_v19(conn: sqlite3.Connection) -> None:
+    """Rename analysis_local_ai → analysis_caption.
+
+    The ``local_ai`` module has been renamed to ``caption`` — all modules now
+    use local AI models, so the old name was meaningless.  The table keeps the
+    same columns; only the name changes.
+    """
+    # Rename the table (safe for existing data and indexes)
+    try:
+        conn.execute("ALTER TABLE analysis_local_ai RENAME TO analysis_caption")
+    except sqlite3.OperationalError:
+        # Table may already be named analysis_caption (fresh install) or missing
+        pass
 

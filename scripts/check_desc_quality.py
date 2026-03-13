@@ -10,7 +10,7 @@ conn.row_factory = sqlite3.Row
 print("=== Local AI description length distribution ===")
 rows = conn.execute("""
 SELECT length(description) as len, COUNT(*) as cnt
-FROM analysis_local_ai
+FROM analysis_caption
 WHERE description IS NOT NULL
 GROUP BY len / 20
 ORDER BY len / 20
@@ -24,7 +24,7 @@ print()
 print("=== Short descriptions (len < 50) ===")
 rows = conn.execute("""
 SELECT la.image_id, length(la.description) as len, la.description
-FROM analysis_local_ai la
+FROM analysis_caption la
 WHERE la.description IS NOT NULL AND length(la.description) < 50
 ORDER BY RANDOM() LIMIT 10
 """).fetchall()
@@ -35,7 +35,7 @@ print()
 print("=== Long descriptions (len > 100) ===")
 rows = conn.execute("""
 SELECT la.image_id, length(la.description) as len, la.description
-FROM analysis_local_ai la
+FROM analysis_caption la
 WHERE la.description IS NOT NULL AND length(la.description) > 100
 ORDER BY RANDOM() LIMIT 5
 """).fetchall()

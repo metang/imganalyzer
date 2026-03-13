@@ -1,14 +1,12 @@
 """Resource-aware scheduler for the batch processing pipeline.
 
-Replaces the rigid two-phase GPU pipeline with a VRAM-budget-aware
-scheduler that can run multiple small GPU models concurrently while
-keeping large models (BLIP-2) exclusive.
+VRAM-budget-aware scheduler that can run multiple small GPU models
+concurrently while keeping large models (UniPercept) exclusive.
 
 Key improvements over the old phase-based approach:
-  - Small GPU models (faces 0.5 GB + ocr 1.3 GB + embedding 0.95 GB)
+  - Small GPU models (faces 1.0 GB + embedding 0.95 GB)
     can run concurrently when they fit within the VRAM budget.
-  - Cloud thread pool is boosted when GPU is idle.
-  - Fewer model load/unload cycles (3 vs 5).
+  - Fewer model load/unload cycles.
 """
 
 from __future__ import annotations
@@ -25,15 +23,13 @@ from imganalyzer.pipeline.vram_budget import VRAMBudget
 # ── Module classifications ────────────────────────────────────────────────────
 
 GPU_MODULES: frozenset[str] = frozenset({
-    "objects", "faces", "embedding", "perception", "aesthetic",
+    "caption", "objects", "faces", "embedding", "perception",
 })
 LOCAL_IO_MODULES: frozenset[str] = frozenset({"metadata", "technical"})
-CLOUD_MODULES: frozenset[str] = frozenset({"cloud_ai"})
-IO_MODULES: frozenset[str] = LOCAL_IO_MODULES | CLOUD_MODULES
+IO_MODULES: frozenset[str] = LOCAL_IO_MODULES
 
 # Dependency graph: module -> prerequisite that must complete first.
 _PREREQUISITES: dict[str, str] = {
-    "cloud_ai":  "objects",
     "faces":     "objects",
 }
 
@@ -44,25 +40,25 @@ _BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "embedding"})
 # be loaded simultaneously (VRAM permitting).  Between phases, all
 # models from the previous phase are unloaded.
 #
-# Phase 0: objects       (must run first — unlocks cloud/faces deps, 2.4 GB)
-#          cloud_ai runs concurrently via Ollama in IO thread pool
-# Phase 1: faces, embedding (co-resident — total ~1.95 GB)
-#          Ollama model is unloaded between Phase 0 and Phase 1
+# Phase 0: caption      (qwen3.5 via Ollama, ~7 GB — must unload before objects)
+# Phase 1: objects       (GroundingDINO, ~2.4 GB — unlocks faces dep)
+# Phase 2: faces, embedding (co-resident — total ~1.95 GB)
 #
-# perception/aesthetic run independently during IO drain (not sequenced with above)
+# perception runs independently during IO drain (not sequenced with above)
 _GPU_PHASES: list[list[str]] = [
+    ["caption"],
     ["objects"],
     ["faces", "embedding"],
 ]
 
 # GPU modules that run independently alongside the IO drain rather than
 # in the sequential phase pipeline.  They have no prerequisites on other
-# GPU modules and can coexist with cloud thread-pool work.
-INDEPENDENT_GPU_MODULES: frozenset[str] = frozenset({"perception", "aesthetic"})
+# GPU modules.
+INDEPENDENT_GPU_MODULES: frozenset[str] = frozenset({"perception"})
 
 
 class ResourceScheduler:
-    """Coordinate GPU, CPU, and cloud work with VRAM-aware scheduling.
+    """Coordinate GPU and CPU work with VRAM-aware scheduling.
 
     Parameters
     ----------
@@ -74,10 +70,6 @@ class ResourceScheduler:
         Fallback batch size for modules not in *gpu_batch_sizes*.
     cpu_workers:
         Thread count for local I/O (metadata, technical).
-    cloud_workers:
-        Thread count for cloud API calls.
-    cloud_boost_factor:
-        Multiplier for cloud threads when GPU is idle (default 2).
     shutdown_event:
         External shutdown signal (e.g. Worker._shutdown).
     """
@@ -88,16 +80,12 @@ class ResourceScheduler:
         gpu_batch_sizes: dict[str, int],
         default_batch_size: int = 10,
         cpu_workers: int = 4,
-        cloud_workers: int = 4,
-        cloud_boost_factor: int = 2,
         shutdown_event: Optional[threading.Event] = None,
     ) -> None:
         self.vram = vram_budget
         self.gpu_batch_sizes = gpu_batch_sizes
         self.default_batch_size = default_batch_size
         self.cpu_workers = cpu_workers
-        self.cloud_workers = cloud_workers
-        self.cloud_boost_factor = cloud_boost_factor
         self._shutdown = shutdown_event or threading.Event()
 
     # ── Phase planning ────────────────────────────────────────────────────
@@ -127,11 +115,7 @@ class ResourceScheduler:
         """Return True if *module* supports batched GPU forward passes."""
         return module in _BATCH_CAPABLE
 
-    # ── Cloud pool sizing ─────────────────────────────────────────────────
 
-    def boosted_cloud_workers(self) -> int:
-        """Return cloud worker count for when GPU is idle."""
-        return self.cloud_workers * self.cloud_boost_factor
 
     # ── Module classification ─────────────────────────────────────────────
 
@@ -142,10 +126,6 @@ class ResourceScheduler:
     @staticmethod
     def is_io(module: str) -> bool:
         return module in IO_MODULES
-
-    @staticmethod
-    def is_cloud(module: str) -> bool:
-        return module in CLOUD_MODULES
 
     @staticmethod
     def is_local_io(module: str) -> bool:
@@ -246,10 +226,10 @@ class ResourceScheduler:
     ) -> None:
         """Execute one GPU phase, potentially with co-resident models.
 
-        For single-module phases (objects, blip2), this drains all jobs
+        For single-module phases (objects), this drains all jobs
         for that module sequentially on the calling thread.
 
-        For multi-module phases (faces + ocr + embedding), each module
+        For multi-module phases (faces + embedding), each module
         gets its own thread so they can process concurrently with separate
         CUDA streams.
         """

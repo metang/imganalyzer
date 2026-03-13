@@ -251,7 +251,7 @@ export interface GalleryChunkResponse {
 export type BatchModuleKey =
   | 'metadata'
   | 'technical'
-  | 'local_ai'
+  | 'caption'
   | 'objects'
   | 'faces'
   | 'cloud_ai'

@@ -50,17 +50,6 @@ class TestVRAMBudget:
     def test_exclusive_module_alone(self):
         vram = self._make()
         assert vram.can_fit("perception")
-        assert vram.can_fit("aesthetic")
-
-    def test_cloud_ai_not_in_vram_budget(self):
-        """cloud_ai runs via Ollama (external GPU) — 0 VRAM, always fits."""
-        vram = self._make(total=8.0, fraction=0.70)
-        assert vram.can_fit("cloud_ai")
-
-    def test_aesthetic_fits_on_small_budget(self):
-        """aesthetic uses UniPercept and does not fit on a 4 GB GPU."""
-        vram = self._make(total=4.0, fraction=0.70)
-        assert not vram.can_fit("aesthetic")
 
     def test_exclusive_blocked_by_existing(self):
         vram = self._make()
@@ -79,9 +68,9 @@ class TestVRAMBudget:
         vram.release("faces")  # no error
 
     def test_cpu_module_always_fits(self):
-        vram = self._make()
+        """Modules with 0 VRAM always fit."""
+        vram = self._make(total=8.0, fraction=0.70)
         assert vram.can_fit("metadata")
-        assert vram.can_fit("cloud_ai")
 
     def test_reserve_over_budget_raises(self):
         vram = self._make(total=2.0, fraction=0.70)  # 1.4 GB budget
@@ -92,8 +81,6 @@ class TestVRAMBudget:
     def test_is_exclusive(self):
         vram = self._make()
         assert vram.is_exclusive("perception")
-        assert vram.is_exclusive("aesthetic")
-        assert not vram.is_exclusive("cloud_ai")
         assert not vram.is_exclusive("faces")
         assert not vram.is_exclusive("embedding")
 
@@ -137,26 +124,26 @@ class TestResourceScheduler:
             "gpu_batch_sizes": {"objects": 4, "embedding": 16},
             "default_batch_size": 10,
             "cpu_workers": 4,
-            "cloud_workers": 4,
         }
         defaults.update(kwargs)
         return ResourceScheduler(**defaults)
 
     def test_gpu_phases(self):
         s = self._make()
-        assert len(s.gpu_phases) == 2
-        assert s.modules_for_phase(0) == ["objects"]
-        assert s.modules_for_phase(1) == ["faces", "embedding"]
+        assert len(s.gpu_phases) == 3
+        assert s.modules_for_phase(0) == ["caption"]
+        assert s.modules_for_phase(1) == ["objects"]
+        assert s.modules_for_phase(2) == ["faces", "embedding"]
 
     def test_co_resident_phase(self):
         s = self._make()
-        assert not s.is_co_resident_phase(0)  # objects alone
-        assert s.is_co_resident_phase(1)       # faces + embedding
+        assert not s.is_co_resident_phase(0)  # caption alone
+        assert not s.is_co_resident_phase(1)  # objects alone
+        assert s.is_co_resident_phase(2)       # faces + embedding
 
     def test_independent_gpu_modules(self):
         s = self._make()
         assert "perception" in s.independent_gpu_modules()
-        assert "aesthetic" in s.independent_gpu_modules()
 
     def test_batch_sizes(self):
         s = self._make()
@@ -168,29 +155,20 @@ class TestResourceScheduler:
         s = self._make()
         assert s.is_batch_capable("objects")
         assert s.is_batch_capable("embedding")
-        assert not s.is_batch_capable("cloud_ai")
         assert not s.is_batch_capable("faces")
-
-    def test_boosted_cloud_workers(self):
-        s = self._make(cloud_workers=4, cloud_boost_factor=2)
-        assert s.boosted_cloud_workers() == 8
 
     def test_module_classification(self):
         s = self._make()
         assert s.is_gpu("objects")
-        assert s.is_gpu("aesthetic")
+        assert s.is_gpu("perception")
         assert not s.is_gpu("metadata")
-        assert s.is_cloud("cloud_ai")
         assert s.is_local_io("metadata")
         assert s.is_local_io("technical")
-        assert s.is_io("cloud_ai")
         assert s.is_io("metadata")
 
     def test_prerequisites(self):
         s = self._make()
-        assert s.prerequisite_for("cloud_ai") == "objects"
         assert s.prerequisite_for("faces") == "objects"
-        assert s.prerequisite_for("aesthetic") is None
         assert s.prerequisite_for("objects") is None
         assert s.prerequisite_for("embedding") is None
 
@@ -235,7 +213,7 @@ class TestResourceScheduler:
             nonlocal submit_calls
             submit_calls += 1
             if submit_calls == 1:
-                return {pending_future: {"id": 99, "image_id": 99, "module": "cloud_ai"}}
+                return {pending_future: {"id": 99, "image_id": 99, "module": "metadata"}}
             return {}
 
         def _collect_fn(futures: dict[Future[Any], dict[str, Any]]) -> None:
@@ -250,7 +228,7 @@ class TestResourceScheduler:
             ThreadPoolExecutor(max_workers=1) as cloud_pool,
         ):
             s.run_gpu_phase(
-                0,  # Phase 0 => ["objects"]
+                0,  # Phase 0 => ["caption"]
                 claim_fn=_claim_fn,
                 process_batch_fn=_process_batch_fn,
                 process_single_fn=lambda _job: "done",
@@ -264,9 +242,9 @@ class TestResourceScheduler:
                 unload_fn=_unload_fn,
             )
 
-        assert "unload:objects" in call_order
+        assert "unload:caption" in call_order
         assert "collect" in call_order
-        assert call_order.index("unload:objects") < call_order.index("collect")
+        assert call_order.index("unload:caption") < call_order.index("collect")
         assert s.vram.loaded_modules == []
 
     def test_run_gpu_phase_cancels_queued_io_futures_on_shutdown(self):
@@ -314,8 +292,8 @@ class TestResourceScheduler:
             assert started.wait(timeout=5)
             shutdown.set()
             return {
-                fut1: {"id": 11, "image_id": 11, "module": "cloud_ai"},
-                fut2: {"id": 12, "image_id": 12, "module": "aesthetic"},
+                fut1: {"id": 11, "image_id": 11, "module": "metadata"},
+                fut2: {"id": 12, "image_id": 12, "module": "technical"},
             }
 
         def _collect_fn(futures: dict[Future[Any], dict[str, Any]]) -> None:
@@ -395,8 +373,8 @@ class TestResourceScheduler:
             assert started.wait(timeout=5)
             shutdown.set()
             return {
-                fut1: {"id": 21, "image_id": 21, "module": "cloud_ai"},
-                fut2: {"id": 22, "image_id": 22, "module": "aesthetic"},
+                fut1: {"id": 21, "image_id": 21, "module": "metadata"},
+                fut2: {"id": 22, "image_id": 22, "module": "technical"},
             }
 
         def _collect_fn(futures: dict[Future[Any], dict[str, Any]]) -> None:
@@ -467,7 +445,6 @@ class TestCoResidencyFitCheck:
     def test_perception_exclusive_in_registry(self):
         """UniPercept-backed modules must be in the exclusive set."""
         assert "perception" in _EXCLUSIVE_MODULES
-        assert "aesthetic" in _EXCLUSIVE_MODULES
 
     def test_all_gpu_phases_have_known_modules(self):
         """Every module in _GPU_PHASES must have a VRAM entry."""

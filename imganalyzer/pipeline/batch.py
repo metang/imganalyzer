@@ -108,11 +108,10 @@ class BatchProcessor:
                 for module_name, table_name in (
                     ("metadata", "analysis_metadata"),
                     ("technical", "analysis_technical"),
-                    ("local_ai", "analysis_local_ai"),
-                    ("blip2", "analysis_blip2"),
+                    ("caption", "analysis_caption"),
                     ("objects", "analysis_objects"),
                     ("faces", "analysis_faces"),
-                    ("aesthetic", "analysis_perception"),
+                    ("perception", "analysis_perception"),
                 ):
                     if module_name not in target_modules:
                         continue
@@ -136,20 +135,8 @@ class BatchProcessor:
                     for r in rows:
                         analyzed_set.add((r["image_id"], "embedding"))
 
-                # Cloud AI uses a different check (multiple rows per image)
-                if "cloud_ai" in target_modules:
-                    id_placeholders = ",".join("?" * len(existing_ids))
-                    rows = self.conn.execute(
-                        f"SELECT DISTINCT image_id FROM analysis_cloud_ai "
-                        f"WHERE image_id IN ({id_placeholders}) AND analyzed_at IS NOT NULL",
-                        existing_ids,
-                    ).fetchall()
-                    for r in rows:
-                        analyzed_set.add((r["image_id"], "cloud_ai"))
-
                 # Also check job_queue for done/skipped jobs — these may have
-                # no analysis data (e.g. cloud_ai skipped due to has_people
-                # guard) but should not be re-enqueued.
+                # no analysis data but should not be re-enqueued.
                 id_placeholders = ",".join("?" * len(existing_ids))
                 for mod in target_modules:
                     rows = self.conn.execute(
@@ -310,14 +297,13 @@ class BatchProcessor:
 
 
 def _module_priority(module: str) -> int:
-    """Assign default priorities — metadata first, objects highest GPU (gates cloud), embedding last."""
+    """Assign default priorities — metadata first, objects highest GPU, embedding last."""
     return {
-        "metadata":  100,
-        "technical":  90,
-        "objects":    85,   # highest GPU priority — unlocks cloud_ai/aesthetic
-        "local_ai":   80,
-        "faces":      77,
-        "cloud_ai":   70,
-        "aesthetic":  60,
-        "embedding":  50,
+        "metadata":   100,
+        "technical":   90,
+        "objects":     85,
+        "caption":     80,
+        "faces":       77,
+        "perception":  60,
+        "embedding":   50,
     }.get(module, 0)

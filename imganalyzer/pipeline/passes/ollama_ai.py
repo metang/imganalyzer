@@ -1,4 +1,8 @@
-"""Ollama AI pass — runs qwen3.5 via Ollama as the ``blip2`` module key."""
+"""Ollama AI pass — runs qwen3.5 via Ollama as the ``caption`` module key.
+
+Legacy helper module kept for backward compatibility with external scripts.
+The main pipeline now calls OllamaAI directly from modules.py._run_caption().
+"""
 from __future__ import annotations
 
 import sqlite3
@@ -51,7 +55,8 @@ def run_ollama_ai_for_cloud(
 ) -> dict[str, Any]:
     """Run qwen3.5 via Ollama and write to ``analysis_cloud_ai``.
 
-    Used as drop-in replacement for the cloud_ai module.
+    Legacy pass — the cloud_ai module has been replaced by caption.
+    Kept for backward compatibility with external scripts.
     """
     from imganalyzer.analysis.ai.ollama import OllamaAI
 

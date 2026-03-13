@@ -29,7 +29,7 @@ for i, r in enumerate(results):
             la.main_subject,
             ca.description AS cloud_desc
         FROM images i
-        LEFT JOIN analysis_local_ai la ON la.image_id = i.id
+        LEFT JOIN analysis_caption la ON la.image_id = i.id
         LEFT JOIN analysis_cloud_ai ca ON ca.image_id = i.id
         WHERE i.id = ?
         LIMIT 1

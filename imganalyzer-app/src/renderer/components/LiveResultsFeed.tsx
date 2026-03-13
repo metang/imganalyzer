@@ -14,7 +14,7 @@ const STATUS_COLORS: Record<BatchResult['status'], string> = {
 const MODULE_LABELS: Record<string, string> = {
   metadata: 'metadata',
   technical: 'technical',
-  local_ai: 'local_ai',
+  caption: 'caption',
   blip2: 'caption',
   objects: 'objects',
   faces: 'faces',

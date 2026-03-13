@@ -17,15 +17,15 @@ from typing import Optional
 # Peak VRAM (GB) per module including model weights + batch activations.
 # Tuned for the default _GPU_BATCH_SIZES in worker.py.
 _MODULE_VRAM_GB: dict[str, float] = {
+    "caption":   7.0,   # qwen3.5:9b Q4_K_M via Ollama (~6.6 model + 0.4 KV cache)
     "objects":    2.4,   # GroundingDINO mixed fp16/fp32, batch=4
     "faces":     1.0,   # InsightFace buffalo_l ONNX (1 GB arena cap)
     "embedding": 0.95,  # CLIP ViT-L/14 fp16, batch=16
     "perception": 15.6, # UniPercept 4-bit NF4 quantized
-    "aesthetic": 15.6,  # UniPercept-backed aesthetic pass
 }
 
 # Modules that must run alone (peak VRAM > 50% of a typical budget).
-_EXCLUSIVE_MODULES: frozenset[str] = frozenset({"perception", "aesthetic"})
+_EXCLUSIVE_MODULES: frozenset[str] = frozenset({"perception"})
 
 # Default VRAM reservation fraction (matches set_per_process_memory_fraction).
 _DEFAULT_FRACTION = 0.70

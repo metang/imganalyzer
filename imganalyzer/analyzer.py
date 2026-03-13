@@ -187,7 +187,7 @@ class Analyzer:
                 self._check_cancel(cancel_event)
             elif self.ai_backend in ("openai", "anthropic", "google", "copilot"):
                 # People guard: do not send images containing recognisable faces to
-                # cloud AI.  Check the DB for a previously stored local_ai result; if
+                # cloud AI.  Check the DB for a previously stored caption result; if
                 # has_people is set, skip the cloud call entirely.
                 has_people = self._db_has_people(path)
                 self._check_cancel(cancel_event)
@@ -205,7 +205,7 @@ class Analyzer:
 
         This is a lightweight pre-pass: only GroundingDINO runs (no BLIP-2,
         no OCR, no InsightFace).  The result is suitable for persisting to
-        analysis_local_ai so the cloud AI guard can use has_people on the
+        analysis_caption so the cloud AI guard can use has_people on the
         next run.
         """
         from imganalyzer.analysis.ai.objects import ObjectDetector
@@ -221,10 +221,10 @@ class Analyzer:
         }
 
     def _db_has_people(self, path: Path) -> bool:
-        """Return True if the DB records has_people=1 for this image (local_ai row).
+        """Return True if the DB records has_people=1 for this image (caption row).
 
         Best-effort: returns False on any error (missing DB, image not registered,
-        local_ai not yet run) so the cloud call proceeds in ambiguous cases.
+        caption not yet run) so the cloud call proceeds in ambiguous cases.
         """
         conn: sqlite3.Connection | None = None
         try:
@@ -251,7 +251,7 @@ class Analyzer:
             img = repo.get_image_by_path(str(path.resolve()))
             if img is None:
                 return False
-            local_data = repo.get_analysis(img["id"], "local_ai")
+            local_data = repo.get_analysis(img["id"], "caption")
             if local_data is None:
                 return False
             return bool(local_data.get("has_people"))

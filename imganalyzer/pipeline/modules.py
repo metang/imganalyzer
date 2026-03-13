@@ -172,7 +172,6 @@ class ModuleRunner:
         conn: sqlite3.Connection,
         repo: Repository,
         force: bool = False,
-        cloud_provider: str = "openai",
         detection_prompt: str | None = None,
         detection_threshold: float | None = None,
         face_match_threshold: float | None = None,
@@ -183,7 +182,6 @@ class ModuleRunner:
         self.conn = conn
         self.repo = repo
         self.force = force
-        self.cloud_provider = cloud_provider
         self.detection_prompt = detection_prompt
         self.detection_threshold = detection_threshold
         self.face_match_threshold = face_match_threshold
@@ -256,9 +254,6 @@ class ModuleRunner:
         """Return False if the module is already analyzed and force is off."""
         if self.force:
             return True
-        if module == "aesthetic":
-            perception = self.repo.get_analysis(image_id, "perception")
-            return not self._has_perception_scores(perception)
         return not self.repo.is_analyzed(image_id, module)
 
     def run(self, image_id: int, module: str) -> dict[str, Any]:
@@ -292,16 +287,12 @@ class ModuleRunner:
             return self._run_metadata(image_id, path)
         elif module == "technical":
             return self._run_technical(image_id, path)
-        elif module == "local_ai":
-            return self._run_local_ai(image_id, path)
+        elif module == "caption":
+            return self._run_caption(image_id, path)
         elif module == "objects":
             return self._run_objects(image_id, path)
         elif module == "faces":
             return self._run_faces(image_id, path)
-        elif module == "cloud_ai":
-            return self._run_cloud_ai(image_id, path)
-        elif module == "aesthetic":
-            return self._run_aesthetic(image_id, path)
         elif module == "perception":
             return self._run_perception(image_id, path)
         else:
@@ -347,39 +338,17 @@ class ModuleRunner:
             console.print(f"  [dim]Technical analysis done for image {image_id}[/dim]")
         return result
 
-    def _run_local_ai(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = self._cached_read_image(path, image_id)
+    def _run_caption(self, image_id: int, path: Path) -> dict[str, Any]:
+        from imganalyzer.analysis.ai.ollama import OllamaAI
 
-        from imganalyzer.analysis.ai.local_full import LocalAIFull
-        result = LocalAIFull().analyze(
-            image_data,
-            detection_prompt=self.detection_prompt,
-            detection_threshold=self.detection_threshold,
-            face_match_threshold=self.face_match_threshold,
-        )
-
-        # Track has_people for cloud_ai gating
-        has_people = bool(result.get("face_count", 0) > 0)
-        result["has_people"] = has_people
+        ollama = OllamaAI()
+        result = ollama.analyze(path, {})
 
         with _transaction(self.conn):
-            self.repo.upsert_local_ai(image_id, result)
-
-        # Also populate the individual split tables so callers can query
-        # blip2/objects/ocr/faces independently when local_ai was used.
-        write_local_ai_split_tables(self.conn, self.repo, image_id, result)
-
-        # Release all local-AI activation tensors (BLIP-2 KV-cache, GDINO/TrOCR
-        # feature maps) before the embedding job loads CLIP.  All 4 models stay
-        # resident in VRAM as singletons, but their inference buffers are freed.
-        try:
-            from imganalyzer.device import empty_cache
-            empty_cache()
-        except Exception:
-            pass
+            self.repo.upsert_caption(image_id, result)
 
         if self.verbose:
-            console.print(f"  [dim]Local AI analysis done for image {image_id}[/dim]")
+            console.print(f"  [dim]Caption analysis done for image {image_id}[/dim]")
         return result
 
     def _run_objects(self, image_id: int, path: Path) -> dict[str, Any]:
@@ -409,58 +378,6 @@ class ModuleRunner:
             console.print(f"  [dim]Face analysis done for image {image_id}[/dim]")
         return result
 
-    def _run_cloud_ai(self, image_id: int, path: Path) -> dict[str, Any]:
-        image_data = self._cached_read_image(path, image_id)
-
-        from imganalyzer.analysis.ai.ollama import OllamaAI
-        result = OllamaAI().analyze(path, image_data)
-
-        # Keep cloud payload focused on captions/keywords. Aesthetic surfaces now
-        # come from UniPercept via the dedicated aesthetic/perception pass.
-        result.pop("aesthetic_score", None)
-        result.pop("aesthetic_label", None)
-        result.pop("aesthetic_reason", None)
-
-        with _transaction(self.conn):
-            self.repo.upsert_cloud_ai(image_id, "ollama-qwen3.5", result)
-            # Also write to analysis_blip2 for backward compat (merged pass)
-            blip2_fields = {}
-            for key in ("description", "scene_type", "main_subject", "lighting", "mood", "keywords"):
-                if key in result:
-                    blip2_fields[key] = result[key]
-            if blip2_fields:
-                self.repo.upsert_blip2(image_id, blip2_fields)
-
-        if self.verbose:
-            console.print(
-                f"  [dim]AI analysis (Qwen 3.5) done for image {image_id}[/dim]"
-            )
-        return result
-
-    def _run_aesthetic(self, image_id: int, path: Path) -> dict[str, Any]:
-        try:
-            from imganalyzer.analysis.perception import analyze as perception_analyze
-        except ImportError as exc:
-            raise RuntimeError(
-                "Perception dependency missing. Install `unipercept-reward` in the "
-                "imganalyzer runtime environment."
-            ) from exc
-
-        result = perception_analyze(path)
-
-        with _transaction(self.conn):
-            self.repo.upsert_perception(image_id, result)
-
-        if self.verbose:
-            iaa = result.get("perception_iaa", "?")
-            iqa = result.get("perception_iqa", "?")
-            ista = result.get("perception_ista", "?")
-            console.print(
-                f"  [dim]Aesthetic (UniPercept) done for image {image_id} "
-                f"(IAA={iaa}, IQA={iqa}, ISTA={ista})[/dim]"
-            )
-        return result
-
     def _run_perception(self, image_id: int, path: Path) -> dict[str, Any]:
         from imganalyzer.analysis.perception import analyze as perception_analyze
 
@@ -482,23 +399,15 @@ class ModuleRunner:
 
         embedder = CLIPEmbedder()
 
-        # Text embedding: combine description, scene, and subject from local AI
-        # and all cloud providers so the vector reflects rich semantic content.
+        # Text embedding: combine description, scene, and subject from caption
+        # so the vector reflects rich semantic content.
         text_parts: list[str] = []
-        local_data = self.repo.get_analysis(image_id, "local_ai")
+        local_data = self.repo.get_analysis(image_id, "caption")
         if local_data:
             for field in ("description", "scene_type", "main_subject"):
                 val = local_data.get(field)
                 if val:
                     text_parts.append(val)
-
-        cloud_data = self.repo.get_analysis(image_id, "cloud_ai")
-        if cloud_data:
-            for prov in cloud_data.get("providers", []):
-                for field in ("description", "scene_type", "main_subject"):
-                    val = prov.get(field)
-                    if val and val not in text_parts:
-                        text_parts.append(val)
 
         desc_text = " ".join(text_parts)
 
@@ -626,22 +535,23 @@ class ModuleRunner:
 
             # Text embedding (cheap, sequential)
             text_parts: list[str] = []
-            local_data = self.repo.get_analysis(image_id, "local_ai")
-            if local_data:
+            caption_data = self.repo.get_analysis(image_id, "caption")
+            if caption_data:
                 for field in ("description", "scene_type", "main_subject"):
-                    val = local_data.get(field)
+                    val = caption_data.get(field)
                     if val:
                         text_parts.append(val)
 
             cloud_data = self.repo.get_analysis(image_id, "cloud_ai")
             if cloud_data:
+                # Legacy cloud_ai data — include for backward compat
                 for prov in cloud_data.get("providers", []):
                     for field in ("description", "scene_type", "main_subject"):
                         val = prov.get(field)
                         if val and val not in text_parts:
                             text_parts.append(val)
 
-            desc_text = " ".join(text_parts)
+            desc_text= " ".join(text_parts)
             if desc_text:
                 text_vector = embedder.embed_text(desc_text)
                 with _transaction(self.conn):
@@ -693,10 +603,11 @@ def write_local_ai_split_tables(
     *,
     wrap_transactions: bool = True,
 ) -> None:
-    """Populate split-pass tables from a merged local_ai result dict.
+    """Populate split-pass tables from a merged caption result dict.
 
-    Failures stay isolated so the primary local_ai write remains the source of
-    truth even when one of the compatibility tables cannot be refreshed.
+    Legacy helper: distributes fields from the monolithic caption (formerly
+    local_ai) result into individual module tables (blip2, objects, ocr, faces)
+    for backward compatibility with older queries.
     """
     import json as _json
 
@@ -768,22 +679,19 @@ def unload_gpu_model(module: str) -> None:
     With model unloading, peak VRAM drops significantly, leaving
     ample headroom for batch inference within the GPU ceiling.
     """
-    if module in ("cloud_ai",):
+    if module == "caption":
         from imganalyzer.analysis.ai.ollama import OllamaAI
         OllamaAI.unload_model()
-    if module in ("local_ai",):
-        from imganalyzer.analysis.ai.local import LocalAI
-        LocalAI._unload()
-    if module in ("objects", "local_ai"):
+    if module in ("objects",):
         from imganalyzer.analysis.ai.objects import ObjectDetector
         ObjectDetector._unload()
-    if module in ("faces", "local_ai"):
+    if module in ("faces",):
         from imganalyzer.analysis.ai.faces import FaceAnalyzer
         FaceAnalyzer._unload()
     if module == "embedding":
         from imganalyzer.embeddings.clip_embedder import CLIPEmbedder
         CLIPEmbedder._unload()
-    if module in ("aesthetic", "perception"):
+    if module == "perception":
         from imganalyzer.analysis.perception import unload_model
         unload_model()
 
@@ -830,11 +738,11 @@ def write_xmp_from_db(repo: Repository, image_id: int) -> Path | None:
             pass
     result.technical = tech
 
-    # AI analysis — merge local_ai and cloud_ai into a single dict
+    # AI analysis — merge caption and cloud_ai into a single dict
     # (XMPWriter expects result.ai_analysis to be a flat dict)
     ai: dict[str, Any] = {}
 
-    local = full.get("local_ai", {})
+    local = full.get("caption", {})
     for key in ("image_id", "analyzed_at", "has_people"):
         local.pop(key, None)
     # Decode JSON list fields
@@ -851,7 +759,7 @@ def write_xmp_from_db(repo: Repository, image_id: int) -> Path | None:
             pass
     ai.update(local)
 
-    # Cloud AI — layer on top (cloud descriptions override local if present)
+    # Cloud AI — legacy data, layer on top for backward compat with existing analyses
     cloud = full.get("cloud_ai", {})
     if cloud and "providers" in cloud:
         for prov_data in cloud["providers"]:

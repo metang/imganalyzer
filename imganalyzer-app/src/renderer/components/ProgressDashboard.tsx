@@ -48,7 +48,7 @@ function statusTone(status: string): string {
 const MODULE_LABELS: Record<string, string> = {
   metadata: 'Metadata',
   technical: 'Technical',
-  local_ai: 'Local AI',
+  caption: 'Caption',
   objects: 'Objects (DINO)',
   faces: 'Faces',
   cloud_ai: 'Caption & Keywords',

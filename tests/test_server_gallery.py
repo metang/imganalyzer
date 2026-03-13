@@ -54,7 +54,7 @@ CREATE TABLE analysis_technical (
     avg_saturation REAL,
     dominant_colors TEXT
 );
-CREATE TABLE analysis_local_ai (
+CREATE TABLE analysis_caption (
     image_id INTEGER PRIMARY KEY,
     description TEXT,
     scene_type TEXT,
@@ -279,7 +279,7 @@ def test_gallery_chunk_folder_filter_escapes_like_wildcards(
     assert result["items"][0]["file_path"] == r"E:\Pic\2006\100%_done\img1.jpg"
 
 
-def test_gallery_chunk_falls_back_to_split_tables_when_local_ai_missing(
+def test_gallery_chunk_falls_back_to_split_tables_when_caption_missing(
     gallery_db: sqlite3.Connection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -473,7 +473,7 @@ def test_search_alias_prompt_routes_to_face_search(
     )
     gallery_db.executemany(
         """
-        INSERT INTO analysis_local_ai (image_id, description, face_count, face_identities, has_people)
+        INSERT INTO analysis_caption (image_id, description, face_count, face_identities, has_people)
         VALUES (?, ?, ?, ?, ?)
         """,
         [
