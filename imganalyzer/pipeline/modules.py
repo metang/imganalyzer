@@ -125,11 +125,13 @@ def _apply_path_mappings(path: Path, mappings: list[tuple[str, str]]) -> Path:
 
 
 # Maximum long-edge pixels for AI modules.  All downstream models
-# (CLIP 224px, GroundingDINO 800px, BLIP-2 364px, TrOCR 384px,
-# InsightFace 640px) internally resize to well below this limit.
-# Pre-shrinking to 1920 px once avoids 7+ redundant (and larger) resizes
-# and cuts per-image memory from ~600 MB (50 MP x 12 bytes) to ~22 MB.
-_AI_MAX_LONG_EDGE = 1920
+# All AI models (CLIP 224px, GroundingDINO 800px, InsightFace 640px)
+# internally resize well below this limit.  1024 px matches the Ollama
+# caption resolution and is the best trade-off for detail recognition
+# (benchmarked across qwen3.5:9b and gpt-4.1 at 480–1920 px).
+# Pre-shrinking once avoids redundant resizes and cuts per-image memory
+# from ~600 MB (50 MP × 12 bytes) to ~6 MB.
+_AI_MAX_LONG_EDGE = 1024
 
 
 def _pre_resize(image_data: dict[str, Any]) -> dict[str, Any]:
