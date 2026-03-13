@@ -520,34 +520,66 @@ class Worker:
                         )
 
                 # ════════════════════════════════════════════════════════════
-                # IO drain + independent GPU modules (e.g. perception)
+                # IO drain (per-chunk)
+                # Independent GPU modules (e.g. perception) are deferred to
+                # after all chunks so they don't block chunk progression.
                 # ════════════════════════════════════════════════════════════
                 if not self._shutdown.is_set():
-                    indie_gpu = [
-                        mod for mod in scheduler.independent_gpu_modules()
-                        if self.queue.pending_count(module=mod, image_ids=chunk_ids) > 0
-                    ]
+                    with (
+                        self.profiler.span("io_drain"),
+                        ThreadPoolExecutor(max_workers=self.workers)  as local_pool,
+                        ThreadPoolExecutor(max_workers=1)             as cloud_pool,
+                    ):
+                        console.print("[dim]IO drain[/dim]")
+
+                        scheduler.run_io_drain(
+                            submit_io_fn=active_submit_io,
+                            collect_fn=_collect_futures,
+                            flush_fn=self._maybe_periodic_flush,
+                            local_pool=local_pool,
+                            cloud_pool=cloud_pool,
+                            cancel_futures_fn=_cancel_futures,
+                        )
+
+                if total_chunks > 1 and not self._shutdown.is_set():
+                    console.print(
+                        f"[green]Chunk {chunk_idx + 1}/{total_chunks} complete ✓[/green]"
+                    )
+
+            # ════════════════════════════════════════════════════════════════
+            # Independent GPU modules (e.g. perception) — run after all
+            # chunks so they don't block per-chunk progress.  These modules
+            # need exclusive GPU access (15+ GB) and are very slow, so
+            # deferring them keeps the fast modules progressing.
+            # ════════════════════════════════════════════════════════════════
+            if not self._shutdown.is_set():
+                indie_gpu = [
+                    mod for mod in scheduler.independent_gpu_modules()
+                    if self.queue.pending_count(module=mod) > 0
+                ]
+                if indie_gpu:
+                    total_indie = sum(
+                        self.queue.pending_count(module=mod) for mod in indie_gpu
+                    )
+                    console.print(
+                        f"[cyan]Independent GPU pass: "
+                        f"{', '.join(indie_gpu)} ({total_indie} jobs)[/cyan]"
+                    )
 
                     def _drain_indie_gpu(module: str) -> None:
                         while not self._shutdown.is_set():
-                            jobs = active_claim_fn(1, module)
+                            _, _, tl_queue, _ = self._get_thread_db()
+                            jobs = tl_queue.claim(batch_size=1, module=module)
                             if not jobs:
                                 break
                             for job in jobs:
                                 self._process_job(job)
 
                     with (
-                        self.profiler.span("io_drain"),
+                        self.profiler.span("indie_gpu"),
                         ThreadPoolExecutor(max_workers=self.workers)  as local_pool,
                         ThreadPoolExecutor(max_workers=1)             as cloud_pool,
                     ):
-                        if indie_gpu:
-                            console.print(
-                                f"[dim]IO drain + GPU ({', '.join(indie_gpu)})[/dim]"
-                            )
-                        else:
-                            console.print("[dim]IO drain[/dim]")
-
                         gpu_threads: list[threading.Thread] = []
                         for mod in indie_gpu:
                             t = threading.Thread(
@@ -559,26 +591,13 @@ class Worker:
                             gpu_threads.append(t)
                             t.start()
 
-                        scheduler.run_io_drain(
-                            submit_io_fn=active_submit_io,
-                            collect_fn=_collect_futures,
-                            flush_fn=self._maybe_periodic_flush,
-                            local_pool=local_pool,
-                            cloud_pool=cloud_pool,
-                            cancel_futures_fn=_cancel_futures,
-                        )
-
+                        # Interleave IO work while GPU is busy
                         for t in gpu_threads:
                             while t.is_alive():
-                                new = active_submit_io(local_pool, cloud_pool)
+                                new = _submit_io_jobs(local_pool, cloud_pool)
                                 if new:
                                     _collect_futures(new)
                                 t.join(timeout=1.0)
-
-                if total_chunks > 1 and not self._shutdown.is_set():
-                    console.print(
-                        f"[green]Chunk {chunk_idx + 1}/{total_chunks} complete ✓[/green]"
-                    )
 
         if self._shutdown.is_set():
             console.print("\n[yellow]Paused.[/yellow] Run `imganalyzer run` to resume.")
