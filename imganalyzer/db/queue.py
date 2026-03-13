@@ -188,11 +188,16 @@ class JobQueue:
         modules: list[str] | None = None,
         exclude_modules: list[str] | None = None,
         prefer_module: str | None = None,
+        prefer_image_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Atomically claim jobs and create leases for distributed workers.
 
         If *prefer_module* is given, jobs for that module are sorted first
         (module affinity) to minimize model switching across claims.
+
+        If *prefer_image_ids* is given, jobs for those images are sorted
+        first (chunk affinity) so distributed workers focus on the same
+        chunk as the coordinator.
         """
         where = "WHERE status = 'pending'"
         params: list[Any] = []
@@ -208,12 +213,22 @@ class JobQueue:
             where += f" AND module NOT IN ({excl_ph})"
             params.extend(exclude_modules)
 
+        # Build ORDER BY with optional chunk and module affinity
+        order_parts: list[str] = []
+
+        # Chunk affinity: prefer images from coordinator's current chunk
+        if prefer_image_ids:
+            chunk_ph = ",".join("?" * len(prefer_image_ids))
+            order_parts.append(f"(CASE WHEN image_id IN ({chunk_ph}) THEN 0 ELSE 1 END)")
+            params.extend(prefer_image_ids)
+
         # Module affinity: prefer same module to minimize model switching
         if prefer_module and not module:
-            order = "(CASE WHEN module = ? THEN 0 ELSE 1 END), priority DESC, queued_at ASC"
+            order_parts.append("(CASE WHEN module = ? THEN 0 ELSE 1 END)")
             params.append(prefer_module)
-        else:
-            order = "priority DESC, queued_at ASC"
+
+        order_parts.extend(["priority DESC", "queued_at ASC"])
+        order = ", ".join(order_parts)
         params.append(batch_size)
 
         self.conn.execute("BEGIN IMMEDIATE")

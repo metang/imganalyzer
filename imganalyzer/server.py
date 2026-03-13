@@ -704,6 +704,12 @@ def _handle_jobs_claim(params: dict) -> dict:
             prefer_module = str(wrow["last_module"])
     except Exception:
         pass  # table may lack last_module column in older schema
+
+    # Chunk affinity: if the coordinator is processing a specific chunk,
+    # direct distributed workers to the same images so chunks finish faster.
+    prefer_image_ids: set[int] | None = None
+    if _active_worker is not None:
+        prefer_image_ids = _active_worker.current_chunk_ids
     # Scan far enough in one request to rotate past large blocked backlogs
     # (for example hundreds of faces/ocr jobs waiting on objects) instead of
     # forcing remote workers to idle through many empty polls.
@@ -729,6 +735,7 @@ def _handle_jobs_claim(params: dict) -> dict:
             modules=modules_filter,
             exclude_modules=excl,
             prefer_module=prefer_module,
+            prefer_image_ids=prefer_image_ids,
         )
         if not claimed:
             break

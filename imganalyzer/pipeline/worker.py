@@ -157,6 +157,11 @@ class Worker:
         self.retry_failed_on_start = retry_failed
         self._shutdown = threading.Event()
 
+        # Current chunk image IDs — exposed so the coordinator's job claim
+        # handler can prefer these images for distributed workers, keeping
+        # workers focused on the same chunk as the coordinator.
+        self.current_chunk_ids: set[int] | None = None
+
         # Profiler
         from imganalyzer.pipeline.profiler import ProfileCollector, NullProfiler
         self.profiler: Any = ProfileCollector(conn) if profile else NullProfiler()
@@ -430,6 +435,10 @@ class Worker:
                 if self._shutdown.is_set():
                     break
 
+                # Expose current chunk to coordinator's job claim handler
+                # so distributed workers are directed to the same chunk.
+                self.current_chunk_ids = chunk_ids
+
                 if total_chunks > 1:
                     console.print(
                         f"\n[bold cyan]━━ Chunk {chunk_idx + 1}/{total_chunks} "
@@ -598,6 +607,9 @@ class Worker:
                                 if new:
                                     _collect_futures(new)
                                 t.join(timeout=1.0)
+
+        # Clear chunk affinity — no longer directing workers to a specific chunk.
+        self.current_chunk_ids = None
 
         if self._shutdown.is_set():
             console.print("\n[yellow]Paused.[/yellow] Run `imganalyzer run` to resume.")
