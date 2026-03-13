@@ -20,7 +20,15 @@ Phase 1 — ``objects`` pass (GPU, serial):
 Phase 2 — ``faces`` + ``embedding`` (GPU, co-resident):
   These models (~1.95 GB total) run concurrently with separate CUDA streams.
   ``perception`` (UniPercept) runs as an independent exclusive GPU module
-  during the IO drain.
+  after all chunks complete.
+
+Mini-batch interleaving
+-----------------------
+When chunk_size > 100, each chunk is split into mini-batches of ~100 images.
+Instead of running ALL captions before ANY objects, phases are interleaved
+per mini-batch: [caption ×100 → objects ×100 → faces+embed ×100 → repeat].
+This gives first fully-analyzed results in ~40 min instead of ~3.5 hours.
+Model switch overhead is ~18s per mini-batch boundary (<1% of batch time).
 
 Structured output
 -----------------
@@ -185,6 +193,25 @@ class Worker:
         # Populated by the scheduler's prefetch producer threads, consumed by
         # _process_job on the GPU thread.  Thread-safe via dict atomicity.
         self._prefetch_cache: dict[int, dict[str, Any]] = {}
+
+    @staticmethod
+    def _mini_batch_size(chunk_size: int) -> int:
+        """Compute optimal mini-batch size for GPU phase interleaving.
+
+        Mini-batches allow images to become fully analyzed sooner by
+        interleaving caption (Ollama, ~25s/img) with fast modules
+        (objects/faces/embedding, ~2s/img) instead of waiting for ALL
+        captions to finish before starting fast modules.
+
+        Model switch overhead is ~18s per mini-batch boundary.  We want
+        this to be < 2% of mini-batch time, so minimum batch is 50
+        (18s / 50×25s = 1.4%).  Default is 100 (0.7% overhead).
+
+        Returns chunk_size itself if interleaving isn't worthwhile.
+        """
+        if chunk_size <= 100:
+            return chunk_size  # single mini-batch, no interleaving
+        return min(100, max(50, chunk_size // 5))
 
     def _get_thread_db(self) -> tuple[sqlite3.Connection, Repository, JobQueue, "ModuleRunner"]:
         """Return (conn, repo, queue, runner) local to the current thread.
@@ -445,13 +472,6 @@ class Worker:
                         f"({len(chunk_ids)} images) ━━[/bold cyan]"  # type: ignore[arg-type]
                     )
 
-                # Build chunk-scoped claim function
-                def _chunk_claim_fn(batch_sz: int, module: str) -> list[dict[str, Any]]:
-                    _, _, tl_queue, _ = self._get_thread_db()
-                    return tl_queue.claim(
-                        batch_size=batch_sz, module=module, image_ids=chunk_ids,
-                    )
-
                 # Chunk-scoped IO submit — same as _submit_io_jobs but uses chunk_ids filter
                 def _chunk_submit_io_jobs(
                     local_pool: ThreadPoolExecutor,
@@ -478,55 +498,116 @@ class Worker:
                     return futures
 
                 # Use chunk-scoped functions when chunking, original otherwise
-                active_claim_fn = _chunk_claim_fn if chunk_ids is not None else _claim_fn
                 active_submit_io = _chunk_submit_io_jobs if chunk_ids is not None else _submit_io_jobs
 
                 # ════════════════════════════════════════════════════════════
-                # GPU Phases (scheduler-driven)
-                # Phase 0: caption (qwen3.5 via Ollama)
-                # Phase 1: objects (unlocks faces dependency)
-                # Phase 2: faces + embedding (co-resident)
+                # Mini-batch interleaving
+                #
+                # Instead of processing ALL captions (~3.5h for 500 images)
+                # before ANY objects/faces/embedding, interleave GPU phases
+                # in mini-batches of ~100 images:
+                #
+                #   [caption ×100] → [objects ×100] → [faces+embed ×100]
+                #   [caption ×100] → [objects ×100] → [faces+embed ×100]
+                #   ...
+                #
+                # Benefits:
+                # - First 100 images fully analyzed in ~40 min (not 3.5h)
+                # - Distributed workers help with caption during fast-module
+                #   windows (chunk affinity keeps them on the same chunk)
+                # - Model switch overhead: ~18s per mini-batch boundary
+                #   (< 1% of mini-batch time)
                 # ════════════════════════════════════════════════════════════
                 phase_labels = [
                     f"Phase {i} — {', '.join(scheduler.modules_for_phase(i))}"
                     for i in range(len(scheduler.gpu_phases))
                 ]
 
-                for phase_idx in range(len(scheduler.gpu_phases)):
+                # Split chunk into mini-batches for interleaving
+                if chunk_ids is not None:
+                    mini_size = self._mini_batch_size(len(chunk_ids))
+                    chunk_list = list(chunk_ids)
+                    mini_batches: list[set[int]] = [
+                        set(chunk_list[i : i + mini_size])
+                        for i in range(0, len(chunk_list), mini_size)
+                    ]
+                else:
+                    # No chunking — single mini-batch of everything
+                    mini_batches = [None]  # type: ignore[list-item]
+
+                total_minis = len(mini_batches)
+                if total_minis > 1:
+                    console.print(
+                        f"[dim]  Mini-batch interleaving: {total_minis} batches "
+                        f"of ~{mini_size} images[/dim]"
+                    )
+
+                for mini_idx, mini_ids in enumerate(mini_batches):
                     if self._shutdown.is_set():
                         break
 
-                    phase_modules = scheduler.modules_for_phase(phase_idx)
-                    has_pending = any(
-                        self.queue.pending_count(module=mod, image_ids=chunk_ids) > 0
-                        for mod in phase_modules
-                    )
-                    if not has_pending:
-                        continue
+                    # Build mini-batch-scoped claim function.
+                    # Falls back to chunk scope (or global) if mini_ids is None.
+                    if mini_ids is not None:
+                        def _mini_claim_fn(
+                            batch_sz: int, module: str,
+                            _ids: set[int] = mini_ids,
+                        ) -> list[dict[str, Any]]:
+                            _, _, tl_queue, _ = self._get_thread_db()
+                            return tl_queue.claim(
+                                batch_size=batch_sz, module=module, image_ids=_ids,
+                            )
+                        active_claim_fn = _mini_claim_fn
+                    else:
+                        active_claim_fn = _claim_fn
 
-                    console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
-
-                    with (
-                        self.profiler.span("gpu_phase", phase=phase_idx),
-                        ThreadPoolExecutor(max_workers=self.workers)  as local_pool,
-                        ThreadPoolExecutor(max_workers=1)             as cloud_pool,
-                    ):
-                        scheduler.run_gpu_phase(
-                            phase_idx,
-                            claim_fn=active_claim_fn,
-                            process_batch_fn=self._process_job_batch,
-                            process_single_fn=self._process_job,
-                            submit_io_fn=active_submit_io,
-                            collect_fn=_collect_futures,
-                            advance_fn=_advance_fn,
-                            flush_fn=self._maybe_periodic_flush,
-                            local_pool=local_pool,
-                            cloud_pool=cloud_pool,
-                            stats=stats,
-                            unload_fn=unload_gpu_model,
-                            prefetch_fn=_prefetch_image,
-                            cancel_futures_fn=_cancel_futures,
+                    if total_minis > 1:
+                        console.print(
+                            f"[dim]  ── Mini-batch {mini_idx + 1}/{total_minis} "
+                            f"({len(mini_ids)} images) ──[/dim]"  # type: ignore[arg-type]
                         )
+
+                    for phase_idx in range(len(scheduler.gpu_phases)):
+                        if self._shutdown.is_set():
+                            break
+
+                        phase_modules = scheduler.modules_for_phase(phase_idx)
+                        has_pending = any(
+                            self.queue.pending_count(
+                                module=mod,
+                                image_ids=mini_ids if mini_ids is not None else chunk_ids,
+                            ) > 0
+                            for mod in phase_modules
+                        )
+                        if not has_pending:
+                            continue
+
+                        if total_minis <= 1:
+                            console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
+
+                        with (
+                            self.profiler.span(
+                                "gpu_phase", phase=phase_idx, mini_batch=mini_idx,
+                            ),
+                            ThreadPoolExecutor(max_workers=self.workers) as local_pool,
+                            ThreadPoolExecutor(max_workers=1)            as cloud_pool,
+                        ):
+                            scheduler.run_gpu_phase(
+                                phase_idx,
+                                claim_fn=active_claim_fn,
+                                process_batch_fn=self._process_job_batch,
+                                process_single_fn=self._process_job,
+                                submit_io_fn=active_submit_io,
+                                collect_fn=_collect_futures,
+                                advance_fn=_advance_fn,
+                                flush_fn=self._maybe_periodic_flush,
+                                local_pool=local_pool,
+                                cloud_pool=cloud_pool,
+                                stats=stats,
+                                unload_fn=unload_gpu_model,
+                                prefetch_fn=_prefetch_image,
+                                cancel_futures_fn=_cancel_futures,
+                            )
 
                 # ════════════════════════════════════════════════════════════
                 # IO drain (per-chunk)
@@ -574,6 +655,14 @@ class Worker:
                         f"[cyan]Independent GPU pass: "
                         f"{', '.join(indie_gpu)} ({total_indie} jobs)[/cyan]"
                     )
+
+                    # Ensure Ollama model is unloaded before perception loads
+                    # its 15+ GB model — belt-and-suspenders safety since
+                    # caption phase already unloads, but Ollama may auto-load.
+                    try:
+                        unload_gpu_model("caption")
+                    except Exception:
+                        pass
 
                     def _drain_indie_gpu(module: str) -> None:
                         while not self._shutdown.is_set():
