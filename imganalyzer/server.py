@@ -228,10 +228,28 @@ def _handle_status(params: dict) -> dict:
     running_modules = _get_running_modules_by_node(conn)
     worker_items = _build_worker_items(conn)
 
+    # Chunk-level stats: pending counts per module within the current chunk.
+    chunk_modules: dict[str, int] = {}
+    chunk_info: dict[str, Any] | None = None
+    if _active_worker is not None and _active_worker.current_chunk_ids is not None:
+        chunk_ids = _active_worker.current_chunk_ids
+        for mod in modules_out:
+            cp = queue.pending_count(module=mod, image_ids=chunk_ids)
+            cr = queue.running_count(module=mod, image_ids=chunk_ids)
+            if cp > 0 or cr > 0:
+                chunk_modules[mod] = cp + cr
+        chunk_info = {
+            "size": len(chunk_ids),
+            "index": _active_worker.current_chunk_index,
+            "total": _active_worker.total_chunks,
+            "modules": chunk_modules,
+        }
+
     return {
         "total_images": total_images,
         "modules": modules_out,
         "module_avg_ms": module_avg_ms,
+        "chunk": chunk_info,
         "totals": {
             "pending": totals.get("pending", 0),
             "running": totals.get("running", 0),
@@ -397,6 +415,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
             # Wire up direct result-notification callback (bypasses print)
             from imganalyzer.pipeline import worker as worker_mod
             worker_mod._result_notify = lambda payload: _send_notification("run/result", payload)
+            worker_mod._chunk_notify = lambda payload: _send_notification("run/chunk_done", payload)
             try:
                 result = worker.run(batch_size=batch_size, chunk_size=chunk_size)
                 _send_notification("run/done", result)
@@ -404,6 +423,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
                 _send_notification("run/error", {"error": str(exc)})
             finally:
                 worker_mod._result_notify = None
+                worker_mod._chunk_notify = None
                 _active_worker = None
                 conn.close()
         except Exception as exc:

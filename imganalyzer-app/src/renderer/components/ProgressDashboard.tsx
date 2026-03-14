@@ -228,6 +228,57 @@ function NodeContribution({ nodes }: { nodes: BatchNode[] }) {
   )
 }
 
+function ChunkProgress({
+  chunk,
+}: {
+  chunk: { size: number; index: number; total: number; modules: Record<string, number> }
+}) {
+  const moduleEntries = Object.entries(chunk.modules)
+    .filter(([, cnt]) => cnt > 0)
+    .sort(([, a], [, b]) => b - a)
+  const totalRemaining = moduleEntries.reduce((s, [, c]) => s + c, 0)
+
+  return (
+    <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
+      <div className="mb-3 flex items-baseline justify-between">
+        <span className="text-sm font-semibold text-neutral-100">
+          Current chunk
+        </span>
+        <span className="text-xs font-mono text-neutral-500">
+          {chunk.index + 1} / {chunk.total}
+          <span className="ml-2 text-neutral-600">({chunk.size} images)</span>
+        </span>
+      </div>
+
+      {moduleEntries.length > 0 ? (
+        <div className="grid gap-1.5">
+          {moduleEntries.map(([mod, count]) => (
+            <div key={mod} className="flex items-center gap-3 text-xs">
+              <span className="min-w-[90px] text-neutral-400">
+                {MODULE_LABELS[mod] ?? mod}
+              </span>
+              <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
+                <div
+                  className="h-full rounded-full bg-cyan-600/70 transition-all duration-300"
+                  style={{ width: `${Math.min(100, (count / chunk.size) * 100)}%` }}
+                />
+              </div>
+              <span className="w-12 shrink-0 text-right font-mono text-neutral-300">
+                {count.toLocaleString()}
+              </span>
+            </div>
+          ))}
+          <div className="mt-1 text-right text-[11px] font-mono text-neutral-500">
+            {totalRemaining.toLocaleString()} remaining
+          </div>
+        </div>
+      ) : (
+        <p className="text-xs text-neutral-500">All jobs in this chunk completed</p>
+      )}
+    </section>
+  )
+}
+
 export function ProgressDashboard({
   stats,
   onPause,
@@ -366,7 +417,12 @@ export function ProgressDashboard({
         </div>
       </section>
 
-      <NodeContribution nodes={nodes} />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <NodeContribution nodes={nodes} />
+        {stats.chunk && stats.chunk.total > 0 && (
+          <ChunkProgress chunk={stats.chunk} />
+        )}
+      </div>
 
       {moduleEntries.length > 0 && (
         <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">

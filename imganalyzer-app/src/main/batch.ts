@@ -97,6 +97,7 @@ export interface BatchStats {
   elapsedMs: number
   queue: BatchQueueSummary
   nodes: BatchNode[]
+  chunk?: { size: number; index: number; total: number; modules: Record<string, number> }
 }
 
 export type BatchStatus =
@@ -211,6 +212,11 @@ const processedStatusResultKeys = new Set<string>()
 const nodeCounters = new Map<string, NodeCounters>()
 let nextResultSequence = 0
 
+// Chunk-based ETA: throughput from the last completed chunk.
+// passesPerSec is derived from all workers' combined throughput during
+// that chunk (wall-clock time includes parallel worker contributions).
+let lastChunkPassesPerSec = 0
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Reset all completion counters for a fresh session. */
@@ -218,6 +224,7 @@ function resetSessionCounters(): void {
   completionWindow.length = 0
   processedStatusResultKeys.clear()
   nodeCounters.clear()
+  lastChunkPassesPerSec = 0
 }
 
 /** Emit a batch:tick event to the renderer with current stats. */
@@ -354,13 +361,19 @@ function computeMetrics(
       ? lastN.reduce((sum, e) => sum + e.durationMs, 0) / lastN.length
       : 0
 
+  // Prefer chunk-based throughput for ETA (accounts for all workers'
+  // combined contributions during the last chunk).
   const effectiveWorkers = Math.max(1, workers)
-  const estimatedMs =
-    imagesPerSec > 0 && remainingPasses > 0
-      ? (remainingPasses / imagesPerSec) * 1000
-      : avgMsPerImage > 0 && remainingPasses > 0
-        ? (remainingPasses * avgMsPerImage) / effectiveWorkers
-        : 0
+  let estimatedMs: number
+  if (lastChunkPassesPerSec > 0 && remainingPasses > 0) {
+    estimatedMs = (remainingPasses / lastChunkPassesPerSec) * 1000
+  } else if (imagesPerSec > 0 && remainingPasses > 0) {
+    estimatedMs = (remainingPasses / imagesPerSec) * 1000
+  } else if (avgMsPerImage > 0 && remainingPasses > 0) {
+    estimatedMs = (remainingPasses * avgMsPerImage) / effectiveWorkers
+  } else {
+    estimatedMs = 0
+  }
 
   return { imagesPerSec, avgMsPerImage, estimatedMs }
 }
@@ -548,6 +561,7 @@ async function doPoll(): Promise<void> {
         remainingJobs: data.remaining_images ?? 0,
       },
       nodes: buildBatchNodes(data),
+      chunk: data.chunk ?? undefined,
     }
 
     emitTick(stats)
@@ -606,6 +620,15 @@ function setupNotificationListener(): void {
           completedAt: new Date().toISOString(),
         }
         trackResult(result)
+        break
+      }
+
+      case 'run/chunk_done': {
+        const durationMs = (p.durationMs as number) ?? 0
+        const passesCompleted = (p.passesCompleted as number) ?? 0
+        if (durationMs > 0 && passesCompleted > 0) {
+          lastChunkPassesPerSec = passesCompleted / (durationMs / 1000)
+        }
         break
       }
 

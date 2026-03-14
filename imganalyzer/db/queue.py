@@ -765,6 +765,25 @@ class JobQueue:
         ).fetchone()
         return row["cnt"]
 
+    def running_count(
+        self,
+        module: str | None = None,
+        image_ids: set[int] | None = None,
+    ) -> int:
+        where = "WHERE status = 'running'"
+        params: list[Any] = []
+        if module:
+            where += " AND module = ?"
+            params.append(module)
+        if image_ids is not None:
+            id_ph = ",".join("?" * len(image_ids))
+            where += f" AND image_id IN ({id_ph})"
+            params.extend(image_ids)
+        row = self.conn.execute(
+            f"SELECT COUNT(*) as cnt FROM job_queue {where}", params
+        ).fetchone()
+        return row["cnt"]
+
     # ── Cleanup ────────────────────────────────────────────────────────────
 
     def clear_module(self, module: str) -> int:

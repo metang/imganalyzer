@@ -321,6 +321,7 @@ export interface BatchStats {
   elapsedMs: number
   queue: BatchQueueSummary
   nodes: BatchNode[]
+  chunk?: { size: number; index: number; total: number; modules: Record<string, number> }
 }
 
 export interface BatchResult {

@@ -99,6 +99,7 @@ for _mod, _prereq in _PREREQUISITES.items():
 # When running from the CLI, it stays None and _emit_result falls back to
 # printing a [RESULT] line to stdout.
 _result_notify: Any = None   # Callable[[dict], None] | None
+_chunk_notify: Any = None    # Callable[[dict], None] | None
 
 
 def _emit_result(
@@ -171,6 +172,8 @@ class Worker:
         # handler can prefer these images for distributed workers, keeping
         # workers focused on the same chunk as the coordinator.
         self.current_chunk_ids: set[int] | None = None
+        self.current_chunk_index: int = 0
+        self.total_chunks: int = 0
 
         # Profiler
         from imganalyzer.pipeline.profiler import ProfileCollector, NullProfiler
@@ -480,6 +483,10 @@ class Worker:
                     # Expose current chunk to coordinator's job claim handler
                     # so distributed workers are directed to the same chunk.
                     self.current_chunk_ids = chunk_ids
+                    self.current_chunk_index = chunk_idx
+                    self.total_chunks = total_chunks
+                    chunk_start_ms = time.perf_counter() * 1000
+                    chunk_stats_before = {k: stats[k] for k in ("done", "failed", "skipped")}
 
                     if total_chunks > 1:
                         console.print(
@@ -729,6 +736,24 @@ class Worker:
                                     cloud_pool=cloud_pool,
                                     cancel_futures_fn=_cancel_futures,
                                 )
+
+                    if not self._shutdown.is_set():
+                        chunk_elapsed_ms = time.perf_counter() * 1000 - chunk_start_ms
+                        chunk_passes = sum(
+                            stats[k] - chunk_stats_before[k]
+                            for k in ("done", "failed", "skipped")
+                        )
+                        if _chunk_notify is not None:
+                            try:
+                                _chunk_notify({
+                                    "chunkIndex": chunk_idx,
+                                    "totalChunks": total_chunks,
+                                    "chunkSize": len(chunk_ids) if chunk_ids else 0,
+                                    "durationMs": round(chunk_elapsed_ms),
+                                    "passesCompleted": chunk_passes,
+                                })
+                            except Exception:
+                                pass
 
                     if total_chunks > 1 and not self._shutdown.is_set():
                         console.print(
