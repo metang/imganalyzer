@@ -27,7 +27,6 @@ $ErrorActionPreference = 'Stop'
 $EnvName         = if ($env:IMGANALYZER_ENV_NAME)            { $env:IMGANALYZER_ENV_NAME }            else { 'imganalyzer' }
 $PythonVersion   = if ($env:IMGANALYZER_PYTHON_VERSION)      { $env:IMGANALYZER_PYTHON_VERSION }      else { '3.12' }
 $RepoUrl         = if ($env:IMGANALYZER_REPO_URL)            { $env:IMGANALYZER_REPO_URL }            else { 'https://github.com/metang/imganalyzer.git' }
-$CloudProvider   = if ($env:IMGANALYZER_WORKER_CLOUD_PROVIDER) { $env:IMGANALYZER_WORKER_CLOUD_PROVIDER } else { 'copilot' }
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 if (-not $RepoDir) {
@@ -52,11 +51,6 @@ function Assert-LastExit([string]$Step) {
 }
 Require-Command 'conda'
 Require-Command 'git'
-
-$ValidProviders = @('copilot', 'openai', 'anthropic', 'google')
-if ($CloudProvider -notin $ValidProviders) {
-    Write-Error "Error: Unsupported cloud provider '$CloudProvider'. Use one of: $($ValidProviders -join ', ')"
-}
 
 # ── Ensure cache directories are writable ────────────────────────────────────
 Write-Host "==> Checking cache directory permissions..."
@@ -118,7 +112,7 @@ Write-Host "==> Installing PyTorch with CUDA support..."
 conda run -n $EnvName python -m pip install "torch>=2.5" torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 Assert-LastExit "Install PyTorch CUDA wheels"
 
-$Extras = "local-ai,$CloudProvider"
+$Extras = "local-ai"
 Write-Host "==> Installing editable package with extras: [$Extras]"
 conda run -n $EnvName python -m pip install -e ".[$Extras]"
 Assert-LastExit "Install imganalyzer editable package with extras"
@@ -157,19 +151,11 @@ if missing:
 "@
 Assert-LastExit "Run capability probe"
 
-Write-Host "==> Verifying cloud provider import ($CloudProvider)..."
-switch ($CloudProvider) {
-    'copilot'   { conda run -n $EnvName python -c "import copilot; print('copilot sdk ok')" }
-    'openai'    { conda run -n $EnvName python -c "import openai; print('openai ok')" }
-    'anthropic' { conda run -n $EnvName python -c "import anthropic; print('anthropic ok')" }
-    'google'    { conda run -n $EnvName python -c "from google.cloud import vision; print('google vision ok')" }
-}
-Assert-LastExit "Verify cloud provider import"
-
 Pop-Location
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 $CondaPrefix = (conda info --base) + "\envs\$EnvName"
+$Hostname = [System.Net.Dns]::GetHostName()
 
 Write-Host @"
 
@@ -181,18 +167,15 @@ Start worker with:
   `$env:IMGANALYZER_MODEL_CACHE = '$ModelCache'
   imganalyzer run-distributed-worker ``
     --coordinator http://<COORDINATOR_IP>:8765/jsonrpc ``
-    --worker-id worker-01 ``
-    --cloud $CloudProvider
+    --auto-update
 
 Or run directly without activating:
   `$env:HF_HOME = '$HfHome'
   `$env:IMGANALYZER_MODEL_CACHE = '$ModelCache'
   & "$CondaPrefix\python.exe" -m imganalyzer.cli run-distributed-worker ``
     --coordinator http://<COORDINATOR_IP>:8765/jsonrpc ``
-    --worker-id worker-01 ``
-    --cloud $CloudProvider
+    --auto-update
 
-Then requeue failed jobs on the coordinator:
-  - UI: click "Retry failed"
-  - CLI: imganalyzer run --retry-failed
+Worker ID defaults to hostname ($Hostname).
+Override with --worker-id <name> if needed.
 "@

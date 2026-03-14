@@ -13,7 +13,6 @@ PYTHON_VERSION="${IMGANALYZER_PYTHON_VERSION:-3.12}"
 REPO_URL="${IMGANALYZER_REPO_URL:-https://github.com/metang/imganalyzer.git}"
 REPO_DIR="${1:-$DEFAULT_REPO_DIR}"
 OS_NAME="$(uname -s)"
-WORKER_CLOUD_PROVIDER="${IMGANALYZER_WORKER_CLOUD_PROVIDER:-copilot}"
 
 require_cmd() {
   local name="$1"
@@ -96,17 +95,7 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
   conda install -n "$ENV_NAME" -c conda-forge onnxruntime -y
 fi
 
-case "$WORKER_CLOUD_PROVIDER" in
-  copilot|openai|anthropic|google)
-    ;;
-  *)
-    echo "Error: Unsupported cloud provider '$WORKER_CLOUD_PROVIDER'." >&2
-    echo "Use one of: copilot, openai, anthropic, google" >&2
-    exit 1
-    ;;
-esac
-
-EXTRAS="local-ai,$WORKER_CLOUD_PROVIDER"
+EXTRAS="local-ai"
 echo "==> Installing editable package with extras: [$EXTRAS]"
 conda run -n "$ENV_NAME" python -m pip install -e ".[${EXTRAS}]"
 
@@ -176,26 +165,11 @@ if missing:
     print('WARNING: Unavailable modules:', ', '.join(missing))
 "
 
-echo "==> Verifying cloud provider import ($WORKER_CLOUD_PROVIDER)..."
-case "$WORKER_CLOUD_PROVIDER" in
-  copilot)
-    conda run -n "$ENV_NAME" python -c "import copilot; print('copilot sdk ok')"
-    ;;
-  openai)
-    conda run -n "$ENV_NAME" python -c "import openai; print('openai ok')"
-    ;;
-  anthropic)
-    conda run -n "$ENV_NAME" python -c "import anthropic; print('anthropic ok')"
-    ;;
-  google)
-    conda run -n "$ENV_NAME" python -c "from google.cloud import vision; print('google vision ok')"
-    ;;
-esac
-
 popd >/dev/null
 
 # ── Write a convenience shell snippet ────────────────────────────────────────
 CONDA_PREFIX="$(conda info --base)/envs/$ENV_NAME"
+HOSTNAME="$(hostname -s 2>/dev/null || hostname)"
 
 cat <<EOF
 
@@ -207,18 +181,15 @@ Start worker with:
   export IMGANALYZER_MODEL_CACHE=$IMGANALYZER_MODEL_CACHE
   imganalyzer run-distributed-worker \\
     --coordinator http://<COORDINATOR_IP>:8765/jsonrpc \\
-    --worker-id worker-01 \\
-    --cloud $WORKER_CLOUD_PROVIDER
+    --auto-update
 
 Or run directly without activating:
   HF_HOME=$HF_HOME \\
   IMGANALYZER_MODEL_CACHE=$IMGANALYZER_MODEL_CACHE \\
   $CONDA_PREFIX/bin/python -m imganalyzer.cli run-distributed-worker \\
     --coordinator http://<COORDINATOR_IP>:8765/jsonrpc \\
-    --worker-id worker-01 \\
-    --cloud $WORKER_CLOUD_PROVIDER
+    --auto-update
 
-Then requeue failed jobs on the coordinator:
-  - UI: click "Retry failed"
-  - CLI: imganalyzer run --retry-failed
+Worker ID defaults to hostname ($HOSTNAME).
+Override with --worker-id <name> if needed.
 EOF
