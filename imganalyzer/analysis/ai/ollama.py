@@ -149,6 +149,7 @@ class OllamaAI:
                 },
             ],
             "stream": False,
+            "think": False,
             "options": {
                 "num_predict": _NUM_PREDICT,
                 "temperature": 0,
