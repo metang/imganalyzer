@@ -135,29 +135,34 @@ class OllamaAI:
         return results
 
     def _call_ollama(self, b64_image: str) -> dict[str, Any]:
-        """Send image to Ollama and parse JSON response with retries."""
+        """Send image to Ollama and parse JSON response with retries.
+
+        On each retry the token budget (num_predict) is increased by 40% so
+        truncated responses have room to complete on the next attempt.
+        """
         from urllib import request as urllib_request
         from urllib.error import URLError
 
-        payload = json.dumps({
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": self._prompt,
-                    "images": [b64_image],
-                },
-            ],
-            "stream": False,
-            "think": False,
-            "options": {
-                "num_predict": _NUM_PREDICT,
-                "temperature": 0,
-            },
-        }).encode("utf-8")
-
+        num_predict = _NUM_PREDICT
         last_text = ""
         for attempt in range(1, _RETRIES + 1):
+            payload = json.dumps({
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": self._prompt,
+                        "images": [b64_image],
+                    },
+                ],
+                "stream": False,
+                "think": False,
+                "options": {
+                    "num_predict": num_predict,
+                    "temperature": 0,
+                },
+            }).encode("utf-8")
+
             start = time.perf_counter()
             try:
                 req = urllib_request.Request(
@@ -175,25 +180,32 @@ class OllamaAI:
                 )
                 if attempt == _RETRIES:
                     return {"description": "", "keywords": [], "error": str(exc)}
+                num_predict = int(num_predict * 1.4)
                 time.sleep(1)
                 continue
 
             elapsed = time.perf_counter() - start
             text = (body.get("message", {}).get("content") or "").strip()
+            done_reason = body.get("done_reason", "")
             last_text = text
 
             parsed = _parse_json_response(text)
             keywords = parsed.get("keywords", [])
             if isinstance(keywords, list) and len(keywords) > 0:
                 log.debug(
-                    "Ollama %s: %d keywords, %.1fs (attempt %d)",
-                    self.model, len(keywords), elapsed, attempt,
+                    "Ollama %s: %d keywords, %.1fs (attempt %d, num_predict=%d)",
+                    self.model, len(keywords), elapsed, attempt, num_predict,
                 )
                 return self._normalize(parsed)
 
+            # Increase token budget for next attempt
+            prev_predict = num_predict
+            num_predict = int(num_predict * 1.4)
             log.warning(
-                "Ollama %s attempt %d/%d: empty keywords (text=%d chars)",
+                "Ollama %s attempt %d/%d: empty keywords (text=%d chars, "
+                "done_reason=%s, num_predict %d->%d)",
                 self.model, attempt, _RETRIES, len(text),
+                done_reason, prev_predict, num_predict,
             )
 
         log.error(

@@ -612,11 +612,12 @@ function setupNotificationListener(): void {
         const runId = currentRunId
         if (batchStatus !== 'running') break
         isRunActive = false
+        const wasPaused = !!(p as any)?.paused
         void rpc.call('status', {}).then((data: any) => {
           if (currentRunId !== runId) return
           const pending = data?.totals?.pending ?? 0
           const running = data?.totals?.running ?? 0
-          if (pending + running > 0) {
+          if (wasPaused && pending + running > 0) {
             batchStatus = 'paused'
           } else {
             batchStatus = 'done'

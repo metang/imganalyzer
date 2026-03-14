@@ -439,266 +439,280 @@ class Worker:
                     return None
 
             # ════════════════════════════════════════════════════════════════
-            # Chunk loop — if chunk_size > 0, process images in fixed-size
-            # chunks so that each chunk is fully analyzed before the next.
-            # chunk_size == 0 → no chunking (original behaviour).
+            # Sweep loop — after processing all chunks, re-check the queue
+            # for remaining pending work (e.g. new images added, distributed
+            # workers completing prerequisites).  Only exits when there is
+            # truly nothing left or the user pauses.
             # ════════════════════════════════════════════════════════════════
-            all_image_ids = self.queue.get_pending_image_ids()
-            if chunk_size > 0 and len(all_image_ids) > chunk_size:
-                chunks = [
-                    set(all_image_ids[i : i + chunk_size])
-                    for i in range(0, len(all_image_ids), chunk_size)
-                ]
-            else:
-                # No chunking: single chunk with all images (or None = no filter)
-                chunks = [None]  # type: ignore[list-item]
+            sweep = 0
+            while not self._shutdown.is_set():
+                all_image_ids = self.queue.get_pending_image_ids()
+                if not all_image_ids:
+                    break  # truly nothing left
 
-            total_chunks = len(chunks)
-            if total_chunks > 1:
-                console.print(
-                    f"[cyan]Chunked processing: {total_chunks} chunks "
-                    f"of {chunk_size} images each[/cyan]"
-                )
-
-            for chunk_idx, chunk_ids in enumerate(chunks):
-                if self._shutdown.is_set():
-                    break
-
-                # Expose current chunk to coordinator's job claim handler
-                # so distributed workers are directed to the same chunk.
-                self.current_chunk_ids = chunk_ids
-
-                if total_chunks > 1:
+                sweep += 1
+                if sweep > 1:
                     console.print(
-                        f"\n[bold cyan]━━ Chunk {chunk_idx + 1}/{total_chunks} "
-                        f"({len(chunk_ids)} images) ━━[/bold cyan]"  # type: ignore[arg-type]
+                        f"\n[cyan]Sweep {sweep}: {len(all_image_ids)} images "
+                        f"still pending, continuing...[/cyan]"
                     )
+                    progress.update(task, total=stats["done"] + stats["failed"] + len(all_image_ids))
 
-                # Chunk-scoped IO submit — same as _submit_io_jobs but uses chunk_ids filter
-                def _chunk_submit_io_jobs(
-                    local_pool: ThreadPoolExecutor,
-                    cloud_pool: ThreadPoolExecutor,
-                ) -> dict[Future, dict[str, Any]]:
-                    futures: dict[Future, dict[str, Any]] = {}
-                    for mod in LOCAL_IO_MODULES:
-                        jobs = self.queue.claim(
-                            batch_size=batch_size, module=mod,
-                            image_ids=chunk_ids,
-                        )
-                        for i, job in enumerate(jobs):
-                            if self._shutdown.is_set():
-                                for j in range(i, len(jobs)):
-                                    self.queue.mark_pending(jobs[j]["id"])
-                                return futures
-                            try:
-                                fut = local_pool.submit(self._process_job, job)
-                                futures[fut] = job
-                            except RuntimeError:
-                                for j in range(i, len(jobs)):
-                                    self.queue.mark_pending(jobs[j]["id"])
-                                return futures
-                    return futures
-
-                # Use chunk-scoped functions when chunking, original otherwise
-                active_submit_io = _chunk_submit_io_jobs if chunk_ids is not None else _submit_io_jobs
-
-                # ════════════════════════════════════════════════════════════
-                # Mini-batch interleaving
-                #
-                # Instead of processing ALL captions (~3.5h for 500 images)
-                # before ANY objects/faces/embedding, interleave GPU phases
-                # in mini-batches of ~100 images:
-                #
-                #   [caption ×100] → [objects ×100] → [faces+embed ×100]
-                #   [caption ×100] → [objects ×100] → [faces+embed ×100]
-                #   ...
-                #
-                # Benefits:
-                # - First 100 images fully analyzed in ~40 min (not 3.5h)
-                # - Distributed workers help with caption during fast-module
-                #   windows (chunk affinity keeps them on the same chunk)
-                # - Model switch overhead: ~18s per mini-batch boundary
-                #   (< 1% of mini-batch time)
-                # ════════════════════════════════════════════════════════════
-                phase_labels = [
-                    f"Phase {i} — {', '.join(scheduler.modules_for_phase(i))}"
-                    for i in range(len(scheduler.gpu_phases))
-                ]
-
-                # Split chunk into mini-batches for interleaving
-                if chunk_ids is not None:
-                    mini_size = self._mini_batch_size(len(chunk_ids))
-                    chunk_list = list(chunk_ids)
-                    mini_batches: list[set[int]] = [
-                        set(chunk_list[i : i + mini_size])
-                        for i in range(0, len(chunk_list), mini_size)
+                if chunk_size > 0 and len(all_image_ids) > chunk_size:
+                    chunks = [
+                        set(all_image_ids[i : i + chunk_size])
+                        for i in range(0, len(all_image_ids), chunk_size)
                     ]
                 else:
-                    # No chunking — single mini-batch of everything
-                    mini_batches = [None]  # type: ignore[list-item]
+                    chunks = [None]  # type: ignore[list-item]
 
-                total_minis = len(mini_batches)
-                if total_minis > 1:
+                total_chunks = len(chunks)
+                if total_chunks > 1:
                     console.print(
-                        f"[dim]  Mini-batch interleaving: {total_minis} batches "
-                        f"of ~{mini_size} images[/dim]"
+                        f"[cyan]Chunked processing: {total_chunks} chunks "
+                        f"of {chunk_size} images each[/cyan]"
                     )
 
-                for mini_idx, mini_ids in enumerate(mini_batches):
+                for chunk_idx, chunk_ids in enumerate(chunks):
                     if self._shutdown.is_set():
                         break
 
-                    # Build mini-batch-scoped claim function.
-                    # Falls back to chunk scope (or global) if mini_ids is None.
-                    if mini_ids is not None:
-                        def _mini_claim_fn(
-                            batch_sz: int, module: str,
-                            _ids: set[int] = mini_ids,
-                        ) -> list[dict[str, Any]]:
-                            _, _, tl_queue, _ = self._get_thread_db()
-                            return tl_queue.claim(
-                                batch_size=batch_sz, module=module, image_ids=_ids,
-                            )
-                        active_claim_fn = _mini_claim_fn
-                    else:
-                        active_claim_fn = _claim_fn
+                    # Expose current chunk to coordinator's job claim handler
+                    # so distributed workers are directed to the same chunk.
+                    self.current_chunk_ids = chunk_ids
 
-                    if total_minis > 1:
+                    if total_chunks > 1:
                         console.print(
-                            f"[dim]  ── Mini-batch {mini_idx + 1}/{total_minis} "
-                            f"({len(mini_ids)} images) ──[/dim]"  # type: ignore[arg-type]
+                            f"\n[bold cyan]━━ Chunk {chunk_idx + 1}/{total_chunks} "
+                            f"({len(chunk_ids)} images) ━━[/bold cyan]"  # type: ignore[arg-type]
                         )
 
-                    for phase_idx in range(len(scheduler.gpu_phases)):
+                    # Chunk-scoped IO submit — same as _submit_io_jobs but uses chunk_ids filter
+                    def _chunk_submit_io_jobs(
+                        local_pool: ThreadPoolExecutor,
+                        cloud_pool: ThreadPoolExecutor,
+                    ) -> dict[Future, dict[str, Any]]:
+                        futures: dict[Future, dict[str, Any]] = {}
+                        for mod in LOCAL_IO_MODULES:
+                            jobs = self.queue.claim(
+                                batch_size=batch_size, module=mod,
+                                image_ids=chunk_ids,
+                            )
+                            for i, job in enumerate(jobs):
+                                if self._shutdown.is_set():
+                                    for j in range(i, len(jobs)):
+                                        self.queue.mark_pending(jobs[j]["id"])
+                                    return futures
+                                try:
+                                    fut = local_pool.submit(self._process_job, job)
+                                    futures[fut] = job
+                                except RuntimeError:
+                                    for j in range(i, len(jobs)):
+                                        self.queue.mark_pending(jobs[j]["id"])
+                                    return futures
+                        return futures
+
+                    # Use chunk-scoped functions when chunking, original otherwise
+                    active_submit_io = _chunk_submit_io_jobs if chunk_ids is not None else _submit_io_jobs
+
+                    # ════════════════════════════════════════════════════════════
+                    # Mini-batch interleaving
+                    #
+                    # Instead of processing ALL captions (~3.5h for 500 images)
+                    # before ANY objects/faces/embedding, interleave GPU phases
+                    # in mini-batches of ~100 images:
+                    #
+                    #   [caption ×100] → [objects ×100] → [faces+embed ×100]
+                    #   [caption ×100] → [objects ×100] → [faces+embed ×100]
+                    #   ...
+                    #
+                    # Benefits:
+                    # - First 100 images fully analyzed in ~40 min (not 3.5h)
+                    # - Distributed workers help with caption during fast-module
+                    #   windows (chunk affinity keeps them on the same chunk)
+                    # - Model switch overhead: ~18s per mini-batch boundary
+                    #   (< 1% of mini-batch time)
+                    # ════════════════════════════════════════════════════════════
+                    phase_labels = [
+                        f"Phase {i} — {', '.join(scheduler.modules_for_phase(i))}"
+                        for i in range(len(scheduler.gpu_phases))
+                    ]
+
+                    # Split chunk into mini-batches for interleaving
+                    if chunk_ids is not None:
+                        mini_size = self._mini_batch_size(len(chunk_ids))
+                        chunk_list = list(chunk_ids)
+                        mini_batches: list[set[int]] = [
+                            set(chunk_list[i : i + mini_size])
+                            for i in range(0, len(chunk_list), mini_size)
+                        ]
+                    else:
+                        # No chunking — single mini-batch of everything
+                        mini_batches = [None]  # type: ignore[list-item]
+
+                    total_minis = len(mini_batches)
+                    if total_minis > 1:
+                        console.print(
+                            f"[dim]  Mini-batch interleaving: {total_minis} batches "
+                            f"of ~{mini_size} images[/dim]"
+                        )
+
+                    for mini_idx, mini_ids in enumerate(mini_batches):
                         if self._shutdown.is_set():
                             break
 
-                        phase_modules = scheduler.modules_for_phase(phase_idx)
-                        has_pending = any(
-                            self.queue.pending_count(
-                                module=mod,
-                                image_ids=mini_ids if mini_ids is not None else chunk_ids,
-                            ) > 0
-                            for mod in phase_modules
-                        )
-                        if not has_pending:
-                            continue
+                        # Build mini-batch-scoped claim function.
+                        # Falls back to chunk scope (or global) if mini_ids is None.
+                        if mini_ids is not None:
+                            def _mini_claim_fn(
+                                batch_sz: int, module: str,
+                                _ids: set[int] = mini_ids,
+                            ) -> list[dict[str, Any]]:
+                                _, _, tl_queue, _ = self._get_thread_db()
+                                return tl_queue.claim(
+                                    batch_size=batch_sz, module=module, image_ids=_ids,
+                                )
+                            active_claim_fn = _mini_claim_fn
+                        else:
+                            active_claim_fn = _claim_fn
 
-                        if total_minis <= 1:
-                            console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
+                        if total_minis > 1:
+                            console.print(
+                                f"[dim]  ── Mini-batch {mini_idx + 1}/{total_minis} "
+                                f"({len(mini_ids)} images) ──[/dim]"  # type: ignore[arg-type]
+                            )
 
+                        for phase_idx in range(len(scheduler.gpu_phases)):
+                            if self._shutdown.is_set():
+                                break
+
+                            phase_modules = scheduler.modules_for_phase(phase_idx)
+                            has_pending = any(
+                                self.queue.pending_count(
+                                    module=mod,
+                                    image_ids=mini_ids if mini_ids is not None else chunk_ids,
+                                ) > 0
+                                for mod in phase_modules
+                            )
+                            if not has_pending:
+                                continue
+
+                            if total_minis <= 1:
+                                console.print(f"[dim]{phase_labels[phase_idx]}[/dim]")
+
+                            with (
+                                self.profiler.span(
+                                    "gpu_phase", phase=phase_idx, mini_batch=mini_idx,
+                                ),
+                                ThreadPoolExecutor(max_workers=self.workers) as local_pool,
+                                ThreadPoolExecutor(max_workers=1)            as cloud_pool,
+                            ):
+                                scheduler.run_gpu_phase(
+                                    phase_idx,
+                                    claim_fn=active_claim_fn,
+                                    process_batch_fn=self._process_job_batch,
+                                    process_single_fn=self._process_job,
+                                    submit_io_fn=active_submit_io,
+                                    collect_fn=_collect_futures,
+                                    advance_fn=_advance_fn,
+                                    flush_fn=self._maybe_periodic_flush,
+                                    local_pool=local_pool,
+                                    cloud_pool=cloud_pool,
+                                    stats=stats,
+                                    unload_fn=unload_gpu_model,
+                                    prefetch_fn=_prefetch_image,
+                                    cancel_futures_fn=_cancel_futures,
+                                )
+
+                    # ════════════════════════════════════════════════════════════
+                    # IO drain (per-chunk)
+                    # Independent GPU modules (e.g. perception) are deferred to
+                    # after all chunks so they don't block chunk progression.
+                    # ════════════════════════════════════════════════════════════
+                    if not self._shutdown.is_set():
                         with (
-                            self.profiler.span(
-                                "gpu_phase", phase=phase_idx, mini_batch=mini_idx,
-                            ),
-                            ThreadPoolExecutor(max_workers=self.workers) as local_pool,
-                            ThreadPoolExecutor(max_workers=1)            as cloud_pool,
+                            self.profiler.span("io_drain"),
+                            ThreadPoolExecutor(max_workers=self.workers)  as local_pool,
+                            ThreadPoolExecutor(max_workers=1)             as cloud_pool,
                         ):
-                            scheduler.run_gpu_phase(
-                                phase_idx,
-                                claim_fn=active_claim_fn,
-                                process_batch_fn=self._process_job_batch,
-                                process_single_fn=self._process_job,
+                            console.print("[dim]IO drain[/dim]")
+
+                            scheduler.run_io_drain(
                                 submit_io_fn=active_submit_io,
                                 collect_fn=_collect_futures,
-                                advance_fn=_advance_fn,
                                 flush_fn=self._maybe_periodic_flush,
                                 local_pool=local_pool,
                                 cloud_pool=cloud_pool,
-                                stats=stats,
-                                unload_fn=unload_gpu_model,
-                                prefetch_fn=_prefetch_image,
                                 cancel_futures_fn=_cancel_futures,
                             )
 
-                # ════════════════════════════════════════════════════════════
-                # IO drain (per-chunk)
-                # Independent GPU modules (e.g. perception) are deferred to
-                # after all chunks so they don't block chunk progression.
-                # ════════════════════════════════════════════════════════════
-                if not self._shutdown.is_set():
-                    with (
-                        self.profiler.span("io_drain"),
-                        ThreadPoolExecutor(max_workers=self.workers)  as local_pool,
-                        ThreadPoolExecutor(max_workers=1)             as cloud_pool,
-                    ):
-                        console.print("[dim]IO drain[/dim]")
-
-                        scheduler.run_io_drain(
-                            submit_io_fn=active_submit_io,
-                            collect_fn=_collect_futures,
-                            flush_fn=self._maybe_periodic_flush,
-                            local_pool=local_pool,
-                            cloud_pool=cloud_pool,
-                            cancel_futures_fn=_cancel_futures,
+                    if total_chunks > 1 and not self._shutdown.is_set():
+                        console.print(
+                            f"[green]Chunk {chunk_idx + 1}/{total_chunks} complete ✓[/green]"
                         )
 
-                if total_chunks > 1 and not self._shutdown.is_set():
-                    console.print(
-                        f"[green]Chunk {chunk_idx + 1}/{total_chunks} complete ✓[/green]"
-                    )
+                # ════════════════════════════════════════════════════════════════
+                # Independent GPU modules — currently empty (perception moved into
+                # the phase pipeline).  Kept as a fallback for any future modules
+                # that need to run outside the sequential pipeline.
+                # ════════════════════════════════════════════════════════════════
+                if not self._shutdown.is_set():
+                    indie_gpu = [
+                        mod for mod in scheduler.independent_gpu_modules()
+                        if self.queue.pending_count(module=mod) > 0
+                    ]
+                    if indie_gpu:
+                        total_indie = sum(
+                            self.queue.pending_count(module=mod) for mod in indie_gpu
+                        )
+                        console.print(
+                            f"[cyan]Independent GPU pass: "
+                            f"{', '.join(indie_gpu)} ({total_indie} jobs)[/cyan]"
+                        )
 
-            # ════════════════════════════════════════════════════════════════
-            # Independent GPU modules — currently empty (perception moved into
-            # the phase pipeline).  Kept as a fallback for any future modules
-            # that need to run outside the sequential pipeline.
-            # ════════════════════════════════════════════════════════════════
-            if not self._shutdown.is_set():
-                indie_gpu = [
-                    mod for mod in scheduler.independent_gpu_modules()
-                    if self.queue.pending_count(module=mod) > 0
-                ]
-                if indie_gpu:
-                    total_indie = sum(
-                        self.queue.pending_count(module=mod) for mod in indie_gpu
-                    )
-                    console.print(
-                        f"[cyan]Independent GPU pass: "
-                        f"{', '.join(indie_gpu)} ({total_indie} jobs)[/cyan]"
-                    )
+                        try:
+                            unload_gpu_model("caption")
+                        except Exception:
+                            pass
 
-                    try:
-                        unload_gpu_model("caption")
-                    except Exception:
-                        pass
+                        def _drain_indie_gpu(module: str) -> None:
+                            while not self._shutdown.is_set():
+                                _, _, tl_queue, _ = self._get_thread_db()
+                                jobs = tl_queue.claim(batch_size=1, module=module)
+                                if not jobs:
+                                    break
+                                for job in jobs:
+                                    self._process_job(job)
 
-                    def _drain_indie_gpu(module: str) -> None:
-                        while not self._shutdown.is_set():
-                            _, _, tl_queue, _ = self._get_thread_db()
-                            jobs = tl_queue.claim(batch_size=1, module=module)
-                            if not jobs:
-                                break
-                            for job in jobs:
-                                self._process_job(job)
+                        with (
+                            self.profiler.span("indie_gpu"),
+                            ThreadPoolExecutor(max_workers=self.workers)  as local_pool,
+                            ThreadPoolExecutor(max_workers=1)             as cloud_pool,
+                        ):
+                            gpu_threads: list[threading.Thread] = []
+                            for mod in indie_gpu:
+                                t = threading.Thread(
+                                    target=_drain_indie_gpu,
+                                    args=(mod,),
+                                    daemon=True,
+                                    name=f"gpu-indie-{mod}",
+                                )
+                                gpu_threads.append(t)
+                                t.start()
 
-                    with (
-                        self.profiler.span("indie_gpu"),
-                        ThreadPoolExecutor(max_workers=self.workers)  as local_pool,
-                        ThreadPoolExecutor(max_workers=1)             as cloud_pool,
-                    ):
-                        gpu_threads: list[threading.Thread] = []
-                        for mod in indie_gpu:
-                            t = threading.Thread(
-                                target=_drain_indie_gpu,
-                                args=(mod,),
-                                daemon=True,
-                                name=f"gpu-indie-{mod}",
-                            )
-                            gpu_threads.append(t)
-                            t.start()
-
-                        for t in gpu_threads:
-                            while t.is_alive():
-                                new = _submit_io_jobs(local_pool, cloud_pool)
-                                if new:
-                                    _collect_futures(new)
-                                t.join(timeout=1.0)
+                            for t in gpu_threads:
+                                while t.is_alive():
+                                    new = _submit_io_jobs(local_pool, cloud_pool)
+                                    if new:
+                                        _collect_futures(new)
+                                    t.join(timeout=1.0)
 
         # Clear chunk affinity — no longer directing workers to a specific chunk.
         self.current_chunk_ids = None
 
         if self._shutdown.is_set():
             console.print("\n[yellow]Paused.[/yellow] Run `imganalyzer run` to resume.")
+            stats["paused"] = True
         else:
             console.print("\n[green]Complete.[/green]")
 
