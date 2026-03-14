@@ -19,8 +19,10 @@ Phase 1 — ``objects`` pass (GPU, serial):
 
 Phase 2 — ``faces`` + ``embedding`` (GPU, co-resident):
   These models (~1.95 GB total) run concurrently with separate CUDA streams.
-  ``perception`` (UniPercept) runs as an independent exclusive GPU module
-  after all chunks complete.
+
+Phase 3 — ``perception`` (GPU, exclusive):
+  UniPercept (~15.6 GB) runs as the last phase in each mini-batch.
+  While CUDA processes perception, macOS workers continue caption jobs.
 
 Mini-batch interleaving
 -----------------------
@@ -637,10 +639,9 @@ class Worker:
                     )
 
             # ════════════════════════════════════════════════════════════════
-            # Independent GPU modules (e.g. perception) — run after all
-            # chunks so they don't block per-chunk progress.  These modules
-            # need exclusive GPU access (15+ GB) and are very slow, so
-            # deferring them keeps the fast modules progressing.
+            # Independent GPU modules — currently empty (perception moved into
+            # the phase pipeline).  Kept as a fallback for any future modules
+            # that need to run outside the sequential pipeline.
             # ════════════════════════════════════════════════════════════════
             if not self._shutdown.is_set():
                 indie_gpu = [
@@ -656,9 +657,6 @@ class Worker:
                         f"{', '.join(indie_gpu)} ({total_indie} jobs)[/cyan]"
                     )
 
-                    # Ensure Ollama model is unloaded before perception loads
-                    # its 15+ GB model — belt-and-suspenders safety since
-                    # caption phase already unloads, but Ollama may auto-load.
                     try:
                         unload_gpu_model("caption")
                     except Exception:
@@ -689,7 +687,6 @@ class Worker:
                             gpu_threads.append(t)
                             t.start()
 
-                        # Interleave IO work while GPU is busy
                         for t in gpu_threads:
                             while t.is_alive():
                                 new = _submit_io_jobs(local_pool, cloud_pool)

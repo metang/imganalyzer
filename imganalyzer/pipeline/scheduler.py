@@ -40,21 +40,27 @@ _BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "embedding"})
 # be loaded simultaneously (VRAM permitting).  Between phases, all
 # models from the previous phase are unloaded.
 #
-# Phase 0: caption      (qwen3.5 via Ollama, ~7 GB — must unload before objects)
+# Phase 0: caption      (qwen3.5 via Ollama, ~8.7 GB — must unload before objects)
 # Phase 1: objects       (GroundingDINO, ~2.4 GB — unlocks faces dep)
 # Phase 2: faces, embedding (co-resident — total ~1.95 GB)
+# Phase 3: perception    (UniPercept, ~15.6 GB exclusive, CUDA-only)
 #
-# perception runs independently during IO drain (not sequenced with above)
+# Perception is interleaved per mini-batch so the CUDA machine doesn't
+# spend hours on perception at the end while macOS workers sit idle.
+# During perception, macOS workers continue processing caption jobs.
 _GPU_PHASES: list[list[str]] = [
     ["caption"],
     ["objects"],
     ["faces", "embedding"],
+    ["perception"],
 ]
 
 # GPU modules that run independently alongside the IO drain rather than
-# in the sequential phase pipeline.  They have no prerequisites on other
-# GPU modules.
-INDEPENDENT_GPU_MODULES: frozenset[str] = frozenset({"perception"})
+# in the sequential phase pipeline.  Currently empty — perception was
+# moved into the phase pipeline for better scheduling with distributed
+# workers (macOS workers can't do perception, so deferring it to the end
+# wastes CUDA time while macOS workers idle).
+INDEPENDENT_GPU_MODULES: frozenset[str] = frozenset()
 
 
 class ResourceScheduler:
