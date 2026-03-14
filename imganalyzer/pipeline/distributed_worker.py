@@ -73,6 +73,69 @@ def _current_python_info() -> str:
     return ", ".join(parts)
 
 
+def _ensure_ollama_running() -> None:
+    """Start Ollama if it isn't already running.
+
+    Tries ``ollama serve`` as a detached background process.  Safe to call
+    even if Ollama is already running — Ollama exits immediately with a
+    non-zero code if the port is already bound, so this is a no-op in that
+    case.  Waits up to 10 s for the server to become responsive.
+    """
+    import os as _os
+    import shutil
+    import subprocess
+    import sys as _sys
+    from urllib import request as _req
+    from urllib.error import URLError
+
+    ollama_url = _os.environ.get("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+
+    # Already running?
+    try:
+        req = _req.Request(f"{ollama_url}/api/tags", method="GET")
+        with _req.urlopen(req, timeout=3) as resp:
+            resp.read()
+        return  # Ollama is reachable
+    except Exception:
+        pass
+
+    ollama_bin = shutil.which("ollama")
+    if not ollama_bin:
+        _sys.stderr.write("[init] Ollama binary not found in PATH; skipping auto-start\n")
+        return
+
+    _sys.stderr.write("[init] Starting Ollama server…\n")
+    try:
+        kwargs: dict[str, Any] = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if _os.name == "nt":
+            kwargs["creationflags"] = (
+                subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+            )
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([ollama_bin, "serve"], **kwargs)
+    except Exception as exc:
+        _sys.stderr.write(f"[init] Failed to start Ollama: {exc}\n")
+        return
+
+    # Wait for Ollama to become responsive
+    import time
+    for _ in range(20):
+        time.sleep(0.5)
+        try:
+            req = _req.Request(f"{ollama_url}/api/tags", method="GET")
+            with _req.urlopen(req, timeout=2) as resp:
+                resp.read()
+            _sys.stderr.write("[init] Ollama server is ready\n")
+            return
+        except Exception:
+            pass
+    _sys.stderr.write("[init] Ollama started but not responsive after 10s\n")
+
+
 def _probe_available_modules() -> list[str]:
     """Probe which analysis modules this worker can actually run.
 
@@ -80,6 +143,7 @@ def _probe_available_modules() -> list[str]:
     jobs it can execute, avoiding wasteful claim-then-skip cycles.
     """
     _ensure_torch_runtime_env()
+    _ensure_ollama_running()
     available = list(_ALWAYS_AVAILABLE_MODULES)
 
     # Check local-AI deps (torch + transformers)
