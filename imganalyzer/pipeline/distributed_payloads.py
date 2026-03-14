@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import sqlite3
 from typing import Any
 
@@ -12,13 +13,24 @@ from imganalyzer.pipeline.modules import write_local_ai_split_tables
 # these values directly when replaying results into a different database context.
 _ANALYSIS_HOUSEKEEPING_KEYS = {"id", "image_id", "analyzed_at", "provider"}
 
+# DB columns that are stored as JSON strings but should be Python objects in payloads.
+_JSON_FIELDS = {"keywords", "detected_objects", "face_identities", "face_details"}
+
 
 def _clean_analysis_row(data: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(data, dict) or not data:
         return {}
-    return {
-        key: value for key, value in data.items() if key not in _ANALYSIS_HOUSEKEEPING_KEYS
-    }
+    cleaned: dict[str, Any] = {}
+    for key, value in data.items():
+        if key in _ANALYSIS_HOUSEKEEPING_KEYS:
+            continue
+        if key in _JSON_FIELDS and isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        cleaned[key] = value
+    return cleaned
 
 
 def _encode_blob(value: bytes | None) -> str | None:
