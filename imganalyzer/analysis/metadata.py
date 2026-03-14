@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from imganalyzer import __version__
+
 
 def _safe_str(value: Any) -> str:
     return str(value).strip() if value is not None else ""
@@ -58,7 +60,7 @@ def _reverse_geocode(lat: float, lon: float) -> dict[str, str]:
         resp = httpx.get(
             "https://nominatim.openstreetmap.org/reverse",
             params={"lat": lat, "lon": lon, "format": "json"},
-            headers={"User-Agent": "imganalyzer/0.1.0"},
+            headers={"User-Agent": f"imganalyzer/{__version__}"},
             timeout=5.0,
         )
         data = resp.json()

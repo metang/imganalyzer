@@ -1,6 +1,6 @@
 {
   "name": "imganalyzer-app",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "GUI validator for imganalyzer",
   "main": "out/main/index.js",
   "scripts": {

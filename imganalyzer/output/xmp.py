@@ -6,6 +6,8 @@ from typing import Any
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
 
+from imganalyzer import __version__
+
 # XMP Namespaces
 NS = {
     "x":             "adobe:ns:meta/",
@@ -66,7 +68,7 @@ class XMPWriter:
 
         # Root
         xmpmeta = ET.Element(_ns("x", "xmpmeta"))
-        xmpmeta.set(_ns("x", "xmptk"), "imganalyzer 0.1.0")
+        xmpmeta.set(_ns("x", "xmptk"), f"imganalyzer {__version__}")
 
         rdf_root = ET.SubElement(xmpmeta, _ns("rdf", "RDF"))
         desc = ET.SubElement(rdf_root, _ns("rdf", "Description"))
@@ -103,7 +105,7 @@ class XMPWriter:
         if meta.get("date_time_original"):
             desc.set(_ns("xmp", "CreateDate"), meta["date_time_original"])
 
-        desc.set(_ns("xmp", "CreatorTool"), "imganalyzer 0.1.0")
+        desc.set(_ns("xmp", "CreatorTool"), f"imganalyzer {__version__}")
 
         # ── xmpMM: Media Management ────────────────────────────────────────
         import uuid
