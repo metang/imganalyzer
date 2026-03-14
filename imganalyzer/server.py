@@ -683,7 +683,26 @@ def _handle_jobs_claim(params: dict) -> dict:
     queue = JobQueue(conn)
     repo = Repository(conn)
 
+    # Cap active leases per worker so no single worker hoards jobs.
+    # Workers should claim a small batch, process it, then come back.
+    _MAX_ACTIVE_LEASES_PER_WORKER = 3
+    try:
+        active_row = conn.execute(
+            """SELECT COUNT(*) AS cnt FROM job_leases
+               WHERE worker_id = ?
+                 AND lease_expires_at > datetime('now')""",
+            [worker_id],
+        ).fetchone()
+        active_leases = int(active_row["cnt"]) if active_row else 0
+    except Exception:
+        active_leases = 0
+
+    if active_leases >= _MAX_ACTIVE_LEASES_PER_WORKER:
+        return {"jobs": []}
+
+    # Reduce requested to stay within the per-worker cap.
     requested = max(1, batch_size)
+    requested = min(requested, _MAX_ACTIVE_LEASES_PER_WORKER - active_leases)
     scan_size = min(max(requested * 4, requested), 32)
     # Single module filter takes precedence; list filter used otherwise.
     module_filter: str | None = str(module) if module is not None else None

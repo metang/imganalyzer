@@ -646,6 +646,90 @@ class Worker:
                                 cancel_futures_fn=_cancel_futures,
                             )
 
+                    # ════════════════════════════════════════════════════════════
+                    # Chunk retry: pick up remaining pending jobs in this chunk.
+                    # Jobs may still be pending because distributed workers
+                    # finished prerequisites (e.g. objects → caption unlocked)
+                    # or because slow modules weren't fully drained.
+                    # ════════════════════════════════════════════════════════════
+                    chunk_retry = 0
+                    while not self._shutdown.is_set() and chunk_ids is not None:
+                        remaining = self.queue.pending_count(image_ids=chunk_ids)
+                        if remaining == 0:
+                            break
+                        chunk_retry += 1
+                        console.print(
+                            f"[dim]  Chunk pass {chunk_retry + 1}: "
+                            f"{remaining} pending jobs remaining[/dim]"
+                        )
+
+                        # Chunk-level claim for retries (no mini-batch split)
+                        def _retry_claim_fn(
+                            batch_sz: int, module: str,
+                            _ids: set[int] = chunk_ids,
+                        ) -> list[dict[str, Any]]:
+                            _, _, tl_queue, _ = self._get_thread_db()
+                            return tl_queue.claim(
+                                batch_size=batch_sz, module=module, image_ids=_ids,
+                            )
+
+                        processed_any = False
+                        for phase_idx in range(len(scheduler.gpu_phases)):
+                            if self._shutdown.is_set():
+                                break
+                            phase_modules = scheduler.modules_for_phase(phase_idx)
+                            has_pending = any(
+                                self.queue.pending_count(
+                                    module=mod, image_ids=chunk_ids,
+                                ) > 0
+                                for mod in phase_modules
+                            )
+                            if not has_pending:
+                                continue
+                            processed_any = True
+                            with (
+                                self.profiler.span(
+                                    "gpu_phase_retry",
+                                    phase=phase_idx, retry=chunk_retry,
+                                ),
+                                ThreadPoolExecutor(max_workers=self.workers) as local_pool,
+                                ThreadPoolExecutor(max_workers=1)            as cloud_pool,
+                            ):
+                                scheduler.run_gpu_phase(
+                                    phase_idx,
+                                    claim_fn=_retry_claim_fn,
+                                    process_batch_fn=self._process_job_batch,
+                                    process_single_fn=self._process_job,
+                                    submit_io_fn=active_submit_io,
+                                    collect_fn=_collect_futures,
+                                    advance_fn=_advance_fn,
+                                    flush_fn=self._maybe_periodic_flush,
+                                    local_pool=local_pool,
+                                    cloud_pool=cloud_pool,
+                                    stats=stats,
+                                    unload_fn=unload_gpu_model,
+                                    prefetch_fn=_prefetch_image,
+                                    cancel_futures_fn=_cancel_futures,
+                                )
+
+                        if not processed_any:
+                            break  # pending jobs exist but not in any GPU phase
+
+                        # IO drain for retried jobs
+                        if not self._shutdown.is_set():
+                            with (
+                                ThreadPoolExecutor(max_workers=self.workers) as local_pool,
+                                ThreadPoolExecutor(max_workers=1)            as cloud_pool,
+                            ):
+                                scheduler.run_io_drain(
+                                    submit_io_fn=active_submit_io,
+                                    collect_fn=_collect_futures,
+                                    flush_fn=self._maybe_periodic_flush,
+                                    local_pool=local_pool,
+                                    cloud_pool=cloud_pool,
+                                    cancel_futures_fn=_cancel_futures,
+                                )
+
                     if total_chunks > 1 and not self._shutdown.is_set():
                         console.print(
                             f"[green]Chunk {chunk_idx + 1}/{total_chunks} complete ✓[/green]"
