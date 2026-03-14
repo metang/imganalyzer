@@ -1,5 +1,11 @@
 # Project Status
 
+## Latest Changes (uncommitted)
+
+### Version bump to `0.5.0`
+- Updated backend package version in `pyproject.toml` and `imganalyzer/__init__.py`.
+- Updated Electron app version in `imganalyzer-app/package.json` and lockfile.
+
 ## Latest Changes (committed `c7d0895`)
 
 ### Skip inaccessible images in `analyze` command

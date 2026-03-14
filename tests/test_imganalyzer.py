@@ -1348,6 +1348,61 @@ class TestJobQueue:
         assert "technical" in stats
         assert stats["technical"]["pending"] == 1
 
+    def test_module_avg_processing_ms_uses_last_done_jobs_only(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        image_ids = [
+            repo.register_image(file_path=f"/photos/caption-{idx}.jpg")
+            for idx in range(4)
+        ]
+        job_ids: list[int] = []
+        for image_id in image_ids:
+            job_id = queue.enqueue(image_id, "caption")
+            assert job_id is not None
+            job_ids.append(job_id)
+
+        conn.execute(
+            """UPDATE job_queue
+               SET status = 'done',
+                   started_at = '2026-01-01 00:00:00.000',
+                   completed_at = '2026-01-01 00:00:01.000'
+               WHERE id = ?""",
+            [job_ids[0]],
+        )
+        conn.execute(
+            """UPDATE job_queue
+               SET status = 'done',
+                   started_at = '2026-01-01 00:00:02.000',
+                   completed_at = '2026-01-01 00:00:04.000'
+               WHERE id = ?""",
+            [job_ids[1]],
+        )
+        conn.execute(
+            """UPDATE job_queue
+               SET status = 'done',
+                   started_at = '2026-01-01 00:00:05.000',
+                   completed_at = '2026-01-01 00:00:08.000'
+               WHERE id = ?""",
+            [job_ids[2]],
+        )
+        conn.execute(
+            """UPDATE job_queue
+               SET status = 'failed',
+                   started_at = '2026-01-01 00:00:09.000',
+                   completed_at = '2026-01-01 00:00:18.000'
+               WHERE id = ?""",
+            [job_ids[3]],
+        )
+        conn.commit()
+
+        avg = queue.module_avg_processing_ms(last_n=2)
+        assert avg["caption"] == 2500
+
     def test_recover_stale_zero_reclaims_all_running(self, tmp_path):
         from imganalyzer.db.repository import Repository
         from imganalyzer.db.queue import JobQueue
@@ -1569,6 +1624,58 @@ class TestJobQueue:
         assert row is not None
         assert row["status"] == "pending"
 
+    def test_reconcile_runtime_state_recovers_orphans_and_dangling_leases(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["worker-1", "Worker 1", "linux", "online"],
+        )
+
+        worker_image = repo.register_image(file_path="/photos/worker-orphan.jpg")
+        worker_job = queue.enqueue(worker_image, "objects")
+        assert worker_job is not None
+        worker_claim = queue.claim_leased(worker_id="worker-1", batch_size=1, module="objects")
+        assert len(worker_claim) == 1
+        conn.execute("DELETE FROM job_leases WHERE job_id = ?", [worker_job])
+
+        master_image = repo.register_image(file_path="/photos/master-orphan.jpg")
+        master_job = queue.enqueue(master_image, "metadata")
+        assert master_job is not None
+        claimed_master = queue.claim(batch_size=1, module="metadata")
+        assert len(claimed_master) == 1
+
+        dangling_image = repo.register_image(file_path="/photos/dangling-lease.jpg")
+        dangling_job = queue.enqueue(dangling_image, "faces")
+        assert dangling_job is not None
+        dangling_claim = queue.claim_leased(worker_id="worker-1", batch_size=1, module="faces")
+        assert len(dangling_claim) == 1
+        conn.execute(
+            "UPDATE job_queue SET status = 'done', completed_at = datetime('now') WHERE id = ?",
+            [dangling_job],
+        )
+        conn.commit()
+
+        summary = queue.reconcile_runtime_state(recover_master_jobs=True)
+        assert summary == {
+            "dangling_leases": 1,
+            "worker_orphans": 1,
+            "master_orphans": 1,
+        }
+
+        worker_row = conn.execute("SELECT status FROM job_queue WHERE id = ?", [worker_job]).fetchone()
+        master_row = conn.execute("SELECT status FROM job_queue WHERE id = ?", [master_job]).fetchone()
+        dangling_lease = conn.execute("SELECT 1 FROM job_leases WHERE job_id = ?", [dangling_job]).fetchone()
+        assert worker_row is not None and worker_row["status"] == "pending"
+        assert master_row is not None and master_row["status"] == "pending"
+        assert dangling_lease is None
+
     def test_get_pending_image_ids(self, tmp_path):
         from imganalyzer.db.repository import Repository
         from imganalyzer.db.queue import JobQueue
@@ -1742,7 +1849,7 @@ class TestWorkerQueueLiveness:
 
         assert image_ids == [123]
         assert fake_queue.running_calls >= 2
-        assert fake_queue.release_calls >= 2
+        assert fake_queue.release_calls == 0
 
     def test_pending_wait_exits_when_running_queue_is_empty(self, tmp_path):
         from imganalyzer.pipeline.worker import Worker
@@ -1763,6 +1870,57 @@ class TestWorkerQueueLiveness:
         worker.queue = FakeQueue()  # type: ignore[assignment]
         image_ids = worker._pending_image_ids_with_running_wait(poll_interval_s=0.0)
         assert image_ids == []
+
+    def test_pending_wait_tolerates_busy_db_during_lease_reclaim(self, tmp_path):
+        from imganalyzer.pipeline.worker import Worker
+
+        conn = _make_test_db(tmp_path)
+        worker = Worker(conn, workers=1, verbose=True)
+
+        class FakeQueue:
+            def __init__(self) -> None:
+                self.pending_calls = 0
+                self.reclaim_calls = 0
+
+            def get_pending_image_ids(self) -> list[int]:
+                self.pending_calls += 1
+                if self.pending_calls >= 3:
+                    return [456]
+                return []
+
+            def running_count(self) -> int:
+                return 1
+
+            def release_expired_leases(self) -> int:
+                self.reclaim_calls += 1
+                if self.reclaim_calls == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                return 0
+
+        fake_queue = FakeQueue()
+        worker.queue = fake_queue  # type: ignore[assignment]
+
+        image_ids = worker._pending_image_ids_with_running_wait(
+            poll_interval_s=0.0,
+            reclaim_interval_s=0.0,
+        )
+
+        assert image_ids == [456]
+        assert fake_queue.reclaim_calls >= 1
+
+    def test_perception_vram_timeout_is_deferred_not_fatal(self, tmp_path):
+        from imganalyzer.pipeline.worker import Worker
+
+        conn = _make_test_db(tmp_path)
+        worker = Worker(conn, workers=1, verbose=False)
+
+        timeout = RuntimeError("Timed out waiting for VRAM for perception: need 13.80 GB")
+        assert worker._is_perception_vram_timeout(["perception"], timeout)
+        assert not worker._is_perception_vram_timeout(["caption"], timeout)
+
+        worker._defer_perception_phase(cooldown_s=5.0)
+        assert worker._perception_on_cooldown(["perception"])
+        assert not worker._perception_on_cooldown(["caption"])
 
 
 class TestWorkerFlushRecovery:

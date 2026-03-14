@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -43,6 +43,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         17: _migrate_v17,
         18: _migrate_v18,
         19: _migrate_v19,
+        20: _migrate_v20,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -701,4 +702,43 @@ def _migrate_v19(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         # Table may already be named analysis_caption (fresh install) or missing
         pass
+
+
+def _migrate_v20(conn: sqlite3.Connection) -> None:
+    """Add unified scheduler state columns/tables.
+
+    - Worker control state (pause/resume) and affinity epoch fields on worker_nodes
+    - Per-worker per-module runtime statistics for ETA-aware balancing
+    """
+    for col_def in (
+        "desired_state TEXT NOT NULL DEFAULT 'active'",
+        "state_reason TEXT",
+        "state_updated_at TEXT",
+        "epoch_module TEXT",
+        "epoch_expires_at TEXT",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE worker_nodes ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+    conn.execute(
+        """UPDATE worker_nodes
+           SET desired_state = COALESCE(desired_state, 'active')"""
+    )
+
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS worker_module_stats (
+               worker_id      TEXT NOT NULL REFERENCES worker_nodes(id) ON DELETE CASCADE,
+               module         TEXT NOT NULL,
+               avg_ms         REAL NOT NULL,
+               samples        INTEGER NOT NULL DEFAULT 1,
+               updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+               PRIMARY KEY(worker_id, module)
+           )"""
+    )
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_worker_module_stats_updated
+           ON worker_module_stats(updated_at)"""
+    )
 

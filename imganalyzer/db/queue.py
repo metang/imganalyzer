@@ -662,6 +662,70 @@ class JobQueue:
 
         return {"updated": updated, "deleted": deleted}
 
+    def reconcile_runtime_state(self, recover_master_jobs: bool = True) -> dict[str, int]:
+        """Repair queue/lease runtime invariants after interruptions.
+
+        This reconciles stale coordinator state without touching healthy in-flight
+        distributed work:
+
+        1) Remove dangling lease rows whose jobs are no longer ``running``.
+        2) Re-queue ``running`` worker jobs that no longer have an active lease.
+        3) Optionally re-queue ``running`` master jobs with no lease
+           (used on coordinator startup when no local run is active).
+        """
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            dangling_cur = self.conn.execute(
+                """DELETE FROM job_leases
+                   WHERE job_id IN (
+                       SELECT jl.job_id
+                       FROM job_leases jl
+                       JOIN job_queue jq ON jq.id = jl.job_id
+                       WHERE jq.status <> 'running'
+                   )"""
+            )
+
+            worker_orphans_cur = self.conn.execute(
+                """UPDATE job_queue
+                   SET status = 'pending',
+                       started_at = NULL,
+                       attempts = attempts + 1,
+                       last_node_id = NULL,
+                       last_node_role = NULL
+                   WHERE status = 'running'
+                     AND COALESCE(last_node_role, 'master') <> 'master'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM job_leases jl WHERE jl.job_id = job_queue.id
+                     )"""
+            )
+
+            master_orphans = 0
+            if recover_master_jobs:
+                master_orphans_cur = self.conn.execute(
+                    """UPDATE job_queue
+                       SET status = 'pending',
+                           started_at = NULL,
+                           attempts = attempts + 1,
+                           last_node_id = NULL,
+                           last_node_role = NULL
+                       WHERE status = 'running'
+                         AND COALESCE(last_node_role, 'master') = 'master'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM job_leases jl WHERE jl.job_id = job_queue.id
+                         )"""
+                )
+                master_orphans = int(master_orphans_cur.rowcount)
+
+            self.conn.commit()
+            return {
+                "dangling_leases": int(dangling_cur.rowcount),
+                "worker_orphans": int(worker_orphans_cur.rowcount),
+                "master_orphans": master_orphans,
+            }
+        except Exception:
+            self.conn.rollback()
+            raise
+
     # ── Recover stale running jobs (crash recovery) ────────────────────────
 
     def recover_stale(self, timeout_minutes: int = 10) -> int:
@@ -717,26 +781,26 @@ class JobQueue:
         return int(row["cnt"] if row is not None else 0)
 
     def module_avg_processing_ms(self, last_n: int = 100) -> dict[str, float]:
-        """Average processing time per module from the last *last_n* completed jobs.
+        """Average processing time per module from the last *last_n* done jobs.
 
-        Uses ``completed_at − started_at`` (actual processing time, excludes
-        queue waiting).  Returns ``{module: avg_ms}``.
+        Uses ``completed_at − started_at`` and only includes jobs in ``done``
+        state.  Returns ``{module: avg_ms}``.
         """
         rows = self.conn.execute(
             """SELECT module,
                       AVG((julianday(completed_at) - julianday(started_at)) * 86400000) AS avg_ms
-               FROM (
-                   SELECT module, started_at, completed_at,
-                          ROW_NUMBER() OVER (
-                              PARTITION BY module ORDER BY completed_at DESC
-                          ) AS rn
-                   FROM job_queue
-                   WHERE status IN ('done', 'failed', 'skipped')
-                     AND started_at IS NOT NULL
-                     AND completed_at IS NOT NULL
-               )
-               WHERE rn <= ?
-               GROUP BY module""",
+                FROM (
+                    SELECT module, started_at, completed_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY module ORDER BY completed_at DESC
+                           ) AS rn
+                    FROM job_queue
+                    WHERE status = 'done'
+                      AND started_at IS NOT NULL
+                      AND completed_at IS NOT NULL
+                )
+                WHERE rn <= ?
+                GROUP BY module""",
             [last_n],
         ).fetchall()
         return {r["module"]: round(r["avg_ms"], 0) for r in rows if r["avg_ms"] is not None}

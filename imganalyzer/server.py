@@ -29,7 +29,9 @@ Supported methods:
     rebuild         - Re-enqueue module jobs (one-shot)
     workers/register - Register/update distributed worker metadata (one-shot)
     workers/heartbeat - Refresh worker heartbeat and recover expired leases (one-shot)
-    workers/list    - List known distributed workers (one-shot)
+    workers/list    - List workers plus coordinator master metadata (one-shot)
+    workers/pause   - Pause a specific worker (`pause-drain` or `pause-immediate`) (one-shot)
+    workers/resume  - Resume a previously paused worker (one-shot)
     jobs/claim      - Lease pending jobs to a worker (one-shot)
     jobs/release-expired - Return expired leases to pending (one-shot)
     jobs/heartbeat  - Extend an active job lease (one-shot)
@@ -124,6 +126,8 @@ def _send_notification(method: str, params: Any) -> None:
 _db_local = threading.local()
 _schema_init_lock = threading.Lock()
 _schema_ready_paths: set[str] = set()
+_runtime_reconcile_lock = threading.Lock()
+_runtime_reconciled = False
 
 
 def _open_server_db() -> sqlite3.Connection:
@@ -181,6 +185,105 @@ _active_worker: Any = None  # Worker | None — set while a run is active
 
 _analyze_cancel: dict[str, threading.Event] = {}  # imagePath -> cancel event
 
+_MASTER_WORKER_ID = "master"
+_MASTER_WORKER_LABEL = "Master device"
+_LEGACY_QUEUE_MODULE_MAP: dict[str, str] = {
+    "blip2": "caption",
+    "cloud_ai": "caption",
+    "local_ai": "caption",
+    "aesthetic": "perception",
+}
+
+
+def _master_worker_runtime_status() -> str:
+    if _active_worker is not None:
+        return "online"
+    if _run_thread is not None and _run_thread.is_alive():
+        return "online"
+    return "offline"
+
+
+def _sync_master_worker_node(conn: sqlite3.Connection) -> None:
+    _upsert_master_worker_node(conn, status=_master_worker_runtime_status())
+
+
+def _mark_stale_worker_nodes_offline(
+    conn: sqlite3.Connection,
+    *,
+    stale_seconds: int = 180,
+) -> int:
+    """Mark stale worker rows offline so lifecycle state is rebuilt on startup."""
+    cur = conn.execute(
+        """UPDATE worker_nodes
+           SET status = 'offline',
+               updated_at = datetime('now')
+           WHERE id <> ?
+             AND status = 'online'
+             AND (
+                 last_heartbeat IS NULL
+                 OR last_heartbeat <= datetime('now', '-' || ? || ' seconds')
+             )""",
+        [_MASTER_WORKER_ID, max(30, int(stale_seconds))],
+    )
+    if cur.rowcount:
+        conn.commit()
+    return int(cur.rowcount)
+
+
+def _reconcile_runtime_queue_state(
+    conn: sqlite3.Connection,
+    *,
+    recover_master_jobs: bool,
+) -> dict[str, int]:
+    """Reconcile queue/runtime invariants to support crash-safe resume."""
+    from imganalyzer.db.queue import JobQueue
+
+    queue = JobQueue(conn)
+    remapped = queue.remap_pending_modules(_LEGACY_QUEUE_MODULE_MAP)
+    reconciled = queue.reconcile_runtime_state(recover_master_jobs=recover_master_jobs)
+    stale_workers = _mark_stale_worker_nodes_offline(conn)
+    return {
+        "remapped_updated": int(remapped.get("updated", 0)),
+        "remapped_deleted": int(remapped.get("deleted", 0)),
+        "dangling_leases": int(reconciled.get("dangling_leases", 0)),
+        "worker_orphans": int(reconciled.get("worker_orphans", 0)),
+        "master_orphans": int(reconciled.get("master_orphans", 0)),
+        "stale_workers": stale_workers,
+    }
+
+
+def _ensure_runtime_state_reconciled(
+    *,
+    context: str,
+    recover_master_jobs: bool,
+) -> None:
+    """Ensure queue/runtime state is reconciled exactly once per server process."""
+    global _runtime_reconciled
+    if _runtime_reconciled:
+        return
+
+    with _runtime_reconcile_lock:
+        if _runtime_reconciled:
+            return
+        try:
+            conn = _get_db()
+            _sync_master_worker_node(conn)
+            summary = _reconcile_runtime_queue_state(
+                conn,
+                recover_master_jobs=recover_master_jobs,
+            )
+            changed = {k: v for k, v in summary.items() if int(v) > 0}
+            if changed:
+                items = ", ".join(f"{key}={value}" for key, value in sorted(changed.items()))
+                sys.stderr.write(
+                    f"[coordinator] Runtime reconciliation ({context}): {items}\n"
+                )
+            _runtime_reconciled = True
+        except Exception as exc:
+            sys.stderr.write(
+                f"[coordinator] Runtime reconciliation failed during {context}: {exc}\n"
+            )
+
 
 # ── Method handlers ──────────────────────────────────────────────────────────
 
@@ -190,6 +293,7 @@ def _handle_status(params: dict) -> dict:
     from imganalyzer.db.repository import Repository
 
     conn = _get_db()
+    _sync_master_worker_node(conn)
     queue = JobQueue(conn)
     repo = Repository(conn)
 
@@ -218,15 +322,9 @@ def _handle_status(params: dict) -> dict:
             "skipped": s.get("skipped", 0),
         }
 
-    master_running_row = conn.execute(
-        """SELECT COUNT(*) AS cnt
-           FROM job_queue jq
-           LEFT JOIN job_leases jl ON jl.job_id = jq.id
-           WHERE jq.status = 'running'
-             AND jl.job_id IS NULL"""
-    ).fetchone()
     running_modules = _get_running_modules_by_node(conn)
-    worker_items = _build_worker_items(conn)
+    master_item = _build_master_item(conn, running_modules=running_modules)
+    worker_items = _build_worker_items(conn, running_modules=running_modules)
 
     # Chunk-level stats: pending counts per module within the current chunk.
     chunk_modules: dict[str, int] = {}
@@ -259,14 +357,7 @@ def _handle_status(params: dict) -> dict:
         },
         "remaining_images": remaining_images,
         "nodes": {
-            "master": {
-                "id": "master",
-                "role": "master",
-                "displayName": "Master device",
-                "platform": sys.platform,
-                "runningJobs": int(master_running_row["cnt"] if master_running_row is not None else 0),
-                "activeModules": running_modules.get(("master", "master"), []),
-            },
+            "master": master_item,
             "workers": worker_items,
         },
         "recent_results": _recent_queue_results(conn),
@@ -350,6 +441,7 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
 def _handle_run(req_id: int | str, params: dict) -> None:
     """Start processing the queue — streaming [RESULT] notifications."""
     global _run_thread
+    from imganalyzer.pipeline.unified_scheduler import PAUSED_STATES, get_worker_control_state
 
     if _run_thread is not None and _run_thread.is_alive():
         # The previous worker may still be winding down after cancel_run.
@@ -358,6 +450,18 @@ def _handle_run(req_id: int | str, params: dict) -> None:
         if _run_thread.is_alive():
             _send_error(req_id, -2, "A run is already in progress")
             return
+
+    conn = _get_db()
+    _sync_master_worker_node(conn)
+    desired_state, state_reason = get_worker_control_state(conn, _MASTER_WORKER_ID)
+    if desired_state in PAUSED_STATES:
+        reason_suffix = f" ({state_reason})" if state_reason else ""
+        _send_error(
+            req_id,
+            -3,
+            f"Master worker is {desired_state}{reason_suffix}; call workers/resume before run.",
+        )
+        return
 
     _run_cancel.clear()
 
@@ -396,6 +500,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA busy_timeout=5000")
+            _upsert_master_worker_node(conn, status="online")
             worker_kwargs = dict(
                 conn=conn,
                 workers=workers,
@@ -425,6 +530,10 @@ def _handle_run(req_id: int | str, params: dict) -> None:
                 worker_mod._result_notify = None
                 worker_mod._chunk_notify = None
                 _active_worker = None
+                try:
+                    _upsert_master_worker_node(conn, status="offline")
+                except Exception:
+                    pass
                 conn.close()
         except Exception as exc:
             _active_worker = None
@@ -511,30 +620,41 @@ def _handle_workers_register(params: dict) -> dict:
 def _handle_workers_heartbeat(params: dict) -> dict:
     """Refresh worker heartbeat timestamp and return basic lease recovery stats."""
     from imganalyzer.db.queue import JobQueue, _now
+    from imganalyzer.pipeline.unified_scheduler import get_worker_control_state
 
     worker_id = str(params.get("workerId", "")).strip()
     if not worker_id:
         raise ValueError("workerId is required")
 
     conn = _get_db()
-    now = _now()
-    cur = conn.execute(
-        """UPDATE worker_nodes
-           SET status = 'online', last_heartbeat = ?, updated_at = ?
-           WHERE id = ?""",
-        [now, now, worker_id],
-    )
-    if cur.rowcount == 0:
-        conn.execute(
-            """INSERT INTO worker_nodes (id, display_name, platform, capabilities, status, last_heartbeat, created_at, updated_at)
-               VALUES (?, ?, '', '{}', 'online', ?, ?, ?)""",
-            [worker_id, worker_id, now, now, now],
+    if worker_id == _MASTER_WORKER_ID:
+        _sync_master_worker_node(conn)
+    else:
+        now = _now()
+        cur = conn.execute(
+            """UPDATE worker_nodes
+               SET status = 'online', last_heartbeat = ?, updated_at = ?
+               WHERE id = ?""",
+            [now, now, worker_id],
         )
-    conn.commit()
+        if cur.rowcount == 0:
+            conn.execute(
+                """INSERT INTO worker_nodes (id, display_name, platform, capabilities, status, last_heartbeat, created_at, updated_at)
+                   VALUES (?, ?, '', '{}', 'online', ?, ?, ?)""",
+                [worker_id, worker_id, now, now, now],
+            )
+        conn.commit()
 
     queue = JobQueue(conn)
     released = queue.release_expired_leases()
-    return {"workerId": worker_id, "ok": True, "releasedExpired": released}
+    desired_state, state_reason = get_worker_control_state(conn, worker_id)
+    return {
+        "workerId": worker_id,
+        "ok": True,
+        "releasedExpired": released,
+        "desiredState": desired_state,
+        "stateReason": state_reason,
+    }
 
 
 def _get_worker_running_counts(conn: sqlite3.Connection) -> dict[str, int]:
@@ -580,33 +700,120 @@ def _get_running_modules_by_node(conn: sqlite3.Connection) -> dict[tuple[str, st
     return items
 
 
-def _build_worker_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    running_counts = _get_worker_running_counts(conn)
-    running_modules = _get_running_modules_by_node(conn)
-    rows = conn.execute(
-        """SELECT id, display_name, platform, capabilities, status, last_heartbeat, created_at, updated_at
+def _decode_worker_capabilities(raw: Any) -> dict[str, Any]:
+    caps_raw = raw or "{}"
+    try:
+        caps = json.loads(caps_raw)
+        if isinstance(caps, dict):
+            return caps
+    except Exception:
+        pass
+    return {}
+
+
+def _master_running_jobs(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        """SELECT COUNT(*) AS cnt
+           FROM job_queue jq
+           LEFT JOIN job_leases jl ON jl.job_id = jq.id
+           WHERE jq.status = 'running'
+             AND jl.job_id IS NULL"""
+    ).fetchone()
+    return int(row["cnt"] if row is not None else 0)
+
+
+def _build_master_item(
+    conn: sqlite3.Connection,
+    *,
+    running_modules: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    row = conn.execute(
+        """SELECT id, display_name, platform, capabilities, status, last_heartbeat,
+                  created_at, updated_at, desired_state, state_reason
            FROM worker_nodes
-           ORDER BY updated_at DESC, id ASC"""
+           WHERE id = ?""",
+        [_MASTER_WORKER_ID],
+    ).fetchone()
+    active_modules = (
+        running_modules
+        if running_modules is not None
+        else _get_running_modules_by_node(conn)
+    )
+    if row is None:
+        return {
+            "id": _MASTER_WORKER_ID,
+            "role": "master",
+            "displayName": _MASTER_WORKER_LABEL,
+            "platform": sys.platform,
+            "capabilities": {},
+            "status": _master_worker_runtime_status(),
+            "lastHeartbeat": None,
+            "createdAt": None,
+            "updatedAt": None,
+            "desiredState": "active",
+            "stateReason": None,
+            "runningJobs": _master_running_jobs(conn),
+            "activeModules": active_modules.get(("master", _MASTER_WORKER_ID), []),
+        }
+
+    return {
+        "id": _MASTER_WORKER_ID,
+        "role": "master",
+        "displayName": row["display_name"] or _MASTER_WORKER_LABEL,
+        "platform": row["platform"] or sys.platform,
+        "capabilities": _decode_worker_capabilities(row["capabilities"]),
+        "status": row["status"] or _master_worker_runtime_status(),
+        "lastHeartbeat": row["last_heartbeat"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "desiredState": row["desired_state"] or "active",
+        "stateReason": row["state_reason"],
+        "runningJobs": _master_running_jobs(conn),
+        "activeModules": active_modules.get(("master", _MASTER_WORKER_ID), []),
+    }
+
+
+def _build_worker_items(
+    conn: sqlite3.Connection,
+    *,
+    running_modules: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+    include_master: bool = False,
+) -> list[dict[str, Any]]:
+    running_counts = _get_worker_running_counts(conn)
+    active_modules = (
+        running_modules
+        if running_modules is not None
+        else _get_running_modules_by_node(conn)
+    )
+    where = ""
+    params: list[Any] = []
+    if not include_master:
+        where = "WHERE id <> ?"
+        params.append(_MASTER_WORKER_ID)
+    rows = conn.execute(
+        f"""SELECT id, display_name, platform, capabilities, status, last_heartbeat,
+                   created_at, updated_at, desired_state, state_reason
+            FROM worker_nodes
+            {where}
+            ORDER BY updated_at DESC, id ASC""",
+        params,
     ).fetchall()
     items = []
     for row in rows:
-        caps_raw = row["capabilities"] or "{}"
-        try:
-            caps = json.loads(caps_raw)
-        except Exception:
-            caps = {}
         worker_id = str(row["id"])
         items.append({
             "id": worker_id,
             "displayName": row["display_name"],
             "platform": row["platform"],
-            "capabilities": caps,
+            "capabilities": _decode_worker_capabilities(row["capabilities"]),
             "status": row["status"],
             "lastHeartbeat": row["last_heartbeat"],
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
+            "desiredState": row["desired_state"] or "active",
+            "stateReason": row["state_reason"],
             "runningJobs": running_counts.get(worker_id, 0),
-            "activeModules": running_modules.get(("worker", worker_id), []),
+            "activeModules": active_modules.get(("worker", worker_id), []),
         })
     return items
 
@@ -644,7 +851,7 @@ def _recent_queue_results(conn: sqlite3.Connection, limit: int = 200) -> list[di
         node_label = (
             str(row["worker_display_name"])
             if node_role == "worker" and row["worker_display_name"]
-            else "Master device"
+            else _MASTER_WORKER_LABEL
         )
         message = row["error_message"] or row["skip_reason"]
         items.append({
@@ -663,9 +870,132 @@ def _recent_queue_results(conn: sqlite3.Connection, limit: int = 200) -> list[di
 
 
 def _handle_workers_list(_params: dict) -> dict:
-    """List registered worker nodes and recent heartbeat metadata."""
+    """List registered workers and include the coordinator master node."""
     conn = _get_db()
-    return {"workers": _build_worker_items(conn)}
+    _sync_master_worker_node(conn)
+    running_modules = _get_running_modules_by_node(conn)
+    return {
+        "master": _build_master_item(conn, running_modules=running_modules),
+        "workers": _build_worker_items(conn, running_modules=running_modules),
+    }
+
+
+def _handle_workers_pause(params: dict) -> dict:
+    """Pause a specific worker (drain or immediate mode)."""
+    from imganalyzer.db.queue import JobQueue
+    from imganalyzer.pipeline.unified_scheduler import (
+        get_worker_control_state,
+        set_worker_control_state,
+    )
+
+    worker_id = str(params.get("workerId", "")).strip()
+    if not worker_id:
+        raise ValueError("workerId is required")
+    mode = str(params.get("mode") or "pause-drain").strip().lower()
+    if mode not in {"pause-drain", "pause-immediate", "paused"}:
+        raise ValueError("mode must be one of: pause-drain, pause-immediate, paused")
+    reason_raw = params.get("reason")
+    reason = str(reason_raw).strip() if reason_raw is not None else None
+    if reason == "":
+        reason = None
+
+    conn = _get_db()
+    if worker_id == _MASTER_WORKER_ID:
+        _sync_master_worker_node(conn)
+    previous_state, _ = get_worker_control_state(conn, worker_id)
+    set_worker_control_state(conn, worker_id, mode, reason=reason)
+
+    released_leases = 0
+    if mode == "pause-immediate" and worker_id != _MASTER_WORKER_ID:
+        queue = JobQueue(conn)
+        released_leases = queue.release_worker_leases(worker_id)
+
+    # Master pause maps to run cancellation.
+    if worker_id == _MASTER_WORKER_ID and _active_worker is not None:
+        _active_worker._shutdown.set()
+
+    result: dict[str, Any] = {
+        "workerId": worker_id,
+        "ok": True,
+        "previousState": previous_state,
+        "transitioned": previous_state != mode,
+        "desiredState": mode,
+        "stateReason": reason,
+        "releasedLeases": released_leases,
+    }
+    if worker_id == _MASTER_WORKER_ID:
+        _sync_master_worker_node(conn)
+        result["worker"] = _build_master_item(conn)
+    return result
+
+
+def _handle_workers_resume(params: dict) -> dict:
+    """Resume a specific worker so it can claim new jobs again."""
+    from imganalyzer.pipeline.unified_scheduler import (
+        get_worker_control_state,
+        set_worker_control_state,
+    )
+
+    worker_id = str(params.get("workerId", "")).strip()
+    if not worker_id:
+        raise ValueError("workerId is required")
+
+    conn = _get_db()
+    if worker_id == _MASTER_WORKER_ID:
+        _sync_master_worker_node(conn)
+    previous_state, _ = get_worker_control_state(conn, worker_id)
+    set_worker_control_state(conn, worker_id, "active", reason=None)
+    result: dict[str, Any] = {
+        "workerId": worker_id,
+        "ok": True,
+        "previousState": previous_state,
+        "transitioned": previous_state != "active",
+        "desiredState": "active",
+        "stateReason": None,
+    }
+    if worker_id == _MASTER_WORKER_ID:
+        _sync_master_worker_node(conn)
+        result["worker"] = _build_master_item(conn)
+    return result
+
+
+def _upsert_master_worker_node(conn: sqlite3.Connection, status: str = "online") -> None:
+    """Keep the coordinator represented in ``worker_nodes`` as a local worker."""
+    from imganalyzer.db.queue import _now
+
+    now = _now()
+    caps: dict[str, Any] = {
+        "pid": os.getpid(),
+        "coordinator": True,
+        "workerType": "local-master",
+    }
+    try:
+        import torch
+
+        caps["cuda"] = bool(torch.cuda.is_available())
+        caps["mps"] = bool(
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()
+        )
+    except Exception:
+        caps["cuda"] = False
+        caps["mps"] = False
+    capabilities_json = json.dumps(caps, separators=(",", ":"))
+
+    conn.execute(
+        """INSERT INTO worker_nodes
+           (id, display_name, platform, capabilities, status, last_heartbeat, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+              display_name = excluded.display_name,
+              platform = excluded.platform,
+              capabilities = excluded.capabilities,
+              status = excluded.status,
+              last_heartbeat = excluded.last_heartbeat,
+              updated_at = excluded.updated_at""",
+        [_MASTER_WORKER_ID, _MASTER_WORKER_LABEL, sys.platform, capabilities_json, status, now, now, now],
+    )
+    conn.commit()
 
 
 _DISTRIBUTED_CONTEXT_MODULES: dict[str, tuple[str, ...]] = {
@@ -688,6 +1018,10 @@ def _handle_jobs_claim(params: dict) -> dict:
     """Lease pending jobs to a worker for distributed execution."""
     from imganalyzer.db.queue import JobQueue
     from imganalyzer.db.repository import Repository
+    from imganalyzer.pipeline.unified_scheduler import (
+        compute_claim_policy,
+        record_worker_affinity,
+    )
     from imganalyzer.pipeline.worker import _PREREQUISITES
 
     worker_id = str(params.get("workerId", "")).strip()
@@ -703,74 +1037,29 @@ def _handle_jobs_claim(params: dict) -> dict:
     queue = JobQueue(conn)
     repo = Repository(conn)
 
-    # Cap active leases per worker so no single worker hoards jobs.
-    # Workers should claim a small batch, process it, then come back.
-    _MAX_ACTIVE_LEASES_PER_WORKER = 3
-    try:
-        active_row = conn.execute(
-            """SELECT COUNT(*) AS cnt FROM job_leases
-               WHERE worker_id = ?
-                 AND lease_expires_at > datetime('now')""",
-            [worker_id],
-        ).fetchone()
-        active_leases = int(active_row["cnt"]) if active_row else 0
-    except Exception:
-        active_leases = 0
-
-    if active_leases >= _MAX_ACTIVE_LEASES_PER_WORKER:
+    active_chunk_ids: set[int] | None = None
+    if _active_worker is not None:
+        active_chunk_ids = _active_worker.current_chunk_ids
+    policy = compute_claim_policy(
+        conn,
+        worker_id=worker_id,
+        batch_size=batch_size,
+        module=module,
+        modules_list=modules_list,
+        active_chunk_ids=active_chunk_ids,
+        coordinator_run_active=_active_worker is not None,
+    )
+    if not policy.allow_claims:
         return {"jobs": []}
 
-    # Reduce requested to stay within the per-worker cap.
-    requested = max(1, batch_size)
-    requested = min(requested, _MAX_ACTIVE_LEASES_PER_WORKER - active_leases)
-    scan_size = min(max(requested * 4, requested), 32)
-    # Single module filter takes precedence; list filter used otherwise.
-    module_filter: str | None = str(module) if module is not None else None
-    modules_filter: list[str] | None = None
-    if module_filter is None and isinstance(modules_list, list) and modules_list:
-        modules_filter = [str(m) for m in modules_list]
+    requested = policy.requested
+    scan_size = policy.scan_size
+    module_filter = policy.module_filter
+    modules_filter = policy.modules_filter
+    prefer_module = policy.prefer_module
+    prefer_image_ids = policy.prefer_image_ids
     pending_eligible = queue.pending_count(module_filter, modules=modules_filter)
-
-    # Keep at least one eligible pending job available for the master when the
-    # coordinator run is active but the master currently has no running jobs.
-    # Without this reserve, remote workers can lease the entire queue slice and
-    # leave the master idle during long-running worker batches.
-    if _active_worker is not None and pending_eligible > 0:
-        master_running_row = conn.execute(
-            """SELECT COUNT(*) AS cnt
-               FROM job_queue jq
-               LEFT JOIN job_leases jl ON jl.job_id = jq.id
-               WHERE jq.status = 'running'
-                 AND jl.job_id IS NULL"""
-        ).fetchone()
-        master_running = int(master_running_row["cnt"]) if master_running_row else 0
-        if master_running <= 0:
-            reserve_for_master = max(1, min(requested, pending_eligible))
-            worker_budget = pending_eligible - reserve_for_master
-            if worker_budget <= 0:
-                return {"jobs": []}
-            requested = min(requested, worker_budget)
-            scan_size = min(max(requested * 4, requested), 32)
-
     pending_candidates = max(requested, pending_eligible)
-
-    # Module affinity: look up last_module for this worker to minimize
-    # model switching across consecutive claims.
-    prefer_module: str | None = None
-    try:
-        wrow = conn.execute(
-            "SELECT last_module FROM worker_nodes WHERE id = ?", [worker_id]
-        ).fetchone()
-        if wrow and wrow["last_module"]:
-            prefer_module = str(wrow["last_module"])
-    except Exception:
-        pass  # table may lack last_module column in older schema
-
-    # Chunk affinity: if the coordinator is processing a specific chunk,
-    # direct distributed workers to the same images so chunks finish faster.
-    prefer_image_ids: set[int] | None = None
-    if _active_worker is not None:
-        prefer_image_ids = _active_worker.current_chunk_ids
     # Scan far enough in one request to rotate past large blocked backlogs
     # (for example hundreds of faces/ocr jobs waiting on objects) instead of
     # forcing remote workers to idle through many empty polls.
@@ -868,17 +1157,17 @@ def _handle_jobs_claim(params: dict) -> dict:
         if len(claimed) < claim_size:
             break
 
-    # Update worker's last_module for affinity on next claim
+    # Update worker affinity epoch for sticky-module scheduling.
     if jobs:
         last_mod = jobs[-1]["module"]
         try:
-            conn.execute(
-                "UPDATE worker_nodes SET last_module = ? WHERE id = ?",
-                [last_mod, worker_id],
+            record_worker_affinity(
+                conn,
+                worker_id=worker_id,
+                module=str(last_mod),
             )
-            conn.commit()
         except Exception:
-            pass  # non-critical — schema may lack column
+            pass  # non-critical
 
     return {"jobs": jobs}
 
@@ -934,13 +1223,13 @@ def _worker_node_info(conn: Any, job_id: int) -> tuple[str, str, str]:
         [job_id],
     ).fetchone()
     if row is None:
-        return ("master", "master", "Master device")
+        return (_MASTER_WORKER_ID, "master", _MASTER_WORKER_LABEL)
     node_role = str(row["last_node_role"] or "master")
-    node_id = str(row["last_node_id"] or "master")
+    node_id = str(row["last_node_id"] or _MASTER_WORKER_ID)
     node_label = (
         str(row["display_name"])
         if node_role == "worker" and row["display_name"]
-        else "Master device"
+        else _MASTER_WORKER_LABEL
     )
     return (node_id, node_role, node_label)
 
@@ -962,28 +1251,36 @@ def _handle_jobs_complete(params: dict) -> dict:
     from imganalyzer.db.repository import Repository
     from imganalyzer.pipeline.distributed_payloads import persist_result_payload
     from imganalyzer.pipeline.modules import write_xmp_from_db
+    from imganalyzer.pipeline.unified_scheduler import record_worker_module_timing
 
     job_id = int(params.get("jobId", 0))
     lease_token = str(params.get("leaseToken", "")).strip()
     payload = params.get("payload", {})
     no_xmp = bool(params.get("noXmp", False))
+    processing_ms_raw = params.get("processingMs")
     if job_id <= 0 or not lease_token:
         raise ValueError("jobId and leaseToken are required")
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
+    try:
+        processing_ms = max(0, int(processing_ms_raw)) if processing_ms_raw is not None else 0
+    except (TypeError, ValueError):
+        processing_ms = 0
 
     conn = _get_db()
     repo = Repository(conn)
+    worker_id_for_timing = ""
 
     conn.execute("BEGIN IMMEDIATE")
     try:
         lease = conn.execute(
-            "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+            "SELECT worker_id FROM job_leases WHERE job_id = ? AND lease_token = ?",
             [job_id, lease_token],
         ).fetchone()
         if lease is None:
             conn.rollback()
             return {"ok": False}
+        worker_id_for_timing = str(lease["worker_id"] or "")
 
         job_row = conn.execute(
             "SELECT image_id, module FROM job_queue WHERE id = ?",
@@ -1006,14 +1303,35 @@ def _handle_jobs_complete(params: dict) -> dict:
             repo.update_search_index(image_id)
 
         conn.execute(
-            "UPDATE job_queue SET status = 'done', completed_at = datetime('now') WHERE id = ?",
-            [job_id],
+            """UPDATE job_queue
+               SET status = 'done',
+                   started_at = CASE
+                       WHEN ? > 0 THEN strftime(
+                           '%Y-%m-%d %H:%M:%f',
+                           julianday('now') - (? / 86400000.0)
+                       )
+                       ELSE started_at
+                   END,
+                   completed_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
+               WHERE id = ?""",
+            [processing_ms, processing_ms, job_id],
         )
         conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
         conn.commit()
     except Exception:
         conn.rollback()
         raise
+
+    if worker_id_for_timing and processing_ms > 0:
+        try:
+            record_worker_module_timing(
+                conn,
+                worker_id=worker_id_for_timing,
+                module=module_name,
+                processing_ms=processing_ms,
+            )
+        except Exception:
+            pass
 
     if not no_xmp:
         remaining = conn.execute(
@@ -2579,6 +2897,8 @@ _SYNC_METHODS: dict[str, Any] = {
     "workers/register": _handle_workers_register,
     "workers/heartbeat": _handle_workers_heartbeat,
     "workers/list": _handle_workers_list,
+    "workers/pause": _handle_workers_pause,
+    "workers/resume": _handle_workers_resume,
     "jobs/claim": _handle_jobs_claim,
     "jobs/release-expired": _handle_jobs_release_expired,
     "jobs/heartbeat": _handle_jobs_heartbeat,
@@ -2699,27 +3019,10 @@ def _serve_http_jsonrpc(
     global _http_transport
     _http_transport = True
 
-    # Remap any legacy module names in the queue so distributed workers
-    # (which only know current module names) can claim existing jobs.
-    try:
-        from imganalyzer.db.queue import JobQueue
-
-        conn = _get_db()
-        q = JobQueue(conn)
-        remapped = q.remap_pending_modules({
-            "blip2": "caption",
-            "cloud_ai": "caption",
-            "local_ai": "caption",
-            "aesthetic": "perception",
-        })
-        total = remapped.get("updated", 0) + remapped.get("deleted", 0)
-        if total:
-            sys.stderr.write(
-                f"[coordinator] Remapped {total} legacy queue jobs "
-                f"(updated={remapped['updated']}, deduped={remapped['deleted']})\n"
-            )
-    except Exception as exc:
-        sys.stderr.write(f"[coordinator] Queue remap failed: {exc}\n")
+    _ensure_runtime_state_reconciled(
+        context="http-startup",
+        recover_master_jobs=_master_worker_runtime_status() != "online",
+    )
 
     normalized_path = rpc_path.strip() or "/jsonrpc"
     if not normalized_path.startswith("/"):
@@ -2909,6 +3212,11 @@ def main() -> None:
         default=os.getenv("IMGANALYZER_COORDINATOR_RPC_PATH", "/jsonrpc"),
     )
     args, _unknown = parser.parse_known_args(sys.argv[1:])
+
+    _ensure_runtime_state_reconciled(
+        context="startup",
+        recover_master_jobs=_master_worker_runtime_status() != "online",
+    )
 
     if args.transport == "http":
         host_value = str(args.host).strip()

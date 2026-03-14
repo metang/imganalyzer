@@ -43,7 +43,7 @@ _BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "embedding"})
 # Phase 0: caption      (qwen3.5 via Ollama, ~8.7 GB — must unload before objects)
 # Phase 1: objects       (GroundingDINO, ~2.4 GB — unlocks faces dep)
 # Phase 2: faces, embedding (co-resident — total ~1.95 GB)
-# Phase 3: perception    (UniPercept, ~15.6 GB exclusive, CUDA-only)
+# Phase 3: perception    (UniPercept, ~13.8 GB effective, CUDA-only)
 #
 # Perception is interleaved per mini-batch so the CUDA machine doesn't
 # spend hours on perception at the end while macOS workers sit idle.
@@ -177,6 +177,20 @@ class ResourceScheduler:
         except Exception:
             pass
 
+    def _ready_free_vram_gb(self, module: str, needed_gb: float) -> float:
+        """Return required free VRAM threshold before starting *module*.
+
+        Exclusive modules may require almost all VRAM on paper. On desktop GPUs,
+        a portion is often permanently reserved by the display driver/compositor,
+        so waiting for full model size can stall forever even when inference works.
+        """
+        if needed_gb <= 0:
+            return 0.0
+        if not self.vram.is_exclusive(module):
+            return needed_gb
+        desktop_reserve_gb = max(2.0, self.vram.total_gb * 0.15)
+        return max(0.0, min(needed_gb, self.vram.total_gb - desktop_reserve_gb))
+
     def _wait_for_vram_ready(self, module: str) -> None:
         """Wait until enough CUDA free memory is visible for *module*.
 
@@ -184,10 +198,13 @@ class ResourceScheduler:
         model unload is returned to the allocator/driver.
         """
         needed_gb = self.vram.vram_for(module)
+        ready_needed_gb = self._ready_free_vram_gb(module, needed_gb)
         if needed_gb <= 0:
             return
         # If the model cannot fit physically on this GPU, don't spin forever.
         if needed_gb > self.vram.total_gb:
+            return
+        if ready_needed_gb <= 0:
             return
         # No CUDA visibility (CPU mode / unsupported backend): nothing to wait for.
         if self._cuda_free_gb() is None:
@@ -197,13 +214,15 @@ class ResourceScheduler:
         deadline = time.monotonic() + timeout_s
         while not self.is_shutdown:
             free_gb = self._cuda_free_gb()
-            if free_gb is None or free_gb >= needed_gb:
+            if free_gb is None or free_gb >= ready_needed_gb:
                 return
             self._force_cuda_cleanup()
             if time.monotonic() >= deadline:
                 raise RuntimeError(
                     f"Timed out waiting for VRAM for {module}: "
-                    f"need {needed_gb:.2f} GB, free {free_gb:.2f} GB"
+                    f"need {needed_gb:.2f} GB "
+                    f"(ready threshold {ready_needed_gb:.2f} GB), "
+                    f"free {free_gb:.2f} GB"
                 )
             self._shutdown.wait(timeout=0.25)
 

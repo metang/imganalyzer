@@ -21,7 +21,8 @@ _MODULE_VRAM_GB: dict[str, float] = {
     "objects":    2.4,   # GroundingDINO mixed fp16/fp32, batch=4
     "faces":     1.0,   # InsightFace buffalo_l ONNX (1 GB arena cap)
     "embedding": 0.95,  # CLIP ViT-L/14 fp16, batch=16
-    "perception": 15.6, # UniPercept 4-bit NF4 quantized
+    # UniPercept 4-bit NF4 quantized; loader caps CUDA allocation at 14 GiB.
+    "perception": 13.8,
 }
 
 # Modules that must run alone (peak VRAM > 50% of a typical budget).

@@ -186,6 +186,20 @@ class TestResourceScheduler:
         assert s.modules_for_phase(99) == []
         assert not s.is_co_resident_phase(99)
 
+    def test_ready_free_vram_threshold_for_exclusive_module(self):
+        s = self._make(vram_budget=VRAMBudget(total_vram_gb=16.0, fraction=0.70))
+        # Leave ~15% headroom for desktop/compositor reservation.
+        assert s._ready_free_vram_gb("perception", s.vram.vram_for("perception")) == pytest.approx(13.6)
+        # Non-exclusive modules keep exact threshold.
+        assert s._ready_free_vram_gb("objects", 2.4) == pytest.approx(2.4)
+
+    def test_wait_for_vram_ready_accepts_headroom_for_perception(self, monkeypatch):
+        s = self._make(vram_budget=VRAMBudget(total_vram_gb=16.0, fraction=0.70))
+        monkeypatch.setattr(s, "_cuda_free_gb", lambda: 14.0)
+        monkeypatch.setattr(s, "_force_cuda_cleanup", lambda: None)
+        # Should not raise: 14 GB free satisfies perception ready threshold.
+        s._wait_for_vram_ready("perception")
+
     def test_unload_happens_before_final_io_collect(self):
         """GPU models should unload before draining trailing IO futures."""
         s = self._make()

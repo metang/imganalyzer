@@ -377,9 +377,13 @@ class DistributedWorker:
         self._shutdown = threading.Event()
         self._active_leases: dict[int, str] = {}
         self._active_lock = threading.Lock()
+        self._desired_state = "active"
+        self._pause_reason: str | None = None
+        self._pause_notice_emitted = False
         self._registration_attempts = 0
         self._claim_attempts = 0
         self._empty_claim_polls = 0
+        self._startup_lease_recovery_done = False
 
         # Auto-update: check git for new commits and restart when found.
         self._auto_update = auto_update
@@ -656,6 +660,57 @@ class DistributedWorker:
                     self._shutdown.wait(delay)
         raise RuntimeError(f"Coordinator call failed unexpectedly for {method}")
 
+    def _is_method_missing_error(self, exc: Exception) -> bool:
+        """Return True when the coordinator reports an unknown RPC method."""
+        text = str(exc).lower()
+        return "method not found" in text or "unknown method" in text
+
+    def _apply_worker_heartbeat(self, heartbeat: dict[str, Any]) -> int:
+        """Apply coordinator heartbeat state and return reclaimed lease count."""
+        released = int(heartbeat.get("releasedExpired", 0) or 0)
+        desired_state = self._normalize_desired_state(heartbeat.get("desiredState"))
+        self._desired_state = desired_state
+        raw_reason = heartbeat.get("stateReason")
+        reason = str(raw_reason).strip() if raw_reason else ""
+        self._pause_reason = reason or None
+        return released
+
+    def _refresh_worker_control_state(self) -> int:
+        """Fetch worker control state once before claim/resume transitions."""
+        heartbeat = self._coordinator_call_with_lock_retry(
+            "workers/heartbeat",
+            {"workerId": self.worker_id},
+        )
+        released = self._apply_worker_heartbeat(heartbeat)
+        if released and self.verbose:
+            console.print(
+                f"[dim]Coordinator released {released} expired lease(s) during startup heartbeat[/dim]"
+            )
+        return released
+
+    def _recover_startup_leases(self) -> int:
+        """Release stale leases for this worker id from previous interrupted sessions."""
+        try:
+            result = self._coordinator_call_with_lock_retry(
+                "jobs/release-worker",
+                {"workerId": self.worker_id},
+            )
+        except Exception as exc:
+            if self._is_method_missing_error(exc):
+                if self.verbose:
+                    console.print(
+                        "[yellow]Coordinator does not support jobs/release-worker; "
+                        "skipping startup lease recovery.[/yellow]"
+                    )
+                return 0
+            raise
+        released = int(result.get("released", 0) or 0)
+        if released:
+            console.print(
+                f"[yellow]Recovered {released} stale lease(s) for worker {self.worker_id}[/yellow]"
+            )
+        return released
+
     def _try_report_skip(
         self,
         *,
@@ -757,6 +812,17 @@ class DistributedWorker:
             "pid": os.getpid(),
             "moduleFilter": self.module_filter,
         }
+        try:
+            import torch
+
+            capabilities["cuda"] = bool(torch.cuda.is_available())
+            capabilities["mps"] = bool(
+                hasattr(torch.backends, "mps")
+                and torch.backends.mps.is_available()
+            )
+        except Exception:
+            capabilities["cuda"] = False
+            capabilities["mps"] = False
         if self.supported_modules is not None:
             capabilities["supportedModules"] = self.supported_modules
         self._coordinator_call(
@@ -768,6 +834,16 @@ class DistributedWorker:
                 "capabilities": capabilities,
             },
         )
+
+    def _normalize_desired_state(self, desired_state: Any) -> str:
+        """Normalize coordinator control state values."""
+        state = str(desired_state or "active").strip().lower()
+        if state == "resume":
+            return "active"
+        return state or "active"
+
+    def _is_paused(self) -> bool:
+        return self._normalize_desired_state(self._desired_state) != "active"
 
     def _mark_all_active(self, jobs: list[dict[str, Any]]) -> None:
         """Track currently leased jobs so the heartbeat thread can extend them."""
@@ -799,7 +875,7 @@ class DistributedWorker:
                 break
             try:
                 heartbeat = self._coordinator_call("workers/heartbeat", {"workerId": self.worker_id})
-                released = int(heartbeat.get("releasedExpired", 0))
+                released = self._apply_worker_heartbeat(heartbeat)
                 if released and self.verbose:
                     console.print(
                         f"[dim]Coordinator released {released} expired lease(s) during heartbeat[/dim]"
@@ -820,8 +896,10 @@ class DistributedWorker:
                     if not bool(result.get("ok")):
                         console.print(
                             f"[yellow]Lease heartbeat rejected for job {job_id}; "
-                            "completion may fail if another worker reclaimed it.[/yellow]"
+                            "completion may fail if another worker reclaimed it. "
+                            "Dropping local lease tracking.[/yellow]"
                         )
+                        self._clear_active(job_id)
                 except Exception as exc:
                     console.print(
                         f"[red]Lease heartbeat failed for job {job_id}:[/red] {escape(str(exc))}"
@@ -988,6 +1066,7 @@ class DistributedWorker:
             payload = extract_result_payload(conn, repo, image_id=image_id, module=module)
             payload_ms = int((time.monotonic() - payload_started) * 1000)
 
+            processing_ms = int((time.monotonic() - started_monotonic) * 1000)
             complete_started = time.monotonic()
             done = self._coordinator_call_with_lock_retry(
                 "jobs/complete",
@@ -996,6 +1075,7 @@ class DistributedWorker:
                     "leaseToken": lease_token,
                     "payload": payload,
                     "noXmp": not self.write_xmp,
+                    "processingMs": processing_ms,
                 },
             )
             complete_ms = int((time.monotonic() - complete_started) * 1000)
@@ -1124,23 +1204,189 @@ class DistributedWorker:
             finally:
                 self._clear_active(job_id)
 
-    def run_forever(self) -> dict[str, int]:
-        """Run until interrupted, returning summary stats."""
-        stats = {"done": 0, "failed": 0, "skipped": 0}
-        original_handler = None
+    def _log_registration_retry(self, exc: Exception) -> None:
+        """Log a transient worker-registration failure."""
+        exc_text = escape(str(exc))
+        hint = ""
+        reason = str(exc).lower()
+        probe = self._tcp_probe_summary()
+        if "timed out" in reason or "timeout" in reason:
+            hint = (
+                "\n[dim]  Hint: if the coordinator is on a remote host, "
+                "ensure firewall allows both coordinator port and python.exe inbound.\n"
+                "  On Windows (port):   New-NetFirewallRule -DisplayName 'imganalyzer Coordinator TCP' "
+                "-Direction Inbound -Protocol TCP -LocalPort <PORT> -Action Allow\n"
+                "  On Windows (python): New-NetFirewallRule -DisplayName 'imganalyzer Python Inbound' "
+                "-Direction Inbound -Program '<python.exe>' -Protocol TCP -Action Allow\n"
+                "  If still blocked: disable inbound 'TCP Query User ... python.exe' BLOCK rules.\n"
+                "  On Linux:   sudo ufw allow <PORT>/tcp[/dim]"
+            )
+        console.print(
+            "[yellow]Coordinator unavailable during registration; "
+            f"attempt {self._registration_attempts}, "
+            f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc_text}\n"
+            f"[dim]  TCP probe: {probe}[/dim]{hint}"
+        )
+
+    def _log_claim_retry(self, exc: Exception) -> None:
+        """Log a transient job-claim failure."""
+        probe = self._tcp_probe_summary()
+        exc_text = escape(str(exc))
+        console.print(
+            "[yellow]Coordinator unavailable while claiming jobs; "
+            f"attempt {self._claim_attempts}, "
+            f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc_text}\n"
+            f"[dim]  TCP probe: {probe}[/dim]"
+        )
+
+    def _handle_pause_state(self) -> bool:
+        """Handle paused/resumed coordinator state; return True when paused."""
+        if self._is_paused():
+            if not self._pause_notice_emitted:
+                reason = f": {self._pause_reason}" if self._pause_reason else ""
+                console.print(
+                    f"[yellow]Worker paused by coordinator ({self._desired_state}){reason}. "
+                    "Waiting for resume...[/yellow]"
+                )
+                self._pause_notice_emitted = True
+            self._shutdown.wait(self.poll_interval_seconds)
+            self._maybe_check_for_update()
+            return True
+        if self._pause_notice_emitted:
+            console.print("[green]Worker resumed by coordinator.[/green]")
+            self._pause_notice_emitted = False
+        return False
+
+    def _handle_empty_claim_poll(self) -> None:
+        """Handle an empty claim result and poll again."""
+        self._empty_claim_polls += 1
+        poll_interval = max(self.poll_interval_seconds, 0.5)
+        idle_log_every = max(1, int(30 / poll_interval))
+        if self._empty_claim_polls % idle_log_every == 0:
+            queue_summary = self._coordinator_queue_summary()
+            queue_hint = f", {queue_summary}" if queue_summary else ""
+            console.print(
+                "[dim]No jobs claimed yet; "
+                f"still polling every {self.poll_interval_seconds:g}s "
+                f"(empty polls={self._empty_claim_polls}, "
+                f"active leases={len(self._snapshot_active())}{queue_hint})[/dim]"
+            )
+        self._maybe_reprobe_modules()
+        self._shutdown.wait(self.poll_interval_seconds)
+        self._maybe_check_for_update()
+
+    def _teardown_runtime_session(self) -> None:
+        """Release worker leases and mark runtime session as stopped."""
+        self._shutdown.set()
+        self._release_all_active_leases()
+        try:
+            self._coordinator_call("jobs/release-worker", {"workerId": self.worker_id})
+        except Exception as exc:
+            if self.verbose:
+                console.print(
+                    f"[yellow]Worker lease release failed on shutdown:[/yellow] "
+                    f"{escape(str(exc))}"
+                )
+
+    def _run_worker_session(self, *, stats: dict[str, int], has_connected: bool) -> bool:
+        """Run one claim/process/poll session until shutdown."""
         registered = False
         heartbeat_started = False
-        has_connected = False
-        is_main = threading.current_thread() is threading.main_thread()
-        if is_main:
-            original_handler = signal.getsignal(signal.SIGINT)
-            signal.signal(signal.SIGINT, self._handle_sigint)
-
         heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop,
             name=f"{self.worker_id}-heartbeat",
             daemon=True,
         )
+        try:
+            while not self._shutdown.is_set():
+                if not registered:
+                    self._registration_attempts += 1
+                    try:
+                        self._register_worker()
+                    except Exception as exc:
+                        self._log_registration_retry(exc)
+                        self._shutdown.wait(self.poll_interval_seconds)
+                        continue
+
+                    try:
+                        if not self._startup_lease_recovery_done:
+                            self._recover_startup_leases()
+                            self._startup_lease_recovery_done = True
+                        self._refresh_worker_control_state()
+                    except Exception as exc:
+                        self._log_registration_retry(exc)
+                        self._shutdown.wait(self.poll_interval_seconds)
+                        continue
+
+                    registered = True
+                    self._registration_attempts = 0
+                    if not heartbeat_started:
+                        heartbeat_thread.start()
+                        heartbeat_started = True
+                    if has_connected:
+                        console.print(
+                            f"[green]Reconnected to coordinator as[/green] {self.display_name} "
+                            f"[dim]({self.worker_id})[/dim]"
+                        )
+                    else:
+                        console.print(
+                            f"[cyan]Connected to coordinator as[/cyan] {self.display_name} "
+                            f"[dim]({self.worker_id})[/dim]"
+                        )
+                        has_connected = True
+
+                if self._handle_pause_state():
+                    continue
+
+                try:
+                    self._claim_attempts += 1
+                    jobs = self._claim_jobs()
+                except Exception as exc:
+                    registered = False
+                    self._log_claim_retry(exc)
+                    self._shutdown.wait(self.poll_interval_seconds)
+                    continue
+
+                self._claim_attempts = 0
+                if not jobs:
+                    self._handle_empty_claim_poll()
+                    continue
+
+                self._empty_claim_polls = 0
+                console.print(f"[cyan]Claimed {len(jobs)} job(s)[/cyan]")
+                self._mark_all_active(jobs)
+                for job in jobs:
+                    if self._shutdown.is_set() or self._is_paused():
+                        self._release_all_active_leases()
+                        break
+                    status = self._process_claimed_job(job)
+                    stats[status] = stats.get(status, 0) + 1
+                    processed = (
+                        stats.get("done", 0)
+                        + stats.get("failed", 0)
+                        + stats.get("skipped", 0)
+                    )
+                    console.print(
+                        f"[dim]Progress:[/dim] {processed} processed — "
+                        f"{stats.get('done', 0)} done, "
+                        f"{stats.get('failed', 0)} failed, "
+                        f"{stats.get('skipped', 0)} skipped"
+                    )
+                self._maybe_check_for_update()
+        finally:
+            self._teardown_runtime_session()
+        return has_connected
+
+    def run_forever(self) -> dict[str, int]:
+        """Run until interrupted, returning summary stats."""
+        stats = {"done": 0, "failed": 0, "skipped": 0}
+        original_handler = None
+        has_connected = False
+        started_session = False
+        is_main = threading.current_thread() is threading.main_thread()
+        if is_main:
+            original_handler = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, self._handle_sigint)
 
         try:
             self._log_connectivity_context()
@@ -1198,184 +1444,27 @@ class DistributedWorker:
                         "  [bold]bash scripts/setup_worker_env.sh[/bold]"
                     )
                     raise SystemExit(1)
-            while not self._shutdown.is_set():
-                if not registered:
-                    self._registration_attempts += 1
-                    try:
-                        self._register_worker()
-                    except Exception as exc:
-                        exc_text = escape(str(exc))
-                        hint = ""
-                        reason = str(exc).lower()
-                        probe = self._tcp_probe_summary()
-                        if "timed out" in reason or "timeout" in reason:
-                            hint = (
-                                "\n[dim]  Hint: if the coordinator is on a remote host, "
-                                "ensure firewall allows both coordinator port and python.exe inbound.\n"
-                                "  On Windows (port):   New-NetFirewallRule -DisplayName 'imganalyzer Coordinator TCP' "
-                                "-Direction Inbound -Protocol TCP -LocalPort <PORT> -Action Allow\n"
-                                "  On Windows (python): New-NetFirewallRule -DisplayName 'imganalyzer Python Inbound' "
-                                "-Direction Inbound -Program '<python.exe>' -Protocol TCP -Action Allow\n"
-                                "  If still blocked: disable inbound 'TCP Query User ... python.exe' BLOCK rules.\n"
-                                "  On Linux:   sudo ufw allow <PORT>/tcp[/dim]"
-                            )
-                        console.print(
-                            "[yellow]Coordinator unavailable during registration; "
-                            f"attempt {self._registration_attempts}, "
-                            f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc_text}\n"
-                            f"[dim]  TCP probe: {probe}[/dim]{hint}"
-                        )
-                        self._shutdown.wait(self.poll_interval_seconds)
-                        continue
 
-                    registered = True
-                    self._registration_attempts = 0
-                    if not heartbeat_started:
-                        heartbeat_thread.start()
-                        heartbeat_started = True
-                    if has_connected:
-                        console.print(
-                            f"[green]Reconnected to coordinator as[/green] {self.display_name} "
-                            f"[dim]({self.worker_id})[/dim]"
-                        )
-                    else:
-                        console.print(
-                            f"[cyan]Connected to coordinator as[/cyan] {self.display_name} "
-                            f"[dim]({self.worker_id})[/dim]"
-                        )
-                        has_connected = True
-
-                try:
-                    self._claim_attempts += 1
-                    jobs = self._claim_jobs()
-                except Exception as exc:
-                    registered = False
-                    probe = self._tcp_probe_summary()
-                    exc_text = escape(str(exc))
-                    console.print(
-                        "[yellow]Coordinator unavailable while claiming jobs; "
-                        f"attempt {self._claim_attempts}, "
-                        f"retrying in {self.poll_interval_seconds:g}s:[/yellow] {exc_text}\n"
-                        f"[dim]  TCP probe: {probe}[/dim]"
-                    )
-                    self._shutdown.wait(self.poll_interval_seconds)
-                    continue
-
-                self._claim_attempts = 0
-                if not jobs:
-                    self._empty_claim_polls += 1
-                    poll_interval = max(self.poll_interval_seconds, 0.5)
-                    idle_log_every = max(1, int(30 / poll_interval))
-                    if self._empty_claim_polls % idle_log_every == 0:
-                        queue_summary = self._coordinator_queue_summary()
-                        queue_hint = f", {queue_summary}" if queue_summary else ""
-                        console.print(
-                            "[dim]No jobs claimed yet; "
-                            f"still polling every {self.poll_interval_seconds:g}s "
-                            f"(empty polls={self._empty_claim_polls}, "
-                            f"active leases={len(self._snapshot_active())}{queue_hint})[/dim]"
-                        )
-                    self._shutdown.wait(self.poll_interval_seconds)
-                    self._maybe_check_for_update()
-                    continue
-
-                self._empty_claim_polls = 0
-                console.print(
-                    f"[cyan]Claimed {len(jobs)} job(s)[/cyan]"
+            while True:
+                started_session = True
+                has_connected = self._run_worker_session(
+                    stats=stats,
+                    has_connected=has_connected,
                 )
-                self._mark_all_active(jobs)
-                for job in jobs:
-                    if self._shutdown.is_set():
-                        break
-                    status = self._process_claimed_job(job)
-                    stats[status] = stats.get(status, 0) + 1
-                    processed = stats.get("done", 0) + stats.get("failed", 0) + stats.get("skipped", 0)
-                    console.print(
-                        f"[dim]Progress:[/dim] {processed} processed — "
-                        f"{stats.get('done', 0)} done, "
-                        f"{stats.get('failed', 0)} failed, "
-                        f"{stats.get('skipped', 0)} skipped"
-                    )
-                self._maybe_check_for_update()
+                if not (self._update_pending and self._repo_dir is not None):
+                    break
+
+                self._pull_and_restart()
+                # _pull_and_restart returns only if pull had no new commits.
+                # Resume the main loop without full re-init.
+                self._shutdown.clear()
+                self._update_pending = False
+                self._empty_claim_polls = 0
+                console.print("[dim]Resuming worker…[/dim]")
         finally:
-            self._shutdown.set()
-            self._release_all_active_leases()
-            try:
-                self._coordinator_call("jobs/release-worker", {"workerId": self.worker_id})
-            except Exception as exc:
-                if self.verbose:
-                    console.print(
-                        f"[yellow]Worker lease release failed on shutdown:[/yellow] "
-                        f"{escape(str(exc))}"
-                    )
-
-        if self._update_pending and self._repo_dir is not None:
-            self._pull_and_restart()
-            # _pull_and_restart returns only if pull had no new commits.
-            # Resume the main loop without full re-init.
-            self._shutdown.clear()
-            self._update_pending = False
-            registered = False
-            self._empty_claim_polls = 0
-            console.print("[dim]Resuming worker…[/dim]")
-
-            # Restart the heartbeat thread (the old one exited when
-            # _shutdown was set during the update-check teardown).
-            heartbeat_thread = threading.Thread(
-                target=self._heartbeat_loop,
-                name=f"{self.worker_id}-heartbeat",
-                daemon=True,
-            )
-            heartbeat_thread.start()
-
-            try:
-                while not self._shutdown.is_set():
-                    if not registered:
-                        try:
-                            self._register_worker()
-                        except Exception:
-                            self._shutdown.wait(self.poll_interval_seconds)
-                            continue
-                        registered = True
-                        console.print(
-                            f"[green]Reconnected to coordinator as[/green] "
-                            f"{self.display_name} [dim]({self.worker_id})[/dim]"
-                        )
-
-                    try:
-                        jobs = self._claim_jobs()
-                    except Exception:
-                        registered = False
-                        self._shutdown.wait(self.poll_interval_seconds)
-                        continue
-
-                    if not jobs:
-                        self._empty_claim_polls += 1
-                        self._maybe_reprobe_modules()
-                        self._shutdown.wait(self.poll_interval_seconds)
-                        self._maybe_check_for_update()
-                        continue
-
-                    self._empty_claim_polls = 0
-                    console.print(f"[cyan]Claimed {len(jobs)} job(s)[/cyan]")
-                    self._mark_all_active(jobs)
-                    for job in jobs:
-                        if self._shutdown.is_set():
-                            break
-                        status = self._process_claimed_job(job)
-                        stats[status] = stats.get(status, 0) + 1
-                    self._maybe_check_for_update()
-            finally:
-                self._shutdown.set()
-                self._release_all_active_leases()
-                try:
-                    self._coordinator_call(
-                        "jobs/release-worker", {"workerId": self.worker_id}
-                    )
-                except Exception:
-                    pass
-
-        if is_main and original_handler is not None:
-            signal.signal(signal.SIGINT, original_handler)
+            if not started_session:
+                self._teardown_runtime_session()
+            if is_main and original_handler is not None:
+                signal.signal(signal.SIGINT, original_handler)
 
         return stats

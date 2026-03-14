@@ -70,17 +70,15 @@ def test_process_claimed_job_reports_completion(tmp_path):
         )
 
     assert status == "done"
-    assert recorded == [
-        (
-            "jobs/complete",
-            {
-                "jobId": 5,
-                "leaseToken": "lease-123",
-                "payload": {"data": {"camera_make": "TestCam"}},
-                "noXmp": True,
-            },
-        )
-    ]
+    assert len(recorded) == 1
+    method, params = recorded[0]
+    assert method == "jobs/complete"
+    assert params["jobId"] == 5
+    assert params["leaseToken"] == "lease-123"
+    assert params["payload"] == {"data": {"camera_make": "TestCam"}}
+    assert params["noXmp"] is True
+    assert isinstance(params["processingMs"], int)
+    assert params["processingMs"] >= 0
 
 
 def test_process_claimed_job_retries_transient_db_lock_on_complete(tmp_path):
@@ -951,6 +949,7 @@ def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
                 ],
             },
             "noXmp": True,
+            "processingMs": 1500,
         }
     )
 
@@ -969,8 +968,22 @@ def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
     assert rows[0]["embedding_type"] == "description_clip"
     assert rows[0]["vector"] == b"\x01\x02\x03\x04"
     assert rows[0]["model_version"] == "clip-test"
-    status_row = check_conn.execute("SELECT status FROM job_queue WHERE id = ?", [job_id]).fetchone()
+    status_row = check_conn.execute(
+        "SELECT status, started_at, completed_at FROM job_queue WHERE id = ?",
+        [job_id],
+    ).fetchone()
     assert status_row["status"] == "done"
+    assert status_row["started_at"] is not None
+    assert status_row["completed_at"] is not None
+    duration_row = check_conn.execute(
+        """SELECT CAST(
+               ROUND((julianday(completed_at) - julianday(started_at)) * 86400000.0)
+           AS INTEGER) AS ms
+           FROM job_queue WHERE id = ?""",
+        [job_id],
+    ).fetchone()
+    assert duration_row is not None
+    assert abs(int(duration_row["ms"]) - 1500) <= 500
     check_conn.close()
 
 
@@ -1041,6 +1054,11 @@ def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkey
     assert recent_by_job[worker_failed_job]["error"] == "boom"
 
     workers_list = server._handle_workers_list({})
+    assert workers_list["master"]["id"] == "master"
+    assert workers_list["master"]["role"] == "master"
+    assert workers_list["master"]["desiredState"] == "active"
+    assert workers_list["master"]["status"] == "offline"
+    assert all(item["id"] != "master" for item in workers_list["workers"])
     listed_worker = next(item for item in workers_list["workers"] if item["id"] == "worker-1")
     assert listed_worker["runningJobs"] == 1
     assert listed_worker["activeModules"] == [{"module": "objects", "count": 1}]
@@ -1077,6 +1095,73 @@ def test_heartbeat_loop_keeps_leases_alive_during_shutdown(monkeypatch):
     assert calls[1][1] == {"jobId": 99, "leaseToken": "lease-99", "extendTtlSeconds": 120}
     assert sleep_calls == [1.0]
     assert worker._snapshot_active() == []
+
+
+def test_heartbeat_loop_drops_active_lease_when_rejected(monkeypatch):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None
+    worker.heartbeat_interval_seconds = 2.0
+    worker._mark_all_active([{"id": 101, "leaseToken": "lease-101"}])
+    worker._shutdown.set()
+
+    calls: list[str] = []
+    sleep_calls: list[float] = []
+
+    def _fake_call(method: str, _params: dict[str, object]) -> dict[str, object]:
+        calls.append(method)
+        if method == "workers/heartbeat":
+            return {"releasedExpired": 0}
+        if method == "jobs/heartbeat":
+            return {"ok": False}
+        raise AssertionError(f"Unexpected coordinator method: {method}")
+
+    monkeypatch.setattr(worker, "_coordinator_call", _fake_call)
+    monkeypatch.setattr(
+        "imganalyzer.pipeline.distributed_worker.time.sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    worker._heartbeat_loop()
+
+    assert calls == ["workers/heartbeat", "jobs/heartbeat"]
+    assert sleep_calls == [1.0]
+    assert worker._snapshot_active() == []
+
+
+def test_run_forever_performs_startup_lease_recovery_once(monkeypatch):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None
+    worker.poll_interval_seconds = 0
+
+    calls: list[str] = []
+    monkeypatch.setattr("imganalyzer.pipeline.distributed_worker.console.print", lambda *args, **_kwargs: None)
+    monkeypatch.setattr(worker, "_heartbeat_loop", lambda: None)
+    monkeypatch.setattr(worker, "_register_worker", lambda: None)
+    monkeypatch.setattr(worker, "_teardown_runtime_session", lambda: None)
+
+    def _fake_call(method: str, _params: dict[str, object]) -> dict[str, object]:
+        calls.append(method)
+        if method == "jobs/release-worker":
+            return {"released": 0}
+        if method == "workers/heartbeat":
+            return {"releasedExpired": 0, "desiredState": "active"}
+        if method == "status":
+            return {"totals": {"pending": 0, "running": 0}, "modules": {}}
+        return {"ok": True}
+
+    def _fake_claim_jobs() -> list[dict[str, object]]:
+        worker._shutdown.set()
+        return []
+
+    monkeypatch.setattr(worker, "_coordinator_call", _fake_call)
+    monkeypatch.setattr(worker, "_claim_jobs", _fake_claim_jobs)
+
+    stats = worker.run_forever()
+
+    assert stats == {"done": 0, "failed": 0, "skipped": 0}
+    assert calls.count("jobs/release-worker") == 1
+    assert calls.count("workers/heartbeat") >= 1
+    assert worker._startup_lease_recovery_done is True
 
 
 def test_run_forever_prints_progress_summary(monkeypatch):
@@ -1176,4 +1261,139 @@ def test_run_forever_retries_claim_after_timeout(monkeypatch):
     assert register_attempts == 2
     assert claim_attempts == 2
     assert any("Coordinator unavailable while claiming jobs" in line for line in printed)
+    assert any("Reconnected to coordinator as" in line for line in printed)
+
+
+def test_run_forever_waits_for_resume_before_claiming(monkeypatch):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None  # bypass startup dep check in tests
+    worker.poll_interval_seconds = 0
+
+    printed: list[str] = []
+    claim_calls = 0
+    maybe_update_calls = 0
+
+    monkeypatch.setattr(
+        "imganalyzer.pipeline.distributed_worker.console.print",
+        lambda *args, **_kwargs: printed.append(" ".join(str(arg) for arg in args)),
+    )
+    monkeypatch.setattr(worker, "_heartbeat_loop", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "_coordinator_call",
+        lambda method, _params: {
+            "jobs/release-worker": {"released": 0},
+            "workers/heartbeat": {
+                "releasedExpired": 0,
+                "desiredState": "pause-drain",
+                "stateReason": "maintenance",
+            },
+        }.get(method, {"ok": True}),
+    )
+    monkeypatch.setattr(worker, "_register_worker", lambda: None)
+
+    def _fake_claim_jobs() -> list[dict[str, object]]:
+        nonlocal claim_calls
+        claim_calls += 1
+        return [{
+            "id": 13,
+            "imageId": 7,
+            "module": "metadata",
+            "leaseToken": "lease-13",
+            "filePath": "/photos/paused-then-resumed.jpg",
+        }]
+
+    def _fake_maybe_check_for_update() -> None:
+        nonlocal maybe_update_calls
+        maybe_update_calls += 1
+        if maybe_update_calls == 1:
+            worker._desired_state = "active"
+            worker._pause_reason = None
+
+    def _fake_process(_job: dict[str, object]) -> str:
+        worker._clear_active(13)
+        worker._shutdown.set()
+        return "done"
+
+    monkeypatch.setattr(worker, "_claim_jobs", _fake_claim_jobs)
+    monkeypatch.setattr(worker, "_maybe_check_for_update", _fake_maybe_check_for_update)
+    monkeypatch.setattr(worker, "_process_claimed_job", _fake_process)
+
+    stats = worker.run_forever()
+
+    assert stats == {"done": 1, "failed": 0, "skipped": 0}
+    assert claim_calls == 1
+    assert any(
+        "Worker paused by coordinator (pause-drain): maintenance." in line
+        for line in printed
+    )
+    assert any("Worker resumed by coordinator." in line for line in printed)
+
+
+def test_run_forever_resumes_after_auto_update_check(monkeypatch, tmp_path):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None  # bypass startup dep check in tests
+    worker.poll_interval_seconds = 0
+    worker._repo_dir = tmp_path
+
+    printed: list[str] = []
+    register_attempts = 0
+    claim_attempts = 0
+    update_checks = 0
+    pull_attempts = 0
+
+    monkeypatch.setattr(
+        "imganalyzer.pipeline.distributed_worker.console.print",
+        lambda *args, **_kwargs: printed.append(" ".join(str(arg) for arg in args)),
+    )
+    monkeypatch.setattr(worker, "_heartbeat_loop", lambda: None)
+    monkeypatch.setattr(worker, "_coordinator_call", lambda _method, _params: {"ok": True})
+
+    def _fake_register() -> None:
+        nonlocal register_attempts
+        register_attempts += 1
+
+    def _fake_claim_jobs() -> list[dict[str, object]]:
+        nonlocal claim_attempts
+        claim_attempts += 1
+        if claim_attempts == 1:
+            return []
+        return [{
+            "id": 17,
+            "imageId": 8,
+            "module": "metadata",
+            "leaseToken": "lease-17",
+            "filePath": "/photos/after-update.jpg",
+        }]
+
+    def _fake_maybe_check_for_update() -> None:
+        nonlocal update_checks
+        update_checks += 1
+        if update_checks == 1:
+            worker._update_pending = True
+            worker._shutdown.set()
+
+    def _fake_pull_and_restart() -> None:
+        nonlocal pull_attempts
+        pull_attempts += 1
+        worker._update_pending = False
+
+    def _fake_process(_job: dict[str, object]) -> str:
+        worker._clear_active(17)
+        worker._shutdown.set()
+        return "done"
+
+    monkeypatch.setattr(worker, "_register_worker", _fake_register)
+    monkeypatch.setattr(worker, "_claim_jobs", _fake_claim_jobs)
+    monkeypatch.setattr(worker, "_maybe_check_for_update", _fake_maybe_check_for_update)
+    monkeypatch.setattr(worker, "_pull_and_restart", _fake_pull_and_restart)
+    monkeypatch.setattr(worker, "_process_claimed_job", _fake_process)
+
+    stats = worker.run_forever()
+
+    assert stats == {"done": 1, "failed": 0, "skipped": 0}
+    assert register_attempts == 2
+    assert claim_attempts == 2
+    assert pull_attempts == 1
+    assert any("Resuming worker" in line for line in printed)
     assert any("Reconnected to coordinator as" in line for line in printed)

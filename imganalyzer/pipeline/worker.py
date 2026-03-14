@@ -21,7 +21,7 @@ Phase 2 — ``faces`` + ``embedding`` (GPU, co-resident):
   These models (~1.95 GB total) run concurrently with separate CUDA streams.
 
 Phase 3 — ``perception`` (GPU, exclusive):
-  UniPercept (~15.6 GB) runs as the last phase in each mini-batch.
+  UniPercept (~13.8 GB effective, 4-bit) runs as the last phase in each mini-batch.
   While CUDA processes perception, macOS workers continue caption jobs.
 
 Mini-batch interleaving
@@ -198,6 +198,9 @@ class Worker:
         # Populated by the scheduler's prefetch producer threads, consumed by
         # _process_job on the GPU thread.  Thread-safe via dict atomicity.
         self._prefetch_cache: dict[int, dict[str, Any]] = {}
+        # Cooldown window after a perception VRAM timeout so we keep processing
+        # other modules instead of repeatedly stalling on the same phase.
+        self._perception_vram_cooldown_until = 0.0
 
     @staticmethod
     def _mini_batch_size(chunk_size: int) -> int:
@@ -256,7 +259,11 @@ class Worker:
             local.runner = runner
         return local.conn, local.repo, local.queue, local.runner
 
-    def _pending_image_ids_with_running_wait(self, poll_interval_s: float = 1.0) -> list[int]:
+    def _pending_image_ids_with_running_wait(
+        self,
+        poll_interval_s: float = 1.0,
+        reclaim_interval_s: float = 15.0,
+    ) -> list[int]:
         """Return pending image_ids, waiting while leased jobs are still running.
 
         In distributed runs, workers can temporarily lease most pending jobs.
@@ -273,14 +280,27 @@ class Worker:
             if running_jobs <= 0:
                 return []
 
+            idle_polls += 1
+            reclaim_every = max(
+                1,
+                int(max(reclaim_interval_s, 0.0) / max(poll_interval_s, 0.1)),
+            )
+            released = 0
             # Reclaim expired worker leases while waiting so stale
             # distributed jobs are eventually returned to pending.
-            released = self.queue.release_expired_leases()
+            if idle_polls % reclaim_every == 0:
+                try:
+                    released = self.queue.release_expired_leases()
+                except sqlite3.OperationalError as exc:
+                    if self.verbose:
+                        console.print(
+                            "[dim]Deferred lease reclaim (database busy): "
+                            f"{exc}[/dim]"
+                        )
             if released > 0:
                 idle_polls = 0
                 continue
 
-            idle_polls += 1
             log_every = max(1, int(30 / max(poll_interval_s, 0.1)))
             if idle_polls % log_every == 0:
                 console.print(
@@ -290,6 +310,33 @@ class Worker:
             self._shutdown.wait(poll_interval_s)
 
         return []
+
+    def _is_perception_vram_timeout(
+        self,
+        phase_modules: list[str],
+        exc: RuntimeError,
+    ) -> bool:
+        if phase_modules != ["perception"]:
+            return False
+        msg = str(exc)
+        return (
+            "Timed out waiting for VRAM for perception" in msg
+            or "Cannot load perception" in msg
+        )
+
+    def _defer_perception_phase(self, cooldown_s: float = 30.0) -> None:
+        self._perception_vram_cooldown_until = time.monotonic() + max(1.0, cooldown_s)
+        if self.verbose:
+            console.print(
+                "[yellow]Perception phase deferred: insufficient free VRAM. "
+                f"Retrying in ~{int(cooldown_s)}s while other modules continue.[/yellow]"
+            )
+
+    def _perception_on_cooldown(self, phase_modules: list[str]) -> bool:
+        return (
+            phase_modules == ["perception"]
+            and time.monotonic() < self._perception_vram_cooldown_until
+        )
 
     def run(self, batch_size: int = 10, chunk_size: int = 0) -> dict[str, int]:
         """Main processing loop.  Blocks until queue is empty or Ctrl+C.
@@ -629,6 +676,8 @@ class Worker:
                                 break
 
                             phase_modules = scheduler.modules_for_phase(phase_idx)
+                            if self._perception_on_cooldown(phase_modules):
+                                continue
                             has_pending = any(
                                 self.queue.pending_count(
                                     module=mod,
@@ -649,22 +698,28 @@ class Worker:
                                 ThreadPoolExecutor(max_workers=self.workers) as local_pool,
                                 ThreadPoolExecutor(max_workers=1)            as cloud_pool,
                             ):
-                                scheduler.run_gpu_phase(
-                                    phase_idx,
-                                    claim_fn=active_claim_fn,
-                                    process_batch_fn=self._process_job_batch,
-                                    process_single_fn=self._process_job,
-                                    submit_io_fn=active_submit_io,
-                                    collect_fn=_collect_futures,
-                                    advance_fn=_advance_fn,
-                                    flush_fn=self._maybe_periodic_flush,
-                                    local_pool=local_pool,
-                                    cloud_pool=cloud_pool,
-                                    stats=stats,
-                                    unload_fn=unload_gpu_model,
-                                    prefetch_fn=_prefetch_image,
-                                    cancel_futures_fn=_cancel_futures,
-                                )
+                                try:
+                                    scheduler.run_gpu_phase(
+                                        phase_idx,
+                                        claim_fn=active_claim_fn,
+                                        process_batch_fn=self._process_job_batch,
+                                        process_single_fn=self._process_job,
+                                        submit_io_fn=active_submit_io,
+                                        collect_fn=_collect_futures,
+                                        advance_fn=_advance_fn,
+                                        flush_fn=self._maybe_periodic_flush,
+                                        local_pool=local_pool,
+                                        cloud_pool=cloud_pool,
+                                        stats=stats,
+                                        unload_fn=unload_gpu_model,
+                                        prefetch_fn=_prefetch_image,
+                                        cancel_futures_fn=_cancel_futures,
+                                    )
+                                except RuntimeError as exc:
+                                    if self._is_perception_vram_timeout(phase_modules, exc):
+                                        self._defer_perception_phase(cooldown_s=30.0)
+                                        continue
+                                    raise
 
                     # ════════════════════════════════════════════════════════════
                     # IO drain (per-chunk)
@@ -720,6 +775,8 @@ class Worker:
                             if self._shutdown.is_set():
                                 break
                             phase_modules = scheduler.modules_for_phase(phase_idx)
+                            if self._perception_on_cooldown(phase_modules):
+                                continue
                             has_pending = any(
                                 self.queue.pending_count(
                                     module=mod, image_ids=chunk_ids,
@@ -737,22 +794,28 @@ class Worker:
                                 ThreadPoolExecutor(max_workers=self.workers) as local_pool,
                                 ThreadPoolExecutor(max_workers=1)            as cloud_pool,
                             ):
-                                scheduler.run_gpu_phase(
-                                    phase_idx,
-                                    claim_fn=_retry_claim_fn,
-                                    process_batch_fn=self._process_job_batch,
-                                    process_single_fn=self._process_job,
-                                    submit_io_fn=active_submit_io,
-                                    collect_fn=_collect_futures,
-                                    advance_fn=_advance_fn,
-                                    flush_fn=self._maybe_periodic_flush,
-                                    local_pool=local_pool,
-                                    cloud_pool=cloud_pool,
-                                    stats=stats,
-                                    unload_fn=unload_gpu_model,
-                                    prefetch_fn=_prefetch_image,
-                                    cancel_futures_fn=_cancel_futures,
-                                )
+                                try:
+                                    scheduler.run_gpu_phase(
+                                        phase_idx,
+                                        claim_fn=_retry_claim_fn,
+                                        process_batch_fn=self._process_job_batch,
+                                        process_single_fn=self._process_job,
+                                        submit_io_fn=active_submit_io,
+                                        collect_fn=_collect_futures,
+                                        advance_fn=_advance_fn,
+                                        flush_fn=self._maybe_periodic_flush,
+                                        local_pool=local_pool,
+                                        cloud_pool=cloud_pool,
+                                        stats=stats,
+                                        unload_fn=unload_gpu_model,
+                                        prefetch_fn=_prefetch_image,
+                                        cancel_futures_fn=_cancel_futures,
+                                    )
+                                except RuntimeError as exc:
+                                    if self._is_perception_vram_timeout(phase_modules, exc):
+                                        self._defer_perception_phase(cooldown_s=30.0)
+                                        continue
+                                    raise
 
                         if not processed_any:
                             break  # pending jobs exist but not in any GPU phase

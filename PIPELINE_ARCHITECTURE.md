@@ -309,7 +309,7 @@ _MODULE_VRAM_GB: dict[str, float] = {
     "ocr":       1.3,   # TrOCR large-printed fp16
     "faces":     1.0,   # InsightFace buffalo_l ONNX (1 GB arena cap)
     "embedding": 0.95,  # CLIP ViT-L/14 fp16, batch=16
-    "perception": 15.6, # UniPercept 4-bit NF4 quantized
+    "perception": 13.8, # UniPercept 4-bit NF4 quantized (14 GiB max_memory cap)
 }
 
 # Modules that must run alone (peak VRAM > 50% of a typical budget).
@@ -735,7 +735,7 @@ _MODULE_VRAM_GB: dict[str, float] = {
     "ocr":       1.3,
     "faces":     1.0,
     "embedding": 0.95,
-    "perception": 15.6,
+    "perception": 13.8,
 }
 
 # If Qwen3.5 + SigLIP can coexist with Phase 2 models:

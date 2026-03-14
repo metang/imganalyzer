@@ -494,6 +494,14 @@ async function doPoll(): Promise<void> {
     const remainingPasses = pending + running
     const activePasses = running
 
+    // Auto-heal stale paused UI state whenever the full queue still has work.
+    // This keeps the run active based on global queue state, not chunk-local state.
+    if (batchStatus === 'paused' && remainingPasses > 0) {
+      batchStatus = 'running'
+      monitorOnly = false
+      isRunActive = true
+    }
+
     const shouldSyncRecentResults =
       monitorOnly ||
       batchStatus === 'running' ||
@@ -639,11 +647,17 @@ function setupNotificationListener(): void {
         const wasPaused = !!(p as any)?.paused
         void rpc.call('status', {}).then((data: any) => {
           if (currentRunId !== runId) return
+          const masterRunning = data?.nodes?.master?.runningJobs ?? 0
           const pending = data?.totals?.pending ?? 0
           const running = data?.totals?.running ?? 0
-          if (pending + running > 0) {
+          if (masterRunning > 0) {
+            batchStatus = 'running'
+            monitorOnly = false
+            isRunActive = true
+          } else if (pending + running > 0) {
             if (wasPaused) {
               batchStatus = 'paused'
+              monitorOnly = false
             } else {
               // Master finished local work but distributed workers still
               // have active jobs — keep polling so the UI stays live.
@@ -679,10 +693,16 @@ function setupNotificationListener(): void {
         isRunActive = false
         void rpc.call('status', {}).then((data: any) => {
           if (currentRunId !== runId) return
+          const masterRunning = data?.nodes?.master?.runningJobs ?? 0
           const pending = data?.totals?.pending ?? 0
           const running = data?.totals?.running ?? 0
-          if (pending + running > 0) {
+          if (masterRunning > 0) {
+            batchStatus = 'running'
+            monitorOnly = false
+            isRunActive = true
+          } else if (pending + running > 0) {
             batchStatus = 'paused'
+            monitorOnly = false
           } else {
             batchStatus = 'error'
             stopPolling()

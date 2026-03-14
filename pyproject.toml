@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "imganalyzer"
-version = "0.4.1"
+version = "0.5.0"
 description = "CLI tool to analyze images and camera RAW files with EXIF, technical, and AI analysis — outputs Lightroom-compatible XMP sidecars"
 readme = "README.md"
 license = { text = "MIT" }
