@@ -323,6 +323,34 @@ class DistributedWorker:
         if auto_update:
             self._repo_dir = _detect_git_repo()
 
+    # ── Module re-probing ────────────────────────────────────────────────
+
+    _REPROBE_INTERVAL = 60.0  # seconds between re-probe attempts
+
+    def _maybe_reprobe_modules(self) -> None:
+        """Re-probe for modules that were missing at startup.
+
+        Ollama may not have been running when the worker started, so
+        ``caption`` would be absent from ``supported_modules``.  Re-probe
+        periodically so the worker picks up caption once Ollama is ready.
+        """
+        if self.module_filter or self.supported_modules is None:
+            return
+        if "caption" in self.supported_modules:
+            return  # nothing to re-probe
+        now = time.monotonic()
+        if now - getattr(self, "_last_reprobe", 0.0) < self._REPROBE_INTERVAL:
+            return
+        self._last_reprobe = now
+        new_modules = _probe_available_modules()
+        added = set(new_modules) - set(self.supported_modules)
+        if added:
+            self.supported_modules = new_modules
+            console.print(
+                f"[green]Re-probe discovered new modules:[/green] "
+                f"{', '.join(sorted(added))}"
+            )
+
     # ── Auto-update ───────────────────────────────────────────────────────
 
     def _maybe_check_for_update(self) -> None:
@@ -1256,6 +1284,7 @@ class DistributedWorker:
 
                     if not jobs:
                         self._empty_claim_polls += 1
+                        self._maybe_reprobe_modules()
                         self._shutdown.wait(self.poll_interval_seconds)
                         self._maybe_check_for_update()
                         continue
