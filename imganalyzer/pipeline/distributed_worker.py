@@ -136,11 +136,14 @@ def _ensure_ollama_running() -> None:
     _sys.stderr.write("[init] Ollama started but not responsive after 10s\n")
 
 
-def _probe_available_modules() -> list[str]:
+def _probe_available_modules(_cloud_provider: str | None = None) -> list[str]:
     """Probe which analysis modules this worker can actually run.
 
     Checks for required dependencies at startup so the worker only claims
     jobs it can execute, avoiding wasteful claim-then-skip cycles.
+
+    The optional cloud provider arg is accepted for backward compatibility
+    with older setup scripts that passed it positionally.
     """
     _ensure_torch_runtime_env()
     _ensure_ollama_running()

@@ -168,7 +168,7 @@ fi
 echo "==> Running capability probe..."
 conda run -n "$ENV_NAME" python -c "
 from imganalyzer.pipeline.distributed_worker import _probe_available_modules
-modules = _probe_available_modules('$WORKER_CLOUD_PROVIDER')
+modules = _probe_available_modules()
 print('Supported modules:', ', '.join(modules))
 from imganalyzer.db.repository import ALL_MODULES
 missing = sorted(set(ALL_MODULES) - set(modules))

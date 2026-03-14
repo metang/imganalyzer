@@ -2407,6 +2407,13 @@ class TestProbeAvailableModules:
         modules = _probe_available_modules()
         assert modules == sorted(set(modules))
 
+    def test_accepts_legacy_cloud_provider_arg(self):
+        from imganalyzer.pipeline.distributed_worker import _probe_available_modules
+
+        modules = _probe_available_modules("copilot")
+        assert "metadata" in modules
+        assert "technical" in modules
+
 
 class TestClaimLeasedModulesFilter:
     """Tests for claim_leased with the new modules list filter."""

@@ -148,7 +148,7 @@ Assert-LastExit "Verify local AI imports"
 Write-Host "==> Running capability probe..."
 conda run -n $EnvName python -c @"
 from imganalyzer.pipeline.distributed_worker import _probe_available_modules
-modules = _probe_available_modules('$CloudProvider')
+modules = _probe_available_modules()
 print('Supported modules:', ', '.join(modules))
 from imganalyzer.db.repository import ALL_MODULES
 missing = sorted(set(ALL_MODULES) - set(modules))
