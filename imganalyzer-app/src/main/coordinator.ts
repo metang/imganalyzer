@@ -14,6 +14,7 @@ let startPromise: Promise<void> | null = null
 let expectedStopPid: number | null = null
 let runningSignature: string | null = null
 let startingSignature: string | null = null
+let activePort: number | null = null
 let status: CoordinatorStatus = {
   state: 'stopped',
   pid: null,
@@ -177,6 +178,9 @@ export function getCoordinatorStatus(): CoordinatorStatus {
 export async function stopCoordinator(): Promise<void> {
   const proc = coordinatorProcess
   if (!proc) {
+    // Even without a tracked process, kill anything on the port
+    if (activePort) killOrphanedCoordinators(activePort, undefined)
+    activePort = null
     setStatus({ state: 'stopped', pid: null, url: null, lastError: null })
     return
   }
@@ -193,10 +197,14 @@ export async function stopCoordinator(): Promise<void> {
     setTimeout(resolve, 3000)
   })
 
+  // Kill any orphaned Python processes that survived the conda wrapper kill
+  if (activePort) killOrphanedCoordinators(activePort, undefined)
+
   coordinatorProcess = null
   startPromise = null
   startingSignature = null
   runningSignature = null
+  activePort = null
   setStatus({ state: 'stopped', pid: null, url: null, lastError: null })
 }
 
@@ -216,7 +224,8 @@ export async function startCoordinator(settings: DistributedCoordinatorSettings)
   if (coordinatorProcess) await stopCoordinator()
 
   // Kill any orphaned coordinator processes left over from a previous session
-  killOrphanedCoordinators(settings.port, coordinatorProcess?.pid)
+  killOrphanedCoordinators(settings.port, undefined)
+  activePort = settings.port
 
   const args = [
     '--transport', 'http',
