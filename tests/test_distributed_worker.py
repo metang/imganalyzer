@@ -623,6 +623,83 @@ def test_server_jobs_claim_packages_embedding_context(tmp_path, monkeypatch):
     assert job["context"]["modules"]["caption"]["description"] == "red boat"
 
 
+def test_server_jobs_claim_reserves_work_for_idle_master(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-claim-master-reserve.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/nas/photos/master-reserve.jpg")
+    job_id = queue.enqueue(image_id, "metadata")
+    assert job_id is not None
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    class ActiveWorkerStub:
+        current_chunk_ids = None
+        current_chunk_index = 0
+        total_chunks = 1
+
+    server._db_local = threading.local()
+    server._active_worker = ActiveWorkerStub()
+    try:
+        server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+        result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "metadata"})
+    finally:
+        server._active_worker = None
+
+    assert result["jobs"] == []
+
+    check = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    check.row_factory = sqlite3.Row
+    row = check.execute("SELECT status FROM job_queue WHERE id = ?", [job_id]).fetchone()
+    check.close()
+    assert row is not None
+    assert row["status"] == "pending"
+
+
+def test_server_jobs_claim_allows_worker_when_master_is_busy(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-claim-master-busy.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    master_image_id = repo.register_image(file_path="/nas/photos/master-running.jpg")
+    master_job_id = queue.enqueue(master_image_id, "technical")
+    assert master_job_id is not None
+    queue.claim(batch_size=1, module="technical")
+
+    pending_image_id = repo.register_image(file_path="/nas/photos/worker-eligible.jpg")
+    pending_job_id = queue.enqueue(pending_image_id, "metadata")
+    assert pending_job_id is not None
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    class ActiveWorkerStub:
+        current_chunk_ids = None
+        current_chunk_index = 0
+        total_chunks = 1
+
+    server._db_local = threading.local()
+    server._active_worker = ActiveWorkerStub()
+    try:
+        server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+        result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "metadata"})
+    finally:
+        server._active_worker = None
+
+    assert len(result["jobs"]) == 1
+    assert result["jobs"][0]["id"] == pending_job_id
+
+
 def test_server_jobs_skip_cascades_corrupt_file_to_pending_sibling_jobs(tmp_path, monkeypatch):
     db_path = tmp_path / "server-corrupt-skip.db"
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)

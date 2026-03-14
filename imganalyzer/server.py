@@ -729,10 +729,30 @@ def _handle_jobs_claim(params: dict) -> dict:
     modules_filter: list[str] | None = None
     if module_filter is None and isinstance(modules_list, list) and modules_list:
         modules_filter = [str(m) for m in modules_list]
-    pending_candidates = max(
-        requested,
-        queue.pending_count(module_filter, modules=modules_filter),
-    )
+    pending_eligible = queue.pending_count(module_filter, modules=modules_filter)
+
+    # Keep at least one eligible pending job available for the master when the
+    # coordinator run is active but the master currently has no running jobs.
+    # Without this reserve, remote workers can lease the entire queue slice and
+    # leave the master idle during long-running worker batches.
+    if _active_worker is not None and pending_eligible > 0:
+        master_running_row = conn.execute(
+            """SELECT COUNT(*) AS cnt
+               FROM job_queue jq
+               LEFT JOIN job_leases jl ON jl.job_id = jq.id
+               WHERE jq.status = 'running'
+                 AND jl.job_id IS NULL"""
+        ).fetchone()
+        master_running = int(master_running_row["cnt"]) if master_running_row else 0
+        if master_running <= 0:
+            reserve_for_master = max(1, min(requested, pending_eligible))
+            worker_budget = pending_eligible - reserve_for_master
+            if worker_budget <= 0:
+                return {"jobs": []}
+            requested = min(requested, worker_budget)
+            scan_size = min(max(requested * 4, requested), 32)
+
+    pending_candidates = max(requested, pending_eligible)
 
     # Module affinity: look up last_module for this worker to minimize
     # model switching across consecutive claims.

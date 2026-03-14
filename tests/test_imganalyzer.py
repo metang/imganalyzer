@@ -1708,6 +1708,63 @@ class TestJobQueue:
         assert claimed[0]["module"] == "metadata"
 
 
+class TestWorkerQueueLiveness:
+    def test_pending_wait_keeps_master_alive_while_jobs_running(self, tmp_path):
+        from imganalyzer.pipeline.worker import Worker
+
+        conn = _make_test_db(tmp_path)
+        worker = Worker(conn, workers=1)
+
+        class FakeQueue:
+            def __init__(self) -> None:
+                self.pending_calls = 0
+                self.running_calls = 0
+                self.release_calls = 0
+
+            def get_pending_image_ids(self) -> list[int]:
+                self.pending_calls += 1
+                if self.pending_calls >= 3:
+                    return [123]
+                return []
+
+            def running_count(self) -> int:
+                self.running_calls += 1
+                return 1
+
+            def release_expired_leases(self) -> int:
+                self.release_calls += 1
+                return 0
+
+        fake_queue = FakeQueue()
+        worker.queue = fake_queue  # type: ignore[assignment]
+
+        image_ids = worker._pending_image_ids_with_running_wait(poll_interval_s=0.0)
+
+        assert image_ids == [123]
+        assert fake_queue.running_calls >= 2
+        assert fake_queue.release_calls >= 2
+
+    def test_pending_wait_exits_when_running_queue_is_empty(self, tmp_path):
+        from imganalyzer.pipeline.worker import Worker
+
+        conn = _make_test_db(tmp_path)
+        worker = Worker(conn, workers=1)
+
+        class FakeQueue:
+            def get_pending_image_ids(self) -> list[int]:
+                return []
+
+            def running_count(self) -> int:
+                return 0
+
+            def release_expired_leases(self) -> int:
+                raise AssertionError("Should not reclaim leases when nothing is running")
+
+        worker.queue = FakeQueue()  # type: ignore[assignment]
+        image_ids = worker._pending_image_ids_with_running_wait(poll_interval_s=0.0)
+        assert image_ids == []
+
+
 class TestWorkerFlushRecovery:
     def test_flush_fts_requeues_failed_ids(self, tmp_path):
         from imganalyzer.pipeline.worker import Worker

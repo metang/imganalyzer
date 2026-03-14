@@ -256,6 +256,41 @@ class Worker:
             local.runner = runner
         return local.conn, local.repo, local.queue, local.runner
 
+    def _pending_image_ids_with_running_wait(self, poll_interval_s: float = 1.0) -> list[int]:
+        """Return pending image_ids, waiting while leased jobs are still running.
+
+        In distributed runs, workers can temporarily lease most pending jobs.
+        During that window ``pending=0`` does not mean the queue is finished —
+        it only means work is currently in ``running`` state on workers.
+        """
+        idle_polls = 0
+        while not self._shutdown.is_set():
+            pending_image_ids = self.queue.get_pending_image_ids()
+            if pending_image_ids:
+                return pending_image_ids
+
+            running_jobs = self.queue.running_count()
+            if running_jobs <= 0:
+                return []
+
+            # Reclaim expired worker leases while waiting so stale
+            # distributed jobs are eventually returned to pending.
+            released = self.queue.release_expired_leases()
+            if released > 0:
+                idle_polls = 0
+                continue
+
+            idle_polls += 1
+            log_every = max(1, int(30 / max(poll_interval_s, 0.1)))
+            if idle_polls % log_every == 0:
+                console.print(
+                    f"[dim]Waiting for {running_jobs} running distributed job(s) "
+                    "to free pending work...[/dim]"
+                )
+            self._shutdown.wait(poll_interval_s)
+
+        return []
+
     def run(self, batch_size: int = 10, chunk_size: int = 0) -> dict[str, int]:
         """Main processing loop.  Blocks until queue is empty or Ctrl+C.
 
@@ -449,7 +484,7 @@ class Worker:
             # ════════════════════════════════════════════════════════════════
             sweep = 0
             while not self._shutdown.is_set():
-                all_image_ids = self.queue.get_pending_image_ids()
+                all_image_ids = self._pending_image_ids_with_running_wait(poll_interval_s=1.0)
                 if not all_image_ids:
                     break  # truly nothing left
 
