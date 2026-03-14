@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'child_process'
+import { execSync } from 'child_process'
 import { spawnPythonModule, killProcessTree } from './python-runtime'
 import type { CoordinatorStatus, DistributedCoordinatorSettings } from './settings'
 import { getDistributedCoordinatorUrl } from './settings'
@@ -124,6 +125,51 @@ function attachLineReader(
   return flush
 }
 
+/**
+ * Kill any orphaned coordinator processes listening on the given port.
+ * On Windows, uses netstat + taskkill; on Unix, uses lsof + kill.
+ * Ignores errors silently — this is a best-effort cleanup.
+ */
+function killOrphanedCoordinators(port: number, ownPid: number | undefined): void {
+  try {
+    if (process.platform === 'win32') {
+      // Find PIDs listening on the target port
+      const out = execSync(
+        `netstat -ano | findstr LISTENING | findstr :${port}`,
+        { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
+      )
+      const pids = new Set<number>()
+      for (const line of out.split(/\r?\n/)) {
+        const match = line.trim().match(/\s(\d+)$/)
+        if (match) pids.add(Number(match[1]))
+      }
+      for (const pid of pids) {
+        if (pid === ownPid || pid === 0) continue
+        console.error(`[coordinator] killing orphaned process PID ${pid} on port ${port}`)
+        try {
+          execSync(`taskkill /T /F /PID ${pid}`, { stdio: 'ignore', timeout: 5000 })
+        } catch { /* already gone */ }
+      }
+    } else {
+      // macOS / Linux: lsof to find listeners
+      const out = execSync(
+        `lsof -iTCP:${port} -sTCP:LISTEN -t 2>/dev/null || true`,
+        { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
+      )
+      for (const line of out.split(/\r?\n/)) {
+        const pid = Number(line.trim())
+        if (!pid || pid === ownPid) continue
+        console.error(`[coordinator] killing orphaned process PID ${pid} on port ${port}`)
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch { /* already gone */ }
+      }
+    }
+  } catch {
+    // Best-effort — netstat/lsof might not find anything
+  }
+}
+
 export function getCoordinatorStatus(): CoordinatorStatus {
   return { ...status }
 }
@@ -168,6 +214,9 @@ export async function startCoordinator(settings: DistributedCoordinatorSettings)
     return Promise.reject(new Error(configError))
   }
   if (coordinatorProcess) await stopCoordinator()
+
+  // Kill any orphaned coordinator processes left over from a previous session
+  killOrphanedCoordinators(settings.port, coordinatorProcess?.pid)
 
   const args = [
     '--transport', 'http',
