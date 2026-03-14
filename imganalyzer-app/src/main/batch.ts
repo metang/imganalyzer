@@ -618,8 +618,14 @@ function setupNotificationListener(): void {
           if (currentRunId !== runId) return
           const pending = data?.totals?.pending ?? 0
           const running = data?.totals?.running ?? 0
-          if (wasPaused && pending + running > 0) {
-            batchStatus = 'paused'
+          if (pending + running > 0) {
+            if (wasPaused) {
+              batchStatus = 'paused'
+            } else {
+              // Master finished local work but distributed workers still
+              // have active jobs — keep polling so the UI stays live.
+              monitorOnly = true
+            }
           } else {
             batchStatus = 'done'
             stopPolling()
