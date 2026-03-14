@@ -716,6 +716,31 @@ class JobQueue:
         ).fetchone()
         return int(row["cnt"] if row is not None else 0)
 
+    def module_avg_processing_ms(self, last_n: int = 100) -> dict[str, float]:
+        """Average processing time per module from the last *last_n* completed jobs.
+
+        Uses ``completed_at − started_at`` (actual processing time, excludes
+        queue waiting).  Returns ``{module: avg_ms}``.
+        """
+        rows = self.conn.execute(
+            """SELECT module,
+                      AVG((julianday(completed_at) - julianday(started_at)) * 86400000) AS avg_ms
+               FROM (
+                   SELECT module, started_at, completed_at,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY module ORDER BY completed_at DESC
+                          ) AS rn
+                   FROM job_queue
+                   WHERE status IN ('done', 'failed', 'skipped')
+                     AND started_at IS NOT NULL
+                     AND completed_at IS NOT NULL
+               )
+               WHERE rn <= ?
+               GROUP BY module""",
+            [last_n],
+        ).fetchall()
+        return {r["module"]: round(r["avg_ms"], 0) for r in rows if r["avg_ms"] is not None}
+
     def pending_count(
         self,
         module: str | None = None,

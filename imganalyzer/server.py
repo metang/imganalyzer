@@ -197,6 +197,7 @@ def _handle_status(params: dict) -> dict:
     module_stats = queue.stats()
     totals = queue.total_stats()
     remaining_images = queue.remaining_image_count()
+    module_avg_ms = queue.module_avg_processing_ms(last_n=100)
 
     from imganalyzer.db.repository import ALL_MODULES
     queue_modules = list(module_stats.keys())
@@ -230,6 +231,7 @@ def _handle_status(params: dict) -> dict:
     return {
         "total_images": total_images,
         "modules": modules_out,
+        "module_avg_ms": module_avg_ms,
         "totals": {
             "pending": totals.get("pending", 0),
             "running": totals.get("running", 0),

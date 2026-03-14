@@ -114,9 +114,6 @@ function ModuleTableRow({ name, stats }: { name: string; stats: BatchModuleStats
           <span className="w-8 shrink-0 text-right text-neutral-500">{pct}%</span>
         </div>
       </td>
-      <td className="px-2 py-1.5 text-right font-mono text-neutral-300 whitespace-nowrap">
-        {fmtRate(stats.imagesPerSec)}
-      </td>
       <td className="px-2 py-1.5 text-right font-mono text-neutral-400 whitespace-nowrap">
         {fmtMs(stats.avgMsPerImage)}
       </td>
@@ -380,7 +377,6 @@ export function ProgressDashboard({
                 <tr className="text-[10px] uppercase tracking-wider text-neutral-600">
                   <th className="py-1 pr-3 text-left font-medium">Module</th>
                   <th className="py-1 pr-3 text-left font-medium">Progress</th>
-                  <th className="py-1 px-2 text-right font-medium whitespace-nowrap">done/s</th>
                   <th className="py-1 px-2 text-right font-medium whitespace-nowrap">Avg ms</th>
                   <th className="py-1 px-2 text-right font-medium">Pending</th>
                   <th className="py-1 px-2 text-right font-medium">Running</th>
