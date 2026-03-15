@@ -15,13 +15,10 @@ const MODULE_LABELS: Record<string, string> = {
   metadata: 'metadata',
   technical: 'technical',
   caption: 'caption',
-  blip2: 'caption',
   objects: 'objects',
   faces: 'faces',
-  cloud_ai: 'caption',
-  aesthetic: 'aesthetic',
-  embedding: 'embedding',
   perception: 'perception',
+  embedding: 'embedding',
 }
 
 const STATUS_LABELS: Record<BatchResult['status'], string> = {

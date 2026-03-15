@@ -55,6 +55,13 @@ const MODULE_LABELS: Record<string, string> = {
   embedding: 'Embeddings',
 }
 
+const LEGACY_RETRY_MODULE_MAP: Record<string, string> = {
+  blip2: 'caption',
+  cloud_ai: 'caption',
+  local_ai: 'caption',
+  aesthetic: 'perception',
+}
+
 function formatModuleLabel(module: string): string {
   return MODULE_LABELS[module] ?? module
 }
@@ -311,59 +318,21 @@ export function ProgressDashboard({
   const hasPending = totals.pending > 0
   const showResume = isPaused || (!isRunning && hasPending)
 
-  // Merge legacy blip2/cloud_ai/local_ai stats into caption
-  const mergedModules: Record<string, BatchModuleStats> = { ...modules }
-  for (const legacy of ['blip2', 'cloud_ai', 'local_ai'] as const) {
-    if (mergedModules[legacy]) {
-      if (mergedModules.caption) {
-        const l = mergedModules[legacy]!
-        const c = mergedModules.caption
-        mergedModules.caption = {
-          pending: c.pending + l.pending,
-          running: c.running + l.running,
-          done: c.done + l.done,
-          failed: c.failed + l.failed,
-          skipped: c.skipped + l.skipped,
-          imagesPerSec: (c.imagesPerSec ?? 0) + (l.imagesPerSec ?? 0),
-          avgMsPerImage: c.avgMsPerImage ?? l.avgMsPerImage ?? 0,
-        }
-      } else {
-        mergedModules.caption = mergedModules[legacy]
-      }
-      delete mergedModules[legacy]
-    }
-  }
-  // Merge legacy aesthetic stats into perception
-  if (mergedModules.aesthetic) {
-    if (mergedModules.perception) {
-      const a = mergedModules.aesthetic
-      const p = mergedModules.perception
-      mergedModules.perception = {
-        pending: p.pending + a.pending,
-        running: p.running + a.running,
-        done: p.done + a.done,
-        failed: p.failed + a.failed,
-        skipped: p.skipped + a.skipped,
-        imagesPerSec: (p.imagesPerSec ?? 0) + (a.imagesPerSec ?? 0),
-        avgMsPerImage: p.avgMsPerImage ?? a.avgMsPerImage ?? 0,
-      }
-    } else {
-      mergedModules.perception = mergedModules.aesthetic
-    }
-    delete mergedModules.aesthetic
-  }
+  const moduleEntries = Object.entries(modules).filter(
+    (entry): entry is [string, BatchModuleStats] => entry[1] != null
+  )
 
-  const failedModules = Object.entries(mergedModules)
-    .filter(([, s]) => s && s.failed > 0)
-    .map(([mod]) => mod)
+  const failedModules = Array.from(
+    new Set(
+      moduleEntries
+        .filter(([, s]) => s && s.failed > 0)
+        .map(([mod]) => LEGACY_RETRY_MODULE_MAP[mod] ?? mod)
+    )
+  )
 
   const canRetry = failedModules.length > 0 && !isRunning
   const canClearQueue = !isRunning && !isPaused && totalPasses > 0
   const canClearCompleted = (totals.done + totals.skipped) > 0
-
-  const moduleEntries = Object.entries(mergedModules).filter(
-    (entry): entry is [string, BatchModuleStats] => entry[1] != null
-  )
 
   return (
     <div className="flex flex-col gap-4">
