@@ -326,8 +326,10 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
 
   // Navigation
   const currentIdx = items.findIndex((i) => i.image_id === item.image_id)
-  const prev = currentIdx > 0 ? items[currentIdx - 1] : null
-  const next = currentIdx < items.length - 1 ? items[currentIdx + 1] : null
+  const hasValidIndex = currentIdx >= 0 && currentIdx < items.length
+  const counterIdx = hasValidIndex ? currentIdx + 1 : 0
+  const prev = hasValidIndex && currentIdx > 0 ? items[currentIdx - 1] : null
+  const next = hasValidIndex && currentIdx < items.length - 1 ? items[currentIdx + 1] : null
 
   // Zoom helpers
   const zoomToward = useCallback((delta: number, cx: number, cy: number) => {
@@ -537,7 +539,7 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
               </svg>
             </button>
             <span className="text-neutral-500 text-xs tabular-nums">
-              {currentIdx + 1} / {items.length}
+              {counterIdx} / {items.length}
             </span>
             <button onClick={() => next && onNavigate(next)} disabled={!next}
               className="p-2 rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors disabled:opacity-20 disabled:cursor-default" title="Next (D, →)">
