@@ -98,8 +98,10 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
 
   // ── Navigation ────────────────────────────────────────────────────────────
   const currentIdx = images.findIndex((i) => i.path === image.path)
-  const prev = currentIdx > 0 ? images[currentIdx - 1] : null
-  const next = currentIdx < images.length - 1 ? images[currentIdx + 1] : null
+  const hasValidIndex = currentIdx >= 0 && currentIdx < images.length
+  const counterIdx = hasValidIndex ? currentIdx + 1 : 0
+  const prev = hasValidIndex && currentIdx > 0 ? images[currentIdx - 1] : null
+  const next = hasValidIndex && currentIdx < images.length - 1 ? images[currentIdx + 1] : null
 
   // ── Zoom helpers ──────────────────────────────────────────────────────────
   const zoomToward = useCallback((delta: number, cx: number, cy: number) => {
@@ -369,7 +371,7 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
                 </svg>
               </button>
               <span className="text-neutral-500 text-xs tabular-nums">
-                {currentIdx + 1} / {images.length}
+                {counterIdx} / {images.length}
                 {isZoomed && <span className="ml-2 text-neutral-600">· Esc to reset</span>}
               </span>
               <button
