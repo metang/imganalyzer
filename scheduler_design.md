@@ -6,8 +6,10 @@ This document summarizes the current scheduler and VRAM-allocation design implem
 
 - `imganalyzer/pipeline/worker.py`
 - `imganalyzer/pipeline/scheduler.py`
+- `imganalyzer/pipeline/unified_scheduler.py`
 - `imganalyzer/pipeline/vram_budget.py`
 - `imganalyzer/db/queue.py`
+- `imganalyzer/db/schema.py`
 - `imganalyzer/server.py`
 - `imganalyzer/pipeline/batch.py`
 - `imganalyzer/pipeline/distributed_worker.py`
@@ -158,6 +160,7 @@ Distributed workers lease jobs via `jobs/claim` (`server.py` + `queue.claim_leas
 
 - Max active leases per worker: `3`.
 - Leases are heartbeated (`jobs/heartbeat`) and reclaimed when expired.
+- Worker control states are enforced in claim policy (`active`, `pause-drain`, `pause-immediate`, `paused`).
 - `claim_leased` supports:
   - module filter
   - supported-modules list filter
@@ -255,7 +258,7 @@ The implementation optimizes for:
 
 #### Cons
 
-- Scheduler logic is spread across worker, server, queue, and distributed worker code (higher maintenance complexity).
+- Policy is centralized, but runtime adapters still span worker/server/queue/distributed-worker paths.
 - Static VRAM numbers can become stale and require manual calibration.
 - Phase sequencing can underutilize hardware in edge cases where cross-phase overlap might be possible.
 - SQLite lock contention remains a practical constraint at high concurrency.

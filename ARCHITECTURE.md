@@ -36,22 +36,24 @@ imganalyzer/
 │   │       └── cloud.py               # OpenAI / Anthropic / Google / Copilot backends
 │   ├── db/
 │   │   ├── connection.py              # SQLite singleton, WAL mode, thread-safe
-│   │   ├── schema.py                  # 16 migrations, 13+ tables, FTS5
+│   │   ├── schema.py                  # 20 migrations, scheduler state + FTS5
 │   │   ├── repository.py             # CRUD, overrides, face management, FTS5 index
 │   │   ├── queue.py                   # Job queue with atomic claim + priority ordering
 │   │   └── search.py                  # Hybrid FTS5 + CLIP search with RRF scoring
 │   ├── pipeline/
 │   │   ├── batch.py                   # Folder scanning, image registration, job enqueue
-│   │   ├── worker.py                  # Three-phase batch worker, GPU model management
-│   │   ├── scheduler.py              # Three-phase GPU resource scheduler with VRAM budget
+│   │   ├── worker.py                  # Chunk-first local worker loop
+│   │   ├── scheduler.py              # GPU phase execution engine + IO interleave
+│   │   ├── unified_scheduler.py      # Central claim policy (pause/capability/ETA/affinity)
 │   │   ├── vram_budget.py            # GPU memory tracking (CUDA + MPS)
 │   │   ├── distributed_worker.py     # Remote worker for distributed batch processing
 │   │   ├── modules.py                 # Per-module dispatch, override guard, XMP from DB
 │   │   └── passes/                    # Individual GPU pass modules
-│   │       ├── blip2.py               # BLIP-2 batch pass
+│   │       ├── ollama_ai.py           # Caption pass (Ollama)
 │   │       ├── objects.py             # GroundingDINO batch pass
-│   │       ├── ocr.py                 # TrOCR batch pass
-│   │       └── faces.py               # InsightFace batch pass
+│   │       ├── faces.py               # InsightFace batch pass
+│   │       ├── blip2.py               # Legacy compatibility pass
+│   │       └── ocr.py                 # Legacy compatibility pass
 │   ├── embeddings/
 │   │   └── clip_embedder.py           # OpenCLIP ViT-L/14, 768-d vectors, batched encoding
 │   └── output/
@@ -83,7 +85,7 @@ imganalyzer/
 │   │       │   ├── Sidebar.tsx         # Right panel: local analysis results
 │   │       │   ├── CloudSidebar.tsx    # Left panel: Copilot cloud AI results
 │   │       │   ├── BatchView.tsx       # BatchConfigView + BatchRunView
-│   │       │   ├── PassSelector.tsx    # 9 analysis pass checkboxes + worker config
+│   │       │   ├── PassSelector.tsx    # 7 analysis pass checkboxes + worker config
 │   │       │   ├── ProgressDashboard.tsx  # Per-module progress bars, stats, controls
 │   │       │   ├── LiveResultsFeed.tsx    # Scrollable feed, last 200 results
 │   │       │   ├── ConfirmStopDialog.tsx  # Modal requiring "STOP" to confirm
@@ -121,8 +123,8 @@ imganalyzer analyze <image(s)> --ai local --overwrite --verbose
 imganalyzer info <image> --format table|json|yaml
 
 # Batch pipeline
-imganalyzer ingest <folder> --modules metadata,technical,objects,blip2,...
-imganalyzer run --workers 1 --cloud-workers 4 --cloud-provider copilot
+imganalyzer ingest <folder> --modules metadata,technical,caption,objects,faces,perception,embedding
+imganalyzer run --workers 1 --chunk-size 500
 imganalyzer status
 imganalyzer queue-clear --status failed|pending|all
 imganalyzer rebuild --module objects
@@ -158,9 +160,9 @@ Spawned by Electron as `python -m imganalyzer.server`. Reads JSON-RPC requests f
 
 | Method | Description |
 |---|---|
-| `status` | Queue stats (pending/running/done/failed per module) |
+| `status` | Queue stats (pending/running/done/failed/skipped per module) |
 | `ingest` | Scan folder, register images, enqueue jobs |
-| `run` | Start batch workers (GPU + cloud threads) |
+| `run` | Start batch workers (local + distributed-aware scheduling) |
 | `cancel_run` | Stop batch workers, release jobs |
 | `analyze` | Single-image analysis (all modules) |
 | `cancel_analyze` | Cancel in-progress single analysis |
@@ -180,9 +182,15 @@ Spawned by Electron as `python -m imganalyzer.server`. Reads JSON-RPC requests f
 | `workers/register` | Register a distributed worker |
 | `workers/heartbeat` | Refresh worker heartbeat, recover expired leases |
 | `workers/list` | List connected workers |
+| `workers/pause` | Pause a worker (`pause-drain` or `pause-immediate`) |
+| `workers/resume` | Resume a paused worker |
 | `jobs/claim` | Atomic lease of pending jobs with TTL |
+| `jobs/heartbeat` | Extend a worker lease before TTL expiry |
+| `jobs/release` | Return a leased job to pending |
 | `jobs/complete` | Mark leased job as done |
 | `jobs/fail` | Mark leased job as failed |
+| `jobs/skip` | Mark leased job as skipped |
+| `jobs/release-worker` | Release all active leases for a worker id |
 | `jobs/release-expired` | Requeue expired leases |
 
 **Notifications** (server → client, unsolicited):
@@ -196,7 +204,7 @@ Spawned by Electron as `python -m imganalyzer.server`. Reads JSON-RPC requests f
 
 ### Database Layer (`db/`)
 
-SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema managed by 16 sequential migrations.
+SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema managed by 20 sequential migrations.
 
 **Core tables:**
 | Table | Purpose |
@@ -204,15 +212,19 @@ SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema managed by
 | `images` | Registered images (path, fingerprint, dimensions, file size) |
 | `analysis_metadata` | EXIF/IPTC extraction results |
 | `analysis_technical` | Technical quality scores |
-| `analysis_blip2` | BLIP-2 captioning results |
+| `analysis_caption` | Captioning results (Ollama) |
 | `analysis_objects` | GroundingDINO detection results + `has_person`/`has_text` flags |
-| `analysis_ocr` | TrOCR text recognition results |
 | `analysis_faces` | InsightFace detection + recognition results |
-| `analysis_local_ai` | Legacy combined local AI results |
+| `analysis_perception` | UniPercept quality/aesthetic metrics |
+| `analysis_local_ai` | Legacy alias table name (migrated to `analysis_caption`) |
+| `analysis_blip2` | Legacy compatibility table for historical data |
+| `analysis_ocr` | Legacy compatibility table for historical data |
 | `analysis_cloud_ai` | Cloud AI results (description, keywords, mood, species) |
 | `analysis_aesthetic` | Aesthetic scores (1-10, from cloud AI) |
 | `overrides` | User manual overrides (protected from re-analysis) |
 | `job_queue` | Batch processing job queue (UNIQUE per image+module) |
+| `worker_nodes` | Distributed worker registry + desired state + affinity epoch |
+| `worker_module_stats` | Per-worker/module EWMA processing times for claim balancing |
 | `embeddings` | CLIP 768-d float32 vectors (image + description) |
 | `search_index` | FTS5 virtual table for full-text search |
 | `face_identities` | Named face identities |
@@ -229,19 +241,21 @@ SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema managed by
 
 ### Job Queue (`db/queue.py`)
 
-Priority-ordered queue with atomic claim (SELECT + UPDATE in a transaction). Jobs have states: `pending` → `running` → `done` | `failed`. UNIQUE(image_id, module) prevents duplicate jobs.
+Priority-ordered queue with atomic claim (SELECT + UPDATE in a transaction). Jobs use states:
+`pending` -> `running` -> `done` | `failed` | `skipped`. UNIQUE(image_id, module) prevents duplicate jobs.
 
 **Module priorities** (higher = processed first):
 ```
-metadata(100) > technical(90) > objects(85) > blip2(80) > local_ai(80)
-  > ocr(78) > faces(77) > cloud_ai(70) > aesthetic(60) > embedding(50)
+metadata(100) > technical(90) > objects(85) > caption(80)
+  > faces(77) > perception(60) > embedding(50)
 ```
 
 **Prerequisites:**
-- `cloud_ai`, `aesthetic`, `ocr`, and `faces` all depend on `objects` completing first
-- `objects` determines `has_person` (privacy gate for cloud/aesthetic) and `has_text` (gate for OCR)
+- `faces` and `embedding` depend on `objects` completing first.
 
 **Job deferral:** When a job's prerequisite isn't met, it is deferred via `defer()` which bumps `queued_at` forward by 30 seconds. This prevents the same ineligible jobs from being repeatedly claimed and starving eligible jobs further back in the queue. Contrast with `mark_pending()` which preserves the original `queued_at` (used for shutdown recovery).
+
+**Runtime reconciliation:** Coordinator startup/run includes queue reconciliation (`reconcile_runtime_state`) to repair dangling leases and re-queue orphaned running rows after crashes.
 
 ### Batch Pipeline (`pipeline/`)
 
@@ -253,36 +267,25 @@ metadata(100) > technical(90) > objects(85) > blip2(80) > local_ai(80)
 - File fingerprinting uses path+size+mtime (not SHA-256) for speed
 
 **Worker** (`worker.py`):
-Three-phase GPU processing loop designed for GPU memory efficiency:
+Chunk-first GPU processing loop with mini-batch interleaving:
 
 ```
-Phase 0: Drain ALL 'objects' jobs (GroundingDINO, batch=4)
-  └─ Sets has_person / has_text flags, unlocking privacy gates
-  └─ Unload GroundingDINO from GPU
+Phase 0: caption (Ollama, ~8.7 GB)
+Phase 1: objects (GroundingDINO, batch=4)
+Phase 2: faces + embedding (co-resident, ~1.95 GB total)
+Phase 3: perception (exclusive, ~13.8 GB)
 
-Phase 1: BLIP-2 captioning (exclusive GPU, batch=1)
-  └─ Requires sole GPU access (~6 GB VRAM)
-  └─ Unload BLIP-2
-
-Phase 2: Co-resident GPU models (~2.75 GB total)
-  ├─ faces (batch=8)     → InsightFace (only if has_person)
-  ├─ ocr (batch=4)       → TrOCR (only if has_text)
-  └─ embedding (batch=16)→ CLIP ViT-L/14
-
-[Concurrent throughout] cloud_ai + aesthetic (ThreadPoolExecutor)
-  └─ Skipped for images with has_person=True (privacy)
-  └─ Cloud futures capped at 2× cloud_workers to prevent phase starvation
-
-IO drain: After all GPU phases, remaining cloud/IO jobs drain with boosted thread pool
+metadata + technical continue in parallel local IO threads throughout phases.
 ```
 
 **VRAM Budget** (`vram_budget.py`):
-Thread-safe GPU memory tracker. Auto-detects CUDA or MPS GPU, applies 70% VRAM cap. Tracks per-module reservations and supports exclusive modules (blip2 cannot share GPU). Falls back to physical RAM for MPS (Apple Silicon).
+Thread-safe GPU memory tracker. Auto-detects CUDA or MPS GPU, applies 70% VRAM cap. Tracks per-module reservations and supports exclusive modules (`perception` runs alone).
 
 **Resource Scheduler** (`scheduler.py`):
-Orchestrates the three GPU phases with VRAM-aware model loading. Single-module phases run on the main thread; multi-module phases (Phase 2) run each module in its own thread with image prefetching to hide disk I/O. Cancels uncompleted cloud futures at phase boundaries to prevent blocking.
+Runs the four GPU phases with VRAM-aware model loading. Co-resident phase modules run with per-module threads and optional prefetch while local IO modules continue draining in parallel.
 
-Peak VRAM: ~6 GB during BLIP-2 phase; ~2.75 GB during Phase 2 (models loaded/unloaded between phases).
+**Unified scheduler policy** (`unified_scheduler.py`):
+Coordinator claim behavior (pause/resume states, lease caps, capability filtering, module affinity epoch, ETA-aware module preference, and master anti-idle reservation) is centralized here and shared across local/distributed execution paths.
 
 **Module Runner** (`modules.py`):
 - Dispatches to per-module analysis functions
@@ -316,20 +319,18 @@ All metrics computed from raw pixels (NumPy/OpenCV):
 
 | Module | Model | Library | Batch Size |
 |---|---|---|---|
-| Captioning | BLIP-2 (flan-t5-xl) | `transformers` | 1 |
+| Captioning | qwen3.5:9b (Ollama) | `ollama` HTTP runtime | 1 |
 | Object detection | GroundingDINO (grounding-dino-base) | `transformers` (`AutoModelForZeroShotObjectDetection`) | 4 |
-| OCR | TrOCR (trocr-large-printed) | `transformers` | 4 |
 | Face detection | buffalo_l (RetinaFace + ArcFace) | `insightface` | 8 |
+| Perception | UniPercept (4-bit) | `unipercept_reward` + `transformers` | 1 |
 | Embeddings | OpenCLIP ViT-L/14 | `open_clip_torch` | 16 |
 
 All models are lazy-loaded singletons — weights cached in `~/.cache/huggingface/` and `~/.insightface/`.
 
-OCR uses document tiling with ink detection, adaptive strip sizing, content cropping, and square padding. Gated on `has_text` from GroundingDINO.
-
 Face recognition compares detected embeddings against registered identities using cosine similarity (default threshold 0.40). Greedy agglomerative clustering groups unknown faces (threshold 0.55).
 
 **Cloud AI** (`analysis/ai/cloud.py`):
-Backends: OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, Google Vision, GitHub Copilot (gpt-4.1). Cloud AI and aesthetic scoring are combined into a single API call. Privacy guard excludes images with detected people.
+Backends: OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, Google Vision, GitHub Copilot (gpt-4.1). Cloud AI paths remain available for single-image analysis and backward-compatible reads, but are not part of the default active batch scheduler modules.
 
 ### Search Engine (`db/search.py`)
 
@@ -462,7 +463,7 @@ App (5-tab layout)
 ├── [Batch tab]
 │   └── BatchConfigView
 │       ├── ConfigPanel (folder, PassSelector, start button)
-│       │   └── PassSelector (9 module checkboxes, workers, cloud provider)
+│       │   └── PassSelector (7 module checkboxes + distributed worker settings)
 │       └── IngestPanel (progress, counters)
 │
 ├── [Running tab]
@@ -523,7 +524,7 @@ User configures batch (folder, modules, workers)
 batch:ingest → rpc.call('ingest', { folder, modules, ... })
     │  ← ingest/progress notifications (scanned/registered/enqueued)
     ▼
-batch:start → rpc.call('run', { workers, cloud_workers, ... })
+batch:start → rpc.call('run', { workers, chunkSize, ... })
     │
     ├─ batch:tick (1s poll) → rpc.call('status') → BatchStats
     │     └─ Per-module progress bars in ProgressDashboard
@@ -630,7 +631,7 @@ imganalyzer supports distributing batch analysis across multiple machines:
 └───────────────────┘    └───────────────────┘
 ```
 
-Workers probe their capabilities at startup (available GPU models, cloud providers) and only claim jobs they can process. Leases include a TTL; if a worker crashes, expired leases are automatically re-queued.
+Workers probe capabilities at startup (`supportedModules`, `cuda`, `mps`) and only claim jobs they can process. Coordinator policy can pause/resume individual workers and enforces lease caps + module affinity. Leases include a TTL; if a worker crashes, expired leases are automatically re-queued.
 
 ---
 
@@ -678,9 +679,9 @@ Optional cloud backends: `openai`, `anthropic`, `google-cloud-vision`.
 
 **Persistent JSON-RPC server instead of per-call subprocesses.** The original architecture spawned `conda run python <script>` for every thumbnail, full-res decode, and analysis call. This added 1-3 seconds of subprocess startup overhead per call. The current architecture spawns a single persistent Python process at app start, keeping all models loaded in memory and eliminating per-call overhead.
 
-**Three-phase GPU processing.** Objects (GroundingDINO) runs first for all images before any other GPU module (Phase 0). This is required because `has_person` and `has_text` flags from object detection gate downstream modules: cloud AI and aesthetic scoring skip images with people (privacy), and OCR only runs on images with detected text. BLIP-2 then runs exclusively in Phase 1 (~6 GB VRAM). Phase 2 runs faces, OCR, and embedding co-resident (~2.75 GB). Processing objects first avoids wasted work.
+**Chunk-first four-phase GPU processing.** The worker runs `caption -> objects -> (faces + embedding) -> perception` per mini-batch within each chunk. This improves time-to-first-fully-processed images and keeps distributed nodes focused on the same frontier.
 
-**Sequential model loading with VRAM budget.** GPU models are loaded according to a VRAM budget tracker that caps usage at 70% of available GPU memory. Exclusive modules (BLIP-2) require sole GPU access; co-resident modules share within budget. This keeps the system usable on consumer GPUs (8 GB VRAM) while maximizing throughput in Phase 2.
+**VRAM-budgeted sequential model loading.** GPU modules are gated by a 70% budget with module-level reservations. `perception` is exclusive and runs alone; `faces + embedding` co-reside when budget allows.
 
 **SQLite as the central data store.** All analysis results are stored in SQLite, not just in XMP files. This enables search, face clustering, progress tracking, and crash recovery. XMP files are regenerated from the database as an export format, maintaining Lightroom compatibility without making XMP the source of truth.
 
@@ -690,14 +691,10 @@ Optional cloud backends: `openai`, `anthropic`, `google-cloud-vision`.
 
 **XMP as the export format.** The CLI writes analysis results to XMP sidecar files readable by Adobe Lightroom, Bridge, and Camera Raw. This means imganalyzer's output integrates directly into existing photography workflows without any Lightroom plugin.
 
-**Privacy guard for people.** Images where GroundingDINO detects a person are automatically excluded from cloud AI analysis and aesthetic scoring. This is enforced at the module runner level, the worker level, and the cloud AI function level to prevent accidental leakage of photos containing people to third-party APIs.
-
 **Override protection.** Users can manually override any analysis field (e.g., correcting an AI caption). Overridden fields are stored in a separate `overrides` table and excluded from UPDATE statements during re-analysis, ensuring manual corrections are never overwritten.
 
-**Three-phase GPU scheduling with VRAM budget.** The original two-phase approach (objects first, then everything else) was replaced with a three-phase scheduler backed by a VRAM budget tracker. Phase 0 runs objects (prerequisite). Phase 1 runs BLIP-2 exclusively (~6 GB). Phase 2 runs faces+OCR+embedding co-resident (~2.75 GB). This maximizes GPU utilization while respecting memory constraints.
-
-**Cloud future capping at phase boundaries.** Cloud API futures submitted during GPU phases are capped at 2× the cloud worker count. Uncompleted cloud futures are cancelled at GPU phase boundaries and returned to the pending queue. This prevents the ThreadPoolExecutor shutdown from blocking for hours when thousands of slow cloud API calls have been queued.
+**Unified claim policy kernel.** Distributed claim decisions are centralized in `unified_scheduler.py` (pause/resume control, capability filtering, module affinity epoch, ETA-aware balancing, and master anti-idle reservation).
 
 **Job deferral to prevent queue starvation.** When a job's prerequisite isn't met, `defer()` bumps its `queued_at` timestamp forward by 30 seconds instead of preserving the original timestamp. This prevents the same ineligible jobs from being repeatedly claimed at the front of the queue, starving eligible jobs with later timestamps.
 
-**Distributed processing via HTTP coordinator.** The JSON-RPC server supports an HTTP transport mode for distributing batch work across multiple machines. Workers claim job leases with TTLs and report completions. This enables scaling GPU-intensive analysis across a fleet of machines without shared filesystem requirements (workers access images via their own mounts).
+**Distributed processing via HTTP coordinator.** The JSON-RPC server supports HTTP transport for fleet execution. Workers claim TTL leases, heartbeat both worker state and active leases, and can be paused/resumed per worker by the coordinator.

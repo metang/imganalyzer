@@ -62,16 +62,17 @@ Computed from the raw pixel data (NumPy/OpenCV), not from metadata:
 
 ### 4. Local AI Analysis (No Internet Required)
 
-Four GPU-accelerated models run on the user's machine:
+Five local analysis modules run on the user's machine:
 
 | Module | Model | What It Does |
 |---|---|---|
-| Captioning | BLIP-2 (flan-t5-xl) | Natural-language image description + VQA for scene/mood/subject |
+| Captioning | qwen3.5:9b (Ollama) | Natural-language image description, scene/mood/subject tags, keywords |
 | Object detection | GroundingDINO (grounding-dino-base) | Zero-shot object detection with bounding boxes |
 | Face detection | InsightFace (buffalo_l: RetinaFace + ArcFace) | Face detection, embedding extraction, recognition against registered identities |
-| OCR | TrOCR (trocr-large-printed) | Text recognition with document tiling, gated on text detection from GroundingDINO |
+| Perception scoring | UniPercept (4-bit quantized) | Image quality/aesthetic metrics (`perception_iaa`, `perception_iqa`, `perception_ista`) |
+| Embeddings | OpenCLIP ViT-L/14 | Image/text embeddings for semantic search |
 
-Models are lazy-loaded singletons cached in `~/.cache/huggingface/` and `~/.insightface/`. Total VRAM requirement: ~6 GB peak during BLIP-2 phase (models are loaded and unloaded sequentially across three GPU phases, not co-resident).
+Models are lazy-loaded and run in a four-phase GPU scheduler. Typical VRAM estimates: caption 8.7 GB, objects 2.4 GB, faces+embedding 1.95 GB co-resident, perception 13.8 GB exclusive.
 
 ### 5. Cloud AI Analysis
 
@@ -93,7 +94,7 @@ Cloud AI extracts: detailed description, keywords, scene type, mood, aesthetic s
 ### 6. CLIP Embeddings & Semantic Search
 
 - OpenCLIP ViT-L/14 generates 768-dimensional embeddings for every image
-- Text descriptions from BLIP-2 and cloud AI are also embedded
+- Text descriptions from caption and cloud AI results are also embedded
 - Hybrid search engine combines FTS5 full-text search with CLIP semantic similarity using Reciprocal Rank Fusion (RRF)
 - Sub-10ms search at 500K images via numpy BLAS vectorized scoring
 
@@ -139,8 +140,8 @@ The Electron app provides a five-tab interface:
 
 ### Batch Tab
 - Configure and launch batch analysis for an entire folder
-- Select which analysis passes to run (metadata, technical, blip2, objects, ocr, faces, cloud_ai, aesthetic, embedding)
-- Configure number of GPU workers, cloud provider, recursive scanning
+- Select which analysis passes to run (metadata, technical, caption, objects, faces, perception, embedding)
+- Configure worker count, chunk size, and recursive scanning
 - Folder ingestion scans and registers images, enqueues jobs by module priority
 
 ### Running Tab
@@ -172,11 +173,11 @@ The batch pipeline is designed for large libraries (500K+ images):
 
 1. **Ingest**: Scan folder, register images in SQLite, enqueue jobs per module. Batched transactions (500 images per commit). File fingerprinting uses path+size+mtime instead of SHA-256.
 
-2. **Three-phase worker**: Phase 0 drains all `objects` jobs (GroundingDINO, batch=4) to determine which images contain people/text (unlocking privacy gates). Phase 1 runs BLIP-2 captioning exclusively (~6 GB VRAM, batch=1). Phase 2 runs faces (batch=8), OCR (batch=4), and embedding (batch=16) co-resident on the GPU (~2.75 GB total). Cloud AI and aesthetic scoring run concurrently in a thread pool throughout all phases.
+2. **Chunk-first four-phase worker**: Each chunk (and mini-batch for large chunks) runs `caption -> objects -> (faces + embedding) -> perception`. This improves time-to-first-fully-processed images and reduces idle coordinator time in distributed runs.
 
-3. **VRAM budget system**: Dynamic GPU memory tracking (CUDA + MPS) ensures models fit within 70% of available VRAM. Exclusive modules (BLIP-2) require sole GPU access; co-resident modules (faces, OCR, embedding) share the GPU within budget.
+3. **VRAM budget system**: Dynamic GPU memory tracking (CUDA + MPS) ensures models fit within 70% of available VRAM. `perception` is exclusive; co-resident modules (`faces`, `embedding`) share the GPU within budget.
 
-4. **Cloud future capping**: Cloud API submissions are capped at 2× the cloud worker count to prevent GPU phase transitions from blocking on thousands of slow API calls. Uncompleted cloud futures are cancelled at phase boundaries.
+4. **Unified distributed claim policy**: Coordinator claim decisions are centralized in `unified_scheduler.py` (pause/resume states, capability filtering, lease caps, module affinity epochs, and ETA-aware balancing).
 
 5. **Job deferral**: Jobs with unmet prerequisites are deferred (queued_at bumped forward by 30 seconds) instead of re-queued at the same position, preventing queue starvation where ineligible jobs block eligible ones.
 
@@ -194,7 +195,8 @@ imganalyzer supports distributing batch analysis across multiple machines via an
 
 - The coordinator exposes a JSON-RPC API over HTTP (with optional bearer token auth)
 - Remote workers register, claim job leases with TTL, and report completions
-- Workers probe their own capabilities (GPU models, cloud providers) at startup
+- Workers probe their own capabilities (`supportedModules`, `cuda`, `mps`) at startup
+- Coordinator can pause/resume specific workers and enforces anti-idle reservation for the local master worker
 - The Electron app can launch the coordinator automatically and show connected worker status
 - Setup scripts (`scripts/setup_worker_env.sh`, `scripts/setup_worker_env.ps1`) bootstrap worker environments with all dependencies
 
@@ -214,7 +216,7 @@ The Python backend runs as a persistent child process, communicating with Electr
 
 ## Data Storage
 
-All analysis results are stored in a SQLite database at `~/.cache/imganalyzer/imganalyzer.db` (configurable via `IMGANALYZER_DB_PATH`). The database uses WAL mode for concurrent read/write access across threads. Schema includes 13+ tables across 16 migration versions, with FTS5 virtual tables for full-text search and a dedicated table for CLIP embeddings.
+All analysis results are stored in a SQLite database at `~/.cache/imganalyzer/imganalyzer.db` (configurable via `IMGANALYZER_DB_PATH`). The database uses WAL mode for concurrent read/write access across threads. Schema includes 13+ tables across 20 migration versions, with FTS5 virtual tables for full-text search and dedicated scheduler-state tables (`worker_nodes`, `worker_module_stats`).
 
 XMP sidecar files are the export format — they are regenerated from the database on demand or periodically during batch processing.
 
@@ -229,7 +231,7 @@ The Python backend is fully usable without the GUI:
 imganalyzer analyze photo.cr2 --ai local
 
 # Batch pipeline (ingest + run)
-imganalyzer ingest /photos --modules metadata,technical,objects,blip2
+imganalyzer ingest /photos --modules metadata,technical,caption,objects,faces,perception,embedding
 imganalyzer run --workers 1
 
 # Monitor progress
@@ -289,7 +291,7 @@ Environment variables (set in `.env` or shell):
 
 - **Python**: 3.10+ with CUDA-capable GPU for local AI (torch + CUDA)
 - **Node.js**: Electron 31 for the desktop GUI
-- **GPU VRAM**: ~6 GB peak for BLIP-2 phase (models loaded sequentially; other phases need ~2.75 GB)
+- **GPU VRAM**: ~8.7 GB for caption phase; ~13.8 GB when running exclusive perception phase
 - **Disk**: ~3 GB for model weights (downloaded on first use)
 - **OS**: Windows (primary target), Linux/macOS should work but less tested
 - **Apple Silicon**: Macs supported via MPS backend with CPU fallback for unsupported ops

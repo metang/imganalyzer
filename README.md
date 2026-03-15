@@ -109,15 +109,13 @@ bash scripts/setup_worker_env.sh ~/imganalyzer-worker
 ```
 
 Both scripts create/reuse a Conda env (`imganalyzer` on Windows, `imganalyzer312`
-on macOS/Linux), install `imganalyzer[local-ai,<provider>]` from source, and
-verify local AI (`torch`, `insightface`, `onnxruntime`) + cloud-provider imports.
-`unipercept_reward` is verified on CUDA-capable hosts (non-Darwin). Default
-provider is `copilot`.
+on macOS/Linux), install `imganalyzer[local-ai]` from source, and verify local
+AI runtime dependencies (`torch`, `insightface`, `onnxruntime`).
+`unipercept_reward` is verified on CUDA-capable hosts (non-Darwin).
 Override defaults with environment variables:
 - `IMGANALYZER_ENV_NAME`
 - `IMGANALYZER_PYTHON_VERSION`
 - `IMGANALYZER_REPO_URL`
-- `IMGANALYZER_WORKER_CLOUD_PROVIDER` (`copilot`, `openai`, `anthropic`, `google`)
 
 Platform notes:
 - **Windows**: PyTorch is installed from the official PyTorch CUDA index
@@ -169,16 +167,20 @@ allow rules must be added in domain Group Policy.
 Useful worker options:
 
 - `--module metadata` to dedicate a worker to a single module
-- `--cloud copilot` to process `cloud_ai` with Copilot backend (match your batch provider)
+- `--batch-size 1` to tune lease claim granularity
+- `--poll-interval 5` to tune how often empty queues are re-polled
 - `--lease-ttl 300` to request longer job leases
 - `--heartbeat-interval 15` to refresh worker and lease liveness more often
 - `--path-mapping "SOURCE_PREFIX=LOCAL_PREFIX"` to remap shared-NAS paths on a worker with a different mount root
 - `--auth-token YOUR_TOKEN` when the coordinator requires HTTP auth
+- `--no-xmp` to skip coordinator-side XMP writes for that worker's completions
 
 ### Current assumptions
 
 - The coordinator is the only SQLite reader/writer; workers return structured
   results over HTTP and do not need direct DB access.
+- Scheduler policy is coordinator-driven (`jobs/claim`) with per-worker pause/resume
+  control (`workers/pause`, `workers/resume`) and capability-aware routing.
 - Workers need read-only access to the shared image files and must either read
   the stored paths directly or provide `--path-mapping` rules when their NAS
   mount root differs.
