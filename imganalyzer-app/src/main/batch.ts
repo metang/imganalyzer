@@ -313,6 +313,26 @@ function nextLocalResultId(): string {
   return `local:${nextResultSequence}`
 }
 
+function parseResultStatus(raw: unknown): BatchResult['status'] {
+  if (raw === 'done' || raw === 'failed' || raw === 'skipped') return raw
+  return 'failed'
+}
+
+function parseDurationMs(raw: unknown): number {
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) ? raw : 0
+  }
+
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (!trimmed) return 0
+    const parsed = Number(trimmed)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+
+  return 0
+}
+
 function parseResultKeywords(raw: unknown): string[] | undefined {
   if (Array.isArray(raw)) {
     const cleaned = raw
@@ -699,6 +719,26 @@ function setupNotificationListener(): void {
           typeof p.data === 'object' && p.data !== null
             ? p.data as Record<string, unknown>
             : null
+        const path =
+          typeof p.path === 'string'
+            ? p.path
+            : typeof payloadData?.path === 'string'
+              ? payloadData.path
+              : ''
+        const moduleName =
+          typeof p.module === 'string'
+            ? p.module
+            : typeof payloadData?.module === 'string'
+              ? payloadData.module
+              : ''
+        const status = parseResultStatus(p.status ?? payloadData?.status)
+        const durationMs = parseDurationMs(p.ms ?? payloadData?.ms)
+        const error =
+          typeof p.error === 'string'
+            ? p.error
+            : typeof payloadData?.error === 'string'
+              ? payloadData.error
+              : undefined
         const keywords =
           parseResultKeywords(p.keywords) ??
           parseResultKeywords(p.keyword) ??
@@ -709,11 +749,11 @@ function setupNotificationListener(): void {
         const nodeLabel = typeof p.nodeLabel === 'string' ? p.nodeLabel : MASTER_NODE_LABEL
         const result: BatchResult = {
           id: nextLocalResultId(),
-          path: (p.path as string) ?? '',
-          module: (p.module as string) ?? '',
-          status: p.status as 'done' | 'failed' | 'skipped',
-          durationMs: (p.ms as number) ?? 0,
-          error: p.error as string | undefined,
+          path,
+          module: moduleName,
+          status,
+          durationMs,
+          error,
           keywords,
           nodeId,
           nodeRole,
