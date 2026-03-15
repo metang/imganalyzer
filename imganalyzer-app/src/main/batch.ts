@@ -30,6 +30,8 @@ const POLL_INTERVAL_MS = 1000
 const COMPLETION_WINDOW_MS = 10_000
 // How many recent completion durations to average for avgMs
 const AVG_WINDOW = 100
+// How many completed chunk durations to keep for avg chunk completion time
+const CHUNK_AVG_WINDOW = 20
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -95,6 +97,9 @@ export interface BatchStats {
   imagesPerSec: number
   estimatedMs: number
   elapsedMs: number
+  chunkAvgCompletionMs: number
+  chunkElapsedMs: number
+  chunkEstimatedMs: number
   queue: BatchQueueSummary
   nodes: BatchNode[]
   chunk?: { size: number; index: number; total: number; modules: Record<string, number> }
@@ -171,9 +176,18 @@ interface ServerRecentResult {
   nodeLabel?: string
 }
 
+interface ServerChunkInfo {
+  size: number
+  index: number
+  total: number
+  modules: Record<string, number>
+}
+
 interface ServerStatusPayload {
   total_images: number
   modules: Record<string, Record<string, number>>
+  module_avg_ms?: Record<string, number>
+  chunk?: ServerChunkInfo | null
   totals: Record<string, number>
   remaining_images?: number
   nodes?: {
@@ -216,6 +230,9 @@ let nextResultSequence = 0
 // passesPerSec is derived from all workers' combined throughput during
 // that chunk (wall-clock time includes parallel worker contributions).
 let lastChunkPassesPerSec = 0
+const chunkCompletionWindowMs: number[] = []
+let currentChunkKey: string | null = null
+let currentChunkStartMs = 0
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -225,6 +242,9 @@ function resetSessionCounters(): void {
   processedStatusResultKeys.clear()
   nodeCounters.clear()
   lastChunkPassesPerSec = 0
+  chunkCompletionWindowMs.length = 0
+  currentChunkKey = null
+  currentChunkStartMs = 0
 }
 
 /** Emit a batch:tick event to the renderer with current stats. */
@@ -515,6 +535,37 @@ async function doPoll(): Promise<void> {
 
     const metrics = computeMetrics(remainingPasses, workers)
     const moduleMetrics = computeModuleMetrics()
+    const now = Date.now()
+    const chunk = data.chunk ?? undefined
+
+    let chunkRemainingPasses = 0
+    let chunkElapsedMs = 0
+    if (chunk && chunk.total > 0) {
+      const nextChunkKey = `${chunk.index}:${chunk.total}:${chunk.size}`
+      if (currentChunkKey !== nextChunkKey) {
+        currentChunkKey = nextChunkKey
+        currentChunkStartMs = now
+      }
+      chunkRemainingPasses = Object.values(chunk.modules).reduce((sum, count) => sum + count, 0)
+      chunkElapsedMs = currentChunkStartMs > 0 ? now - currentChunkStartMs : 0
+    } else {
+      currentChunkKey = null
+      currentChunkStartMs = 0
+    }
+
+    const chunkAvgCompletionMs =
+      chunkCompletionWindowMs.length > 0
+        ? chunkCompletionWindowMs.reduce((sum, ms) => sum + ms, 0) / chunkCompletionWindowMs.length
+        : 0
+
+    let chunkEstimatedMs = 0
+    if (chunkRemainingPasses > 0) {
+      if (lastChunkPassesPerSec > 0) {
+        chunkEstimatedMs = (chunkRemainingPasses / lastChunkPassesPerSec) * 1000
+      } else if (metrics.imagesPerSec > 0) {
+        chunkEstimatedMs = (chunkRemainingPasses / metrics.imagesPerSec) * 1000
+      }
+    }
 
     if (monitorOnly) {
       if (remainingPasses > 0) {
@@ -560,7 +611,10 @@ async function doPoll(): Promise<void> {
       avgMsPerImage: metrics.avgMsPerImage,
       imagesPerSec: metrics.imagesPerSec,
       estimatedMs: metrics.estimatedMs,
-      elapsedMs: sessionStartMs > 0 ? Date.now() - sessionStartMs : 0,
+      elapsedMs: sessionStartMs > 0 ? now - sessionStartMs : 0,
+      chunkAvgCompletionMs,
+      chunkElapsedMs,
+      chunkEstimatedMs,
       queue: {
         totalPasses,
         activePasses,
@@ -569,7 +623,7 @@ async function doPoll(): Promise<void> {
         remainingJobs: data.remaining_images ?? 0,
       },
       nodes: buildBatchNodes(data),
-      chunk: data.chunk ?? undefined,
+      chunk,
     }
 
     emitTick(stats)
@@ -634,6 +688,12 @@ function setupNotificationListener(): void {
       case 'run/chunk_done': {
         const durationMs = (p.durationMs as number) ?? 0
         const passesCompleted = (p.passesCompleted as number) ?? 0
+        if (durationMs > 0) {
+          chunkCompletionWindowMs.push(durationMs)
+          if (chunkCompletionWindowMs.length > CHUNK_AVG_WINDOW) {
+            chunkCompletionWindowMs.shift()
+          }
+        }
         if (durationMs > 0 && passesCompleted > 0) {
           lastChunkPassesPerSec = passesCompleted / (durationMs / 1000)
         }

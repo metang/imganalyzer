@@ -28,6 +28,9 @@ function emptyStats(): BatchStats {
     imagesPerSec: 0,
     estimatedMs: 0,
     elapsedMs: 0,
+    chunkAvgCompletionMs: 0,
+    chunkElapsedMs: 0,
+    chunkEstimatedMs: 0,
     queue: {
       totalPasses: 0,
       activePasses: 0,

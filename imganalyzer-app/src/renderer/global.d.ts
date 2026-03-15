@@ -319,6 +319,9 @@ export interface BatchStats {
   imagesPerSec: number
   estimatedMs: number
   elapsedMs: number
+  chunkAvgCompletionMs: number
+  chunkElapsedMs: number
+  chunkEstimatedMs: number
   queue: BatchQueueSummary
   nodes: BatchNode[]
   chunk?: { size: number; index: number; total: number; modules: Record<string, number> }

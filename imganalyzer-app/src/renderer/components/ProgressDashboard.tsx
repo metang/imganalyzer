@@ -294,10 +294,11 @@ export function ProgressDashboard({
     queue,
     totals,
     modules,
-    imagesPerSec,
-    avgMsPerImage,
     estimatedMs,
     elapsedMs,
+    chunkAvgCompletionMs,
+    chunkElapsedMs,
+    chunkEstimatedMs,
     nodes,
   } = stats
 
@@ -393,17 +394,32 @@ export function ProgressDashboard({
         </p>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-        <SummaryCard label="Remaining jobs" value={queue.remainingJobs.toLocaleString()} />
-        <SummaryCard label="Remaining passes" value={queue.remainingPasses.toLocaleString()} />
-        <SummaryCard label="Done rate" value={fmtRate(imagesPerSec)} />
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <SummaryCard
+          label="Avg chunk completion"
+          value={fmtMs(chunkAvgCompletionMs)}
+          hint={
+            chunkAvgCompletionMs > 0
+              ? 'Average of recent completed chunks'
+              : 'Waiting for first chunk completion'
+          }
+        />
+        <SummaryCard
+          label="Current chunk runtime"
+          value={fmtMs(chunkElapsedMs)}
+          hint={stats.chunk ? `Chunk ${stats.chunk.index + 1} in progress` : 'No active chunk'}
+        />
+        <SummaryCard
+          label="Chunk ETA"
+          value={fmtMs(chunkEstimatedMs)}
+          hint={chunkEstimatedMs > 0 ? 'Based on chunk throughput' : 'Waiting for enough samples'}
+        />
         <SummaryCard
           label="ETA"
           value={fmtMs(estimatedMs)}
           hint={estimatedMs > 0 ? 'Based on recent throughput' : 'Waiting for enough samples'}
         />
         <SummaryCard label="Elapsed" value={fmtMs(elapsedMs)} />
-        <SummaryCard label="Avg/pass" value={fmtMs(avgMsPerImage)} />
       </div>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
