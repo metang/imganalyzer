@@ -707,7 +707,7 @@ def status(
         # modules that are actually in the queue (future-proof).
         from imganalyzer.db.repository import ALL_MODULES
         queue_modules = list(module_stats.keys())
-        ordered = [m for m in ALL_MODULES if m in module_stats or True]
+        ordered = [m for m in ALL_MODULES if m in module_stats]
         extra = [m for m in queue_modules if m not in ALL_MODULES]
         all_modules = ordered + extra
         modules_out: dict[str, dict[str, int]] = {}
