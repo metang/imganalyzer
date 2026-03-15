@@ -9,6 +9,16 @@ const pendingIds = new Set<number>()
 const pendingCallbacks = new Map<number, Array<(src: string | null) => void>>()
 let batchTimer: ReturnType<typeof setTimeout> | null = null
 
+const CLUSTER_PAGE_SIZE = 200
+const UNLINKED_CLUSTER_TARGET = 60
+
+function countUnlinkedClusters(clusters: FaceCluster[]): number {
+  return clusters.reduce(
+    (count, cluster) => (cluster.cluster_id !== null && !cluster.person_id ? count + 1 : count),
+    0,
+  )
+}
+
 function requestThumbnail(
   occurrenceId: number,
   callback: (src: string | null) => void
@@ -346,8 +356,6 @@ export function FacesView() {
 
   // ── Load data ─────────────────────────────────────────────────────────────
 
-  const CLUSTER_PAGE_SIZE = 200
-
   const loadData = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -363,13 +371,37 @@ export function FacesView() {
         return
       }
 
-      setTotalClusterCount(clusterResult.total_count)
-
       if (clusterResult.has_occurrences && clusterResult.clusters.length > 0) {
+        let loadedClusters = clusterResult.clusters
+        let loadedTotalCount = clusterResult.total_count
+        const shouldEnsureUnlinked = !personsResult.error && personsResult.persons.length > 0
+
+        if (shouldEnsureUnlinked) {
+          let offset = loadedClusters.length
+          let unlinkedCount = countUnlinkedClusters(loadedClusters)
+
+          while (unlinkedCount < UNLINKED_CLUSTER_TARGET && offset < loadedTotalCount) {
+            const nextPage = await window.api.listFaceClusters(CLUSTER_PAGE_SIZE, offset)
+            if (nextPage.error) {
+              setError(nextPage.error)
+              break
+            }
+            if (nextPage.clusters.length === 0) {
+              break
+            }
+            loadedClusters = [...loadedClusters, ...nextPage.clusters]
+            loadedTotalCount = nextPage.total_count
+            offset = loadedClusters.length
+            unlinkedCount = countUnlinkedClusters(loadedClusters)
+          }
+        }
+
+        setTotalClusterCount(loadedTotalCount)
         setHasOccurrences(true)
-        setClusters(clusterResult.clusters)
+        setClusters(loadedClusters)
         setLegacyFaces([])
       } else {
+        setTotalClusterCount(clusterResult.total_count)
         // Fallback to legacy identity-name mode
         setHasOccurrences(clusterResult.has_occurrences)
         const legacyResult = await window.api.listFaces()
@@ -908,6 +940,10 @@ export function FacesView() {
     () => clusters.filter((c) => c.cluster_id !== null && !c.person_id),
     [clusters],
   )
+  const visibleUnlinkedClusters = useMemo(
+    () => unlinkedClusters.slice(0, UNLINKED_CLUSTER_TARGET),
+    [unlinkedClusters],
+  )
 
   const filteredPersons = useMemo(() => {
     const lowerFilter = linkSearchFilter.toLowerCase()
@@ -1085,8 +1121,8 @@ export function FacesView() {
               <span className="text-neutral-500 ml-1 text-xs">({p.face_count})</span>
             </button>
           ))}
-          {filteredPersons.length === 0 && lowerFilter && (
-            <div className="px-3 py-1.5 text-xs text-neutral-500">No match</div>
+          {filteredPersons.length === 0 && linkSearchFilter.trim().length > 0 && (
+            <div className="px-3 py-1.5 text-xs text-neutral-500">No results</div>
           )}
         </div>
         <div className="border-t border-neutral-700 mt-1 pt-1">
@@ -1977,14 +2013,14 @@ export function FacesView() {
 
 
           {/* Unlinked clusters */}
-          {unlinkedClusters.length > 0 && (
+          {visibleUnlinkedClusters.length > 0 && (
             <>
               <div className="px-5 py-2 text-xs text-neutral-500 font-medium uppercase tracking-wide bg-neutral-900/80 border-b border-neutral-800/60 sticky top-0">
-                Unlinked Clusters ({unlinkedClusters.length})
+                Unlinked Clusters ({visibleUnlinkedClusters.length}{unlinkedClusters.length > visibleUnlinkedClusters.length ? ` of ${unlinkedClusters.length}` : ''})
               </div>
               <div className="p-4">
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-3">
-                  {unlinkedClusters.map((cluster) => {
+                  {visibleUnlinkedClusters.map((cluster) => {
                     const displayLabel = cluster.display_name || cluster.identity_name
                     const isSelected = expandedKey === `cluster:${cluster.cluster_id}`
 
@@ -2116,9 +2152,9 @@ export function FacesView() {
           )
         })()}
 
-        {expandedKey && unlinkedClusters.some((c) => `cluster:${c.cluster_id}` === expandedKey) && (() => {
+        {expandedKey && visibleUnlinkedClusters.some((c) => `cluster:${c.cluster_id}` === expandedKey) && (() => {
           const cId = parseInt(expandedKey.replace('cluster:', ''), 10)
-          const cl = unlinkedClusters.find((c) => c.cluster_id === cId)
+          const cl = visibleUnlinkedClusters.find((c) => c.cluster_id === cId)
           const displayLabel = cl?.display_name || cl?.identity_name || `Cluster #${cId}`
           return (
           <div className="shrink-0 border-t border-neutral-700 bg-neutral-900 max-h-[40vh] overflow-y-auto">

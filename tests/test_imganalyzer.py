@@ -2388,6 +2388,64 @@ class TestFacePersons:
         assert cluster_map[2]["person_id"] is None
         assert cluster_map[3]["person_id"] is None
 
+    def test_list_clusters_includes_unclustered_rows_when_mixed(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        self._seed_clusters(repo, conn)
+
+        conn.execute(
+            "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+            [10, "/img/10.jpg", "hash10", 100],
+        )
+        emb = np.zeros(512, dtype=np.float32).tobytes()
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, identity_name, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (100, 10, 0, emb, None, "new_person", 0.0, 0.0, 1.0, 1.0),
+                (101, 10, 1, emb, None, "new_person", 0.0, 0.0, 2.0, 2.0),
+            ],
+        )
+        conn.commit()
+
+        clusters, total_count = repo.list_face_clusters()
+        assert total_count == 4
+
+        unclustered = next(
+            c for c in clusters
+            if c["cluster_id"] is None and c["identity_name"] == "new_person"
+        )
+        assert unclustered["face_count"] == 2
+        assert unclustered["image_count"] == 1
+
+    def test_get_cluster_occurrences_identity_returns_only_unclustered(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        self._seed_clusters(repo, conn)
+
+        conn.execute(
+            "UPDATE face_occurrences SET identity_name = ? WHERE id = ?",
+            ["alice", 1],
+        )
+        conn.execute(
+            "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+            [11, "/img/11.jpg", "hash11", 100],
+        )
+        emb = np.zeros(512, dtype=np.float32).tobytes()
+        conn.execute(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, identity_name, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [110, 11, 0, emb, None, "alice", 0.0, 0.0, 1.5, 1.5],
+        )
+        conn.commit()
+
+        occurrences = repo.get_cluster_occurrences(identity_name="alice", limit=10)
+        assert [row["id"] for row in occurrences] == [110]
+
     def test_relink_cluster_updates_label_and_person_together(self, tmp_path):
         from imganalyzer.db.repository import Repository
         conn = _make_test_db(tmp_path)

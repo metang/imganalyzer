@@ -1035,10 +1035,20 @@ class Repository:
             params = [limit, offset]
 
         if has_clusters:
-            total_row = self.conn.execute(
+            clustered_row = self.conn.execute(
                 "SELECT COUNT(DISTINCT cluster_id) AS cnt FROM face_occurrences WHERE cluster_id IS NOT NULL"
             ).fetchone()
-            total_count = total_row["cnt"] if total_row else 0
+            unclustered_row = self.conn.execute(
+                """
+                SELECT COUNT(DISTINCT COALESCE(identity_name, 'Unknown')) AS cnt
+                FROM face_occurrences
+                WHERE cluster_id IS NULL
+                """
+            ).fetchone()
+            total_count = (
+                (clustered_row["cnt"] if clustered_row else 0)
+                + (unclustered_row["cnt"] if unclustered_row else 0)
+            )
 
             rows = self.conn.execute(
                 f"""
@@ -1079,35 +1089,91 @@ class Repository:
                            ) AS rn
                     FROM face_occurrences
                     WHERE cluster_id IS NOT NULL
+                ),
+                cluster_rows AS (
+                    SELECT
+                        ca.cluster_id,
+                        ci.identity_name,
+                        COALESCE(fcl.display_name, fi.display_name) AS display_name,
+                        fi.id AS identity_id,
+                        ca.image_count,
+                        ca.face_count,
+                        cr.representative_id,
+                        cp.person_id
+                    FROM cluster_agg ca
+                    LEFT JOIN cluster_identity ci
+                        ON ci.cluster_id = ca.cluster_id AND ci.rn = 1
+                    LEFT JOIN cluster_person cp
+                        ON cp.cluster_id = ca.cluster_id AND cp.rn = 1
+                    LEFT JOIN cluster_rep cr
+                        ON cr.cluster_id = ca.cluster_id AND cr.rn = 1
+                    LEFT JOIN face_identities fi
+                        ON fi.canonical_name = ci.identity_name
+                    LEFT JOIN face_cluster_labels fcl
+                        ON fcl.cluster_id = ca.cluster_id
+                ),
+                unclustered_agg AS (
+                    SELECT
+                        COALESCE(identity_name, 'Unknown') AS identity_name,
+                        COUNT(DISTINCT image_id) AS image_count,
+                        COUNT(id)                AS face_count
+                    FROM face_occurrences
+                    WHERE cluster_id IS NULL
+                    GROUP BY COALESCE(identity_name, 'Unknown')
+                ),
+                unclustered_rep AS (
+                    SELECT
+                        COALESCE(identity_name, 'Unknown') AS identity_name,
+                        id AS representative_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY COALESCE(identity_name, 'Unknown')
+                            ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
+                        ) AS rn
+                    FROM face_occurrences
+                    WHERE cluster_id IS NULL
+                ),
+                unclustered_rows AS (
+                    SELECT
+                        NULL AS cluster_id,
+                        ua.identity_name,
+                        fi.display_name,
+                        fi.id AS identity_id,
+                        ua.image_count,
+                        ua.face_count,
+                        ur.representative_id,
+                        NULL AS person_id
+                    FROM unclustered_agg ua
+                    LEFT JOIN unclustered_rep ur
+                        ON ur.identity_name = ua.identity_name AND ur.rn = 1
+                    LEFT JOIN face_identities fi
+                        ON fi.canonical_name = ua.identity_name
+                ),
+                combined AS (
+                    SELECT * FROM cluster_rows
+                    UNION ALL
+                    SELECT * FROM unclustered_rows
                 )
                 SELECT
-                    ca.cluster_id,
-                    ci.identity_name,
-                    COALESCE(fcl.display_name, fi.display_name) AS display_name,
-                    fi.id AS identity_id,
-                    ca.image_count,
-                    ca.face_count,
-                    cr.representative_id,
-                    cp.person_id
-                FROM cluster_agg ca
-                LEFT JOIN cluster_identity ci
-                    ON ci.cluster_id = ca.cluster_id AND ci.rn = 1
-                LEFT JOIN cluster_person cp
-                    ON cp.cluster_id = ca.cluster_id AND cp.rn = 1
-                LEFT JOIN cluster_rep cr
-                    ON cr.cluster_id = ca.cluster_id AND cr.rn = 1
-                LEFT JOIN face_identities fi
-                    ON fi.canonical_name = ci.identity_name
-                LEFT JOIN face_cluster_labels fcl
-                    ON fcl.cluster_id = ca.cluster_id
-                ORDER BY ca.face_count DESC
+                    cluster_id,
+                    identity_name,
+                    display_name,
+                    identity_id,
+                    image_count,
+                    face_count,
+                    representative_id,
+                    person_id
+                FROM combined
+                ORDER BY face_count DESC
                 {pagination}
                 """,
                 params,
             ).fetchall()
         else:
             total_row = self.conn.execute(
-                "SELECT COUNT(DISTINCT identity_name) AS cnt FROM face_occurrences"
+                """
+                SELECT COUNT(DISTINCT COALESCE(identity_name, 'Unknown')) AS cnt
+                FROM face_occurrences
+                """
             ).fetchone()
             total_count = total_row["cnt"] if total_row else 0
 
@@ -1115,18 +1181,19 @@ class Repository:
                 f"""
                 WITH name_agg AS (
                     SELECT
-                        identity_name,
+                        COALESCE(identity_name, 'Unknown') AS identity_name,
                         COUNT(DISTINCT image_id) AS image_count,
                         COUNT(id)                AS face_count
                     FROM face_occurrences
-                    GROUP BY identity_name
+                    GROUP BY COALESCE(identity_name, 'Unknown')
                 ),
                 name_rep AS (
-                    SELECT identity_name, id AS representative_id,
+                    SELECT COALESCE(identity_name, 'Unknown') AS identity_name,
+                           id AS representative_id,
                            ROW_NUMBER() OVER (
-                               PARTITION BY identity_name
-                               ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
-                           ) AS rn
+                                PARTITION BY COALESCE(identity_name, 'Unknown')
+                                ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
+                            ) AS rn
                     FROM face_occurrences
                 )
                 SELECT
@@ -1136,7 +1203,8 @@ class Repository:
                     fi.id AS identity_id,
                     na.image_count,
                     na.face_count,
-                    nr.representative_id
+                    nr.representative_id,
+                    NULL AS person_id
                 FROM name_agg na
                 LEFT JOIN name_rep nr
                     ON nr.identity_name = na.identity_name AND nr.rn = 1
@@ -1154,7 +1222,7 @@ class Repository:
         self, cluster_id: int | None = None, identity_name: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        """Return face occurrences for a cluster (or by identity_name).
+        """Return face occurrences for a cluster (or by unclustered identity_name).
 
         Each row includes: id, image_id, file_path, bbox coords, age, gender,
         identity_name.
@@ -1181,7 +1249,8 @@ class Repository:
                        fo.age, fo.gender, fo.identity_name
                 FROM face_occurrences fo
                 JOIN images i ON i.id = fo.image_id
-                WHERE fo.identity_name = ?
+                WHERE COALESCE(fo.identity_name, 'Unknown') = ?
+                  AND fo.cluster_id IS NULL
                 ORDER BY (fo.bbox_x2 - fo.bbox_x1) * (fo.bbox_y2 - fo.bbox_y1) DESC
                 LIMIT ?
                 """,
