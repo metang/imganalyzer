@@ -313,6 +313,42 @@ function nextLocalResultId(): string {
   return `local:${nextResultSequence}`
 }
 
+function parseResultKeywords(raw: unknown): string[] | undefined {
+  if (Array.isArray(raw)) {
+    const cleaned = raw
+      .map((value) => String(value).trim())
+      .filter((value) => value.length > 0)
+    return cleaned.length > 0 ? cleaned : undefined
+  }
+
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (!trimmed) return undefined
+
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (Array.isArray(parsed)) {
+          const cleaned = parsed
+            .map((value) => String(value).trim())
+            .filter((value) => value.length > 0)
+          return cleaned.length > 0 ? cleaned : undefined
+        }
+      } catch {
+        // Not valid JSON; fall back to comma-split parsing below.
+      }
+    }
+
+    const split = trimmed
+      .split(',')
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0)
+    return split.length > 0 ? split : undefined
+  }
+
+  return undefined
+}
+
 function parseServerTimestamp(value?: string | null): number | null {
   if (!value) return null
   const isoLike = value.includes('T') ? value : value.replace(' ', 'T')
@@ -659,12 +695,15 @@ function setupNotificationListener(): void {
         break
 
       case 'run/result': {
-        const rawKw = p.keywords
-        const keywords = Array.isArray(rawKw)
-          ? rawKw as string[]
-          : typeof rawKw === 'string'
-            ? rawKw.split(',').map((s: string) => s.trim()).filter(Boolean)
-            : undefined
+        const payloadData =
+          typeof p.data === 'object' && p.data !== null
+            ? p.data as Record<string, unknown>
+            : null
+        const keywords =
+          parseResultKeywords(p.keywords) ??
+          parseResultKeywords(p.keyword) ??
+          parseResultKeywords(payloadData?.keywords) ??
+          parseResultKeywords(payloadData?.keyword)
         const nodeId = typeof p.nodeId === 'string' ? p.nodeId : MASTER_NODE_ID
         const nodeRole = p.nodeRole === 'worker' ? 'worker' as const : 'master' as const
         const nodeLabel = typeof p.nodeLabel === 'string' ? p.nodeLabel : MASTER_NODE_LABEL

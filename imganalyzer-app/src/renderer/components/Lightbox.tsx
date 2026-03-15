@@ -122,37 +122,56 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
   // ── Keyboard ──────────────────────────────────────────────────────────────
   const handleKey = useCallback((e: KeyboardEvent) => {
     if (e.ctrlKey || e.metaKey) return
+    const target = e.target as HTMLElement | null
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) {
+      return
+    }
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key
 
-    switch (e.key) {
+    switch (key) {
       case 'Escape':
+        e.preventDefault()
         if (zoom !== 1 || offset.x !== 0 || offset.y !== 0) {
           resetZoom()
         } else {
           onClose()
         }
         break
+      case 'g':
+        e.preventDefault()
+        onClose()
+        break
       case 'ArrowLeft':
-        if (zoom === 1) { if (prev) onNavigate(prev) }
-        else setOffset((o) => ({ ...o, x: o.x + 80 }))
+      case 'a':
+        e.preventDefault()
+        if (prev) onNavigate(prev)
         break
       case 'ArrowRight':
-        if (zoom === 1) { if (next) onNavigate(next) }
-        else setOffset((o) => ({ ...o, x: o.x - 80 }))
+      case 'd':
+        e.preventDefault()
+        if (next) onNavigate(next)
         break
       case 'ArrowUp':
+        e.preventDefault()
         if (zoom > 1) setOffset((o) => ({ ...o, y: o.y + 80 }))
         break
       case 'ArrowDown':
+        e.preventDefault()
         if (zoom > 1) setOffset((o) => ({ ...o, y: o.y - 80 }))
         break
       case '+':
       case '=':
+        e.preventDefault()
         zoomToward(ZOOM_STEP_KEY, 0, 0)
         break
       case '-':
+        e.preventDefault()
         zoomToward(-ZOOM_STEP_KEY, 0, 0)
         break
       case '0':
+      case ' ':
+      case 'Spacebar':
+        e.preventDefault()
         resetZoom()
         break
     }
@@ -240,7 +259,7 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
           <button
             onClick={onClose}
             className="p-2 rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors"
-            title="Close (Esc)"
+            title="Close (Esc, G)"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -261,7 +280,7 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
             <button
               onClick={resetZoom}
               className={`px-2 py-1 rounded text-xs tabular-nums transition-colors ${isZoomed ? 'bg-blue-600/70 hover:bg-blue-600 text-white' : 'bg-black/50 hover:bg-black/80 text-neutral-400'}`}
-              title="Reset zoom (0)"
+              title="Fit to window (0, Space)"
             >
               {zoomPct}%
             </button>
@@ -343,7 +362,7 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
                 onClick={() => prev && onNavigate(prev)}
                 disabled={!prev}
                 className="p-2 rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors disabled:opacity-20 disabled:cursor-default"
-                title="Previous (←)"
+                title="Previous (A, ←)"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
@@ -357,7 +376,7 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
                 onClick={() => next && onNavigate(next)}
                 disabled={!next}
                 className="p-2 rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors disabled:opacity-20 disabled:cursor-default"
-                title="Next (→)"
+                title="Next (D, →)"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />

@@ -344,23 +344,53 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
   // Keyboard
   const handleKey = useCallback((e: KeyboardEvent) => {
     if (e.ctrlKey || e.metaKey) return
-    switch (e.key) {
+    const target = e.target as HTMLElement | null
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) {
+      return
+    }
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key
+    switch (key) {
       case 'Escape':
+        e.preventDefault()
         if (zoom !== 1 || offset.x !== 0 || offset.y !== 0) { resetZoom() } else { onClose() }
         break
+      case 'g':
+        e.preventDefault()
+        onClose()
+        break
       case 'ArrowLeft':
-        if (zoom === 1) { if (prev) onNavigate(prev) }
-        else setOffset((o) => ({ ...o, x: o.x + 80 }))
+      case 'a':
+        e.preventDefault()
+        if (prev) onNavigate(prev)
         break
       case 'ArrowRight':
-        if (zoom === 1) { if (next) onNavigate(next) }
-        else setOffset((o) => ({ ...o, x: o.x - 80 }))
+      case 'd':
+        e.preventDefault()
+        if (next) onNavigate(next)
         break
-      case 'ArrowUp':    if (zoom > 1) setOffset((o) => ({ ...o, y: o.y + 80 })); break
-      case 'ArrowDown':  if (zoom > 1) setOffset((o) => ({ ...o, y: o.y - 80 })); break
-      case '+': case '=': zoomToward(ZOOM_STEP_KEY, 0, 0); break
-      case '-': zoomToward(-ZOOM_STEP_KEY, 0, 0); break
-      case '0': resetZoom(); break
+      case 'ArrowUp':
+        e.preventDefault()
+        if (zoom > 1) setOffset((o) => ({ ...o, y: o.y + 80 }))
+        break
+      case 'ArrowDown':
+        e.preventDefault()
+        if (zoom > 1) setOffset((o) => ({ ...o, y: o.y - 80 }))
+        break
+      case '+':
+      case '=':
+        e.preventDefault()
+        zoomToward(ZOOM_STEP_KEY, 0, 0)
+        break
+      case '-':
+        e.preventDefault()
+        zoomToward(-ZOOM_STEP_KEY, 0, 0)
+        break
+      case '0':
+      case ' ':
+      case 'Spacebar':
+        e.preventDefault()
+        resetZoom()
+        break
     }
   }, [zoom, offset, onClose, prev, next, onNavigate, zoomToward, resetZoom])
 
@@ -423,7 +453,7 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
           <button
             onClick={onClose}
             className="p-2 rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors"
-            title="Close (Esc)"
+            title="Close (Esc, G)"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -437,7 +467,7 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
                 <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 115 11a6 6 0 0112 0zM8 11h6" />
               </svg>
             </button>
-            <button onClick={resetZoom} className={`px-2 py-1 rounded text-xs tabular-nums transition-colors ${isZoomed ? 'bg-blue-600/70 hover:bg-blue-600 text-white' : 'bg-black/50 hover:bg-black/80 text-neutral-400'}`} title="Reset zoom (0)">
+            <button onClick={resetZoom} className={`px-2 py-1 rounded text-xs tabular-nums transition-colors ${isZoomed ? 'bg-blue-600/70 hover:bg-blue-600 text-white' : 'bg-black/50 hover:bg-black/80 text-neutral-400'}`} title="Fit to window (0, Space)">
               {zoomPct}%
             </button>
             <button onClick={() => zoomToward(ZOOM_STEP_KEY, 0, 0)} className="p-1.5 rounded bg-black/50 hover:bg-black/80 text-white transition-colors" title="Zoom in (+)">
@@ -501,7 +531,7 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
         {!isZoomed && (
           <div className="shrink-0 flex items-center justify-center gap-3 pb-4">
             <button onClick={() => prev && onNavigate(prev)} disabled={!prev}
-              className="p-2 rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors disabled:opacity-20 disabled:cursor-default" title="Previous (←)">
+              className="p-2 rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors disabled:opacity-20 disabled:cursor-default" title="Previous (A, ←)">
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
               </svg>
@@ -510,7 +540,7 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
               {currentIdx + 1} / {items.length}
             </span>
             <button onClick={() => next && onNavigate(next)} disabled={!next}
-              className="p-2 rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors disabled:opacity-20 disabled:cursor-default" title="Next (→)">
+              className="p-2 rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors disabled:opacity-20 disabled:cursor-default" title="Next (D, →)">
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
               </svg>

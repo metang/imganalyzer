@@ -1246,6 +1246,30 @@ def _job_duration_ms(conn: Any, job_id: int) -> int:
     return max(0, int(row["ms"] or 0)) if row else 0
 
 
+def _normalize_result_keywords(value: Any) -> list[str] | None:
+    """Normalize keyword payload values to a non-empty string list."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        return cleaned or None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                decoded = json.loads(text)
+                if isinstance(decoded, list):
+                    cleaned = [str(item).strip() for item in decoded if str(item).strip()]
+                    return cleaned or None
+            except Exception:
+                pass
+        cleaned = [part.strip() for part in text.split(",") if part.strip()]
+        return cleaned or None
+    return None
+
+
 def _handle_jobs_complete(params: dict) -> dict:
     """Persist a worker result payload and mark the leased job complete."""
     from imganalyzer.db.repository import Repository
@@ -1356,7 +1380,12 @@ def _handle_jobs_complete(params: dict) -> dict:
         duration_ms = _job_duration_ms(conn, job_id)
         kw: list[str] | None = None
         if module_name == "caption":
-            kw = (payload.get("data") or {}).get("keywords")
+            payload_data = payload.get("data")
+            if isinstance(payload_data, dict):
+                for key in ("keywords", "keyword"):
+                    kw = _normalize_result_keywords(payload_data.get(key))
+                    if kw:
+                        break
         note: dict[str, Any] = {
             "path": file_path,
             "module": module_name,

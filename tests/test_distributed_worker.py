@@ -987,6 +987,55 @@ def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
     check_conn.close()
 
 
+def test_server_jobs_complete_emits_caption_keywords_from_legacy_keyword_field(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-complete-caption.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/nas/photos/caption.jpg")
+    job_id = queue.enqueue(image_id, "caption")
+    assert job_id is not None
+    claimed = queue.claim_leased(worker_id="worker-1", batch_size=1, module="caption")
+    assert claimed
+    lease = claimed[0]
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    emitted: list[tuple[str, dict[str, object]]] = []
+
+    def _capture_notification(method: str, params: dict[str, object]) -> None:
+        emitted.append((method, params))
+
+    monkeypatch.setattr(server, "_send_notification", _capture_notification)
+
+    result = server._handle_jobs_complete(
+        {
+            "jobId": lease["id"],
+            "leaseToken": lease["lease_token"],
+            "payload": {
+                "data": {
+                    "description": "child playing at beach",
+                    "keyword": ["child", "beach", "sand"],
+                }
+            },
+            "noXmp": True,
+            "processingMs": 900,
+        }
+    )
+
+    assert result == {"ok": True}
+    run_results = [params for method, params in emitted if method == "run/result"]
+    assert len(run_results) == 1
+    assert run_results[0]["module"] == "caption"
+    assert run_results[0]["keywords"] == ["child", "beach", "sand"]
+
+
 def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkeypatch):
     db_path = tmp_path / "server-status.db"
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
