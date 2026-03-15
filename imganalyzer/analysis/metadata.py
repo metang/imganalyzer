@@ -1,11 +1,14 @@
 """EXIF and metadata extraction."""
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
 from imganalyzer import __version__
+
+log = logging.getLogger(__name__)
 
 
 def _safe_str(value: Any) -> str:
@@ -22,7 +25,13 @@ def _parse_rational(tag_value: Any) -> float | None:
                 return r.num / r.den
             return float(r)
         return float(v)
-    except Exception:
+    except Exception as exc:
+        log.debug(
+            "metadata rational parse failed tag_value=%r error_type=%s error=%s",
+            tag_value,
+            type(exc).__name__,
+            exc,
+        )
         return None
 
 
@@ -36,7 +45,14 @@ def _dms_to_decimal(dms: list, ref: str) -> float | None:
         if ref in ("S", "W"):
             decimal = -decimal
         return round(decimal, 6)
-    except Exception:
+    except Exception as exc:
+        log.debug(
+            "metadata GPS DMS parse failed ref=%s dms=%r error_type=%s error=%s",
+            ref,
+            dms,
+            type(exc).__name__,
+            exc,
+        )
         return None
 
 
@@ -71,7 +87,27 @@ def _reverse_geocode(lat: float, lon: float) -> dict[str, str]:
             "location_country": addr.get("country", ""),
             "location_country_code": addr.get("country_code", "").upper(),
         }
-    except Exception:
+    except Exception as exc:
+        error_key = f"{type(exc).__name__}:{exc}"
+        if error_key not in _geocode_warning_keys:
+            log.warning(
+                "metadata reverse geocode failed lat=%.6f lon=%.6f "
+                "error_type=%s error=%s",
+                lat,
+                lon,
+                type(exc).__name__,
+                exc,
+            )
+            _geocode_warning_keys.add(error_key)
+        else:
+            log.debug(
+                "metadata reverse geocode failed (repeat) lat=%.6f lon=%.6f "
+                "error_type=%s error=%s",
+                lat,
+                lon,
+                type(exc).__name__,
+                exc,
+            )
         result = {}
 
     _geocode_cache[cache_key] = result
@@ -82,6 +118,7 @@ def _reverse_geocode(lat: float, lon: float) -> dict[str, str]:
 # places (~11 m resolution).  Survives the full ingest run so that images
 # from the same location share a single HTTP request.
 _geocode_cache: dict[tuple[float, float], dict[str, str]] = {}
+_geocode_warning_keys: set[str] = set()
 
 
 class MetadataExtractor:
@@ -98,8 +135,14 @@ class MetadataExtractor:
             with open(self.path, "rb") as f:
                 tags = exifread.process_file(f, details=False, strict=False)
             meta.update(self._parse_exifread_tags(tags))
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug(
+                "metadata extraction failed stage=exifread path=%s "
+                "error_type=%s error=%s",
+                self.path,
+                type(exc).__name__,
+                exc,
+            )
 
         # Fallback: piexif for JPEG
         if not meta and not self.image_data.get("is_raw"):
@@ -109,8 +152,14 @@ class MetadataExtractor:
                 if exif_bytes:
                     exif_dict = piexif.load(exif_bytes)
                     meta.update(self._parse_piexif(exif_dict))
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug(
+                    "metadata extraction failed stage=piexif path=%s "
+                    "error_type=%s error=%s",
+                    self.path,
+                    type(exc).__name__,
+                    exc,
+                )
 
         # DPI from Pillow
         if self.image_data.get("dpi"):
@@ -132,8 +181,16 @@ class MetadataExtractor:
             try:
                 geo = _reverse_geocode(meta["gps_latitude"], meta["gps_longitude"])
                 meta.update(geo)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning(
+                    "metadata geocode update failed path=%s lat=%.6f lon=%.6f "
+                    "error_type=%s error=%s",
+                    self.path,
+                    meta["gps_latitude"],
+                    meta["gps_longitude"],
+                    type(exc).__name__,
+                    exc,
+                )
 
         return meta
 
@@ -183,8 +240,13 @@ class MetadataExtractor:
         if iso:
             try:
                 m["iso"] = int(_safe_str(iso))
-            except ValueError:
-                pass
+            except ValueError as exc:
+                log.debug(
+                    "metadata ISO parse failed value=%r error_type=%s error=%s",
+                    iso,
+                    type(exc).__name__,
+                    exc,
+                )
 
         exp = tags.get("EXIF ExposureTime")
         if exp:
@@ -202,8 +264,14 @@ class MetadataExtractor:
         if fl35:
             try:
                 m["focal_length_35mm"] = int(_safe_str(fl35))
-            except ValueError:
-                pass
+            except ValueError as exc:
+                log.debug(
+                    "metadata focal_length_35mm parse failed value=%r "
+                    "error_type=%s error=%s",
+                    fl35,
+                    type(exc).__name__,
+                    exc,
+                )
 
         ev = tags.get("EXIF ExposureBiasValue")
         if ev:

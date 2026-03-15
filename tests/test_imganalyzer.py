@@ -109,6 +109,56 @@ class TestMetadataExtractor:
         result = MetadataExtractor(img_path, synthetic_image_data).extract()
         assert isinstance(result, dict)
 
+    def test_extract_logs_debug_on_exifread_failure(self, tmp_path, synthetic_image_data, caplog):
+        from PIL import Image
+        import imganalyzer.analysis.metadata as metadata_module
+
+        img_path = tmp_path / "bad-exif.jpg"
+        Image.fromarray(synthetic_image_data["rgb_array"]).save(str(img_path))
+
+        def _fail_process_file(*_args, **_kwargs):
+            raise ValueError("bad EXIF payload")
+
+        fake_exifread = types.SimpleNamespace(process_file=_fail_process_file)
+
+        with patch.dict(sys.modules, {"exifread": fake_exifread}):
+            with caplog.at_level(logging.DEBUG, logger=metadata_module.__name__):
+                result = metadata_module.MetadataExtractor(img_path, synthetic_image_data).extract()
+
+        assert isinstance(result, dict)
+        assert "stage=exifread" in caplog.text
+
+    def test_reverse_geocode_logs_warning_then_debug_for_repeat(self, caplog):
+        import imganalyzer.analysis.metadata as metadata_module
+
+        metadata_module._geocode_cache.clear()
+        metadata_module._geocode_warning_keys.clear()
+
+        def _fail_get(*_args, **_kwargs):
+            raise RuntimeError("network down")
+
+        fake_httpx = types.SimpleNamespace(get=_fail_get)
+
+        with patch.dict(sys.modules, {"httpx": fake_httpx}):
+            with caplog.at_level(logging.DEBUG, logger=metadata_module.__name__):
+                assert metadata_module._reverse_geocode(37.0, -122.0) == {}
+                metadata_module._geocode_cache.clear()  # force second request path
+                assert metadata_module._reverse_geocode(37.0, -122.0) == {}
+
+        warning_msgs = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "metadata reverse geocode failed" in r.getMessage()
+        ]
+        debug_msgs = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and "metadata reverse geocode failed (repeat)" in r.getMessage()
+        ]
+        assert len(warning_msgs) == 1
+        assert len(debug_msgs) >= 1
+
     def test_no_crash_on_missing_exif(self, tmp_path, synthetic_image_data):
         """Images without EXIF should return empty dict without crashing."""
         from PIL import Image
