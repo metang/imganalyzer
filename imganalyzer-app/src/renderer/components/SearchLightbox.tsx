@@ -372,11 +372,11 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
         break
       case 'ArrowUp':
         e.preventDefault()
-        if (zoom > 1) setOffset((o) => ({ ...o, y: o.y + 80 }))
+        if (zoom > 1) setOffset((o) => ({ ...o, y: o.y - 80 }))
         break
       case 'ArrowDown':
         e.preventDefault()
-        if (zoom > 1) setOffset((o) => ({ ...o, y: o.y - 80 }))
+        if (zoom > 1) setOffset((o) => ({ ...o, y: o.y + 80 }))
         break
       case '+':
       case '=':
