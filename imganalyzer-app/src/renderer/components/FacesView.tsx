@@ -2021,7 +2021,7 @@ export function FacesView() {
               <div className="p-4">
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-3">
                   {visibleUnlinkedClusters.map((cluster) => {
-                    const displayLabel = cluster.display_name || cluster.identity_name
+                    const displayLabel = 'Unknown'
                     const isSelected = expandedKey === `cluster:${cluster.cluster_id}`
 
                     return (
@@ -2155,7 +2155,7 @@ export function FacesView() {
         {expandedKey && visibleUnlinkedClusters.some((c) => `cluster:${c.cluster_id}` === expandedKey) && (() => {
           const cId = parseInt(expandedKey.replace('cluster:', ''), 10)
           const cl = visibleUnlinkedClusters.find((c) => c.cluster_id === cId)
-          const displayLabel = cl?.display_name || cl?.identity_name || `Cluster #${cId}`
+          const displayLabel = cl ? 'Unknown' : `Cluster #${cId}`
           return (
           <div className="shrink-0 border-t border-neutral-700 bg-neutral-900 max-h-[40vh] overflow-y-auto">
             <div className="px-4 py-2 border-b border-neutral-800/60 flex items-center justify-between sticky top-0 bg-neutral-900 z-10">
