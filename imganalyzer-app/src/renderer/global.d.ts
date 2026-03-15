@@ -409,6 +409,27 @@ export interface FaceOccurrence {
   identity_name: string
 }
 
+export interface FaceLinkSuggestion {
+  target_type: 'person' | 'alias'
+  label: string
+  person_id: number | null
+  cluster_id: number | null
+  score: number
+  representative_id: number | null
+  face_count: number
+  reason: string
+}
+
+export interface PersonLinkSuggestion {
+  cluster_id: number
+  label: string
+  score: number
+  representative_id: number | null
+  face_count: number
+  image_count: number
+  reason: string
+}
+
 declare global {
   interface Window {
     api: {
@@ -445,6 +466,7 @@ declare global {
       listFaceClusters(limit?: number, offset?: number): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; total_count: number; error?: string }>
       getFaceClusterImages(clusterId: number | null, identityName: string | null, limit?: number): Promise<{ occurrences: FaceOccurrence[]; error?: string }>
       relinkFaceCluster(clusterId: number, displayName: string | null, personId?: number | null, updatePerson?: boolean): Promise<{ ok: boolean; updated: number; error?: string }>
+      getClusterLinkSuggestions(clusterId: number, limit?: number): Promise<{ suggestions: FaceLinkSuggestion[]; error?: string }>
       getFaceCrop(occurrenceId: number): Promise<{ data?: string; error?: string }>
       getFaceCropBatch(ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }>
       runFaceClustering(threshold?: number): Promise<{ started: boolean; error?: string }>
@@ -459,6 +481,7 @@ declare global {
       linkClusterToPerson(clusterId: number, personId: number): Promise<{ ok: boolean; updated: number; error?: string }>
       unlinkClusterFromPerson(clusterId: number): Promise<{ ok: boolean; updated: number; error?: string }>
       getPersonClusters(personId: number): Promise<{ clusters: PersonCluster[]; error?: string }>
+      getPersonLinkSuggestions(personId: number, limit?: number): Promise<{ suggestions: PersonLinkSuggestion[]; error?: string }>
 
       // Batch processing
       batchIngest(

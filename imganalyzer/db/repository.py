@@ -649,6 +649,265 @@ class Repository:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def suggest_person_link_clusters(
+        self,
+        person_id: int,
+        *,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        """Rank unlinked clusters by likely match against ``person_id`` embeddings."""
+        if limit <= 0 or not self._table_exists("face_occurrences"):
+            return []
+
+        import numpy as _np
+
+        def _centroid(blobs: list[bytes]) -> _np.ndarray | None:
+            vectors: list[_np.ndarray] = []
+            for blob in blobs:
+                vec = _np.frombuffer(blob, dtype=_np.float32)
+                if vec.size == 0:
+                    continue
+                norm = float(_np.linalg.norm(vec))
+                if norm <= 0.0:
+                    continue
+                vectors.append((vec / norm).astype(_np.float32))
+            if not vectors:
+                return None
+            center = _np.vstack(vectors).mean(axis=0).astype(_np.float32)
+            center_norm = float(_np.linalg.norm(center))
+            if center_norm <= 0.0:
+                return None
+            return center / center_norm
+
+        person_rows = self.conn.execute(
+            """
+            SELECT embedding
+            FROM face_occurrences
+            WHERE person_id = ?
+              AND embedding IS NOT NULL
+            """,
+            [person_id],
+        ).fetchall()
+        person_centroid = _centroid([row["embedding"] for row in person_rows])
+        if person_centroid is None:
+            return []
+
+        clusters, _ = self.list_face_clusters(limit=0, offset=0)
+        candidate_meta: dict[int, dict[str, Any]] = {}
+        for cluster in clusters:
+            cluster_id = cluster.get("cluster_id")
+            if cluster_id is None or cluster.get("person_id") is not None:
+                continue
+            candidate_meta[int(cluster_id)] = cluster
+        if not candidate_meta:
+            return []
+
+        candidate_cluster_ids = sorted(candidate_meta.keys())
+        placeholders = ",".join("?" for _ in candidate_cluster_ids)
+        candidate_rows = self.conn.execute(
+            f"""
+            SELECT cluster_id, embedding
+            FROM face_occurrences
+            WHERE cluster_id IN ({placeholders})
+              AND person_id IS NULL
+              AND embedding IS NOT NULL
+            """,
+            candidate_cluster_ids,
+        ).fetchall()
+
+        candidate_embeddings: dict[int, list[bytes]] = {}
+        for row in candidate_rows:
+            cluster_id = int(row["cluster_id"])
+            candidate_embeddings.setdefault(cluster_id, []).append(row["embedding"])
+
+        suggestions: list[dict[str, Any]] = []
+        for cluster_id, blobs in candidate_embeddings.items():
+            centroid = _centroid(blobs)
+            meta = candidate_meta.get(cluster_id)
+            if centroid is None or meta is None:
+                continue
+
+            score = float(_np.dot(person_centroid, centroid))
+            display_name = meta.get("display_name")
+            label = str(display_name) if display_name else "Unknown"
+            suggestions.append(
+                {
+                    "cluster_id": cluster_id,
+                    "label": label,
+                    "score": score,
+                    "representative_id": (
+                        int(meta["representative_id"])
+                        if meta.get("representative_id") is not None
+                        else None
+                    ),
+                    "face_count": int(meta.get("face_count") or 0),
+                    "image_count": int(meta.get("image_count") or 0),
+                    "reason": "Similarity to person-linked face embeddings",
+                }
+            )
+
+        suggestions.sort(
+            key=lambda item: (float(item["score"]), int(item["face_count"])),
+            reverse=True,
+        )
+        return suggestions[:limit]
+
+    def suggest_cluster_link_targets(
+        self,
+        cluster_id: int,
+        *,
+        limit: int = 12,
+        include_persons: bool = True,
+        include_aliases: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Rank likely person/alias targets for ``cluster_id`` by embedding similarity."""
+        if limit <= 0 or not self._table_exists("face_occurrences"):
+            return []
+
+        import numpy as _np
+
+        def _centroid(blobs: list[bytes]) -> _np.ndarray | None:
+            vectors: list[_np.ndarray] = []
+            for blob in blobs:
+                vec = _np.frombuffer(blob, dtype=_np.float32)
+                if vec.size == 0:
+                    continue
+                norm = float(_np.linalg.norm(vec))
+                if norm <= 0.0:
+                    continue
+                vectors.append((vec / norm).astype(_np.float32))
+            if not vectors:
+                return None
+            center = _np.vstack(vectors).mean(axis=0).astype(_np.float32)
+            center_norm = float(_np.linalg.norm(center))
+            if center_norm <= 0.0:
+                return None
+            return center / center_norm
+
+        source_rows = self.conn.execute(
+            """
+            SELECT embedding
+            FROM face_occurrences
+            WHERE cluster_id = ?
+              AND embedding IS NOT NULL
+            """,
+            [cluster_id],
+        ).fetchall()
+        source_blobs = [row["embedding"] for row in source_rows]
+        source_centroid = _centroid(source_blobs)
+        if source_centroid is None:
+            return []
+
+        suggestions: list[dict[str, Any]] = []
+
+        if include_persons and self._table_exists("face_persons"):
+            person_meta = {int(row["id"]): row for row in self.list_persons()}
+            person_rows = self.conn.execute(
+                """
+                SELECT person_id, embedding
+                FROM face_occurrences
+                WHERE person_id IS NOT NULL
+                  AND embedding IS NOT NULL
+                  AND (cluster_id IS NULL OR cluster_id != ?)
+                """,
+                [cluster_id],
+            ).fetchall()
+
+            person_embeddings: dict[int, list[bytes]] = {}
+            for row in person_rows:
+                person_id = int(row["person_id"])
+                person_embeddings.setdefault(person_id, []).append(row["embedding"])
+
+            for person_id, blobs in person_embeddings.items():
+                centroid = _centroid(blobs)
+                meta = person_meta.get(person_id)
+                if centroid is None or meta is None:
+                    continue
+                score = float(_np.dot(source_centroid, centroid))
+                suggestions.append(
+                    {
+                        "target_type": "person",
+                        "label": str(meta["name"]),
+                        "person_id": person_id,
+                        "cluster_id": None,
+                        "score": score,
+                        "representative_id": (
+                            int(meta["representative_id"])
+                            if meta.get("representative_id") is not None
+                            else None
+                        ),
+                        "face_count": int(meta.get("face_count") or 0),
+                        "reason": "Similarity to person-linked face embeddings",
+                    }
+                )
+
+        if include_aliases:
+            clusters, _ = self.list_face_clusters(limit=0, offset=0)
+            alias_meta: dict[int, dict[str, Any]] = {}
+            for cluster in clusters:
+                candidate_cluster_id = cluster.get("cluster_id")
+                display_name = cluster.get("display_name")
+                if (
+                    candidate_cluster_id is None
+                    or int(candidate_cluster_id) == cluster_id
+                    or not display_name
+                ):
+                    continue
+                alias_meta[int(candidate_cluster_id)] = cluster
+
+            if alias_meta:
+                candidate_cluster_ids = sorted(alias_meta.keys())
+                placeholders = ",".join("?" for _ in candidate_cluster_ids)
+                alias_rows = self.conn.execute(
+                    f"""
+                    SELECT cluster_id, embedding
+                    FROM face_occurrences
+                    WHERE cluster_id IN ({placeholders})
+                      AND embedding IS NOT NULL
+                    """,
+                    candidate_cluster_ids,
+                ).fetchall()
+
+                alias_embeddings: dict[int, list[bytes]] = {}
+                for row in alias_rows:
+                    candidate_cluster_id = int(row["cluster_id"])
+                    alias_embeddings.setdefault(candidate_cluster_id, []).append(
+                        row["embedding"]
+                    )
+
+                for candidate_cluster_id, blobs in alias_embeddings.items():
+                    centroid = _centroid(blobs)
+                    meta = alias_meta.get(candidate_cluster_id)
+                    if centroid is None or meta is None:
+                        continue
+                    score = float(_np.dot(source_centroid, centroid))
+                    suggestions.append(
+                        {
+                            "target_type": "alias",
+                            "label": str(meta["display_name"]),
+                            "person_id": (
+                                int(meta["person_id"])
+                                if meta.get("person_id") is not None
+                                else None
+                            ),
+                            "cluster_id": candidate_cluster_id,
+                            "score": score,
+                            "representative_id": (
+                                int(meta["representative_id"])
+                                if meta.get("representative_id") is not None
+                                else None
+                            ),
+                            "face_count": int(meta.get("face_count") or 0),
+                            "reason": "Similarity to labeled cluster embeddings",
+                        }
+                    )
+
+        suggestions.sort(
+            key=lambda item: (float(item["score"]), int(item["face_count"])),
+            reverse=True,
+        )
+        return suggestions[:limit]
+
     def auto_assign_persons_after_recluster(self) -> int:
         """Propagate person_id within new clusters by majority vote.
 

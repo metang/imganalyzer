@@ -184,6 +184,24 @@ contextBridge.exposeInMainWorld('api', {
   relinkFaceCluster: (clusterId: number, displayName: string | null, personId?: number | null, updatePerson?: boolean): Promise<{ ok: boolean; updated: number; error?: string }> =>
     ipcRenderer.invoke('faces:clusterRelink', clusterId, displayName, personId ?? null, updatePerson ?? false),
 
+  getClusterLinkSuggestions: (
+    clusterId: number,
+    limit?: number,
+  ): Promise<{
+    suggestions: Array<{
+      target_type: 'person' | 'alias'
+      label: string
+      person_id: number | null
+      cluster_id: number | null
+      score: number
+      representative_id: number | null
+      face_count: number
+      reason: string
+    }>
+    error?: string
+  }> =>
+    ipcRenderer.invoke('faces:clusterLinkSuggestions', clusterId, limit),
+
   getFaceCrop: (occurrenceId: number): Promise<{ data?: string; error?: string }> =>
     ipcRenderer.invoke('faces:crop', occurrenceId),
 
@@ -223,4 +241,7 @@ contextBridge.exposeInMainWorld('api', {
 
   getPersonClusters: (personId: number): Promise<{ clusters: Array<{ cluster_id: number; face_count: number; image_count: number; label: string; representative_id: number | null }>; error?: string }> =>
     ipcRenderer.invoke('faces:personClusters', personId),
+
+  getPersonLinkSuggestions: (personId: number, limit?: number): Promise<{ suggestions: Array<{ cluster_id: number; label: string; score: number; representative_id: number | null; face_count: number; image_count: number; reason: string }>; error?: string }> =>
+    ipcRenderer.invoke('faces:personLinkSuggestions', personId, limit),
 })

@@ -1,5 +1,14 @@
 import { useState, useEffect, useCallback, useRef, memo, useMemo } from 'react'
-import type { FaceCluster, FaceOccurrence, FaceSummary, FaceImage, FacePerson, PersonCluster } from '../global'
+import type {
+  FaceCluster,
+  FaceOccurrence,
+  FaceSummary,
+  FaceImage,
+  FacePerson,
+  PersonCluster,
+  FaceLinkSuggestion,
+  PersonLinkSuggestion,
+} from '../global'
 
 // ── Thumbnail cache & batch fetcher ───────────────────────────────────────────
 
@@ -324,6 +333,10 @@ export function FacesView() {
   // Person state
   const [persons, setPersons] = useState<FacePerson[]>([])
   const [personClusters, setPersonClusters] = useState<Record<number, PersonCluster[]>>({})
+  const [personLinkSuggestions, setPersonLinkSuggestions] = useState<Record<number, PersonLinkSuggestion[]>>({})
+  const [loadingPersonLinkSuggestionsId, setLoadingPersonLinkSuggestionsId] = useState<number | null>(null)
+  const [selectedSuggestedClusterIds, setSelectedSuggestedClusterIds] = useState<number[]>([])
+  const [confirmingSuggestedLinks, setConfirmingSuggestedLinks] = useState(false)
   const [expandedPersonId, setExpandedPersonId] = useState<number | null>(null)
 
   // Person editing
@@ -351,6 +364,7 @@ export function FacesView() {
   const [relinkPersons, setRelinkPersons] = useState<FacePerson[]>([])
   const [relinkFaceTargets, setRelinkFaceTargets] = useState<FaceSummary[]>([])
   const [relinkClusterTargets, setRelinkClusterTargets] = useState<FaceCluster[]>([])
+  const [relinkSuggestions, setRelinkSuggestions] = useState<FaceLinkSuggestion[]>([])
   const [unlinkPersonOnAliasRelink, setUnlinkPersonOnAliasRelink] = useState(false)
   const relinkSearchRef = useRef<HTMLInputElement>(null)
 
@@ -447,6 +461,10 @@ export function FacesView() {
   useEffect(() => {
     loadData()
   }, [loadData])
+
+  useEffect(() => {
+    setSelectedSuggestedClusterIds([])
+  }, [expandedPersonId])
 
   // ── Clustering ────────────────────────────────────────────────────────────
 
@@ -596,6 +614,7 @@ export function FacesView() {
     setRelinkPersons([])
     setRelinkFaceTargets([])
     setRelinkClusterTargets([])
+    setRelinkSuggestions([])
     setUnlinkPersonOnAliasRelink(false)
   }, [])
 
@@ -612,10 +631,11 @@ export function FacesView() {
     setUnlinkPersonOnAliasRelink(false)
 
     try {
-      const [personsResult, faceResult, clusterResult] = await Promise.all([
+      const [personsResult, faceResult, clusterResult, suggestionResult] = await Promise.all([
         window.api.listPersons(),
         window.api.listFaces(),
         window.api.listFaceClusters(),
+        window.api.getClusterLinkSuggestions(cluster.cluster_id, 12),
       ])
       if (personsResult.error) {
         setError(personsResult.error)
@@ -636,6 +656,12 @@ export function FacesView() {
       setRelinkPersons(personsResult.persons)
       setRelinkFaceTargets(faceResult.faces)
       setRelinkClusterTargets(clusterResult.clusters)
+      if (suggestionResult.error) {
+        setError(suggestionResult.error)
+        setRelinkSuggestions([])
+      } else {
+        setRelinkSuggestions(suggestionResult.suggestions)
+      }
     } catch (err) {
       setError(String(err))
       closeRelinkDialog()
@@ -769,6 +795,31 @@ export function FacesView() {
     }
   }, [applyClusterRelink, closeRelinkDialog, loadData, relinkingCluster])
 
+  const loadPersonLinkSuggestions = useCallback(
+    async (personId: number, force = false) => {
+      if (!force && personLinkSuggestions[personId] !== undefined) {
+        return
+      }
+
+      setLoadingPersonLinkSuggestionsId(personId)
+      try {
+        const result = await window.api.getPersonLinkSuggestions(personId, 12)
+        if (result.error) {
+          setError(result.error)
+          setPersonLinkSuggestions((prev) => ({ ...prev, [personId]: [] }))
+          return
+        }
+        setPersonLinkSuggestions((prev) => ({ ...prev, [personId]: result.suggestions }))
+      } catch (err) {
+        setError(String(err))
+        setPersonLinkSuggestions((prev) => ({ ...prev, [personId]: [] }))
+      } finally {
+        setLoadingPersonLinkSuggestionsId((current) => (current === personId ? null : current))
+      }
+    },
+    [personLinkSuggestions]
+  )
+
   const togglePersonExpand = useCallback(
     async (personId: number) => {
       if (expandedPersonId === personId) {
@@ -776,37 +827,75 @@ export function FacesView() {
         return
       }
       setExpandedPersonId(personId)
+      void loadPersonLinkSuggestions(personId)
 
       // Load clusters for this person if not cached
-      let pClusters = personClusters[personId]
-      if (!pClusters) {
-        const result = await window.api.getPersonClusters(personId)
-        if (!result.error) {
-          pClusters = result.clusters
-          setPersonClusters((prev) => ({ ...prev, [personId]: pClusters! }))
-        }
+      const pClusters = personClusters[personId]
+      if (pClusters) {
+        return
       }
 
-      // Load all face occurrences for this person (all clusters merged)
-      const personKey = `person:${personId}`
-      if (pClusters && !clusterOccurrences[personKey]) {
-        setLoadingDetail(personKey)
-        try {
-          const allOccs: FaceOccurrence[] = []
-          for (const pc of pClusters) {
-            const r = await window.api.getFaceClusterImages(pc.cluster_id, null)
-            if (!r.error) allOccs.push(...r.occurrences)
-          }
-          setClusterOccurrences((prev) => ({ ...prev, [personKey]: allOccs }))
-        } catch {
-          // silently ignore
-        } finally {
-          setLoadingDetail(null)
+      const loadingKey = `person-clusters:${personId}`
+      setLoadingDetail(loadingKey)
+      try {
+        const result = await window.api.getPersonClusters(personId)
+        if (!result.error) {
+          setPersonClusters((prev) => ({ ...prev, [personId]: result.clusters }))
         }
+      } catch {
+        // silently ignore
+      } finally {
+        setLoadingDetail(null)
       }
     },
-    [expandedPersonId, personClusters, clusterOccurrences]
+    [expandedPersonId, loadPersonLinkSuggestions, personClusters]
   )
+
+  const toggleSuggestedClusterSelection = useCallback((clusterId: number) => {
+    setSelectedSuggestedClusterIds((prev) =>
+      prev.includes(clusterId)
+        ? prev.filter((id) => id !== clusterId)
+        : [...prev, clusterId]
+    )
+  }, [])
+
+  const handleConfirmSuggestedLinks = useCallback(async () => {
+    if (expandedPersonId == null) {
+      return
+    }
+
+    const suggestions = personLinkSuggestions[expandedPersonId] ?? []
+    const suggestedIds = new Set(suggestions.map((suggestion) => suggestion.cluster_id))
+    const selectedIds = [...new Set(selectedSuggestedClusterIds)].filter((clusterId) =>
+      suggestedIds.has(clusterId)
+    )
+    if (selectedIds.length === 0) {
+      return
+    }
+
+    setConfirmingSuggestedLinks(true)
+    try {
+      for (const clusterId of selectedIds) {
+        const result = await window.api.linkClusterToPerson(clusterId, expandedPersonId)
+        if (result.error || !result.ok) {
+          throw new Error(result.error ?? `Failed to link cluster ${clusterId}`)
+        }
+      }
+      setSelectedSuggestedClusterIds([])
+      setError(null)
+      await loadData()
+
+      const personClusterResult = await window.api.getPersonClusters(expandedPersonId)
+      if (!personClusterResult.error) {
+        setPersonClusters((prev) => ({ ...prev, [expandedPersonId]: personClusterResult.clusters }))
+      }
+      await loadPersonLinkSuggestions(expandedPersonId, true)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setConfirmingSuggestedLinks(false)
+    }
+  }, [expandedPersonId, loadData, loadPersonLinkSuggestions, personLinkSuggestions, selectedSuggestedClusterIds])
 
   // ── Expand / collapse ─────────────────────────────────────────────────────
 
@@ -1245,6 +1334,35 @@ export function FacesView() {
     )
   }
 
+  const getRelinkClusterFromPersonCluster = useCallback(
+    (cluster: PersonCluster, personId: number): FaceCluster => {
+      const existing = clusters.find((item) => item.cluster_id === cluster.cluster_id)
+      if (existing) {
+        return existing
+      }
+
+      const trimmedLabel = cluster.label.trim()
+      const inferredDisplayName =
+        trimmedLabel
+        && trimmedLabel.toLowerCase() !== 'unknown'
+        && !/^cluster\s+\d+$/i.test(trimmedLabel)
+          ? trimmedLabel
+          : null
+
+      return {
+        cluster_id: cluster.cluster_id,
+        identity_name: inferredDisplayName ?? `cluster-${cluster.cluster_id}`,
+        display_name: inferredDisplayName,
+        identity_id: null,
+        image_count: cluster.image_count,
+        face_count: cluster.face_count,
+        representative_id: cluster.representative_id,
+        person_id: personId,
+      }
+    },
+    [clusters]
+  )
+
   const renderEditButton = (
     key: string,
     displayName: string | null,
@@ -1650,6 +1768,66 @@ export function FacesView() {
                   </div>
                 ) : (
                   <div className="flex-1 overflow-y-auto">
+                    <div className="px-5 pt-4 pb-2 text-[11px] uppercase tracking-wide text-neutral-500">
+                      Likely matches
+                    </div>
+                    <div className="px-4 space-y-2">
+                      {relinkSuggestions.map((suggestion) => {
+                        const isPersonSuggestion = suggestion.target_type === 'person'
+                        const selected = isPersonSuggestion
+                          ? relinkSelection?.type === 'person'
+                            && relinkSelection.personId === suggestion.person_id
+                          : relinkSelection?.type === 'alias'
+                            && relinkSelection.label === suggestion.label
+
+                        return (
+                          <button
+                            key={`suggestion:${suggestion.target_type}:${suggestion.person_id ?? suggestion.cluster_id ?? suggestion.label}`}
+                            onClick={() => {
+                              if (isPersonSuggestion) {
+                                if (suggestion.person_id == null) {
+                                  return
+                                }
+                                setRelinkSelection({
+                                  type: 'person',
+                                  personId: suggestion.person_id,
+                                  label: suggestion.label,
+                                })
+                                setUnlinkPersonOnAliasRelink(false)
+                                return
+                              }
+                              setRelinkSelection({ type: 'alias', label: suggestion.label })
+                            }}
+                            className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${
+                              selected
+                                ? 'border-emerald-600 bg-emerald-950/25'
+                                : 'border-neutral-800 bg-neutral-950/40 hover:bg-neutral-800/50'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3">
+                              {suggestion.representative_id != null ? (
+                                <FaceCropThumbnail occurrenceId={suggestion.representative_id} size="sm" />
+                              ) : (
+                                <div className="w-12 h-12 rounded bg-neutral-800" />
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm text-neutral-100 truncate">{suggestion.label}</p>
+                                <p className="text-xs text-neutral-500 truncate">
+                                  {isPersonSuggestion ? 'Person' : 'Alias'} · similarity {suggestion.score.toFixed(3)} · {suggestion.face_count} faces
+                                </p>
+                                <p className="text-[11px] text-neutral-600 truncate">{suggestion.reason}</p>
+                              </div>
+                            </div>
+                          </button>
+                        )
+                      })}
+                      {relinkSuggestions.length === 0 && (
+                        <div className="rounded-lg border border-dashed border-neutral-800 px-3 py-4 text-xs text-neutral-500">
+                          No likely matches available yet.
+                        </div>
+                      )}
+                    </div>
+
                     <div className="px-5 pt-4 pb-2 text-[11px] uppercase tracking-wide text-neutral-500">
                       People
                     </div>
@@ -2075,101 +2253,271 @@ export function FacesView() {
         {/* Bottom drawer for expanded person or cluster details */}
         {expandedPersonId !== null && (() => {
           const pClusters = personClusters[expandedPersonId] ?? []
+          const suggestedClusters = personLinkSuggestions[expandedPersonId] ?? []
           const person = persons.find((p) => p.id === expandedPersonId)
-          const personKey = `person:${expandedPersonId}`
-          const allOccs = clusterOccurrences[personKey]
-          const isLoading = loadingDetail === personKey
+          const isLoading = loadingDetail === `person-clusters:${expandedPersonId}`
+          const isLoadingSuggestions = loadingPersonLinkSuggestionsId === expandedPersonId
+          const selectedSuggestedCount = suggestedClusters.reduce(
+            (count, suggestion) =>
+              selectedSuggestedClusterIds.includes(suggestion.cluster_id) ? count + 1 : count,
+            0,
+          )
+          const allSuggestedSelected =
+            suggestedClusters.length > 0
+            && selectedSuggestedCount === suggestedClusters.length
 
           return (
             <div className="shrink-0 border-t border-cyan-800/50 bg-neutral-900 max-h-[40vh] overflow-y-auto">
               <div className="px-4 py-2 border-b border-neutral-800/60 flex items-center justify-between sticky top-0 bg-neutral-900 z-10">
                 <span className="text-xs text-cyan-300 font-medium">
-                  {person?.name} — {pClusters.length} cluster{pClusters.length !== 1 ? 's' : ''}
-                  {allOccs ? ` · ${allOccs.length} faces` : ''}
+                  {person?.name} — {pClusters.length} linked
+                  {suggestedClusters.length > 0 && ` · ${suggestedClusters.length} suggested`}
                 </span>
-                <button onClick={() => setExpandedPersonId(null)} className="text-neutral-500 hover:text-neutral-300 text-xs">Close</button>
+                <div className="flex items-center gap-2">
+                  <span className="hidden sm:inline-flex px-1.5 py-0.5 rounded border border-cyan-700/50 bg-cyan-950/25 text-[10px] text-cyan-200">
+                    Linked
+                  </span>
+                  <span className="hidden sm:inline-flex px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-950/20 text-[10px] text-amber-200">
+                    Suggested
+                  </span>
+                  <button onClick={() => setExpandedPersonId(null)} className="text-neutral-500 hover:text-neutral-300 text-xs">Close</button>
+                </div>
               </div>
 
               {isLoading && (
                 <div className="px-4 py-3 flex items-center gap-2 text-xs text-neutral-500">
                   <span className="w-3 h-3 border border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
-                  Loading faces...
+                  Loading clusters...
                 </div>
-              )}
-              {allOccs && allOccs.length > 0 && (
-                <div className="px-4 py-3">
-                  <div className="flex flex-wrap gap-2">
-                    {allOccs.map((occ) => (
-                      <div
-                        key={occ.id}
-                        className="group relative cursor-pointer"
-                        title={`Click to open · ${occ.file_path.split(/[/\\]/).pop()}${occ.age ? ` | Age: ~${occ.age}` : ''}${occ.gender ? ` | ${occ.gender}` : ''}`}
-                        onClick={() => setLightboxPath(occ.file_path)}
-                      >
-                        <FaceCropThumbnail occurrenceId={occ.id} size="lg" />
-                        <div className="absolute inset-x-0 bottom-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity px-1 py-0.5 rounded-b">
-                          <p className="text-[10px] text-neutral-300 truncate">
-                            {occ.file_path.split(/[/\\]/).pop()}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {allOccs && allOccs.length === 0 && (
-                <div className="px-4 py-3 text-xs text-neutral-600">No face occurrences found.</div>
               )}
 
-              {pClusters.length > 0 && (
-                <div className="border-t border-neutral-800/60">
-                  <div className="px-4 py-1.5 text-[10px] text-neutral-500 uppercase tracking-wide">
-                    Clusters
+              <div className="p-4 space-y-4">
+                <div>
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-[11px] uppercase tracking-wide text-amber-300/90">
+                      Suggested links
+                    </p>
+                    <div className="flex items-center gap-2">
+                      {isLoadingSuggestions && (
+                        <span className="inline-flex items-center gap-1 text-[11px] text-neutral-500">
+                          <span className="w-3 h-3 border border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
+                          Scoring...
+                        </span>
+                      )}
+                      {suggestedClusters.length > 0 && (
+                        <>
+                          <button
+                            onClick={() => {
+                              if (allSuggestedSelected) {
+                                setSelectedSuggestedClusterIds([])
+                                return
+                              }
+                              setSelectedSuggestedClusterIds(
+                                suggestedClusters.map((suggestion) => suggestion.cluster_id)
+                              )
+                            }}
+                            disabled={confirmingSuggestedLinks}
+                            className="px-2 py-1 text-[11px] rounded border border-neutral-700 text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
+                          >
+                            {allSuggestedSelected ? 'Clear' : 'Select all'}
+                          </button>
+                          <button
+                            onClick={() => void handleConfirmSuggestedLinks()}
+                            disabled={selectedSuggestedCount === 0 || confirmingSuggestedLinks}
+                            className="px-2 py-1 text-[11px] rounded border border-emerald-700/60 bg-emerald-950/30 text-emerald-200 hover:bg-emerald-900/40 disabled:opacity-40"
+                          >
+                            {confirmingSuggestedLinks
+                              ? 'Linking...'
+                              : `Confirm selected (${selectedSuggestedCount})`}
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                  {pClusters.map((pc) => {
-                    const sourceCluster = clusters.find((cluster) => cluster.cluster_id === pc.cluster_id)
-                    return (
-                      <div key={pc.cluster_id} className="flex items-center gap-2 px-4 py-1 text-xs hover:bg-neutral-800/30">
-                        {pc.representative_id != null && (
-                          <FaceCropThumbnail occurrenceId={pc.representative_id} size="sm" />
-                        )}
-                        <span className="flex-1 text-neutral-300 truncate">{pc.label}</span>
-                        <span className="text-neutral-500">{pc.face_count} faces</span>
-                        {sourceCluster && renderRelinkButton(sourceCluster)}
-                        <button
-                          onClick={() => handleUnlinkCluster(pc.cluster_id)}
-                          className="text-neutral-600 hover:text-red-400 transition-colors"
-                          title="Unlink from person"
-                        >
-                          Unlink
-                        </button>
-                      </div>
-                    )
-                  })}
+                  {suggestedClusters.length > 0 ? (
+                    <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3">
+                      {suggestedClusters.map((suggestion) => {
+                        const sourceCluster = clusters.find(
+                          (cluster) => cluster.cluster_id === suggestion.cluster_id
+                        ) ?? {
+                          cluster_id: suggestion.cluster_id,
+                          identity_name: suggestion.label || `cluster-${suggestion.cluster_id}`,
+                          display_name: suggestion.label || null,
+                          identity_id: null,
+                          image_count: suggestion.image_count,
+                          face_count: suggestion.face_count,
+                          representative_id: suggestion.representative_id,
+                          person_id: null,
+                        }
+                        const key = `cluster:${suggestion.cluster_id}`
+                        const isSelected = expandedKey === key
+                        const isBatchSelected = selectedSuggestedClusterIds.includes(
+                          suggestion.cluster_id
+                        )
+
+                        return (
+                          <div
+                            key={`suggested:${suggestion.cluster_id}`}
+                            className={`relative rounded-lg border transition-colors cursor-pointer ${
+                              isSelected
+                                ? 'border-amber-600/70 bg-amber-900/20'
+                                : 'border-amber-800/50 bg-amber-950/10 hover:bg-amber-900/15'
+                            }`}
+                            onClick={() => toggleExpand(key, sourceCluster, null)}
+                          >
+                            <div className="absolute top-1 left-1 rounded px-1.5 py-0.5 text-[10px] text-amber-100 bg-amber-900/60 border border-amber-700/60 z-10">
+                              Suggested
+                            </div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                toggleSuggestedClusterSelection(suggestion.cluster_id)
+                              }}
+                              className={`absolute top-1 right-1 z-10 rounded px-1.5 py-0.5 text-[10px] border ${
+                                isBatchSelected
+                                  ? 'border-emerald-500/70 bg-emerald-900/70 text-emerald-100'
+                                  : 'border-neutral-600 bg-black/55 text-neutral-200'
+                              }`}
+                            >
+                              {isBatchSelected ? 'Selected' : 'Select'}
+                            </button>
+                            <div className="aspect-square w-full overflow-hidden rounded-t-lg bg-neutral-800">
+                              {suggestion.representative_id != null ? (
+                                <FaceCropThumbnail occurrenceId={suggestion.representative_id} size="fill" />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center">
+                                  <svg className="w-10 h-10 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                                  </svg>
+                                </div>
+                              )}
+                            </div>
+                            <div className="px-2 py-1.5">
+                              <p className="text-xs text-neutral-100 truncate">
+                                {suggestion.label || 'Unknown'}
+                              </p>
+                              <p className="text-[10px] text-neutral-400 mt-0.5">
+                                {suggestion.face_count} faces · score {suggestion.score.toFixed(3)}
+                              </p>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : !isLoadingSuggestions ? (
+                    <p className="text-xs text-neutral-600">
+                      No suggested links from current embeddings.
+                    </p>
+                  ) : null}
                 </div>
-              )}
+
+                <div className={suggestedClusters.length > 0 ? 'pt-4 border-t border-neutral-800/70' : ''}>
+                  <p className="mb-2 text-[11px] uppercase tracking-wide text-cyan-300/90">
+                    Confirmed links
+                  </p>
+                  {pClusters.length > 0 ? (
+                    <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3">
+                      {pClusters.map((pc) => {
+                        const relinkCluster = getRelinkClusterFromPersonCluster(pc, expandedPersonId)
+                        const key = `cluster:${pc.cluster_id}`
+                        const isSelected = expandedKey === key
+                        return (
+                          <div
+                            key={pc.cluster_id}
+                            className={`group relative rounded-lg border transition-colors cursor-pointer ${
+                              isSelected
+                                ? 'border-cyan-600/70 bg-cyan-900/20'
+                                : 'border-cyan-800/50 bg-cyan-950/10 hover:bg-cyan-900/15'
+                            }`}
+                            onClick={() => toggleExpand(key, relinkCluster, null)}
+                          >
+                            <div className="absolute top-1 left-1 rounded px-1.5 py-0.5 text-[10px] text-cyan-100 bg-cyan-900/60 border border-cyan-700/60 z-10">
+                              Linked
+                            </div>
+                            <div className="aspect-square w-full overflow-hidden rounded-t-lg bg-neutral-800">
+                              {pc.representative_id != null ? (
+                                <FaceCropThumbnail occurrenceId={pc.representative_id} size="fill" />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center">
+                                  <svg className="w-10 h-10 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                                  </svg>
+                                </div>
+                              )}
+                            </div>
+                            <div className="px-2 py-1.5">
+                              <p className="text-xs text-neutral-100 truncate">{pc.label}</p>
+                              <p className="text-[10px] text-neutral-400 mt-0.5">
+                                {pc.face_count} faces · {pc.image_count} images
+                              </p>
+                            </div>
+                            <div
+                              className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {renderRelinkButton(relinkCluster)}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  void handleUnlinkCluster(pc.cluster_id)
+                                }}
+                                className="px-1.5 py-0.5 rounded bg-black/60 text-[10px] text-neutral-300 hover:text-red-400 transition-colors"
+                                title="Unlink from person"
+                              >
+                                Unlink
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : !isLoading ? (
+                    <p className="text-xs text-neutral-600">No confirmed links yet.</p>
+                  ) : null}
+                </div>
+              </div>
             </div>
           )
         })()}
 
-        {expandedKey && visibleUnlinkedClusters.some((c) => `cluster:${c.cluster_id}` === expandedKey) && (() => {
+        {expandedKey?.startsWith('cluster:') && (() => {
           const cId = parseInt(expandedKey.replace('cluster:', ''), 10)
-          const cl = visibleUnlinkedClusters.find((c) => c.cluster_id === cId)
-          const displayLabel = cl ? 'Unknown' : `Cluster #${cId}`
+          if (Number.isNaN(cId)) {
+            return null
+          }
+
+          const suggested = Object.values(personLinkSuggestions)
+            .flat()
+            .find((suggestion) => suggestion.cluster_id === cId)
+          const cl = clusters.find((cluster) => cluster.cluster_id === cId) ?? (
+            suggested
+              ? {
+                  cluster_id: suggested.cluster_id,
+                  identity_name: suggested.label || `cluster-${suggested.cluster_id}`,
+                  display_name: suggested.label || null,
+                  identity_id: null,
+                  image_count: suggested.image_count,
+                  face_count: suggested.face_count,
+                  representative_id: suggested.representative_id,
+                  person_id: null,
+                }
+              : null
+          )
+          const displayLabel = cl?.display_name || 'Unknown'
           return (
-          <div className="shrink-0 border-t border-neutral-700 bg-neutral-900 max-h-[40vh] overflow-y-auto">
-            <div className="px-4 py-2 border-b border-neutral-800/60 flex items-center justify-between sticky top-0 bg-neutral-900 z-10">
-              <span className="text-xs text-neutral-300 font-medium">{displayLabel}</span>
-              <div className="flex items-center gap-3">
-                {cl && renderRelinkButton(cl)}
-                <div className="relative">
-                  {renderLinkDropdown(cId)}
+            <div className="shrink-0 border-t border-neutral-700 bg-neutral-900 max-h-[40vh] overflow-y-auto">
+              <div className="px-4 py-2 border-b border-neutral-800/60 flex items-center justify-between sticky top-0 bg-neutral-900 z-10">
+                <span className="text-xs text-neutral-300 font-medium">{displayLabel}</span>
+                <div className="flex items-center gap-3">
+                  {cl && renderRelinkButton(cl)}
+                  <div className="relative">
+                    {renderLinkDropdown(cId)}
+                  </div>
+                  <button onClick={() => setExpandedKey(null)} className="text-neutral-500 hover:text-neutral-300 text-xs">Close</button>
                 </div>
-                <button onClick={() => setExpandedKey(null)} className="text-neutral-500 hover:text-neutral-300 text-xs">Close</button>
               </div>
+              {renderExpandedDetail(expandedKey)}
             </div>
-            {renderExpandedDetail(expandedKey)}
-          </div>
           )
         })()}
         </div>

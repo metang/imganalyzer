@@ -49,6 +49,17 @@ export interface FaceOccurrence {
   identity_name: string
 }
 
+export interface FaceLinkSuggestion {
+  target_type: 'person' | 'alias'
+  label: string
+  person_id: number | null
+  cluster_id: number | null
+  score: number
+  representative_id: number | null
+  face_count: number
+  reason: string
+}
+
 export interface FacePerson {
   id: number
   name: string
@@ -65,6 +76,16 @@ export interface PersonCluster {
   image_count: number
   label: string
   representative_id: number | null
+}
+
+export interface PersonLinkSuggestion {
+  cluster_id: number
+  label: string
+  score: number
+  representative_id: number | null
+  face_count: number
+  image_count: number
+  reason: string
 }
 
 // ── IPC Registration ──────────────────────────────────────────────────────────
@@ -187,6 +208,28 @@ export function registerFaceHandlers(): void {
         return { ok: true, updated: result.updated }
       } catch (err) {
         return { ok: false, updated: 0, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:clusterLinkSuggestions',
+    async (
+      _evt,
+      clusterId: number,
+      limit?: number,
+    ): Promise<{ suggestions: FaceLinkSuggestion[]; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/cluster-link-suggestions', {
+          cluster_id: clusterId,
+          limit: limit ?? 12,
+          include_persons: true,
+          include_aliases: true,
+        }) as { suggestions: FaceLinkSuggestion[] }
+        return { suggestions: result.suggestions }
+      } catch (err) {
+        return { suggestions: [], error: String(err) }
       }
     }
   )
@@ -351,6 +394,22 @@ export function registerFaceHandlers(): void {
         return { clusters: result.clusters }
       } catch (err) {
         return { clusters: [], error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personLinkSuggestions',
+    async (_evt, personId: number, limit?: number): Promise<{ suggestions: PersonLinkSuggestion[]; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/person-link-suggestions', {
+          person_id: personId,
+          limit: limit ?? 12,
+        }) as { suggestions: PersonLinkSuggestion[] }
+        return { suggestions: result.suggestions }
+      } catch (err) {
+        return { suggestions: [], error: String(err) }
       }
     }
   )

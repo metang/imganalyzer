@@ -52,6 +52,8 @@ Supported methods:
     faces/images    - Get images containing a face identity (one-shot)
     faces/set-alias - Set display name (alias) for a face identity (one-shot)
     faces/clusters  - List face clusters with counts (one-shot)
+    faces/cluster-link-suggestions - Suggest likely person/alias targets for a cluster (one-shot)
+    faces/person-link-suggestions - Suggest likely unlinked clusters for a person (one-shot)
     faces/cluster-images - Get face occurrences for a cluster (one-shot)
     faces/crop      - Crop a face from source image by occurrence ID (one-shot)
     faces/run-clustering - Run embedding-based face clustering (one-shot)
@@ -2671,6 +2673,26 @@ def _handle_faces_cluster_relink(params: dict) -> dict:
     return {"ok": True, "updated": updated}
 
 
+def _handle_faces_cluster_link_suggestions(params: dict) -> dict:
+    """Suggest likely person/alias targets for a cluster relink action."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+
+    cluster_id = int(params["cluster_id"])
+    limit = int(params.get("limit", 12))
+    limit = max(1, min(limit, 100))
+
+    suggestions = repo.suggest_cluster_link_targets(
+        cluster_id,
+        limit=limit,
+        include_persons=bool(params.get("include_persons", True)),
+        include_aliases=bool(params.get("include_aliases", True)),
+    )
+    return {"suggestions": suggestions}
+
+
 # ── Person (cross-age identity grouping) ─────────────────────────────────
 
 
@@ -2743,6 +2765,19 @@ def _handle_faces_person_clusters(params: dict) -> dict:
     repo = Repository(conn)
     clusters = repo.get_person_clusters(int(params["person_id"]))
     return {"clusters": clusters}
+
+
+def _handle_faces_person_link_suggestions(params: dict) -> dict:
+    """Suggest likely unlinked clusters for a person."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    person_id = int(params["person_id"])
+    limit = int(params.get("limit", 12))
+    limit = max(1, min(limit, 100))
+    suggestions = repo.suggest_person_link_clusters(person_id, limit=limit)
+    return {"suggestions": suggestions}
 
 
 def _handle_faces_cluster_images(params: dict) -> dict:
@@ -2950,6 +2985,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/set-alias": _handle_faces_set_alias,
     "faces/clusters": _handle_faces_clusters,
     "faces/cluster-relink": _handle_faces_cluster_relink,
+    "faces/cluster-link-suggestions": _handle_faces_cluster_link_suggestions,
     "faces/cluster-images": _handle_faces_cluster_images,
     "faces/crop": _handle_faces_crop,
     "faces/crop-batch": _handle_faces_crop_batch,
@@ -2960,6 +2996,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/person-link-cluster": _handle_faces_person_link,
     "faces/person-unlink-cluster": _handle_faces_person_unlink,
     "faces/person-clusters": _handle_faces_person_clusters,
+    "faces/person-link-suggestions": _handle_faces_person_link_suggestions,
 }
 
 # Methods that send their own result/error asynchronously (streaming).

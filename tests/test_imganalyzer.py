@@ -2446,6 +2446,161 @@ class TestFacePersons:
         occurrences = repo.get_cluster_occurrences(identity_name="alice", limit=10)
         assert [row["id"] for row in occurrences] == [110]
 
+    def test_suggest_cluster_link_targets_scores_persons_and_aliases(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        for i in range(1, 7):
+            conn.execute(
+                "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+                [i, f"/img/suggest_{i}.jpg", f"hash_suggest_{i}", 100],
+            )
+
+        def emb(values: list[float]) -> bytes:
+            return np.array(values, dtype=np.float32).tobytes()
+
+        likely_person_id = repo.create_person("Likely Person")
+        wrong_person_id = repo.create_person("Wrong Person")
+
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, person_id, identity_name, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 1, 0, emb([1.0, 0.0, 0.0]), 1, None, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (2, 1, 1, emb([0.98, 0.02, 0.0]), 1, None, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (3, 2, 0, emb([0.97, 0.03, 0.0]), 2, likely_person_id, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (4, 3, 0, emb([-1.0, 0.0, 0.0]), 3, wrong_person_id, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (5, 4, 0, emb([0.96, 0.04, 0.0]), 4, None, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (6, 5, 0, emb([-0.95, 0.05, 0.0]), 5, None, "Unknown", 0.0, 0.0, 2.0, 2.0),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO face_cluster_labels (cluster_id, display_name) VALUES (?, ?)",
+            [
+                (4, "Likely Alias"),
+                (5, "Wrong Alias"),
+            ],
+        )
+        conn.commit()
+
+        suggestions = repo.suggest_cluster_link_targets(1, limit=10)
+        assert suggestions
+
+        likely_person = next(
+            item
+            for item in suggestions
+            if item["target_type"] == "person" and item["person_id"] == likely_person_id
+        )
+        wrong_person = next(
+            item
+            for item in suggestions
+            if item["target_type"] == "person" and item["person_id"] == wrong_person_id
+        )
+        likely_alias = next(
+            item
+            for item in suggestions
+            if item["target_type"] == "alias" and item["cluster_id"] == 4
+        )
+        wrong_alias = next(
+            item
+            for item in suggestions
+            if item["target_type"] == "alias" and item["cluster_id"] == 5
+        )
+
+        assert likely_person["score"] > wrong_person["score"]
+        assert likely_alias["score"] > wrong_alias["score"]
+        assert suggestions[0]["label"] in {"Likely Person", "Likely Alias"}
+        assert likely_person["representative_id"] is not None
+        assert likely_alias["representative_id"] is not None
+        assert likely_person["reason"]
+
+    def test_suggest_cluster_link_targets_returns_empty_without_source_embedding(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        conn.execute(
+            "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+            [1, "/img/no_embedding.jpg", "hash_no_embedding", 100],
+        )
+        conn.execute(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, person_id, identity_name, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [1, 1, 0, None, 1, None, "Unknown", 0.0, 0.0, 1.0, 1.0],
+        )
+        conn.commit()
+
+        assert repo.suggest_cluster_link_targets(1, limit=5) == []
+
+    def test_suggest_person_link_clusters_ranks_unlinked_clusters(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        for i in range(1, 6):
+            conn.execute(
+                "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+                [i, f"/img/person_suggest_{i}.jpg", f"hash_person_suggest_{i}", 100],
+            )
+
+        def emb(values: list[float]) -> bytes:
+            return np.array(values, dtype=np.float32).tobytes()
+
+        target_person_id = repo.create_person("Target Person")
+        other_person_id = repo.create_person("Other Person")
+
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, person_id, identity_name, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 1, 0, emb([1.0, 0.0, 0.0]), 1, target_person_id, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (2, 1, 1, emb([0.98, 0.02, 0.0]), 1, target_person_id, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (3, 2, 0, emb([0.97, 0.03, 0.0]), 2, None, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (4, 3, 0, emb([-1.0, 0.0, 0.0]), 3, None, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (5, 4, 0, emb([0.95, 0.05, 0.0]), 4, other_person_id, "Unknown", 0.0, 0.0, 2.0, 2.0),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO face_cluster_labels (cluster_id, display_name) VALUES (?, ?)",
+            [2, "Likely Candidate"],
+        )
+        conn.commit()
+
+        suggestions = repo.suggest_person_link_clusters(target_person_id, limit=10)
+        assert suggestions
+
+        likely = next(item for item in suggestions if item["cluster_id"] == 2)
+        unlikely = next(item for item in suggestions if item["cluster_id"] == 3)
+
+        assert likely["score"] > unlikely["score"]
+        assert likely["label"] == "Likely Candidate"
+        assert likely["representative_id"] is not None
+        assert all(item["cluster_id"] != 4 for item in suggestions)
+
+    def test_suggest_person_link_clusters_empty_without_person_embeddings(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        person_id = repo.create_person("No Embedding Person")
+        conn.execute(
+            "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+            [1, "/img/no_person_embedding.jpg", "hash_no_person_embedding", 100],
+        )
+        conn.execute(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, person_id, identity_name, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [1, 1, 0, None, 1, person_id, "Unknown", 0.0, 0.0, 1.0, 1.0],
+        )
+        conn.commit()
+
+        assert repo.suggest_person_link_clusters(person_id, limit=5) == []
+
     def test_relink_cluster_updates_label_and_person_together(self, tmp_path):
         from imganalyzer.db.repository import Repository
         conn = _make_test_db(tmp_path)
