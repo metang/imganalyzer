@@ -195,6 +195,12 @@ _LEGACY_QUEUE_MODULE_MAP: dict[str, str] = {
     "local_ai": "caption",
     "aesthetic": "perception",
 }
+_PERSON_LINK_SUGGESTION_CACHE_TTL_SECONDS = 30.0
+_person_link_suggestion_cache: dict[tuple[int, int], tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _invalidate_person_link_suggestion_cache() -> None:
+    _person_link_suggestion_cache.clear()
 
 
 def _master_worker_runtime_status() -> str:
@@ -2670,6 +2676,7 @@ def _handle_faces_cluster_relink(params: dict) -> dict:
         person_id,
         update_person=update_person,
     )
+    _invalidate_person_link_suggestion_cache()
     return {"ok": True, "updated": updated}
 
 
@@ -2732,6 +2739,7 @@ def _handle_faces_person_delete(params: dict) -> dict:
     conn = _get_db()
     repo = Repository(conn)
     repo.delete_person(int(params["person_id"]))
+    _invalidate_person_link_suggestion_cache()
     return {"ok": True}
 
 
@@ -2744,6 +2752,7 @@ def _handle_faces_person_link(params: dict) -> dict:
     updated = repo.link_cluster_to_person(
         int(params["cluster_id"]), int(params["person_id"])
     )
+    _invalidate_person_link_suggestion_cache()
     return {"ok": True, "updated": updated}
 
 
@@ -2754,6 +2763,7 @@ def _handle_faces_person_unlink(params: dict) -> dict:
     conn = _get_db()
     repo = Repository(conn)
     updated = repo.unlink_cluster_from_person(int(params["cluster_id"]))
+    _invalidate_person_link_suggestion_cache()
     return {"ok": True, "updated": updated}
 
 
@@ -2771,12 +2781,22 @@ def _handle_faces_person_link_suggestions(params: dict) -> dict:
     """Suggest likely unlinked clusters for a person."""
     from imganalyzer.db.repository import Repository
 
-    conn = _get_db()
-    repo = Repository(conn)
     person_id = int(params["person_id"])
     limit = int(params.get("limit", 12))
     limit = max(1, min(limit, 100))
+
+    cache_key = (person_id, limit)
+    cached = _person_link_suggestion_cache.get(cache_key)
+    now = time.time()
+    if cached is not None:
+        cached_at, cached_payload = cached
+        if now - cached_at <= _PERSON_LINK_SUGGESTION_CACHE_TTL_SECONDS:
+            return {"suggestions": cached_payload}
+
+    conn = _get_db()
+    repo = Repository(conn)
     suggestions = repo.suggest_person_link_clusters(person_id, limit=limit)
+    _person_link_suggestion_cache[cache_key] = (now, suggestions)
     return {"suggestions": suggestions}
 
 

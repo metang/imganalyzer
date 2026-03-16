@@ -2601,6 +2601,38 @@ class TestFacePersons:
 
         assert repo.suggest_person_link_clusters(person_id, limit=5) == []
 
+    def test_suggest_person_link_clusters_respects_limit(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        for i in range(1, 6):
+            conn.execute(
+                "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+                [i, f"/img/person_limit_{i}.jpg", f"hash_person_limit_{i}", 100],
+            )
+
+        def emb(values: list[float]) -> bytes:
+            return np.array(values, dtype=np.float32).tobytes()
+
+        person_id = repo.create_person("Limit Person")
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, person_id, identity_name, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 1, 0, emb([1.0, 0.0, 0.0]), 1, person_id, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (2, 2, 0, emb([0.99, 0.01, 0.0]), 2, None, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (3, 3, 0, emb([0.95, 0.05, 0.0]), 3, None, "Unknown", 0.0, 0.0, 2.0, 2.0),
+                (4, 4, 0, emb([-1.0, 0.0, 0.0]), 4, None, "Unknown", 0.0, 0.0, 2.0, 2.0),
+            ],
+        )
+        conn.commit()
+
+        suggestions = repo.suggest_person_link_clusters(person_id, limit=1)
+        assert len(suggestions) == 1
+        assert suggestions[0]["cluster_id"] == 2
+
     def test_relink_cluster_updates_label_and_person_together(self, tmp_path):
         from imganalyzer.db.repository import Repository
         conn = _make_test_db(tmp_path)

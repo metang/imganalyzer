@@ -692,31 +692,73 @@ class Repository:
         if person_centroid is None:
             return []
 
-        clusters, _ = self.list_face_clusters(limit=0, offset=0)
+        # Bound candidate set up-front to avoid scanning every cluster in large DBs.
+        candidate_pool = max(limit * 20, 200)
+        candidate_rows = self.conn.execute(
+            """
+            SELECT
+                fo.cluster_id AS cluster_id,
+                COUNT(fo.id) AS face_count,
+                COUNT(DISTINCT fo.image_id) AS image_count,
+                COALESCE(fcl.display_name, 'Unknown') AS label,
+                (
+                    SELECT fo2.id
+                    FROM face_occurrences fo2
+                    WHERE fo2.cluster_id = fo.cluster_id
+                    ORDER BY (fo2.bbox_x2 - fo2.bbox_x1) * (fo2.bbox_y2 - fo2.bbox_y1) DESC
+                    LIMIT 1
+                ) AS representative_id
+            FROM face_occurrences fo
+            LEFT JOIN face_cluster_labels fcl ON fcl.cluster_id = fo.cluster_id
+            WHERE fo.cluster_id IS NOT NULL
+            GROUP BY fo.cluster_id
+            HAVING SUM(CASE WHEN fo.person_id IS NOT NULL THEN 1 ELSE 0 END) = 0
+            ORDER BY face_count DESC
+            LIMIT ?
+            """,
+            [candidate_pool],
+        ).fetchall()
+
         candidate_meta: dict[int, dict[str, Any]] = {}
-        for cluster in clusters:
-            cluster_id = cluster.get("cluster_id")
-            if cluster_id is None or cluster.get("person_id") is not None:
-                continue
-            candidate_meta[int(cluster_id)] = cluster
+        for row in candidate_rows:
+            cluster_id = int(row["cluster_id"])
+            candidate_meta[cluster_id] = {
+                "cluster_id": cluster_id,
+                "display_name": row["label"],
+                "face_count": int(row["face_count"] or 0),
+                "image_count": int(row["image_count"] or 0),
+                "representative_id": (
+                    int(row["representative_id"])
+                    if row["representative_id"] is not None
+                    else None
+                ),
+            }
         if not candidate_meta:
             return []
 
         candidate_cluster_ids = sorted(candidate_meta.keys())
         placeholders = ",".join("?" for _ in candidate_cluster_ids)
-        candidate_rows = self.conn.execute(
+        max_vectors_per_cluster = 48
+        candidate_embeddings_rows = self.conn.execute(
             f"""
             SELECT cluster_id, embedding
-            FROM face_occurrences
-            WHERE cluster_id IN ({placeholders})
-              AND person_id IS NULL
-              AND embedding IS NOT NULL
+            FROM (
+                SELECT
+                    cluster_id,
+                    embedding,
+                    ROW_NUMBER() OVER (PARTITION BY cluster_id ORDER BY id DESC) AS rn
+                FROM face_occurrences
+                WHERE cluster_id IN ({placeholders})
+                  AND person_id IS NULL
+                  AND embedding IS NOT NULL
+            )
+            WHERE rn <= ?
             """,
-            candidate_cluster_ids,
+            [*candidate_cluster_ids, max_vectors_per_cluster],
         ).fetchall()
 
         candidate_embeddings: dict[int, list[bytes]] = {}
-        for row in candidate_rows:
+        for row in candidate_embeddings_rows:
             cluster_id = int(row["cluster_id"])
             candidate_embeddings.setdefault(cluster_id, []).append(row["embedding"])
 
