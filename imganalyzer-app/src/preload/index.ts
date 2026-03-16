@@ -2,7 +2,13 @@ import { clipboard, contextBridge, ipcRenderer } from 'electron'
 import type { XmpData } from '../main/xmp'
 import type { ImageFile } from '../main/images'
 import type { AnalysisProgress } from '../main/analyzer'
-import type { BatchStats, BatchResult, BatchIngestProgress } from '../main/batch'
+import type {
+  BatchControlTarget,
+  BatchIngestProgress,
+  BatchPauseMode,
+  BatchResult,
+  BatchStats,
+} from '../main/batch'
 import type { SearchFilters, SearchPlanRequest, SearchPlanResponse, SearchResponse } from '../main/search'
 import type { GalleryChunkParams, GalleryChunkResponse, GalleryFoldersResponse } from '../main/gallery'
 import type {
@@ -76,8 +82,14 @@ contextBridge.exposeInMainWorld('api', {
   batchPause: (): Promise<void> =>
     ipcRenderer.invoke('batch:pause'),
 
+  batchPauseTarget: (target: BatchControlTarget, mode: BatchPauseMode = 'pause-drain'): Promise<void> =>
+    ipcRenderer.invoke('batch:pause-target', target, mode),
+
   batchResume: (): Promise<void> =>
     ipcRenderer.invoke('batch:resume'),
+
+  batchResumeTarget: (target: BatchControlTarget): Promise<void> =>
+    ipcRenderer.invoke('batch:resume-target', target),
 
   batchStop: (folder: string): Promise<void> =>
     ipcRenderer.invoke('batch:stop', folder),

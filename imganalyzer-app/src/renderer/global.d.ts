@@ -267,6 +267,20 @@ export type BatchStatus =
   | 'stopped'
   | 'error'
 
+export type BatchPauseMode = 'pause-drain' | 'pause-immediate'
+
+export interface BatchControlTarget {
+  scope: 'coordinator' | 'master' | 'worker'
+  workerId?: string
+}
+
+export interface BatchCoordinatorStatus {
+  state: 'stopped' | 'starting' | 'running' | 'error'
+  pid?: number | null
+  url?: string | null
+  lastError?: string | null
+}
+
 export interface BatchModuleStats {
   pending: number
   running: number
@@ -295,6 +309,8 @@ export interface BatchNode {
   role: 'master' | 'worker'
   label: string
   status: string
+  desiredState?: string
+  stateReason?: string | null
   platform?: string
   lastHeartbeat?: string | null
   lastResultAt?: string | null
@@ -312,6 +328,7 @@ export interface BatchNode {
 export interface BatchStats {
   status: BatchStatus
   monitorOnly: boolean
+  coordinator: BatchCoordinatorStatus
   totalImages: number
   modules: Partial<Record<string, BatchModuleStats>>
   totals: { pending: number; running: number; done: number; failed: number; skipped: number }
@@ -502,7 +519,9 @@ declare global {
         forceReprocess?: boolean
       ): Promise<void>
       batchPause(): Promise<void>
+      batchPauseTarget(target: BatchControlTarget, mode?: BatchPauseMode): Promise<void>
       batchResume(): Promise<void>
+      batchResumeTarget(target: BatchControlTarget): Promise<void>
       batchStop(folder: string): Promise<void>
       batchCheckPending(): Promise<{ pending: number; running: number }>
       batchMonitorExisting(): Promise<boolean>

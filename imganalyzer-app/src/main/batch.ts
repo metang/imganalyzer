@@ -12,6 +12,8 @@
  *     batch:pause     — cancel run (queue preserved in DB)
  *     batch:resume    — re-start run with saved config
  *     batch:stop      — cancel run + clear pending/running jobs from DB
+ *     batch:pause-target  — pause coordinator/master/specific worker
+ *     batch:resume-target — resume coordinator/master/specific worker
  *
  *   Events (main -> renderer):
  *     batch:tick             — polled stats every 1 s (BatchStats)
@@ -22,6 +24,9 @@
 
 import { ipcMain, BrowserWindow } from 'electron'
 import { rpc, ensureServerRunning, setNotificationListener, shutdownServer } from './python-rpc'
+import { getCoordinatorStatus, startCoordinator, stopCoordinator } from './coordinator'
+import { getAppSettings } from './settings'
+import type { CoordinatorStatus } from './settings'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -73,6 +78,8 @@ export interface BatchNode {
   role: 'master' | 'worker'
   label: string
   status: string
+  desiredState?: string
+  stateReason?: string | null
   platform?: string
   lastHeartbeat?: string | null
   lastResultAt?: string | null
@@ -90,6 +97,7 @@ export interface BatchNode {
 export interface BatchStats {
   status: BatchStatus
   monitorOnly: boolean
+  coordinator: CoordinatorStatus
   totalImages: number
   modules: Partial<Record<string, BatchModuleStats>>
   totals: { pending: number; running: number; done: number; failed: number; skipped: number }
@@ -113,6 +121,13 @@ export type BatchStatus =
   | 'done'
   | 'stopped'
   | 'error'
+
+export type BatchPauseMode = 'pause-drain' | 'pause-immediate'
+
+export interface BatchControlTarget {
+  scope: 'coordinator' | 'master' | 'worker'
+  workerId?: string
+}
 
 export interface BatchResult {
   id: string
@@ -158,6 +173,8 @@ interface ServerWorkerNode {
   platform?: string
   capabilities?: Record<string, unknown>
   status?: string
+  desiredState?: string
+  stateReason?: string | null
   lastHeartbeat?: string | null
   runningJobs?: number
   activeModules?: BatchActiveModule[]
@@ -196,6 +213,8 @@ interface ServerStatusPayload {
       role?: 'master'
       displayName?: string
       platform?: string
+      desiredState?: string
+      stateReason?: string | null
       runningJobs?: number
       activeModules?: BatchActiveModule[]
     }
@@ -235,6 +254,20 @@ let currentChunkKey: string | null = null
 let currentChunkStartMs = 0
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function normalizePauseMode(mode: unknown): BatchPauseMode {
+  return mode === 'pause-immediate' ? 'pause-immediate' : 'pause-drain'
+}
+
+function resolveTargetWorkerId(target: BatchControlTarget): string {
+  if (target.scope === 'master') return MASTER_NODE_ID
+  if (target.scope === 'worker') {
+    const workerId = target.workerId?.trim()
+    if (!workerId) throw new Error('workerId is required when scope is worker')
+    return workerId
+  }
+  throw new Error(`Unsupported target scope: ${target.scope}`)
+}
 
 /** Reset all completion counters for a fresh session. */
 function resetSessionCounters(): void {
@@ -522,6 +555,8 @@ function buildBatchNodes(data: ServerStatusPayload): BatchNode[] {
     role: 'master',
     label: masterMeta?.displayName ?? MASTER_NODE_LABEL,
     status: masterStatus,
+    desiredState: masterMeta?.desiredState ?? 'active',
+    stateReason: masterMeta?.stateReason ?? null,
     platform: masterMeta?.platform,
     runningJobs: masterRunningJobs,
     completedJobs: (masterCounts?.done ?? 0) + (masterCounts?.failed ?? 0) + (masterCounts?.skipped ?? 0),
@@ -541,6 +576,8 @@ function buildBatchNodes(data: ServerStatusPayload): BatchNode[] {
       role: 'worker',
       label: worker.displayName ?? worker.id,
       status: (worker.runningJobs ?? 0) > 0 ? 'running' : (worker.status ?? 'idle'),
+      desiredState: worker.desiredState ?? 'active',
+      stateReason: worker.stateReason ?? null,
       platform: worker.platform,
       lastHeartbeat: worker.lastHeartbeat ?? null,
       lastResultAt: workerCounts?.lastResultAt ?? null,
@@ -661,6 +698,7 @@ async function doPoll(): Promise<void> {
     const stats: BatchStats = {
       status: batchStatus,
       monitorOnly,
+      coordinator: getCoordinatorStatus(),
       totalImages: data.total_images,
       modules: modulesWithSpeed,
       totals,
@@ -1033,6 +1071,66 @@ export function registerBatchHandlers(win: BrowserWindow): void {
 
     startPolling()
   })
+
+  // ── batch:pause-target ────────────────────────────────────────────────────
+  ipcMain.handle(
+    'batch:pause-target',
+    async (_evt, target: BatchControlTarget, mode?: BatchPauseMode): Promise<void> => {
+      const pauseMode = normalizePauseMode(mode)
+      if (!target || typeof target !== 'object') {
+        throw new Error('target is required')
+      }
+
+      if (target.scope === 'coordinator') {
+        const coordinator = getCoordinatorStatus()
+        if (coordinator.state === 'running' || coordinator.state === 'starting') {
+          await stopCoordinator()
+        }
+        await doPoll()
+        return
+      }
+
+      await ensureServerRunning()
+      const workerId = resolveTargetWorkerId(target)
+      await rpc.call('workers/pause', {
+        workerId,
+        mode: pauseMode,
+        reason: 'paused from Running tab',
+      })
+
+      if (workerId === MASTER_NODE_ID && batchStatus === 'running') {
+        batchStatus = 'paused'
+        monitorOnly = false
+        isRunActive = false
+      }
+      await doPoll()
+    }
+  )
+
+  // ── batch:resume-target ───────────────────────────────────────────────────
+  ipcMain.handle(
+    'batch:resume-target',
+    async (_evt, target: BatchControlTarget): Promise<void> => {
+      if (!target || typeof target !== 'object') {
+        throw new Error('target is required')
+      }
+
+      if (target.scope === 'coordinator') {
+        const settings = await getAppSettings()
+        if (!settings.distributed.enabled) {
+          throw new Error('Enable distributed coordinator in Settings before resuming it.')
+        }
+        await startCoordinator(settings.distributed)
+        await doPoll()
+        return
+      }
+
+      await ensureServerRunning()
+      const workerId = resolveTargetWorkerId(target)
+      await rpc.call('workers/resume', { workerId })
+      await doPoll()
+    }
+  )
 
   // ── batch:stop ────────────────────────────────────────────────────────────
   ipcMain.handle('batch:stop', async (_evt, folder: string): Promise<void> => {

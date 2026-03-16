@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { PassSelector, defaultPassSelectorValue, resolveModuleKeys } from './PassSelector'
 import type { PassSelectorValue } from './PassSelector'
 import { ProgressDashboard } from './ProgressDashboard'
@@ -316,6 +316,15 @@ export function BatchRunView({
   const { stats, results, ingestSummary, error } = batch
 
   const [showStopDialog, setShowStopDialog] = useState(false)
+  const pausedByPauseAllRef = useRef<{
+    coordinatorPaused: boolean
+    pausedWorkerIds: string[]
+    masterPaused: boolean
+  }>({
+    coordinatorPaused: false,
+    pausedWorkerIds: [],
+    masterPaused: false,
+  })
   // Derive the folder from initialFolder (passed from App which tracks gallery folder)
   const folder = initialFolder
 
@@ -324,13 +333,54 @@ export function BatchRunView({
     await batch.stop(folder)
   }, [batch, folder])
 
+  const handlePause = useCallback(async () => {
+    const snapshot = {
+      coordinatorPaused: false,
+      pausedWorkerIds: [] as string[],
+      masterPaused: false,
+    }
+
+    const coordinatorState = stats.coordinator?.state ?? 'stopped'
+    if (coordinatorState === 'running' || coordinatorState === 'starting') {
+      await batch.pauseTarget({ scope: 'coordinator' }, 'pause-drain')
+      snapshot.coordinatorPaused = true
+    }
+
+    const nodes = Array.isArray(stats.nodes) ? stats.nodes : []
+    for (const node of nodes) {
+      if (node.role !== 'worker') continue
+      await batch.pauseTarget({ scope: 'worker', workerId: node.id }, 'pause-drain')
+      snapshot.pausedWorkerIds.push(node.id)
+    }
+
+    await batch.pauseTarget({ scope: 'master' }, 'pause-drain')
+    snapshot.masterPaused = true
+    pausedByPauseAllRef.current = snapshot
+  }, [batch, stats.coordinator?.state, stats.nodes])
+
   // Combined resume handler: use batch.resume() when paused (has sessionConfig),
   // otherwise use resumePending() which works without sessionConfig.
   const handleResume = useCallback(async () => {
+    const pausedTargets = pausedByPauseAllRef.current
+    if (pausedTargets.coordinatorPaused) {
+      await batch.resumeTarget({ scope: 'coordinator' })
+    }
+    for (const workerId of pausedTargets.pausedWorkerIds) {
+      await batch.resumeTarget({ scope: 'worker', workerId })
+    }
+    if (pausedTargets.masterPaused) {
+      await batch.resumeTarget({ scope: 'master' })
+    }
+
     if (stats.status === 'paused') {
       await batch.resume()
     } else {
       await batch.resumePending()
+    }
+    pausedByPauseAllRef.current = {
+      coordinatorPaused: false,
+      pausedWorkerIds: [],
+      masterPaused: false,
     }
   }, [batch, stats.status])
 
@@ -370,8 +420,10 @@ export function BatchRunView({
 
         <ProgressDashboard
           stats={stats}
-          onPause={batch.pause}
+          onPause={handlePause}
           onResume={handleResume}
+          onPauseTarget={batch.pauseTarget}
+          onResumeTarget={batch.resumeTarget}
           onStop={() => setShowStopDialog(true)}
           onRetryFailed={batch.retryFailed}
           onClearQueue={handleClearQueue}

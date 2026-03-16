@@ -1,9 +1,18 @@
-import type { BatchStats, BatchModuleStats, BatchNode, BatchActiveModule } from '../global'
+import type {
+  BatchActiveModule,
+  BatchControlTarget,
+  BatchModuleStats,
+  BatchNode,
+  BatchPauseMode,
+  BatchStats,
+} from '../global'
 
 interface Props {
   stats: BatchStats
   onPause(): void
   onResume(): void
+  onPauseTarget(target: BatchControlTarget, mode?: BatchPauseMode): void
+  onResumeTarget(target: BatchControlTarget): void
   onStop(): void
   onRetryFailed(modules: string[]): void
   onClearQueue(): void
@@ -290,6 +299,8 @@ export function ProgressDashboard({
   stats,
   onPause,
   onResume,
+  onPauseTarget,
+  onResumeTarget,
   onStop,
   onRetryFailed,
   onClearQueue,
@@ -333,6 +344,15 @@ export function ProgressDashboard({
   const canRetry = failedModules.length > 0 && !isRunning
   const canClearQueue = !isRunning && !isPaused && totalPasses > 0
   const canClearCompleted = (totals.done + totals.skipped) > 0
+  const coordinatorState = stats.coordinator?.state ?? 'stopped'
+  const coordinatorCanPause = coordinatorState === 'running' || coordinatorState === 'starting'
+  const masterNode = nodes.find((node) => node.role === 'master') ?? null
+  const workerNodes = nodes.filter((node) => node.role === 'worker')
+
+  const isNodePaused = (node: BatchNode): boolean => {
+    const desired = node.desiredState ?? 'active'
+    return desired === 'pause-drain' || desired === 'pause-immediate' || desired === 'paused'
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -359,7 +379,7 @@ export function ProgressDashboard({
 
       {monitorOnly && (
         <p className="rounded-lg border border-blue-800 bg-blue-900/20 px-3 py-2 text-xs text-blue-300">
-          Monitoring distributed worker progress. Pause/Resume control the local worker only.
+          Monitoring distributed worker progress. Use target controls below to pause/resume nodes.
         </p>
       )}
 
@@ -436,13 +456,103 @@ export function ProgressDashboard({
         </section>
       )}
 
+      <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-semibold text-neutral-100">Pause targets</div>
+          <div className="text-[11px] text-neutral-500">Fine control for coordinator, master worker, and remotes</div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-neutral-800/80 bg-black/20 px-3 py-2 text-xs">
+            <span className="min-w-[120px] text-neutral-200">Coordinator</span>
+            <span className={`rounded-full border px-2 py-0.5 text-[11px] ${statusTone(coordinatorState)}`}>
+              {coordinatorState}
+            </span>
+            <span className="text-neutral-500">
+              {stats.coordinator?.lastError ? `Error: ${stats.coordinator.lastError}` : 'Distributed job router'}
+            </span>
+            <button
+              onClick={() =>
+                coordinatorCanPause
+                  ? onPauseTarget({ scope: 'coordinator' }, 'pause-drain')
+                  : onResumeTarget({ scope: 'coordinator' })
+              }
+              className={`ml-auto rounded-md px-3 py-1 text-[11px] transition-colors ${
+                coordinatorCanPause
+                  ? 'bg-neutral-700 text-neutral-200 hover:bg-neutral-600'
+                  : 'bg-blue-700 text-neutral-100 hover:bg-blue-600'
+              }`}
+            >
+              {coordinatorCanPause ? 'Pause' : 'Resume'}
+            </button>
+          </div>
+
+          {masterNode && (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-neutral-800/80 bg-black/20 px-3 py-2 text-xs">
+              <span className="min-w-[120px] text-neutral-200">{masterNode.label}</span>
+              <span className={`rounded-full border px-2 py-0.5 text-[11px] ${statusTone(masterNode.status)}`}>
+                {masterNode.status}
+              </span>
+              <span className="text-neutral-500">
+                desired: {masterNode.desiredState ?? 'active'}
+                {masterNode.stateReason ? ` (${masterNode.stateReason})` : ''}
+              </span>
+              <button
+                onClick={() =>
+                  isNodePaused(masterNode)
+                    ? onResumeTarget({ scope: 'master' })
+                    : onPauseTarget({ scope: 'master' }, 'pause-drain')
+                }
+                className={`ml-auto rounded-md px-3 py-1 text-[11px] transition-colors ${
+                  isNodePaused(masterNode)
+                    ? 'bg-blue-700 text-neutral-100 hover:bg-blue-600'
+                    : 'bg-neutral-700 text-neutral-200 hover:bg-neutral-600'
+                }`}
+              >
+                {isNodePaused(masterNode) ? 'Resume' : 'Pause'}
+              </button>
+            </div>
+          )}
+
+          {workerNodes.map((node) => (
+            <div
+              key={node.id}
+              className="flex flex-wrap items-center gap-2 rounded-lg border border-neutral-800/80 bg-black/20 px-3 py-2 text-xs"
+            >
+              <span className="min-w-[120px] text-neutral-200">{node.label}</span>
+              <span className={`rounded-full border px-2 py-0.5 text-[11px] ${statusTone(node.status)}`}>
+                {node.status}
+              </span>
+              <span className="text-neutral-500">
+                desired: {node.desiredState ?? 'active'}
+                {node.stateReason ? ` (${node.stateReason})` : ''}
+              </span>
+              <button
+                onClick={() =>
+                  isNodePaused(node)
+                    ? onResumeTarget({ scope: 'worker', workerId: node.id })
+                    : onPauseTarget({ scope: 'worker', workerId: node.id }, 'pause-drain')
+                }
+                className={`ml-auto rounded-md px-3 py-1 text-[11px] transition-colors ${
+                  isNodePaused(node)
+                    ? 'bg-blue-700 text-neutral-100 hover:bg-blue-600'
+                    : 'bg-neutral-700 text-neutral-200 hover:bg-neutral-600'
+                }`}
+              >
+                {isNodePaused(node) ? 'Resume' : 'Pause'}
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
+
       <div className="flex flex-wrap gap-2">
         {!monitorOnly && isRunning && (
           <button
             onClick={onPause}
             className="rounded-lg bg-neutral-700 px-4 py-1.5 text-sm text-neutral-200 transition-colors hover:bg-neutral-600"
           >
-            Pause
+            Pause all
           </button>
         )}
         {!monitorOnly && showResume && (

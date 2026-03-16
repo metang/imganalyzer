@@ -1,5 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { BatchStats, BatchResult, BatchStatus, BatchIngestProgress } from '../global'
+import type {
+  BatchControlTarget,
+  BatchPauseMode,
+  BatchStats,
+  BatchResult,
+  BatchStatus,
+  BatchIngestProgress,
+} from '../global'
 
 // ── Pass config ───────────────────────────────────────────────────────────────
 
@@ -21,6 +28,7 @@ function emptyStats(): BatchStats {
   return {
     status: 'idle',
     monitorOnly: false,
+    coordinator: { state: 'stopped', pid: null, url: null, lastError: null },
     totalImages: 0,
     modules: {},
     totals: { pending: 0, running: 0, done: 0, failed: 0, skipped: 0 },
@@ -83,7 +91,9 @@ export interface UseBatchProcessReturn {
   /** Remove completed (done + skipped) jobs from the queue. Returns number of deleted jobs. */
   clearCompleted(): Promise<number>
   pause(): Promise<void>
+  pauseTarget(target: BatchControlTarget, mode?: BatchPauseMode): Promise<void>
   resume(): Promise<void>
+  resumeTarget(target: BatchControlTarget): Promise<void>
   stop(folder: string): Promise<void>
 }
 
@@ -110,7 +120,13 @@ export function useBatchProcess(): UseBatchProcessReturn {
 
   // Subscribe to events once on mount
   useEffect(() => {
-    unsubTickRef.current = window.api.onBatchTick((s) => setStats(s))
+    unsubTickRef.current = window.api.onBatchTick((s) => {
+      setStats((prev) => ({
+        ...s,
+        coordinator: s.coordinator ?? prev.coordinator ?? emptyStats().coordinator,
+        nodes: Array.isArray(s.nodes) ? s.nodes : [],
+      }))
+    })
     unsubResultRef.current = window.api.onBatchResult((r) => {
       setResults((prev) => {
         const next = [r, ...prev]
@@ -185,9 +201,25 @@ export function useBatchProcess(): UseBatchProcessReturn {
     }
   }, [])
 
+  const pauseTarget = useCallback(async (target: BatchControlTarget, mode: BatchPauseMode = 'pause-drain') => {
+    try {
+      await window.api.batchPauseTarget(target, mode)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [])
+
   const resume = useCallback(async () => {
     try {
       await window.api.batchResume()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [])
+
+  const resumeTarget = useCallback(async (target: BatchControlTarget) => {
+    try {
+      await window.api.batchResumeTarget(target)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -295,7 +327,9 @@ export function useBatchProcess(): UseBatchProcessReturn {
     clearQueue,
     clearCompleted,
     pause,
+    pauseTarget,
     resume,
+    resumeTarget,
     stop,
   }
 }
