@@ -102,17 +102,49 @@ const FaceCropThumbnail = memo(function FaceCropThumbnail({
   const [src, setSrc] = useState<string | null>(() => thumbCache.get(occurrenceId) ?? null)
   const [failed, setFailed] = useState(false)
   const requested = useRef(false)
+  const containerRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const cached = thumbCache.get(occurrenceId) ?? null
+    setSrc(cached)
+    setFailed(false)
+    requested.current = cached !== null
+  }, [occurrenceId])
 
   useEffect(() => {
     if (src || requested.current) return
-    requested.current = true
-    requestThumbnail(occurrenceId, (dataUri) => {
-      if (dataUri) {
-        setSrc(dataUri)
-      } else {
-        setFailed(true)
-      }
-    })
+    const node = containerRef.current
+    if (!node) return
+
+    let cancelled = false
+    const load = () => {
+      if (requested.current || cancelled) return
+      requested.current = true
+      requestThumbnail(occurrenceId, (dataUri) => {
+        if (cancelled) return
+        if (dataUri) {
+          setSrc(dataUri)
+        } else {
+          setFailed(true)
+        }
+      })
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer.disconnect()
+          load()
+        }
+      },
+      { rootMargin: '200px' },
+    )
+    observer.observe(node)
+
+    return () => {
+      cancelled = true
+      observer.disconnect()
+    }
   }, [occurrenceId, src])
 
   const sizeClass =
@@ -125,11 +157,13 @@ const FaceCropThumbnail = memo(function FaceCropThumbnail({
           : 'w-16 h-16'
 
   const shrink = size === 'fill' ? '' : 'shrink-0'
+  const wrapperClass = `${sizeClass} rounded overflow-hidden ${shrink}`
 
   if (failed) {
     return (
       <div
-        className={`${sizeClass} rounded bg-neutral-800 flex items-center justify-center ${shrink}`}
+        ref={containerRef}
+        className={`${wrapperClass} bg-neutral-800 flex items-center justify-center`}
       >
         <svg
           className="w-5 h-5 text-neutral-600"
@@ -151,18 +185,21 @@ const FaceCropThumbnail = memo(function FaceCropThumbnail({
   if (!src) {
     return (
       <div
-        className={`${sizeClass} rounded bg-neutral-800 animate-pulse ${shrink}`}
+        ref={containerRef}
+        className={`${wrapperClass} bg-neutral-800 animate-pulse`}
       />
     )
   }
 
   return (
-    <img
-      src={src}
-      alt=""
-      className={`${sizeClass} rounded object-cover ${shrink}`}
-      draggable={false}
-    />
+    <div ref={containerRef} className={wrapperClass}>
+      <img
+        src={src}
+        alt=""
+        className="w-full h-full object-cover"
+        draggable={false}
+      />
+    </div>
   )
 })
 

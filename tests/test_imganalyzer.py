@@ -2972,3 +2972,57 @@ class TestClaimLeasedModulesFilter:
         assert queue.pending_count(modules=["metadata", "caption"]) == 2
         assert queue.pending_count(modules=["objects"]) == 1
         assert queue.pending_count() == 3
+
+
+class TestFaceCropBatchCaching:
+    def test_crop_batch_opens_shared_image_once_and_persists_backfill(self, tmp_path, monkeypatch):
+        from PIL import Image
+
+        from imganalyzer import server
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        image_path = tmp_path / "source.jpg"
+        Image.new("RGB", (120, 120), color=(180, 120, 90)).save(image_path, format="JPEG")
+        image_id = repo.register_image(file_path=str(image_path), width=120, height=120, fmt="JPEG")
+
+        occ1 = conn.execute(
+            """
+            INSERT INTO face_occurrences
+                (image_id, face_idx, bbox_x1, bbox_y1, bbox_x2, bbox_y2, identity_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [image_id, 0, 10.0, 10.0, 50.0, 50.0, "Unknown"],
+        ).lastrowid
+        occ2 = conn.execute(
+            """
+            INSERT INTO face_occurrences
+                (image_id, face_idx, bbox_x1, bbox_y1, bbox_x2, bbox_y2, identity_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [image_id, 1, 30.0, 25.0, 80.0, 85.0, "Unknown"],
+        ).lastrowid
+
+        original_open = Image.open
+        open_calls: list[str] = []
+
+        def counting_open(*args, **kwargs):
+            open_calls.append(str(args[0]))
+            return original_open(*args, **kwargs)
+
+        monkeypatch.setattr("PIL.Image.open", counting_open)
+        monkeypatch.setattr(server, "_get_db", lambda: conn)
+
+        result = server._handle_faces_crop_batch({"ids": [occ1, occ2]})
+
+        assert set(result["thumbnails"]) == {str(occ1), str(occ2)}
+        assert len(open_calls) == 1
+
+        persisted = conn.execute(
+            "SELECT id, thumbnail FROM face_occurrences WHERE id IN (?, ?)",
+            [occ1, occ2],
+        ).fetchall()
+        assert len(persisted) == 2
+        assert all(row["thumbnail"] is not None for row in persisted)

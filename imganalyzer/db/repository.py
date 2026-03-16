@@ -1575,6 +1575,13 @@ class Repository:
         ).fetchone()
         return dict(row) if row else None
 
+    def set_face_occurrence_thumbnail(self, occurrence_id: int, thumbnail: bytes) -> None:
+        """Persist a generated thumbnail for an existing face occurrence."""
+        self.conn.execute(
+            "UPDATE face_occurrences SET thumbnail = ? WHERE id = ?",
+            [thumbnail, occurrence_id],
+        )
+
     def cluster_faces(self, threshold: float = 0.55) -> int:
         """Cluster all face occurrences by cosine similarity of embeddings.
 

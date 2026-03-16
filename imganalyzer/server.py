@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import defaultdict
 import io
 import json
 import os
@@ -2836,38 +2837,47 @@ def _handle_faces_crop(params: dict) -> dict:
     if thumbnail is not None:
         return {"data": base64.b64encode(thumbnail).decode("ascii")}
 
-    file_path = occ["file_path"]
-    path = Path(file_path)
-    if not path.exists():
-        return {"error": f"Image file not found: {file_path}"}
+    thumbnail = _generate_face_occurrence_thumbnail(occ)
+    repo.set_face_occurrence_thumbnail(occurrence_id, thumbnail)
+    conn.commit()
+    return {"data": base64.b64encode(thumbnail).decode("ascii")}
 
+
+_RAW_FACE_CROP_EXTS = {
+    ".arw", ".cr2", ".cr3", ".nef", ".nrw", ".orf", ".raf", ".rw2",
+    ".dng", ".pef", ".srw", ".erf", ".kdc", ".mrw", ".3fr", ".fff",
+    ".sr2", ".srf", ".x3f", ".iiq", ".mos", ".raw",
+}
+
+
+def _open_face_crop_image(path: Path):
     from PIL import Image
     from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
 
+    if not path.exists():
+        raise FileNotFoundError(f"Image file not found: {path}")
     ext = path.suffix.lower()
     register_optional_pillow_opener(path)
-
-    RAW_EXTS = {
-        ".arw", ".cr2", ".cr3", ".nef", ".nrw", ".orf", ".raf", ".rw2",
-        ".dng", ".pef", ".srw", ".erf", ".kdc", ".mrw", ".3fr", ".fff",
-        ".sr2", ".srf", ".x3f", ".iiq", ".mos", ".raw",
-    }
-
-    if ext in RAW_EXTS:
+    if ext in _RAW_FACE_CROP_EXTS:
         import rawpy
+
         with _suppress_c_stderr():
             raw_ctx = rawpy.imread(str(path))
         with raw_ctx as raw:
             rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
-        img = Image.fromarray(rgb)
-    else:
-        with pillow_decode_guard(path):
-            img = Image.open(path)
-            img = img.convert("RGB")
+        return Image.fromarray(rgb)
 
-    # Crop face region with some padding.
-    # IMPORTANT: bbox coordinates were computed on a pre-resized image
-    # (max 1920px long edge) — scale them to the original resolution.
+    with pillow_decode_guard(path):
+        img = Image.open(path)
+        return img.convert("RGB")
+
+
+def _render_face_occurrence_thumbnail(occ: dict[str, Any], img) -> bytes:
+    from PIL import Image
+
+    # Crop face region with some padding. IMPORTANT: bbox coordinates were
+    # computed on a pre-resized image (max 1920px long edge) — scale them to
+    # the original resolution.
     w, h = img.size
     det_long_edge = 1920  # _AI_MAX_LONG_EDGE in modules.py
     orig_long_edge = max(w, h)
@@ -2904,7 +2914,24 @@ def _handle_faces_crop(params: dict) -> dict:
 
     buf = io.BytesIO()
     crop.save(buf, format="JPEG", quality=85)
-    return {"data": base64.b64encode(buf.getvalue()).decode("ascii")}
+    return buf.getvalue()
+
+
+def _generate_face_occurrence_thumbnail(
+    occ: dict[str, Any], img=None
+) -> bytes:
+    file_path = occ["file_path"]
+    path = Path(file_path)
+    if img is not None:
+        return _render_face_occurrence_thumbnail(occ, img)
+
+    source = _open_face_crop_image(path)
+    try:
+        return _render_face_occurrence_thumbnail(occ, source)
+    finally:
+        close = getattr(source, "close", None)
+        if callable(close):
+            close()
 
 
 def _handle_faces_run_clustering(req_id: int | str, params: dict) -> None:
@@ -2941,7 +2968,10 @@ def _handle_faces_crop_batch(params: dict) -> dict:
     Accepts ``{"ids": [1, 2, 3, ...]}`` and returns
     ``{"thumbnails": {"1": "<base64>", "2": "<base64>", ...}}``.
     """
+    from imganalyzer.db.repository import Repository
+
     conn = _get_db()
+    repo = Repository(conn)
     ids = params.get("ids", [])
     if not ids:
         return {"thumbnails": {}}
@@ -2957,16 +2987,31 @@ def _handle_faces_crop_batch(params: dict) -> dict:
     ).fetchall()
 
     thumbnails: dict[str, str] = {}
+    missing_rows_by_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         row_d = dict(row)
         oid = str(row_d["id"])
         if row_d.get("thumbnail") is not None:
             thumbnails[oid] = base64.b64encode(row_d["thumbnail"]).decode("ascii")
         else:
-            # Fallback: generate on-the-fly for legacy rows
-            result = _handle_faces_crop({"occurrence_id": row_d["id"]})
-            if "data" in result:
-                thumbnails[oid] = result["data"]
+            missing_rows_by_path[row_d["file_path"]].append(row_d)
+
+    updated = False
+    for file_path, group in missing_rows_by_path.items():
+        img = _open_face_crop_image(Path(file_path))
+        try:
+            for row_d in group:
+                thumbnail = _generate_face_occurrence_thumbnail(row_d, img=img)
+                repo.set_face_occurrence_thumbnail(row_d["id"], thumbnail)
+                thumbnails[str(row_d["id"])] = base64.b64encode(thumbnail).decode("ascii")
+                updated = True
+        finally:
+            close = getattr(img, "close", None)
+            if callable(close):
+                close()
+
+    if updated:
+        conn.commit()
 
     return {"thumbnails": thumbnails}
 

@@ -239,7 +239,7 @@ async function runThumbnailCacheCleanup(): Promise<void> {
   }
 }
 
-function triggerThumbnailCacheCleanup(): Promise<void> {
+export function triggerThumbnailCacheCleanup(): Promise<void> {
   if (cleanupPromise) return cleanupPromise
   cleanupPromise = runThumbnailCacheCleanup()
     .catch((err) => {

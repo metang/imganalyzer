@@ -7,7 +7,145 @@
  */
 
 import { ipcMain } from 'electron'
+import { createHash } from 'crypto'
+import { mkdir, readFile, utimes, writeFile } from 'fs/promises'
+import { dirname, join } from 'path'
 import { rpc, ensureServerRunning } from './python-rpc'
+import { getThumbnailCacheConfig, triggerThumbnailCacheCleanup } from './images'
+
+const MAX_FACE_CROP_CACHE = 2000
+const FACE_CROP_CACHE_WRITE_INTERVAL = 64
+const faceCropCache = new Map<number, string>()
+let faceCropWritesSinceCleanup = 0
+
+function isErrnoCode(err: unknown, code: string): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: string }).code === code
+}
+
+function faceCropCacheGet(occurrenceId: number): string | undefined {
+  const cached = faceCropCache.get(occurrenceId)
+  if (cached !== undefined) {
+    faceCropCache.delete(occurrenceId)
+    faceCropCache.set(occurrenceId, cached)
+  }
+  return cached
+}
+
+function faceCropCacheSet(occurrenceId: number, base64Jpeg: string): void {
+  if (faceCropCache.has(occurrenceId)) faceCropCache.delete(occurrenceId)
+  faceCropCache.set(occurrenceId, base64Jpeg)
+  while (faceCropCache.size > MAX_FACE_CROP_CACHE) {
+    const oldest = faceCropCache.keys().next().value
+    if (oldest !== undefined) {
+      faceCropCache.delete(oldest)
+    } else {
+      break
+    }
+  }
+}
+
+async function faceCropCacheFilePath(occurrenceId: number): Promise<string> {
+  const cfg = await getThumbnailCacheConfig()
+  const hash = createHash('sha1')
+    .update(`face-crop-v1|${occurrenceId}`)
+    .digest('hex')
+  return join(cfg.directory, 'faces', hash.slice(0, 2), `${hash}.jpg`)
+}
+
+async function readFaceCropFromDisk(occurrenceId: number): Promise<string | null> {
+  try {
+    const cachePath = await faceCropCacheFilePath(occurrenceId)
+    const buf = await readFile(cachePath)
+    const now = new Date()
+    void utimes(cachePath, now, now)
+    return buf.toString('base64')
+  } catch (err) {
+    if (isErrnoCode(err, 'ENOENT') || isErrnoCode(err, 'ENOTDIR')) {
+      return null
+    }
+    console.warn('Disk face crop cache read failed for', occurrenceId, err)
+    return null
+  }
+}
+
+async function writeFaceCropToDisk(occurrenceId: number, base64Jpeg: string): Promise<void> {
+  try {
+    const cachePath = await faceCropCacheFilePath(occurrenceId)
+    await mkdir(dirname(cachePath), { recursive: true })
+    await writeFile(cachePath, Buffer.from(base64Jpeg, 'base64'))
+    faceCropWritesSinceCleanup += 1
+    if (faceCropWritesSinceCleanup >= FACE_CROP_CACHE_WRITE_INTERVAL) {
+      faceCropWritesSinceCleanup = 0
+      void triggerThumbnailCacheCleanup()
+    }
+  } catch (err) {
+    console.warn('Disk face crop cache write failed for', occurrenceId, err)
+  }
+}
+
+async function getFaceCropCached(occurrenceId: number): Promise<string | null> {
+  const cached = faceCropCacheGet(occurrenceId)
+  if (cached !== undefined) return cached
+
+  const diskCached = await readFaceCropFromDisk(occurrenceId)
+  if (diskCached) {
+    faceCropCacheSet(occurrenceId, diskCached)
+    return diskCached
+  }
+
+  const result = await rpc.call('faces/crop', {
+    occurrence_id: occurrenceId,
+  }) as { data?: string; error?: string }
+  if (result.error || !result.data) {
+    return null
+  }
+  faceCropCacheSet(occurrenceId, result.data)
+  void writeFaceCropToDisk(occurrenceId, result.data)
+  return result.data
+}
+
+async function getFaceCropBatchCached(ids: number[]): Promise<Record<string, string>> {
+  const uniqueIds = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))]
+  const thumbnails: Record<string, string> = {}
+  if (uniqueIds.length === 0) return thumbnails
+
+  const diskResults = await Promise.all(uniqueIds.map(async (occurrenceId) => {
+    const cached = faceCropCacheGet(occurrenceId)
+    if (cached !== undefined) {
+      return { occurrenceId, base64Jpeg: cached }
+    }
+    const diskCached = await readFaceCropFromDisk(occurrenceId)
+    if (diskCached) {
+      faceCropCacheSet(occurrenceId, diskCached)
+      return { occurrenceId, base64Jpeg: diskCached }
+    }
+    return { occurrenceId, base64Jpeg: null }
+  }))
+
+  const missingIds: number[] = []
+  for (const { occurrenceId, base64Jpeg } of diskResults) {
+    if (base64Jpeg) {
+      thumbnails[String(occurrenceId)] = base64Jpeg
+    } else {
+      missingIds.push(occurrenceId)
+    }
+  }
+
+  if (missingIds.length > 0) {
+    const result = await rpc.call('faces/crop-batch', { ids: missingIds }) as {
+      thumbnails?: Record<string, string>
+    }
+    for (const occurrenceId of missingIds) {
+      const base64Jpeg = result.thumbnails?.[String(occurrenceId)]
+      if (!base64Jpeg) continue
+      faceCropCacheSet(occurrenceId, base64Jpeg)
+      thumbnails[String(occurrenceId)] = base64Jpeg
+      void writeFaceCropToDisk(occurrenceId, base64Jpeg)
+    }
+  }
+
+  return thumbnails
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -239,13 +377,11 @@ export function registerFaceHandlers(): void {
     async (_evt, occurrenceId: number): Promise<{ data?: string; error?: string }> => {
       try {
         await ensureServerRunning()
-        const result = await rpc.call('faces/crop', {
-          occurrence_id: occurrenceId,
-        }) as { data?: string; error?: string }
-        if (result.error) {
-          return { error: result.error }
+        const data = await getFaceCropCached(occurrenceId)
+        if (!data) {
+          return { error: 'Face crop not available' }
         }
-        return { data: result.data }
+        return { data }
       } catch (err) {
         return { error: String(err) }
       }
@@ -257,10 +393,8 @@ export function registerFaceHandlers(): void {
     async (_evt, ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }> => {
       try {
         await ensureServerRunning()
-        const result = await rpc.call('faces/crop-batch', { ids }) as {
-          thumbnails: Record<string, string>
-        }
-        return { thumbnails: result.thumbnails }
+        const thumbnails = await getFaceCropBatchCached(ids)
+        return { thumbnails }
       } catch (err) {
         return { thumbnails: {}, error: String(err) }
       }
@@ -287,6 +421,7 @@ export function registerFaceHandlers(): void {
     async (): Promise<{ enqueued: number; error?: string }> => {
       try {
         await ensureServerRunning()
+        faceCropCache.clear()
         const result = await rpc.call('rebuild', {
           module: 'faces',
           force: true,
