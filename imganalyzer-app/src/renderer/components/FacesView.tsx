@@ -283,6 +283,8 @@ function coerceText(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
+type PeopleStage = 'linked' | 'suggested' | 'unlinked' | 'inspector'
+
 // ── Main FacesView component ──────────────────────────────────────────────────
 
 export function FacesView() {
@@ -318,11 +320,6 @@ export function FacesView() {
   // Clustering state
   const [clustering, setClustering] = useState(false)
 
-  // Rebuild state
-  const [rebuilding, setRebuilding] = useState(false)
-  const [showRebuildConfirm, setShowRebuildConfirm] = useState(false)
-  const [rebuildConfirmText, setRebuildConfirmText] = useState('')
-
   // Lightbox state (in-app image viewer)
   const [lightboxPath, setLightboxPath] = useState<string | null>(null)
 
@@ -338,6 +335,10 @@ export function FacesView() {
   const [selectedSuggestedClusterIds, setSelectedSuggestedClusterIds] = useState<number[]>([])
   const [confirmingSuggestedLinks, setConfirmingSuggestedLinks] = useState(false)
   const [expandedPersonId, setExpandedPersonId] = useState<number | null>(null)
+  const [isPeopleChooserExpanded, setIsPeopleChooserExpanded] = useState(false)
+  const [peopleStage, setPeopleStage] = useState<PeopleStage>('linked')
+  const [inspectorReturnStage, setInspectorReturnStage] = useState<'linked' | 'suggested' | 'unlinked'>('linked')
+  const [inspectorCluster, setInspectorCluster] = useState<FaceCluster | null>(null)
 
   // Person editing
   const [editingPersonId, setEditingPersonId] = useState<number | null>(null)
@@ -464,6 +465,10 @@ export function FacesView() {
 
   useEffect(() => {
     setSelectedSuggestedClusterIds([])
+    setExpandedKey(null)
+    setInspectorCluster(null)
+    setPeopleStage('linked')
+    setInspectorReturnStage('linked')
   }, [expandedPersonId])
 
   // ── Clustering ────────────────────────────────────────────────────────────
@@ -496,48 +501,33 @@ export function FacesView() {
     }
   }, [])
 
-  const handleRebuild = useCallback(async () => {
-    setShowRebuildConfirm(false)
-    setRebuildConfirmText('')
-    setRebuilding(true)
-    try {
-      const result = await window.api.rebuildFaces()
-      if (result.error) {
-        setError(result.error)
-        return
-      }
-      if (result.enqueued === 0) {
-        setError('No images found to rebuild faces for.')
-        return
-      }
-      // Auto-start the batch run
-      setError(null)
-      try {
-        await window.api.batchResume()
-        setError(`✓ ${result.enqueued} face jobs enqueued and running. Switch to the Batch tab to monitor progress.`)
-      } catch {
-        setError(`✓ ${result.enqueued} face jobs enqueued. Go to the Batch tab and click Resume to start processing.`)
-      }
-    } catch (err) {
-      setError(String(err))
-    } finally {
-      setRebuilding(false)
-    }
-  }, [])
-
   // ── Person actions ──────────────────────────────────────────────────────
+
+  const removeSuggestedClusterEverywhere = useCallback((clusterId: number) => {
+    setSelectedSuggestedClusterIds((prev) => prev.filter((id) => id !== clusterId))
+    setPersonLinkSuggestions((prev) => {
+      const next: Record<number, PersonLinkSuggestion[]> = {}
+      for (const [personId, suggestions] of Object.entries(prev)) {
+        next[Number(personId)] = suggestions.filter(
+          (suggestion) => suggestion.cluster_id !== clusterId
+        )
+      }
+      return next
+    })
+  }, [])
 
   const handleLinkCluster = useCallback(
     async (clusterId: number, personId: number) => {
       try {
         await window.api.linkClusterToPerson(clusterId, personId)
+        removeSuggestedClusterEverywhere(clusterId)
         setLinkingClusterId(null)
         await loadData()
       } catch (err) {
         setError(String(err))
       }
     },
-    [loadData]
+    [loadData, removeSuggestedClusterEverywhere]
   )
 
   const handleUnlinkCluster = useCallback(
@@ -563,6 +553,7 @@ export function FacesView() {
           return
         }
         await window.api.linkClusterToPerson(clusterId, result.id)
+        removeSuggestedClusterEverywhere(clusterId)
         setShowCreatePerson(false)
         setNewPersonName('')
         setLinkingClusterId(null)
@@ -571,7 +562,7 @@ export function FacesView() {
         setError(String(err))
       }
     },
-    [newPersonName, loadData]
+    [newPersonName, loadData, removeSuggestedClusterEverywhere]
   )
 
   const handleRenamePerson = useCallback(
@@ -695,6 +686,7 @@ export function FacesView() {
           relinkSelection.personId,
           true,
         )
+        removeSuggestedClusterEverywhere(relinkingCluster.cluster_id)
       } else {
         await applyClusterRelink(
           relinkingCluster.cluster_id,
@@ -711,7 +703,7 @@ export function FacesView() {
     } finally {
       setRelinkSubmitting(false)
     }
-  }, [applyClusterRelink, closeRelinkDialog, loadData, relinkSelection, relinkingCluster, unlinkPersonOnAliasRelink])
+  }, [applyClusterRelink, closeRelinkDialog, loadData, relinkSelection, relinkingCluster, removeSuggestedClusterEverywhere, unlinkPersonOnAliasRelink])
 
   const handleCreateRelinkPerson = useCallback(async () => {
     const clusterId = relinkingCluster?.cluster_id
@@ -727,6 +719,7 @@ export function FacesView() {
         throw new Error(createResult.error)
       }
       await applyClusterRelink(clusterId, name, createResult.id, true)
+      removeSuggestedClusterEverywhere(clusterId)
       setError(null)
       closeRelinkDialog()
       await loadData()
@@ -735,7 +728,7 @@ export function FacesView() {
     } finally {
       setRelinkSubmitting(false)
     }
-  }, [applyClusterRelink, closeRelinkDialog, loadData, relinkSearch, relinkingCluster])
+  }, [applyClusterRelink, closeRelinkDialog, loadData, relinkSearch, relinkingCluster, removeSuggestedClusterEverywhere])
 
   const handleCreateRelinkAlias = useCallback(async () => {
     const clusterId = relinkingCluster?.cluster_id
@@ -801,6 +794,7 @@ export function FacesView() {
         return
       }
 
+      const startedAt = performance.now()
       setLoadingPersonLinkSuggestionsId(personId)
       try {
         const result = await window.api.getPersonLinkSuggestions(personId, 12)
@@ -814,6 +808,10 @@ export function FacesView() {
         setError(String(err))
         setPersonLinkSuggestions((prev) => ({ ...prev, [personId]: [] }))
       } finally {
+        if (import.meta.env.DEV) {
+          const elapsed = Math.round(performance.now() - startedAt)
+          console.debug(`[FacesView] suggestions(${personId}) loaded in ${elapsed}ms`)
+        }
         setLoadingPersonLinkSuggestionsId((current) => (current === personId ? null : current))
       }
     },
@@ -824,29 +822,43 @@ export function FacesView() {
     async (personId: number) => {
       if (expandedPersonId === personId) {
         setExpandedPersonId(null)
+        setExpandedKey(null)
+        setInspectorCluster(null)
         return
       }
       setExpandedPersonId(personId)
-      void loadPersonLinkSuggestions(personId)
+      setIsPeopleChooserExpanded(false)
+      setExpandedKey(null)
+      setInspectorCluster(null)
+      setPeopleStage('linked')
+      setInspectorReturnStage('linked')
 
       // Load clusters for this person if not cached
       const pClusters = personClusters[personId]
-      if (pClusters) {
-        return
+      if (!pClusters) {
+        const startedAt = performance.now()
+        const loadingKey = `person-clusters:${personId}`
+        setLoadingDetail(loadingKey)
+        try {
+          const result = await window.api.getPersonClusters(personId)
+          if (!result.error) {
+            setPersonClusters((prev) => ({ ...prev, [personId]: result.clusters }))
+          }
+        } catch {
+          // silently ignore
+        } finally {
+          if (import.meta.env.DEV) {
+            const elapsed = Math.round(performance.now() - startedAt)
+            console.debug(`[FacesView] personClusters(${personId}) loaded in ${elapsed}ms`)
+          }
+          setLoadingDetail(null)
+        }
       }
 
-      const loadingKey = `person-clusters:${personId}`
-      setLoadingDetail(loadingKey)
-      try {
-        const result = await window.api.getPersonClusters(personId)
-        if (!result.error) {
-          setPersonClusters((prev) => ({ ...prev, [personId]: result.clusters }))
-        }
-      } catch {
-        // silently ignore
-      } finally {
-        setLoadingDetail(null)
-      }
+      // Fast-first: load suggestions only after linked clusters have rendered.
+      setTimeout(() => {
+        void loadPersonLinkSuggestions(personId)
+      }, 0)
     },
     [expandedPersonId, loadPersonLinkSuggestions, personClusters]
   )
@@ -882,6 +894,12 @@ export function FacesView() {
         }
       }
       setSelectedSuggestedClusterIds([])
+      setPersonLinkSuggestions((prev) => ({
+        ...prev,
+        [expandedPersonId]: (prev[expandedPersonId] ?? []).filter(
+          (suggestion) => !selectedIds.includes(suggestion.cluster_id)
+        ),
+      }))
       setError(null)
       await loadData()
 
@@ -899,15 +917,8 @@ export function FacesView() {
 
   // ── Expand / collapse ─────────────────────────────────────────────────────
 
-  const toggleExpand = useCallback(
+  const ensureExpandedDetailLoaded = useCallback(
     async (key: string, cluster: FaceCluster | null, legacyFace: FaceSummary | null) => {
-      if (expandedKey === key) {
-        setExpandedKey(null)
-        return
-      }
-
-      setExpandedKey(key)
-
       if (cluster && !clusterOccurrences[key]) {
         setLoadingDetail(key)
         try {
@@ -926,7 +937,10 @@ export function FacesView() {
         } finally {
           setLoadingDetail(null)
         }
-      } else if (legacyFace && !legacyImages[key]) {
+        return
+      }
+
+      if (legacyFace && !legacyImages[key]) {
         setLoadingDetail(key)
         try {
           const result = await window.api.getFaceImages(legacyFace.canonical_name)
@@ -943,7 +957,35 @@ export function FacesView() {
         }
       }
     },
-    [expandedKey, clusterOccurrences, legacyImages]
+    [clusterOccurrences, legacyImages]
+  )
+
+  const toggleExpand = useCallback(
+    async (key: string, cluster: FaceCluster | null, legacyFace: FaceSummary | null) => {
+      if (expandedKey === key) {
+        setExpandedKey(null)
+        return
+      }
+
+      setExpandedKey(key)
+      await ensureExpandedDetailLoaded(key, cluster, legacyFace)
+    },
+    [ensureExpandedDetailLoaded, expandedKey]
+  )
+
+  const openClusterInspector = useCallback(
+    async (
+      key: string,
+      cluster: FaceCluster,
+      returnStage: 'linked' | 'suggested' | 'unlinked'
+    ) => {
+      setExpandedKey(key)
+      setInspectorCluster(cluster)
+      setInspectorReturnStage(returnStage)
+      setPeopleStage('inspector')
+      await ensureExpandedDetailLoaded(key, cluster, null)
+    },
+    [ensureExpandedDetailLoaded]
   )
 
   // ── Inline alias editing ──────────────────────────────────────────────────
@@ -1033,6 +1075,50 @@ export function FacesView() {
     () => unlinkedClusters.slice(0, UNLINKED_CLUSTER_TARGET),
     [unlinkedClusters],
   )
+  const activePerson = useMemo(
+    () => persons.find((person) => person.id === expandedPersonId) ?? null,
+    [expandedPersonId, persons],
+  )
+  const activePersonClusters = useMemo(
+    () => (expandedPersonId == null ? [] : (personClusters[expandedPersonId] ?? [])),
+    [expandedPersonId, personClusters],
+  )
+  const linkedClusterIds = useMemo(() => {
+    const ids = new Set<number>()
+    for (const cluster of clusters) {
+      if (cluster.cluster_id != null && cluster.person_id != null) {
+        ids.add(cluster.cluster_id)
+      }
+    }
+    return ids
+  }, [clusters])
+  const activeSuggestedClusters = useMemo(
+    () => (
+      expandedPersonId == null
+        ? []
+        : (personLinkSuggestions[expandedPersonId] ?? []).filter(
+            (suggestion) =>
+              suggestion.score >= 0.6
+              && !linkedClusterIds.has(suggestion.cluster_id)
+          )
+    ),
+    [expandedPersonId, linkedClusterIds, personLinkSuggestions],
+  )
+  const activePersonLoading =
+    expandedPersonId != null && loadingDetail === `person-clusters:${expandedPersonId}`
+  const activeSuggestionsLoading =
+    expandedPersonId != null && loadingPersonLinkSuggestionsId === expandedPersonId
+  const selectedSuggestedCount = useMemo(
+    () => activeSuggestedClusters.reduce(
+      (count, suggestion) =>
+        selectedSuggestedClusterIds.includes(suggestion.cluster_id) ? count + 1 : count,
+      0,
+    ),
+    [activeSuggestedClusters, selectedSuggestedClusterIds],
+  )
+  const allSuggestedSelected =
+    activeSuggestedClusters.length > 0
+    && selectedSuggestedCount === activeSuggestedClusters.length
 
   const filteredPersons = useMemo(() => {
     const lowerFilter = linkSearchFilter.toLowerCase()
@@ -1540,22 +1626,6 @@ export function FacesView() {
             </button>
           )}
           <button
-            onClick={() => { setRebuildConfirmText(''); setShowRebuildConfirm(true) }}
-            disabled={rebuilding}
-            className="px-3 py-1 text-xs rounded-md bg-amber-900/50 text-amber-300 hover:bg-amber-800/60
-                       disabled:opacity-50 transition-colors border border-amber-700/40"
-            title="Re-enqueue face analysis for all images (regenerates thumbnails)"
-          >
-            {rebuilding ? (
-              <span className="flex items-center gap-1.5">
-                <span className="w-3 h-3 border border-amber-600 border-t-amber-300 rounded-full animate-spin" />
-                Rebuilding...
-              </span>
-            ) : (
-              'Rebuild Faces'
-            )}
-          </button>
-          <button
             onClick={loadData}
             disabled={loading}
             className="px-3 py-1 text-xs rounded-md bg-neutral-800 text-neutral-300 hover:bg-neutral-700
@@ -1573,51 +1643,6 @@ export function FacesView() {
           </button>
         </div>
       </div>
-
-      {/* Rebuild confirmation dialog */}
-      {showRebuildConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl p-6 max-w-sm mx-4">
-            <h3 className="text-sm font-semibold text-neutral-200 mb-2">Rebuild Face Analysis?</h3>
-            <p className="text-xs text-neutral-400 mb-3">
-              This will re-enqueue face detection jobs for <strong>all images</strong>.
-              Existing face data will be replaced when the batch runs.
-            </p>
-            <p className="text-xs text-neutral-400 mb-2">
-              Type <code className="px-1.5 py-0.5 rounded bg-neutral-800 text-amber-400 font-mono">REBUILD</code> to confirm:
-            </p>
-            <input
-              value={rebuildConfirmText}
-              onChange={(e) => setRebuildConfirmText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && rebuildConfirmText === 'REBUILD') handleRebuild()
-                if (e.key === 'Escape') { setShowRebuildConfirm(false); setRebuildConfirmText('') }
-              }}
-              placeholder="REBUILD"
-              className="w-full px-3 py-1.5 text-sm rounded-md bg-neutral-800 border border-neutral-600
-                         text-neutral-100 placeholder-neutral-600 font-mono outline-none focus:border-amber-500 mb-4"
-              autoFocus
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => { setShowRebuildConfirm(false); setRebuildConfirmText('') }}
-                className="px-3 py-1.5 text-xs rounded-md bg-neutral-800 text-neutral-300 hover:bg-neutral-700
-                           transition-colors border border-neutral-600"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleRebuild}
-                disabled={rebuildConfirmText !== 'REBUILD'}
-                className="px-3 py-1.5 text-xs rounded-md bg-amber-700 text-white hover:bg-amber-600
-                           transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Rebuild All Faces
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Cluster relink dialog */}
       {relinkingCluster && (
@@ -2098,428 +2123,569 @@ export function FacesView() {
 
       {/* Face list — people mode */}
       {hasOccurrences && viewMode === 'people' && (
-        <div className="flex-1 flex flex-col min-h-0">
-        <div className="flex-1 overflow-y-auto">
-          {/* Persons grid */}
-          {persons.length > 0 && (
-            <div className="p-4">
-              <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-3">
+        <div className="flex-1 min-h-0 overflow-hidden bg-neutral-950/50">
+          <div className="flex h-full min-h-0 flex-col lg:flex-row">
+            <div
+              className={`shrink-0 border-b border-neutral-800 ${
+                isPeopleChooserExpanded
+                  ? 'flex-1 lg:border-b-0 lg:border-r-0'
+                  : 'lg:w-72 lg:border-b-0 lg:border-r'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-3 border-b border-neutral-800/60 px-4 py-3">
+                <div>
+                  <p className="text-[11px] uppercase tracking-wide text-neutral-500">People chooser</p>
+                  <p className="mt-1 text-xs text-neutral-600">
+                    Pick one person, then work through linked, suggested, unlinked, or inspector stages.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsPeopleChooserExpanded((current) => !current)}
+                  className="shrink-0 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-300 transition-colors hover:bg-neutral-800"
+                >
+                  {isPeopleChooserExpanded ? 'Collapse chooser' : 'Expand chooser'}
+                </button>
+              </div>
+              <div
+                className={`px-4 py-4 ${
+                  isPeopleChooserExpanded
+                    ? 'grid max-h-[calc(100%-72px)] grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-4 overflow-y-auto'
+                    : 'flex gap-3 overflow-x-auto lg:h-[calc(100%-72px)] lg:flex-col lg:overflow-y-auto lg:overflow-x-hidden'
+                }`}
+              >
                 {persons.map((person) => {
-                  const isExpPerson = expandedPersonId === person.id
-
+                  const isSelected = expandedPersonId === person.id
                   return (
-                    <div
+                    <button
                       key={`person:${person.id}`}
-                      className={`group relative rounded-lg border transition-colors cursor-pointer ${
-                        isExpPerson
-                          ? 'border-cyan-700/60 bg-cyan-900/20'
-                          : 'border-neutral-800 hover:border-neutral-700 bg-neutral-900/50 hover:bg-neutral-800/40'
+                      type="button"
+                      onClick={() => void togglePersonExpand(person.id)}
+                      className={`rounded-xl border text-left transition-colors ${
+                        isSelected
+                          ? 'border-cyan-700/60 bg-cyan-950/30'
+                          : 'border-neutral-800 bg-neutral-900/70 hover:border-neutral-700 hover:bg-neutral-900'
+                      } ${
+                        isPeopleChooserExpanded
+                          ? 'flex flex-col overflow-hidden p-0'
+                          : 'flex min-w-[180px] items-center gap-3 px-3 py-2 lg:min-w-0'
                       }`}
-                      onClick={() => togglePersonExpand(person.id)}
                     >
-                      {/* Large representative thumbnail */}
-                      <div className="aspect-square w-full overflow-hidden rounded-t-lg bg-neutral-800">
+                      <div
+                        className={`overflow-hidden bg-neutral-800 ${
+                          isPeopleChooserExpanded
+                            ? 'aspect-square w-full rounded-t-xl'
+                            : 'h-14 w-14 shrink-0 rounded-lg'
+                        }`}
+                      >
                         {person.representative_id != null ? (
                           <FaceCropThumbnail occurrenceId={person.representative_id} size="fill" />
                         ) : (
-                          <div className="w-full h-full flex items-center justify-center">
-                            <svg className="w-10 h-10 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+                          <div className="flex h-full w-full items-center justify-center">
+                            <svg className="h-6 w-6 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
                               <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
                             </svg>
                           </div>
                         )}
                       </div>
+                      <div className={`min-w-0 ${isPeopleChooserExpanded ? 'w-full px-3 py-2' : 'flex-1'}`}>
+                        <p className="truncate text-sm font-medium text-neutral-100">{person.name}</p>
+                        <p className="mt-1 text-[11px] text-neutral-500">
+                          {person.face_count} faces · {person.cluster_count} clusters
+                        </p>
+                      </div>
+                    </button>
+                  )
+                })}
+                {persons.length === 0 && (
+                  <div className="rounded-xl border border-dashed border-neutral-800 px-4 py-6 text-sm text-neutral-600">
+                    No people found yet.
+                  </div>
+                )}
+              </div>
+            </div>
 
-                      {/* Name + stats */}
-                      <div className="px-2 py-1.5">
-                        {editingPersonId === person.id ? (
-                          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+            <div className={`min-h-0 flex-1 flex-col overflow-hidden ${isPeopleChooserExpanded ? 'hidden' : 'flex'}`}>
+              {activePerson ? (
+                <>
+                  <div className="border-b border-neutral-800 bg-neutral-950/80 px-4 py-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        {editingPersonId === activePerson.id ? (
+                          <div className="flex items-center gap-2">
                             <input
                               ref={personEditRef}
                               value={personEditValue}
                               onChange={(e) => setPersonEditValue(e.target.value)}
                               onKeyDown={(e) => {
-                                if (e.key === 'Enter') handleRenamePerson(person.id)
+                                if (e.key === 'Enter') handleRenamePerson(activePerson.id)
                                 if (e.key === 'Escape') setEditingPersonId(null)
                               }}
-                              className="w-full px-1.5 py-0.5 text-xs rounded bg-neutral-800 border border-neutral-600
-                                         text-neutral-100 outline-none focus:border-blue-500"
+                              className="w-64 max-w-full rounded-lg border border-neutral-600 bg-neutral-900 px-3 py-1.5 text-sm text-neutral-100 outline-none focus:border-blue-500"
                               autoFocus
                             />
+                            <button
+                              type="button"
+                              onClick={() => setEditingPersonId(null)}
+                              className="text-xs text-neutral-500 hover:text-neutral-300"
+                            >
+                              Cancel
+                            </button>
                           </div>
                         ) : (
-                          <p className="text-xs text-neutral-100 font-medium truncate">{person.name}</p>
+                          <>
+                            <h3 className="text-base font-semibold text-neutral-100">{activePerson.name}</h3>
+                            <p className="mt-1 text-xs text-neutral-500">
+                              {activePerson.face_count} faces · {activePerson.cluster_count} clusters
+                            </p>
+                          </>
                         )}
-                        <p className="text-[10px] text-neutral-500 mt-0.5">
-                          {person.face_count} faces · {person.cluster_count} cl.
-                        </p>
                       </div>
-
-                      {/* Action buttons (hover) */}
-                      <div className="absolute top-1 right-1 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                        onClick={(e) => e.stopPropagation()}>
+                      <div className="flex flex-wrap items-center gap-2">
                         <button
+                          type="button"
                           onClick={() => {
-                            setEditingPersonId(person.id)
-                            setPersonEditValue(person.name)
+                            setEditingPersonId(activePerson.id)
+                            setPersonEditValue(activePerson.name)
                             setTimeout(() => personEditRef.current?.focus(), 0)
                           }}
-                          className="p-1 rounded bg-black/60 text-neutral-400 hover:text-white transition-colors"
-                          title="Rename"
+                          className="rounded-lg border border-neutral-700 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800"
                         >
-                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
-                          </svg>
+                          Rename person
                         </button>
                         <button
-                          onClick={() => setDeletingPersonId(person.id)}
-                          className="p-1 rounded bg-black/60 text-neutral-400 hover:text-red-400 transition-colors"
-                          title="Delete"
+                          type="button"
+                          onClick={() => setDeletingPersonId(activePerson.id)}
+                          className="rounded-lg border border-red-800/60 bg-red-950/20 px-3 py-1.5 text-xs text-red-200 hover:bg-red-900/30"
                         >
-                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                          </svg>
+                          Delete person
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setExpandedPersonId(null)
+                            setIsPeopleChooserExpanded(false)
+                          }}
+                          className="text-xs text-neutral-500 hover:text-neutral-300"
+                        >
+                          Close workspace
                         </button>
                       </div>
                     </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
 
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {([
+                        ['linked', 'Linked', `${activePersonClusters.length}`],
+                        ['suggested', 'Suggested', `${activeSuggestedClusters.length}`],
+                        ['unlinked', 'Unlinked', `${visibleUnlinkedClusters.length}`],
+                        ['inspector', 'Inspector', inspectorCluster ? '1' : '0'],
+                      ] as Array<[PeopleStage, string, string]>).map(([stage, label, count]) => {
+                        const isDisabled = stage === 'inspector' && !inspectorCluster
+                        return (
+                          <button
+                            key={stage}
+                            type="button"
+                            disabled={isDisabled}
+                            onClick={() => {
+                              if (stage === 'inspector') {
+                                setPeopleStage('inspector')
+                                return
+                              }
+                              setPeopleStage(stage)
+                              setInspectorReturnStage(stage)
+                            }}
+                            className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                              peopleStage === stage
+                                ? 'border-cyan-600 bg-cyan-950/40 text-cyan-100'
+                                : 'border-neutral-700 bg-neutral-900 text-neutral-300 hover:bg-neutral-800'
+                            } disabled:cursor-not-allowed disabled:opacity-40`}
+                          >
+                            {label} <span className="ml-1 text-neutral-500">{count}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
 
-
-          {/* Unlinked clusters */}
-          {visibleUnlinkedClusters.length > 0 && (
-            <>
-              <div className="px-5 py-2 text-xs text-neutral-500 font-medium uppercase tracking-wide bg-neutral-900/80 border-b border-neutral-800/60 sticky top-0">
-                Unlinked Clusters ({visibleUnlinkedClusters.length}{unlinkedClusters.length > visibleUnlinkedClusters.length ? ` of ${unlinkedClusters.length}` : ''})
-              </div>
-              <div className="p-4">
-                <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-3">
-                  {visibleUnlinkedClusters.map((cluster) => {
-                    const displayLabel = 'Unknown'
-                    const isSelected = expandedKey === `cluster:${cluster.cluster_id}`
-
-                    return (
-                      <div
-                        key={`unlinked:${cluster.cluster_id}`}
-                        className={`group relative rounded-lg border transition-colors cursor-pointer ${
-                          isSelected
-                            ? 'border-blue-700/60 bg-blue-900/20'
-                            : 'border-neutral-800 hover:border-neutral-700 bg-neutral-900/50 hover:bg-neutral-800/40'
-                        }`}
-                        onClick={() => {
-                          if (cluster.cluster_id !== null) {
-                            const key = `cluster:${cluster.cluster_id}`
-                            toggleExpand(key, cluster, null)
-                          }
-                        }}
-                      >
-                        <div className="aspect-square w-full overflow-hidden rounded-t-lg bg-neutral-800">
-                          {cluster.representative_id != null ? (
-                            <FaceCropThumbnail occurrenceId={cluster.representative_id} size="fill" />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center">
-                              <svg className="w-10 h-10 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
-                              </svg>
-                            </div>
-                          )}
+                  <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+                    {peopleStage === 'linked' && (
+                      <div className="space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <p className="text-[11px] uppercase tracking-wide text-cyan-300/90">Linked clusters</p>
+                            <p className="mt-1 text-xs text-neutral-500">
+                              Review confirmed matches for {activePerson.name}.
+                            </p>
+                          </div>
                         </div>
-                        <div className="px-2 py-1.5">
-                          <p className="text-xs text-neutral-100 truncate">{displayLabel}</p>
-                          <p className="text-[10px] text-neutral-500 mt-0.5">{cluster.face_count} faces</p>
-                        </div>
-                        {/* Link button (hover) */}
-                        {cluster.cluster_id !== null && (
-                          <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                            onClick={(e) => e.stopPropagation()}>
-                            <div className="relative">
-                              {renderLinkDropdown(cluster.cluster_id)}
-                            </div>
+
+                        {activePersonLoading ? (
+                          <div className="flex items-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900/60 px-4 py-3 text-sm text-neutral-500">
+                            <span className="h-4 w-4 rounded-full border border-neutral-600 border-t-neutral-300 animate-spin" />
+                            Loading linked clusters...
+                          </div>
+                        ) : activePersonClusters.length > 0 ? (
+                          <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
+                            {activePersonClusters.map((pc) => {
+                              const relinkCluster = getRelinkClusterFromPersonCluster(pc, activePerson.id)
+                              const key = `cluster:${pc.cluster_id}`
+                              const isSelected = expandedKey === key && peopleStage === 'inspector'
+                              return (
+                                <div
+                                  key={pc.cluster_id}
+                                  className={`group relative rounded-xl border transition-colors ${
+                                    isSelected
+                                      ? 'border-cyan-600/70 bg-cyan-950/20'
+                                      : 'border-cyan-800/40 bg-cyan-950/10 hover:bg-cyan-900/15'
+                                  }`}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => void openClusterInspector(key, relinkCluster, 'linked')}
+                                    className="block w-full text-left"
+                                  >
+                                    <div className="absolute left-2 top-2 rounded px-1.5 py-0.5 text-[10px] text-cyan-100 bg-cyan-900/60 border border-cyan-700/60 z-10">
+                                      Linked
+                                    </div>
+                                    <div className="aspect-square w-full overflow-hidden rounded-t-xl bg-neutral-800">
+                                      {pc.representative_id != null ? (
+                                        <FaceCropThumbnail occurrenceId={pc.representative_id} size="fill" />
+                                      ) : (
+                                        <div className="flex h-full w-full items-center justify-center">
+                                          <svg className="h-10 w-10 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                                          </svg>
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="px-3 py-2">
+                                      <p className="truncate text-sm text-neutral-100">{pc.label}</p>
+                                      <p className="mt-1 text-[11px] text-neutral-400">
+                                        {pc.face_count} faces · {pc.image_count} images
+                                      </p>
+                                    </div>
+                                  </button>
+                                  <div className="absolute right-2 top-2 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                                    <div onClick={(e) => e.stopPropagation()}>
+                                      {renderRelinkButton(relinkCluster)}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        void handleUnlinkCluster(pc.cluster_id)
+                                      }}
+                                      className="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-neutral-300 hover:text-red-400"
+                                    >
+                                      Unlink
+                                    </button>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-dashed border-neutral-800 px-4 py-10 text-sm text-neutral-600">
+                            No confirmed links yet.
                           </div>
                         )}
                       </div>
-                    )
-                  })}
-                </div>
-              </div>
-            </>
-          )}
-        </div>
+                    )}
 
-        {/* Bottom drawer for expanded person or cluster details */}
-        {expandedPersonId !== null && (() => {
-          const pClusters = personClusters[expandedPersonId] ?? []
-          const suggestedClusters = personLinkSuggestions[expandedPersonId] ?? []
-          const person = persons.find((p) => p.id === expandedPersonId)
-          const isLoading = loadingDetail === `person-clusters:${expandedPersonId}`
-          const isLoadingSuggestions = loadingPersonLinkSuggestionsId === expandedPersonId
-          const selectedSuggestedCount = suggestedClusters.reduce(
-            (count, suggestion) =>
-              selectedSuggestedClusterIds.includes(suggestion.cluster_id) ? count + 1 : count,
-            0,
-          )
-          const allSuggestedSelected =
-            suggestedClusters.length > 0
-            && selectedSuggestedCount === suggestedClusters.length
+                    {peopleStage === 'suggested' && (
+                      <div className="space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <p className="text-[11px] uppercase tracking-wide text-amber-300/90">Suggested links</p>
+                            <p className="mt-1 text-xs text-neutral-500">
+                              Review AI-proposed matches for {activePerson.name}.
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {activeSuggestionsLoading && (
+                              <span className="inline-flex items-center gap-1 text-[11px] text-neutral-500">
+                                <span className="h-3 w-3 rounded-full border border-neutral-600 border-t-neutral-300 animate-spin" />
+                                Scoring...
+                              </span>
+                            )}
+                            {activeSuggestedClusters.length > 0 && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (allSuggestedSelected) {
+                                      setSelectedSuggestedClusterIds([])
+                                      return
+                                    }
+                                    setSelectedSuggestedClusterIds(
+                                      activeSuggestedClusters.map((suggestion) => suggestion.cluster_id)
+                                    )
+                                  }}
+                                  disabled={confirmingSuggestedLinks}
+                                  className="rounded-lg border border-neutral-700 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
+                                >
+                                  {allSuggestedSelected ? 'Clear selection' : 'Select all'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleConfirmSuggestedLinks()}
+                                  disabled={selectedSuggestedCount === 0 || confirmingSuggestedLinks}
+                                  className="rounded-lg border border-emerald-700/60 bg-emerald-950/30 px-3 py-1.5 text-xs text-emerald-200 hover:bg-emerald-900/40 disabled:opacity-40"
+                                >
+                                  {confirmingSuggestedLinks
+                                    ? 'Linking...'
+                                    : `Confirm selected (${selectedSuggestedCount})`}
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
 
-          return (
-            <div className="shrink-0 border-t border-cyan-800/50 bg-neutral-900 max-h-[40vh] overflow-y-auto">
-              <div className="px-4 py-2 border-b border-neutral-800/60 flex items-center justify-between sticky top-0 bg-neutral-900 z-10">
-                <span className="text-xs text-cyan-300 font-medium">
-                  {person?.name} — {pClusters.length} linked
-                  {suggestedClusters.length > 0 && ` · ${suggestedClusters.length} suggested`}
-                </span>
-                <div className="flex items-center gap-2">
-                  <span className="hidden sm:inline-flex px-1.5 py-0.5 rounded border border-cyan-700/50 bg-cyan-950/25 text-[10px] text-cyan-200">
-                    Linked
-                  </span>
-                  <span className="hidden sm:inline-flex px-1.5 py-0.5 rounded border border-amber-700/50 bg-amber-950/20 text-[10px] text-amber-200">
-                    Suggested
-                  </span>
-                  <button onClick={() => setExpandedPersonId(null)} className="text-neutral-500 hover:text-neutral-300 text-xs">Close</button>
-                </div>
-              </div>
+                        {activeSuggestedClusters.length > 0 ? (
+                          <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-4">
+                            {activeSuggestedClusters.map((suggestion) => {
+                              const sourceCluster = clusters.find(
+                                (cluster) => cluster.cluster_id === suggestion.cluster_id
+                              ) ?? {
+                                cluster_id: suggestion.cluster_id,
+                                identity_name: suggestion.label || `cluster-${suggestion.cluster_id}`,
+                                display_name: suggestion.label || null,
+                                identity_id: null,
+                                image_count: suggestion.image_count,
+                                face_count: suggestion.face_count,
+                                representative_id: suggestion.representative_id,
+                                person_id: null,
+                              }
+                              const key = `cluster:${suggestion.cluster_id}`
+                              const isSelected = expandedKey === key && peopleStage === 'inspector'
+                              const isBatchSelected = selectedSuggestedClusterIds.includes(suggestion.cluster_id)
 
-              {isLoading && (
-                <div className="px-4 py-3 flex items-center gap-2 text-xs text-neutral-500">
-                  <span className="w-3 h-3 border border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
-                  Loading clusters...
+                              return (
+                                <div
+                                  key={`suggested:${suggestion.cluster_id}`}
+                                  className={`relative rounded-xl border transition-colors ${
+                                    isSelected
+                                      ? 'border-amber-600/70 bg-amber-900/20'
+                                      : 'border-amber-800/50 bg-amber-950/10 hover:bg-amber-900/15'
+                                  }`}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => void openClusterInspector(key, sourceCluster, 'suggested')}
+                                    className="block w-full text-left"
+                                  >
+                                    <div className="absolute left-2 top-2 rounded px-1.5 py-0.5 text-[10px] text-amber-100 bg-amber-900/60 border border-amber-700/60 z-10">
+                                      Suggested
+                                    </div>
+                                    <div className="aspect-square w-full overflow-hidden rounded-t-xl bg-neutral-800">
+                                      {suggestion.representative_id != null ? (
+                                        <FaceCropThumbnail occurrenceId={suggestion.representative_id} size="fill" />
+                                      ) : (
+                                        <div className="flex h-full w-full items-center justify-center">
+                                          <svg className="h-10 w-10 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                                          </svg>
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="px-3 py-2">
+                                      <p className="truncate text-sm text-neutral-100">
+                                        {suggestion.label || 'Unknown'}
+                                      </p>
+                                      <p className="mt-1 text-[11px] text-neutral-400">
+                                        {suggestion.face_count} faces · score {suggestion.score.toFixed(3)}
+                                      </p>
+                                    </div>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      toggleSuggestedClusterSelection(suggestion.cluster_id)
+                                    }}
+                                    className={`absolute right-2 top-2 z-10 rounded px-1.5 py-0.5 text-[10px] border ${
+                                      isBatchSelected
+                                        ? 'border-emerald-500/70 bg-emerald-900/70 text-emerald-100'
+                                        : 'border-neutral-600 bg-black/55 text-neutral-200'
+                                    }`}
+                                  >
+                                    {isBatchSelected ? 'Selected' : 'Select'}
+                                  </button>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ) : !activeSuggestionsLoading ? (
+                          <div className="rounded-xl border border-dashed border-neutral-800 px-4 py-10 text-sm text-neutral-600">
+                            No suggested links from current embeddings.
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+
+                    {peopleStage === 'unlinked' && (
+                      <div className="space-y-4">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wide text-blue-300/90">Unlinked clusters</p>
+                          <p className="mt-1 text-xs text-neutral-500">
+                            Hunt for missed matches for {activePerson.name}. Showing {visibleUnlinkedClusters.length}
+                            {unlinkedClusters.length > visibleUnlinkedClusters.length ? ` of ${unlinkedClusters.length}` : ''} unlinked clusters.
+                          </p>
+                        </div>
+
+                        {visibleUnlinkedClusters.length > 0 ? (
+                          <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-4">
+                            {visibleUnlinkedClusters.map((cluster) => {
+                              const key = `cluster:${cluster.cluster_id}`
+                              const isSelected = expandedKey === key && peopleStage === 'inspector'
+                              return (
+                                <div
+                                  key={`unlinked:${cluster.cluster_id}`}
+                                  className={`group relative rounded-xl border transition-colors ${
+                                    isSelected
+                                      ? 'border-blue-700/60 bg-blue-900/20'
+                                      : 'border-neutral-800 bg-neutral-900/60 hover:border-neutral-700 hover:bg-neutral-800/40'
+                                  }`}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (cluster.cluster_id != null) {
+                                        void openClusterInspector(key, cluster, 'unlinked')
+                                      }
+                                    }}
+                                    className="block w-full text-left"
+                                  >
+                                    <div className="aspect-square w-full overflow-hidden rounded-t-xl bg-neutral-800">
+                                      {cluster.representative_id != null ? (
+                                        <FaceCropThumbnail occurrenceId={cluster.representative_id} size="fill" />
+                                      ) : (
+                                        <div className="flex h-full w-full items-center justify-center">
+                                          <svg className="h-10 w-10 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                                          </svg>
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="px-3 py-2">
+                                      <p className="truncate text-sm text-neutral-100">Unknown</p>
+                                      <p className="mt-1 text-[11px] text-neutral-500">{cluster.face_count} faces</p>
+                                    </div>
+                                  </button>
+                                  {cluster.cluster_id !== null && (
+                                    <div
+                                      className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <div className="relative">
+                                        {renderLinkDropdown(cluster.cluster_id)}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-dashed border-neutral-800 px-4 py-10 text-sm text-neutral-600">
+                            No unlinked clusters available.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {peopleStage === 'inspector' && (
+                      <div className="space-y-4">
+                        {inspectorCluster && expandedKey ? (
+                          <>
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <div>
+                                <p className="text-[11px] uppercase tracking-wide text-violet-300/90">Inspector</p>
+                                <h4 className="mt-1 text-base font-semibold text-neutral-100">
+                                  {inspectorCluster.display_name || 'Unknown'}
+                                </h4>
+                                <p className="mt-1 text-xs text-neutral-500">
+                                  {inspectorCluster.face_count} faces · {inspectorCluster.image_count} images
+                                </p>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                {renderRelinkButton(inspectorCluster)}
+                                {inspectorCluster.cluster_id != null && (
+                                  <div className="relative">
+                                    {renderLinkDropdown(inspectorCluster.cluster_id)}
+                                  </div>
+                                )}
+                                {inspectorCluster.person_id != null && inspectorCluster.cluster_id != null && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleUnlinkCluster(inspectorCluster.cluster_id!)}
+                                    className="rounded-lg border border-red-800/60 bg-red-950/20 px-3 py-1.5 text-xs text-red-200 hover:bg-red-900/30"
+                                  >
+                                    Unlink
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => setPeopleStage(inspectorReturnStage)}
+                                  className="text-xs text-neutral-500 hover:text-neutral-300"
+                                >
+                                  Back to {inspectorReturnStage}
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="rounded-xl border border-neutral-800 bg-neutral-900/60 p-4">
+                              <div className="flex flex-col gap-4 xl:flex-row">
+                                <div className="xl:w-72 shrink-0">
+                                  <div className="aspect-square overflow-hidden rounded-xl bg-neutral-800">
+                                    {inspectorCluster.representative_id != null ? (
+                                      <FaceCropThumbnail occurrenceId={inspectorCluster.representative_id} size="fill" />
+                                    ) : (
+                                      <div className="flex h-full w-full items-center justify-center">
+                                        <svg className="h-10 w-10 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+                                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                                        </svg>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="rounded-lg border border-neutral-800 bg-neutral-950/40 px-3 py-2 text-xs text-neutral-500">
+                                    Click any thumbnail below to open the source image in the lightbox.
+                                  </div>
+                                  <div className="mt-4 rounded-xl border border-neutral-800 bg-neutral-950/30">
+                                    <div className="border-b border-neutral-800/70 px-4 py-2 text-[11px] uppercase tracking-wide text-neutral-500">
+                                      Face occurrences
+                                    </div>
+                                    <div className="max-h-[50vh] overflow-y-auto py-3">
+                                      {renderExpandedDetail(expandedKey)}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="rounded-xl border border-dashed border-neutral-800 px-4 py-10 text-sm text-neutral-600">
+                            Pick a linked, suggested, or unlinked cluster to inspect it here.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-1 items-center justify-center px-6 text-center">
+                  <div className="max-w-lg rounded-2xl border border-dashed border-neutral-800 bg-neutral-900/40 px-6 py-8">
+                    <p className="text-sm font-medium text-neutral-200">Choose a person to open the review workspace.</p>
+                    <p className="mt-2 text-xs text-neutral-500">
+                      You will land in Linked first, then move through Suggested, Unlinked, or Inspector without stacked drawers or floating review panels.
+                    </p>
+                  </div>
                 </div>
               )}
-
-              <div className="p-4 space-y-4">
-                <div>
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <p className="text-[11px] uppercase tracking-wide text-amber-300/90">
-                      Suggested links
-                    </p>
-                    <div className="flex items-center gap-2">
-                      {isLoadingSuggestions && (
-                        <span className="inline-flex items-center gap-1 text-[11px] text-neutral-500">
-                          <span className="w-3 h-3 border border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
-                          Scoring...
-                        </span>
-                      )}
-                      {suggestedClusters.length > 0 && (
-                        <>
-                          <button
-                            onClick={() => {
-                              if (allSuggestedSelected) {
-                                setSelectedSuggestedClusterIds([])
-                                return
-                              }
-                              setSelectedSuggestedClusterIds(
-                                suggestedClusters.map((suggestion) => suggestion.cluster_id)
-                              )
-                            }}
-                            disabled={confirmingSuggestedLinks}
-                            className="px-2 py-1 text-[11px] rounded border border-neutral-700 text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
-                          >
-                            {allSuggestedSelected ? 'Clear' : 'Select all'}
-                          </button>
-                          <button
-                            onClick={() => void handleConfirmSuggestedLinks()}
-                            disabled={selectedSuggestedCount === 0 || confirmingSuggestedLinks}
-                            className="px-2 py-1 text-[11px] rounded border border-emerald-700/60 bg-emerald-950/30 text-emerald-200 hover:bg-emerald-900/40 disabled:opacity-40"
-                          >
-                            {confirmingSuggestedLinks
-                              ? 'Linking...'
-                              : `Confirm selected (${selectedSuggestedCount})`}
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  {suggestedClusters.length > 0 ? (
-                    <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3">
-                      {suggestedClusters.map((suggestion) => {
-                        const sourceCluster = clusters.find(
-                          (cluster) => cluster.cluster_id === suggestion.cluster_id
-                        ) ?? {
-                          cluster_id: suggestion.cluster_id,
-                          identity_name: suggestion.label || `cluster-${suggestion.cluster_id}`,
-                          display_name: suggestion.label || null,
-                          identity_id: null,
-                          image_count: suggestion.image_count,
-                          face_count: suggestion.face_count,
-                          representative_id: suggestion.representative_id,
-                          person_id: null,
-                        }
-                        const key = `cluster:${suggestion.cluster_id}`
-                        const isSelected = expandedKey === key
-                        const isBatchSelected = selectedSuggestedClusterIds.includes(
-                          suggestion.cluster_id
-                        )
-
-                        return (
-                          <div
-                            key={`suggested:${suggestion.cluster_id}`}
-                            className={`relative rounded-lg border transition-colors cursor-pointer ${
-                              isSelected
-                                ? 'border-amber-600/70 bg-amber-900/20'
-                                : 'border-amber-800/50 bg-amber-950/10 hover:bg-amber-900/15'
-                            }`}
-                            onClick={() => toggleExpand(key, sourceCluster, null)}
-                          >
-                            <div className="absolute top-1 left-1 rounded px-1.5 py-0.5 text-[10px] text-amber-100 bg-amber-900/60 border border-amber-700/60 z-10">
-                              Suggested
-                            </div>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                toggleSuggestedClusterSelection(suggestion.cluster_id)
-                              }}
-                              className={`absolute top-1 right-1 z-10 rounded px-1.5 py-0.5 text-[10px] border ${
-                                isBatchSelected
-                                  ? 'border-emerald-500/70 bg-emerald-900/70 text-emerald-100'
-                                  : 'border-neutral-600 bg-black/55 text-neutral-200'
-                              }`}
-                            >
-                              {isBatchSelected ? 'Selected' : 'Select'}
-                            </button>
-                            <div className="aspect-square w-full overflow-hidden rounded-t-lg bg-neutral-800">
-                              {suggestion.representative_id != null ? (
-                                <FaceCropThumbnail occurrenceId={suggestion.representative_id} size="fill" />
-                              ) : (
-                                <div className="w-full h-full flex items-center justify-center">
-                                  <svg className="w-10 h-10 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
-                                  </svg>
-                                </div>
-                              )}
-                            </div>
-                            <div className="px-2 py-1.5">
-                              <p className="text-xs text-neutral-100 truncate">
-                                {suggestion.label || 'Unknown'}
-                              </p>
-                              <p className="text-[10px] text-neutral-400 mt-0.5">
-                                {suggestion.face_count} faces · score {suggestion.score.toFixed(3)}
-                              </p>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  ) : !isLoadingSuggestions ? (
-                    <p className="text-xs text-neutral-600">
-                      No suggested links from current embeddings.
-                    </p>
-                  ) : null}
-                </div>
-
-                <div className={suggestedClusters.length > 0 ? 'pt-4 border-t border-neutral-800/70' : ''}>
-                  <p className="mb-2 text-[11px] uppercase tracking-wide text-cyan-300/90">
-                    Confirmed links
-                  </p>
-                  {pClusters.length > 0 ? (
-                    <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3">
-                      {pClusters.map((pc) => {
-                        const relinkCluster = getRelinkClusterFromPersonCluster(pc, expandedPersonId)
-                        const key = `cluster:${pc.cluster_id}`
-                        const isSelected = expandedKey === key
-                        return (
-                          <div
-                            key={pc.cluster_id}
-                            className={`group relative rounded-lg border transition-colors cursor-pointer ${
-                              isSelected
-                                ? 'border-cyan-600/70 bg-cyan-900/20'
-                                : 'border-cyan-800/50 bg-cyan-950/10 hover:bg-cyan-900/15'
-                            }`}
-                            onClick={() => toggleExpand(key, relinkCluster, null)}
-                          >
-                            <div className="absolute top-1 left-1 rounded px-1.5 py-0.5 text-[10px] text-cyan-100 bg-cyan-900/60 border border-cyan-700/60 z-10">
-                              Linked
-                            </div>
-                            <div className="aspect-square w-full overflow-hidden rounded-t-lg bg-neutral-800">
-                              {pc.representative_id != null ? (
-                                <FaceCropThumbnail occurrenceId={pc.representative_id} size="fill" />
-                              ) : (
-                                <div className="w-full h-full flex items-center justify-center">
-                                  <svg className="w-10 h-10 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
-                                  </svg>
-                                </div>
-                              )}
-                            </div>
-                            <div className="px-2 py-1.5">
-                              <p className="text-xs text-neutral-100 truncate">{pc.label}</p>
-                              <p className="text-[10px] text-neutral-400 mt-0.5">
-                                {pc.face_count} faces · {pc.image_count} images
-                              </p>
-                            </div>
-                            <div
-                              className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              {renderRelinkButton(relinkCluster)}
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  void handleUnlinkCluster(pc.cluster_id)
-                                }}
-                                className="px-1.5 py-0.5 rounded bg-black/60 text-[10px] text-neutral-300 hover:text-red-400 transition-colors"
-                                title="Unlink from person"
-                              >
-                                Unlink
-                              </button>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  ) : !isLoading ? (
-                    <p className="text-xs text-neutral-600">No confirmed links yet.</p>
-                  ) : null}
-                </div>
-              </div>
             </div>
-          )
-        })()}
-
-        {expandedKey?.startsWith('cluster:') && (() => {
-          const cId = parseInt(expandedKey.replace('cluster:', ''), 10)
-          if (Number.isNaN(cId)) {
-            return null
-          }
-
-          const suggested = Object.values(personLinkSuggestions)
-            .flat()
-            .find((suggestion) => suggestion.cluster_id === cId)
-          const cl = clusters.find((cluster) => cluster.cluster_id === cId) ?? (
-            suggested
-              ? {
-                  cluster_id: suggested.cluster_id,
-                  identity_name: suggested.label || `cluster-${suggested.cluster_id}`,
-                  display_name: suggested.label || null,
-                  identity_id: null,
-                  image_count: suggested.image_count,
-                  face_count: suggested.face_count,
-                  representative_id: suggested.representative_id,
-                  person_id: null,
-                }
-              : null
-          )
-          const displayLabel = cl?.display_name || 'Unknown'
-          return (
-            <div className="shrink-0 border-t border-neutral-700 bg-neutral-900 max-h-[40vh] overflow-y-auto">
-              <div className="px-4 py-2 border-b border-neutral-800/60 flex items-center justify-between sticky top-0 bg-neutral-900 z-10">
-                <span className="text-xs text-neutral-300 font-medium">{displayLabel}</span>
-                <div className="flex items-center gap-3">
-                  {cl && renderRelinkButton(cl)}
-                  <div className="relative">
-                    {renderLinkDropdown(cId)}
-                  </div>
-                  <button onClick={() => setExpandedKey(null)} className="text-neutral-500 hover:text-neutral-300 text-xs">Close</button>
-                </div>
-              </div>
-              {renderExpandedDetail(expandedKey)}
-            </div>
-          )
-        })()}
+          </div>
         </div>
       )}
 

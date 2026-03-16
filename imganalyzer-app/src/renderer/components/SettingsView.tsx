@@ -603,9 +603,108 @@ export function SettingsView() {
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-neutral-100">Maintenance</h2>
           </div>
+          <RebuildFacesButton />
           <RebuildPerceptionButton />
         </section>
       </div>
+    </div>
+  )
+}
+
+function RebuildFacesButton() {
+  const [showConfirm, setShowConfirm] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+
+  const doRebuild = async () => {
+    setShowConfirm(false)
+    setConfirmText('')
+    setBusy(true)
+    setMessage(null)
+    try {
+      const result = await window.api.rebuildFaces()
+      if (result.error) {
+        setMessage(result.error)
+        return
+      }
+      if (result.enqueued === 0) {
+        setMessage('No images found to rebuild faces for.')
+        return
+      }
+      try {
+        await window.api.batchResume()
+        setMessage(`${result.enqueued} face-analysis jobs queued and running. Check the Running tab for progress.`)
+      } catch {
+        setMessage(`${result.enqueued} face-analysis jobs queued. Open the Running tab and resume processing when ready.`)
+      }
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-amber-800/40 bg-amber-950/10 px-4 py-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="text-sm font-medium text-amber-200">Rebuild face analysis</p>
+          <p className="mt-1 text-xs text-neutral-400">
+            Re-enqueue face detection for all images. This is a maintenance action, so it lives here instead of the Faces page.
+          </p>
+        </div>
+        {!showConfirm && (
+          <button
+            type="button"
+            onClick={() => setShowConfirm(true)}
+            disabled={busy}
+            className="rounded-lg border border-amber-700/50 bg-amber-900/30 px-4 py-1.5 text-sm text-amber-300 transition-colors hover:border-amber-600 hover:bg-amber-800/40 disabled:opacity-50"
+          >
+            {busy ? 'Queueing…' : 'Rebuild face analysis'}
+          </button>
+        )}
+      </div>
+
+      {showConfirm && (
+        <div className="mt-4 flex flex-col gap-3 rounded-lg border border-amber-800/40 bg-neutral-950/60 p-3">
+          <p className="text-sm text-amber-200">
+            Type <strong>REBUILD</strong> to re-enqueue face analysis on all images:
+          </p>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input
+              autoFocus
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && confirmText === 'REBUILD') void doRebuild()
+                else if (e.key === 'Escape') { setShowConfirm(false); setConfirmText('') }
+              }}
+              className="w-full rounded border border-amber-700/60 bg-neutral-900 px-3 py-2 text-sm text-neutral-200 outline-none focus:border-amber-500 sm:w-40"
+              placeholder="REBUILD"
+            />
+            <button
+              type="button"
+              disabled={confirmText !== 'REBUILD' || busy}
+              onClick={() => void doRebuild()}
+              className="rounded bg-amber-700 px-3 py-2 text-sm text-white transition-colors enabled:hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Confirm
+            </button>
+            <button
+              type="button"
+              onClick={() => { setShowConfirm(false); setConfirmText('') }}
+              className="text-sm text-neutral-500 hover:text-neutral-300"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {message && (
+        <p className="mt-3 text-xs text-neutral-300">{message}</p>
+      )}
     </div>
   )
 }
