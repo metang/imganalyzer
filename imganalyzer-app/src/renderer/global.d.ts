@@ -391,6 +391,7 @@ export interface FacePerson {
   face_count: number
   image_count: number
   representative_id: number | null
+  representative_thumbnail: string | null
 }
 
 export interface PersonCluster {
@@ -399,6 +400,7 @@ export interface PersonCluster {
   image_count: number
   label: string
   representative_id: number | null
+  representative_thumbnail: string | null
 }
 
 export interface FaceCluster {

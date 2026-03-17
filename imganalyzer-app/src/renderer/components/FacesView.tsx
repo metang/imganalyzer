@@ -51,6 +51,20 @@ function requestThumbnail(
   }
 }
 
+/** Pre-populate the thumbnail cache from inline base64 data (e.g. from
+ *  faces/persons or faces/person-clusters responses).  Avoids separate
+ *  RPC roundtrips for thumbnails the server already returned. */
+function primeThumbCache(entries: Array<{ id: number; base64: string }>): void {
+  for (const { id, base64 } of entries) {
+    if (thumbCache.has(id)) continue
+    if (thumbCache.size >= THUMB_CACHE_MAX) {
+      const oldest = thumbCache.keys().next().value
+      if (oldest !== undefined) thumbCache.delete(oldest)
+    }
+    thumbCache.set(id, `data:image/jpeg;base64,${base64}`)
+  }
+}
+
 async function flushBatch(): Promise<void> {
   batchTimer = null
   if (pendingIds.size === 0) return
@@ -58,17 +72,20 @@ async function flushBatch(): Promise<void> {
   const ids = [...pendingIds]
   pendingIds.clear()
 
-  // Process in chunks of 50 to avoid overly large RPC payloads
+  // Process chunks in parallel for faster loading
   const CHUNK = 50
+  const chunks: number[][] = []
   for (let i = 0; i < ids.length; i += CHUNK) {
-    const chunk = ids.slice(i, i + CHUNK)
+    chunks.push(ids.slice(i, i + CHUNK))
+  }
+
+  await Promise.all(chunks.map(async (chunk) => {
     try {
       const result = await window.api.getFaceCropBatch(chunk)
       for (const id of chunk) {
         const b64 = result.thumbnails?.[String(id)]
         const dataUri = b64 ? `data:image/jpeg;base64,${b64}` : null
         if (dataUri) {
-          // Evict oldest if cache full
           if (thumbCache.size >= THUMB_CACHE_MAX) {
             const oldest = thumbCache.keys().next().value
             if (oldest !== undefined) thumbCache.delete(oldest)
@@ -80,14 +97,13 @@ async function flushBatch(): Promise<void> {
         for (const cb of cbs) cb(dataUri)
       }
     } catch {
-      // On error, notify all callbacks with null
       for (const id of chunk) {
         const cbs = pendingCallbacks.get(id) ?? []
         pendingCallbacks.delete(id)
         for (const cb of cbs) cb(null)
       }
     }
-  }
+  }))
 }
 
 // ── Face crop thumbnail (batch-loaded with LRU cache) ─────────────────────────
@@ -367,7 +383,9 @@ export function FacesView() {
   // Person state
   const [persons, setPersons] = useState<FacePerson[]>([])
   const [personClusters, setPersonClusters] = useState<Record<number, PersonCluster[]>>({})
+  const [personClusterErrors, setPersonClusterErrors] = useState<Record<number, string>>({})
   const [personLinkSuggestions, setPersonLinkSuggestions] = useState<Record<number, PersonLinkSuggestion[]>>({})
+  const [personLinkSuggestionErrors, setPersonLinkSuggestionErrors] = useState<Record<number, string>>({})
   const [loadingPersonLinkSuggestionsId, setLoadingPersonLinkSuggestionsId] = useState<number | null>(null)
   const [selectedSuggestedClusterIds, setSelectedSuggestedClusterIds] = useState<number[]>([])
   const [confirmingSuggestedLinks, setConfirmingSuggestedLinks] = useState(false)
@@ -468,6 +486,11 @@ export function FacesView() {
       // Load persons
       if (!personsResult.error) {
         setPersons(personsResult.persons)
+        // Pre-populate thumbnail cache from inline thumbnails
+        const thumbEntries = personsResult.persons
+          .filter((p) => p.representative_id != null && p.representative_thumbnail != null)
+          .map((p) => ({ id: p.representative_id!, base64: p.representative_thumbnail! }))
+        if (thumbEntries.length > 0) primeThumbCache(thumbEntries)
         // Auto-switch to people view if persons exist and no view preference yet
         if (personsResult.persons.length > 0) {
           setViewMode('people')
@@ -833,16 +856,24 @@ export function FacesView() {
 
       const startedAt = performance.now()
       setLoadingPersonLinkSuggestionsId(personId)
+      setPersonLinkSuggestionErrors((prev) => {
+        if (prev[personId] === undefined) {
+          return prev
+        }
+        const next = { ...prev }
+        delete next[personId]
+        return next
+      })
       try {
         const result = await window.api.getPersonLinkSuggestions(personId, 12)
         if (result.error) {
-          setError(result.error)
+          setPersonLinkSuggestionErrors((prev) => ({ ...prev, [personId]: result.error }))
           setPersonLinkSuggestions((prev) => ({ ...prev, [personId]: [] }))
           return
         }
         setPersonLinkSuggestions((prev) => ({ ...prev, [personId]: result.suggestions }))
       } catch (err) {
-        setError(String(err))
+        setPersonLinkSuggestionErrors((prev) => ({ ...prev, [personId]: String(err) }))
         setPersonLinkSuggestions((prev) => ({ ...prev, [personId]: [] }))
       } finally {
         if (import.meta.env.DEV) {
@@ -853,6 +884,48 @@ export function FacesView() {
       }
     },
     [personLinkSuggestions]
+  )
+
+  const loadPersonClusters = useCallback(
+    async (personId: number, force = false) => {
+      if (!force && personClusters[personId] !== undefined) {
+        return
+      }
+
+      const startedAt = performance.now()
+      const loadingKey = `person-clusters:${personId}`
+      setLoadingDetail(loadingKey)
+      setPersonClusterErrors((prev) => {
+        if (prev[personId] === undefined) {
+          return prev
+        }
+        const next = { ...prev }
+        delete next[personId]
+        return next
+      })
+      try {
+        const result = await window.api.getPersonClusters(personId)
+        if (result.error) {
+          setPersonClusterErrors((prev) => ({ ...prev, [personId]: result.error }))
+          return
+        }
+        // Pre-populate thumbnail cache from inline thumbnails
+        const thumbEntries = result.clusters
+          .filter((c) => c.representative_id != null && c.representative_thumbnail != null)
+          .map((c) => ({ id: c.representative_id!, base64: c.representative_thumbnail! }))
+        if (thumbEntries.length > 0) primeThumbCache(thumbEntries)
+        setPersonClusters((prev) => ({ ...prev, [personId]: result.clusters }))
+      } catch (err) {
+        setPersonClusterErrors((prev) => ({ ...prev, [personId]: String(err) }))
+      } finally {
+        if (import.meta.env.DEV) {
+          const elapsed = Math.round(performance.now() - startedAt)
+          console.debug(`[FacesView] personClusters(${personId}) loaded in ${elapsed}ms`)
+        }
+        setLoadingDetail((current) => (current === loadingKey ? null : current))
+      }
+    },
+    [personClusters]
   )
 
   const togglePersonExpand = useCallback(
@@ -871,34 +944,31 @@ export function FacesView() {
       setInspectorReturnStage('linked')
 
       // Load clusters for this person if not cached
-      const pClusters = personClusters[personId]
-      if (!pClusters) {
-        const startedAt = performance.now()
-        const loadingKey = `person-clusters:${personId}`
-        setLoadingDetail(loadingKey)
-        try {
-          const result = await window.api.getPersonClusters(personId)
-          if (!result.error) {
-            setPersonClusters((prev) => ({ ...prev, [personId]: result.clusters }))
-          }
-        } catch {
-          // silently ignore
-        } finally {
-          if (import.meta.env.DEV) {
-            const elapsed = Math.round(performance.now() - startedAt)
-            console.debug(`[FacesView] personClusters(${personId}) loaded in ${elapsed}ms`)
-          }
-          setLoadingDetail(null)
-        }
+      if (personClusters[personId] === undefined) {
+        await loadPersonClusters(personId)
       }
 
-      // Fast-first: load suggestions only after linked clusters have rendered.
-      setTimeout(() => {
-        void loadPersonLinkSuggestions(personId)
-      }, 0)
     },
-    [expandedPersonId, loadPersonLinkSuggestions, personClusters]
+    [expandedPersonId, loadPersonClusters, personClusters]
   )
+
+  useEffect(() => {
+    if (
+      peopleStage !== 'suggested'
+      || expandedPersonId == null
+      || personLinkSuggestions[expandedPersonId] !== undefined
+      || loadingPersonLinkSuggestionsId === expandedPersonId
+    ) {
+      return
+    }
+    void loadPersonLinkSuggestions(expandedPersonId)
+  }, [
+    expandedPersonId,
+    loadPersonLinkSuggestions,
+    loadingPersonLinkSuggestionsId,
+    peopleStage,
+    personLinkSuggestions,
+  ])
 
   const toggleSuggestedClusterSelection = useCallback((clusterId: number) => {
     setSelectedSuggestedClusterIds((prev) =>
@@ -940,17 +1010,14 @@ export function FacesView() {
       setError(null)
       await loadData()
 
-      const personClusterResult = await window.api.getPersonClusters(expandedPersonId)
-      if (!personClusterResult.error) {
-        setPersonClusters((prev) => ({ ...prev, [expandedPersonId]: personClusterResult.clusters }))
-      }
+      await loadPersonClusters(expandedPersonId, true)
       await loadPersonLinkSuggestions(expandedPersonId, true)
     } catch (err) {
       setError(String(err))
     } finally {
       setConfirmingSuggestedLinks(false)
     }
-  }, [expandedPersonId, loadData, loadPersonLinkSuggestions, personLinkSuggestions, selectedSuggestedClusterIds])
+  }, [expandedPersonId, loadData, loadPersonClusters, loadPersonLinkSuggestions, personLinkSuggestions, selectedSuggestedClusterIds])
 
   // ── Expand / collapse ─────────────────────────────────────────────────────
 
@@ -1116,10 +1183,14 @@ export function FacesView() {
     () => persons.find((person) => person.id === expandedPersonId) ?? null,
     [expandedPersonId, persons],
   )
+  const activePersonClustersLoaded =
+    expandedPersonId != null && personClusters[expandedPersonId] !== undefined
   const activePersonClusters = useMemo(
     () => (expandedPersonId == null ? [] : (personClusters[expandedPersonId] ?? [])),
     [expandedPersonId, personClusters],
   )
+  const activeLinkedCount =
+    activePersonClustersLoaded ? activePersonClusters.length : (activePerson?.cluster_count ?? 0)
   const linkedClusterIds = useMemo(() => {
     const ids = new Set<number>()
     for (const cluster of clusters) {
@@ -1143,8 +1214,12 @@ export function FacesView() {
   )
   const activePersonLoading =
     expandedPersonId != null && loadingDetail === `person-clusters:${expandedPersonId}`
+  const activePersonClusterError =
+    expandedPersonId == null ? null : (personClusterErrors[expandedPersonId] ?? null)
   const activeSuggestionsLoading =
     expandedPersonId != null && loadingPersonLinkSuggestionsId === expandedPersonId
+  const activeSuggestionsError =
+    expandedPersonId == null ? null : (personLinkSuggestionErrors[expandedPersonId] ?? null)
   const selectedSuggestedCount = useMemo(
     () => activeSuggestedClusters.reduce(
       (count, suggestion) =>
@@ -2312,7 +2387,7 @@ export function FacesView() {
 
                     <div className="mt-4 flex flex-wrap gap-2">
                       {([
-                        ['linked', 'Linked', `${activePersonClusters.length}`],
+                        ['linked', 'Linked', `${activeLinkedCount}`],
                         ['suggested', 'Suggested', `${activeSuggestedClusters.length}`],
                         ['unlinked', 'Unlinked', `${visibleUnlinkedClusters.length}`],
                         ['inspector', 'Inspector', inspectorCluster ? '1' : '0'],
@@ -2360,6 +2435,18 @@ export function FacesView() {
                           <div className="flex items-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900/60 px-4 py-3 text-sm text-neutral-500">
                             <span className="h-4 w-4 rounded-full border border-neutral-600 border-t-neutral-300 animate-spin" />
                             Loading linked clusters...
+                          </div>
+                        ) : activePersonClusterError ? (
+                          <div className="rounded-xl border border-amber-900/60 bg-amber-950/30 px-4 py-4 text-sm text-amber-100">
+                            <p>Couldn&apos;t load linked clusters right now.</p>
+                            <p className="mt-1 text-xs text-amber-200/80">{activePersonClusterError}</p>
+                            <button
+                              type="button"
+                              onClick={() => void loadPersonClusters(activePerson.id, true)}
+                              className="mt-3 rounded-lg border border-neutral-700 px-3 py-1.5 text-xs text-neutral-200 hover:bg-neutral-800"
+                            >
+                              Retry linked clusters
+                            </button>
                           </div>
                         ) : activePersonClusters.length > 0 ? (
                           <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
@@ -2475,10 +2562,25 @@ export function FacesView() {
                                 </button>
                               </>
                             )}
+                            {(activeSuggestionsError || !activeSuggestionsLoading) && (
+                              <button
+                                type="button"
+                                onClick={() => void loadPersonLinkSuggestions(activePerson.id, true)}
+                                disabled={activeSuggestionsLoading}
+                                className="rounded-lg border border-neutral-700 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
+                              >
+                                Refresh suggestions
+                              </button>
+                            )}
                           </div>
                         </div>
 
-                        {activeSuggestedClusters.length > 0 ? (
+                        {activeSuggestionsError ? (
+                          <div className="rounded-xl border border-amber-900/60 bg-amber-950/30 px-4 py-4 text-sm text-amber-100">
+                            <p>Couldn&apos;t load suggested links right now.</p>
+                            <p className="mt-1 text-xs text-amber-200/80">{activeSuggestionsError}</p>
+                          </div>
+                        ) : activeSuggestedClusters.length > 0 ? (
                           <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-4">
                             {activeSuggestedClusters.map((suggestion) => {
                               const sourceCluster = clusters.find(

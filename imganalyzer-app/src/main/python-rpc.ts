@@ -23,7 +23,7 @@ import { killProcessTree, spawnPythonModule } from './python-runtime'
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const STARTUP_TIMEOUT_MS = 30_000
-const CALL_TIMEOUT_MS = 120_000
+const CALL_TIMEOUT_MS = 60_000
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

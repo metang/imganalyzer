@@ -586,7 +586,15 @@ class Repository:
         self.conn.commit()
 
     def list_persons(self) -> list[dict]:
-        """Return persons with cluster count, face count, and a representative thumbnail."""
+        """Return persons with cluster count, face count, and a representative thumbnail.
+
+        Uses a window function (``ROW_NUMBER``) to batch-compute representatives
+        instead of a correlated subquery per person, avoiding O(N*M) scans.
+        Includes cached ``representative_thumbnail`` (base64) when available.
+        """
+        import base64 as _b64
+
+        # Step 1: aggregate stats (fast – uses person_id index)
         rows = self.conn.execute(
             """
             SELECT
@@ -595,18 +603,58 @@ class Repository:
                 fp.notes,
                 COUNT(DISTINCT fo.cluster_id) AS cluster_count,
                 COUNT(fo.id)                  AS face_count,
-                COUNT(DISTINCT fo.image_id)   AS image_count,
-                (SELECT fo2.id FROM face_occurrences fo2
-                 WHERE fo2.person_id = fp.id
-                 ORDER BY (fo2.bbox_x2 - fo2.bbox_x1) * (fo2.bbox_y2 - fo2.bbox_y1) DESC
-                 LIMIT 1) AS representative_id
+                COUNT(DISTINCT fo.image_id)   AS image_count
             FROM face_persons fp
             LEFT JOIN face_occurrences fo ON fo.person_id = fp.id
             GROUP BY fp.id
             ORDER BY face_count DESC
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+        if not rows:
+            return []
+
+        # Step 2: batch-fetch representative IDs via window function
+        person_ids = [r["id"] for r in rows]
+        ph = ",".join("?" for _ in person_ids)
+        reps = self.conn.execute(
+            f"""
+            SELECT person_id, id AS representative_id
+            FROM (
+                SELECT person_id, id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY person_id
+                           ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
+                       ) AS rn
+                FROM face_occurrences
+                WHERE person_id IN ({ph})
+            )
+            WHERE rn = 1
+            """,
+            person_ids,
+        ).fetchall()
+        rep_map: dict[int, int] = {r["person_id"]: r["representative_id"] for r in reps}
+
+        # Step 3: fetch cached thumbnails for representatives only
+        rep_ids = list(rep_map.values())
+        thumb_map: dict[int, str | None] = {}
+        if rep_ids:
+            ph2 = ",".join("?" for _ in rep_ids)
+            thumb_rows = self.conn.execute(
+                f"SELECT id, thumbnail FROM face_occurrences WHERE id IN ({ph2})",
+                rep_ids,
+            ).fetchall()
+            for tr in thumb_rows:
+                blob = tr["thumbnail"]
+                thumb_map[tr["id"]] = _b64.b64encode(blob).decode("ascii") if blob else None
+
+        result: list[dict] = []
+        for row in rows:
+            d = dict(row)
+            rep_id = rep_map.get(d["id"])
+            d["representative_id"] = rep_id
+            d["representative_thumbnail"] = thumb_map.get(rep_id) if rep_id else None
+            result.append(d)
+        return result
 
     def link_cluster_to_person(self, cluster_id: int, person_id: int) -> int:
         """Set person_id on all occurrences in *cluster_id*. Returns rows updated."""
@@ -627,18 +675,22 @@ class Repository:
         return cur.rowcount
 
     def get_person_clusters(self, person_id: int) -> list[dict]:
-        """Return clusters belonging to a person, with face counts."""
+        """Return clusters belonging to a person, with face counts.
+
+        Uses a window function (``ROW_NUMBER``) to batch-compute representatives
+        instead of a correlated subquery per cluster.
+        Includes cached ``representative_thumbnail`` (base64) when available.
+        """
+        import base64 as _b64
+
+        # Step 1: aggregate stats (fast – uses person_id + cluster_id index)
         rows = self.conn.execute(
             """
             SELECT
                 fo.cluster_id,
                 COUNT(fo.id) AS face_count,
                 COUNT(DISTINCT fo.image_id) AS image_count,
-                COALESCE(fcl.display_name, 'Cluster ' || fo.cluster_id) AS label,
-                (SELECT fo2.id FROM face_occurrences fo2
-                 WHERE fo2.cluster_id = fo.cluster_id
-                 ORDER BY (fo2.bbox_x2 - fo2.bbox_x1) * (fo2.bbox_y2 - fo2.bbox_y1) DESC
-                 LIMIT 1) AS representative_id
+                COALESCE(fcl.display_name, 'Cluster ' || fo.cluster_id) AS label
             FROM face_occurrences fo
             LEFT JOIN face_cluster_labels fcl ON fcl.cluster_id = fo.cluster_id
             WHERE fo.person_id = ? AND fo.cluster_id IS NOT NULL
@@ -647,7 +699,51 @@ class Repository:
             """,
             [person_id],
         ).fetchall()
-        return [dict(r) for r in rows]
+        if not rows:
+            return []
+
+        # Step 2: batch-fetch representative IDs via window function
+        cluster_ids = [r["cluster_id"] for r in rows]
+        ph = ",".join("?" for _ in cluster_ids)
+        reps = self.conn.execute(
+            f"""
+            SELECT cluster_id, id AS representative_id
+            FROM (
+                SELECT cluster_id, id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cluster_id
+                           ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
+                       ) AS rn
+                FROM face_occurrences
+                WHERE cluster_id IN ({ph})
+            )
+            WHERE rn = 1
+            """,
+            cluster_ids,
+        ).fetchall()
+        rep_map: dict[int, int] = {r["cluster_id"]: r["representative_id"] for r in reps}
+
+        # Step 3: fetch cached thumbnails for representatives only
+        rep_ids = list(rep_map.values())
+        thumb_map: dict[int, str | None] = {}
+        if rep_ids:
+            ph2 = ",".join("?" for _ in rep_ids)
+            thumb_rows = self.conn.execute(
+                f"SELECT id, thumbnail FROM face_occurrences WHERE id IN ({ph2})",
+                rep_ids,
+            ).fetchall()
+            for tr in thumb_rows:
+                blob = tr["thumbnail"]
+                thumb_map[tr["id"]] = _b64.b64encode(blob).decode("ascii") if blob else None
+
+        result: list[dict] = []
+        for row in rows:
+            d = dict(row)
+            rep_id = rep_map.get(d["cluster_id"])
+            d["representative_id"] = rep_id
+            d["representative_thumbnail"] = thumb_map.get(rep_id) if rep_id else None
+            result.append(d)
+        return result
 
     def suggest_person_link_clusters(
         self,
