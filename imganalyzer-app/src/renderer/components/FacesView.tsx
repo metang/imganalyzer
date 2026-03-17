@@ -953,9 +953,11 @@ export function FacesView() {
   )
 
   useEffect(() => {
+    // Load suggestions in the background as soon as a person is expanded,
+    // not just when the "Suggested" tab is active.  This lets the tab badge
+    // show an accurate count before the user clicks it.
     if (
-      peopleStage !== 'suggested'
-      || expandedPersonId == null
+      expandedPersonId == null
       || personLinkSuggestions[expandedPersonId] !== undefined
       || loadingPersonLinkSuggestionsId === expandedPersonId
     ) {
@@ -966,7 +968,6 @@ export function FacesView() {
     expandedPersonId,
     loadPersonLinkSuggestions,
     loadingPersonLinkSuggestionsId,
-    peopleStage,
     personLinkSuggestions,
   ])
 
