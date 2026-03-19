@@ -405,6 +405,7 @@ export function FacesView() {
   const [showCreatePerson, setShowCreatePerson] = useState(false)
   const [newPersonName, setNewPersonName] = useState('')
   const [linkSearchFilter, setLinkSearchFilter] = useState('')
+  const [peopleChooserFilter, setPeopleChooserFilter] = useState('')
   const newPersonRef = useRef<HTMLInputElement>(null)
   const linkSearchRef = useRef<HTMLInputElement>(null)
 
@@ -1239,6 +1240,13 @@ export function FacesView() {
       ? persons.filter((p) => coerceText(p.name).toLowerCase().includes(lowerFilter))
       : persons
   }, [persons, linkSearchFilter])
+
+  const chooserPersons = useMemo(() => {
+    const lf = peopleChooserFilter.toLowerCase()
+    return lf
+      ? persons.filter((p) => coerceText(p.name).toLowerCase().includes(lf))
+      : persons
+  }, [persons, peopleChooserFilter])
 
   const currentRelinkPerson = useMemo(
     () => relinkPersons.find((person) => person.id === relinkingCluster?.person_id) ?? null,
@@ -2245,29 +2253,33 @@ export function FacesView() {
                   : 'lg:w-72 lg:border-b-0 lg:border-r'
               }`}
             >
-              <div className="flex items-start justify-between gap-3 border-b border-neutral-800/60 px-4 py-3">
-                <div>
+              <div className="border-b border-neutral-800/60 px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
                   <p className="text-[11px] uppercase tracking-wide text-neutral-500">People chooser</p>
-                  <p className="mt-1 text-xs text-neutral-600">
-                    Pick one person, then work through linked, suggested, unlinked, or inspector stages.
-                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setIsPeopleChooserExpanded((current) => !current)}
+                    className="shrink-0 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-300 transition-colors hover:bg-neutral-800"
+                  >
+                    {isPeopleChooserExpanded ? 'Collapse chooser' : 'Expand chooser'}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setIsPeopleChooserExpanded((current) => !current)}
-                  className="shrink-0 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-300 transition-colors hover:bg-neutral-800"
-                >
-                  {isPeopleChooserExpanded ? 'Collapse chooser' : 'Expand chooser'}
-                </button>
+                <input
+                  value={peopleChooserFilter}
+                  onChange={(e) => setPeopleChooserFilter(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Escape') setPeopleChooserFilter('') }}
+                  placeholder="Filter by name…"
+                  className="mt-2 w-full px-2.5 py-1.5 text-xs rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-100 placeholder-neutral-500 outline-none focus:border-cyan-600"
+                />
               </div>
               <div
                 className={`px-4 py-4 ${
                   isPeopleChooserExpanded
-                    ? 'grid max-h-[calc(100%-72px)] grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-4 overflow-y-auto'
-                    : 'flex gap-3 overflow-x-auto lg:h-[calc(100%-72px)] lg:flex-col lg:overflow-y-auto lg:overflow-x-hidden'
+                    ? 'grid max-h-[calc(100%-76px)] grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-4 overflow-y-auto'
+                    : 'flex gap-3 overflow-x-auto lg:h-[calc(100%-76px)] lg:flex-col lg:overflow-y-auto lg:overflow-x-hidden'
                 }`}
               >
-                {persons.map((person) => {
+                {chooserPersons.map((person) => {
                   const isSelected = expandedPersonId === person.id
                   return (
                     <button
@@ -2310,9 +2322,9 @@ export function FacesView() {
                     </button>
                   )
                 })}
-                {persons.length === 0 && (
+                {chooserPersons.length === 0 && (
                   <div className="rounded-xl border border-dashed border-neutral-800 px-4 py-6 text-sm text-neutral-600">
-                    No people found yet.
+                    {peopleChooserFilter.trim() ? 'No people match your filter.' : 'No people found yet.'}
                   </div>
                 )}
               </div>
