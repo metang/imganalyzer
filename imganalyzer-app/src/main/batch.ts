@@ -234,6 +234,12 @@ let isRunActive = false
 let currentRunId = 0
 let idleTimer: ReturnType<typeof setTimeout> | null = null
 let monitorOnly = false
+let pollInFlight = false
+// Consecutive polls where remainingPasses was 0 while monitorOnly is active.
+// We require several zero readings before concluding the run is truly done,
+// to avoid stopping polling on transient zero snapshots.
+let monitorZeroStreak = 0
+const MONITOR_ZERO_THRESHOLD = 5
 
 const MASTER_NODE_ID = 'master'
 const MASTER_NODE_LABEL = 'Master device'
@@ -278,6 +284,7 @@ function resetSessionCounters(): void {
   chunkCompletionWindowMs.length = 0
   currentChunkKey = null
   currentChunkStartMs = 0
+  monitorZeroStreak = 0
 }
 
 /** Emit a batch:tick event to the renderer with current stats. */
@@ -598,6 +605,10 @@ function buildBatchNodes(data: ServerStatusPayload): BatchNode[] {
 
 /** Poll status via RPC (no subprocess) and emit a batch:tick. */
 async function doPoll(): Promise<void> {
+  // Re-entrance guard: skip if previous poll is still in flight to avoid
+  // piling up RPC calls when the server is slow to respond.
+  if (pollInFlight) return
+  pollInFlight = true
   try {
     const data = await rpc.call('status', {}) as ServerStatusPayload
 
@@ -663,14 +674,32 @@ async function doPoll(): Promise<void> {
     if (monitorOnly) {
       if (remainingPasses > 0) {
         batchStatus = 'running'
-      } else if (batchStatus === 'running' || batchStatus === 'paused') {
-        batchStatus = 'done'
-        stopPolling()
-        if (idleTimer) clearTimeout(idleTimer)
-        idleTimer = setTimeout(() => {
-          batchStatus = 'idle'
-          monitorOnly = false
-        }, 3000)
+        monitorZeroStreak = 0
+      } else {
+        // Require several consecutive zero readings before concluding work
+        // is done.  Transient zeros (lease gaps, stale recovery windows)
+        // won't trigger premature stop.
+        monitorZeroStreak++
+        const hasActiveWorkers = (data.nodes?.workers ?? []).some(
+          (w: any) => w.status === 'online' && (w.runningJobs > 0 || w.pendingJobs > 0),
+        )
+        if (hasActiveWorkers) {
+          // Workers still active — keep polling regardless of zero readings
+          monitorZeroStreak = 0
+        }
+        if (
+          monitorZeroStreak >= MONITOR_ZERO_THRESHOLD &&
+          (batchStatus === 'running' || batchStatus === 'paused')
+        ) {
+          batchStatus = 'done'
+          monitorZeroStreak = 0
+          stopPolling()
+          if (idleTimer) clearTimeout(idleTimer)
+          idleTimer = setTimeout(() => {
+            batchStatus = 'idle'
+            monitorOnly = false
+          }, 3000)
+        }
       }
     }
 
@@ -721,8 +750,12 @@ async function doPoll(): Promise<void> {
     }
 
     emitTick(stats)
-  } catch {
-    // Polling errors are non-fatal — just skip this tick
+  } catch (err) {
+    // Log poll errors so they're visible in dev-tools / stderr instead of
+    // being silently swallowed — critical for diagnosing dashboard freezes.
+    console.error('[batch] doPoll error:', err)
+  } finally {
+    pollInFlight = false
   }
 }
 
@@ -799,6 +832,15 @@ function setupNotificationListener(): void {
           completedAt: new Date().toISOString(),
         }
         trackResult(result)
+
+        // Safety net: if polling stopped but we're still receiving results,
+        // the run isn't really done — restart polling.
+        if (monitorOnly && pollTimer === null) {
+          console.warn('[batch] run/result received while polling stopped — restarting')
+          monitorZeroStreak = 0
+          batchStatus = 'running'
+          startPolling()
+        }
         break
       }
 
@@ -839,6 +881,7 @@ function setupNotificationListener(): void {
               // Master finished local work but distributed workers still
               // have active jobs — keep polling so the UI stays live.
               monitorOnly = true
+              monitorZeroStreak = 0
             }
           } else {
             batchStatus = 'done'
@@ -915,6 +958,7 @@ function setupNotificationListener(): void {
 export async function killAllBatchProcesses(): Promise<void> {
   stopPolling()
   monitorOnly = false
+  monitorZeroStreak = 0
   if (isRunActive) {
     try {
       await rpc.call('cancel_run', {})
@@ -1260,6 +1304,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
       batchStatus = 'running'
       monitorOnly = true
+      monitorZeroStreak = 0
       isRunActive = false
       startPolling()
       void doPoll()
