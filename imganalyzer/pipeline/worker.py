@@ -750,14 +750,48 @@ class Worker:
                     # or because slow modules weren't fully drained.
                     # ════════════════════════════════════════════════════════════
                     chunk_retry = 0
+                    last_stale_recovery = time.perf_counter()
+                    stale_recovery_interval_s = 60.0  # recover stuck jobs every 60s
                     while not self._shutdown.is_set() and chunk_ids is not None:
+                        # ── Periodic stale + lease recovery ──────────────────
+                        # During long chunk processing, jobs claimed by
+                        # distributed workers can get stuck in "running" state
+                        # indefinitely.  Periodically reclaim them.
+                        now_pc = time.perf_counter()
+                        if now_pc - last_stale_recovery >= stale_recovery_interval_s:
+                            try:
+                                recovered = self.queue.recover_stale(
+                                    self.stale_timeout,
+                                )
+                                released = self.queue.release_expired_leases()
+                                if recovered or released:
+                                    console.print(
+                                        f"[yellow]  Recovered {recovered} stale + "
+                                        f"{released} expired lease(s)[/yellow]"
+                                    )
+                            except sqlite3.OperationalError:
+                                pass  # database busy — try again next interval
+                            last_stale_recovery = now_pc
+
                         remaining = self.queue.pending_count(image_ids=chunk_ids)
-                        if remaining == 0:
+                        running = self.queue.running_count(image_ids=chunk_ids)
+                        if remaining == 0 and running == 0:
                             break
+
+                        if remaining == 0 and running > 0:
+                            # All remaining work is in-flight on distributed
+                            # workers.  Wait for completions / lease expiry.
+                            console.print(
+                                f"[dim]  Waiting for {running} running job(s) "
+                                "in chunk (will reclaim stale)...[/dim]"
+                            )
+                            self._shutdown.wait(min(5.0, stale_recovery_interval_s))
+                            continue
+
                         chunk_retry += 1
                         console.print(
                             f"[dim]  Chunk pass {chunk_retry + 1}: "
-                            f"{remaining} pending jobs remaining[/dim]"
+                            f"{remaining} pending, {running} running[/dim]"
                         )
 
                         # Chunk-level claim for retries (no mini-batch split)
@@ -770,6 +804,31 @@ class Worker:
                                 batch_size=batch_sz, module=module, image_ids=_ids,
                             )
 
+                        # ── IO drain first (metadata / technical) ────────────
+                        # IO modules are not part of any GPU phase, so they
+                        # must be drained explicitly here.
+                        if not self._shutdown.is_set():
+                            io_pending = any(
+                                self.queue.pending_count(
+                                    module=mod, image_ids=chunk_ids,
+                                ) > 0
+                                for mod in LOCAL_IO_MODULES
+                            )
+                            if io_pending:
+                                with (
+                                    ThreadPoolExecutor(max_workers=self.workers) as local_pool,
+                                    ThreadPoolExecutor(max_workers=1)            as cloud_pool,
+                                ):
+                                    scheduler.run_io_drain(
+                                        submit_io_fn=active_submit_io,
+                                        collect_fn=_collect_futures,
+                                        flush_fn=self._maybe_periodic_flush,
+                                        local_pool=local_pool,
+                                        cloud_pool=cloud_pool,
+                                        cancel_futures_fn=_cancel_futures,
+                                    )
+
+                        # ── GPU phases ────────────────────────────────────────
                         processed_any = False
                         for phase_idx in range(len(scheduler.gpu_phases)):
                             if self._shutdown.is_set():
@@ -818,7 +877,11 @@ class Worker:
                                     raise
 
                         if not processed_any:
-                            break  # pending jobs exist but not in any GPU phase
+                            # No GPU phase had work — remaining jobs are
+                            # IO-only or running on workers.  The IO drain
+                            # above already handled IO jobs; loop back to
+                            # check running count and wait if needed.
+                            continue
 
                         # IO drain for retried jobs
                         if not self._shutdown.is_set():
