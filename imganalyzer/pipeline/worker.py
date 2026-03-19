@@ -530,6 +530,8 @@ class Worker:
             # truly nothing left or the user pauses.
             # ════════════════════════════════════════════════════════════════
             sweep = 0
+            chunk_offset = 0          # cumulative chunk count across sweeps
+            overall_total_chunks = 0  # total chunks across all sweeps
             while not self._shutdown.is_set():
                 all_image_ids = self._pending_image_ids_with_running_wait(poll_interval_s=1.0)
                 if not all_image_ids:
@@ -551,10 +553,15 @@ class Worker:
                 else:
                     chunks = [None]  # type: ignore[list-item]
 
-                total_chunks = len(chunks)
-                if total_chunks > 1:
+                sweep_chunks = len(chunks)
+                if sweep == 1:
+                    overall_total_chunks = sweep_chunks
+                else:
+                    overall_total_chunks = chunk_offset + sweep_chunks
+                total_chunks = overall_total_chunks
+                if sweep_chunks > 1 or (sweep == 1 and sweep_chunks > 1):
                     console.print(
-                        f"[cyan]Chunked processing: {total_chunks} chunks "
+                        f"[cyan]Chunked processing: {sweep_chunks} chunks "
                         f"of {chunk_size} images each[/cyan]"
                     )
 
@@ -562,17 +569,19 @@ class Worker:
                     if self._shutdown.is_set():
                         break
 
+                    global_chunk_idx = chunk_offset + chunk_idx
+
                     # Expose current chunk to coordinator's job claim handler
                     # so distributed workers are directed to the same chunk.
                     self.current_chunk_ids = chunk_ids
-                    self.current_chunk_index = chunk_idx
+                    self.current_chunk_index = global_chunk_idx
                     self.total_chunks = total_chunks
                     chunk_start_ms = time.perf_counter() * 1000
                     chunk_stats_before = {k: stats[k] for k in ("done", "failed", "skipped")}
 
                     if total_chunks > 1:
                         console.print(
-                            f"\n[bold cyan]━━ Chunk {chunk_idx + 1}/{total_chunks} "
+                            f"\n[bold cyan]━━ Chunk {global_chunk_idx + 1}/{total_chunks} "
                             f"({len(chunk_ids)} images) ━━[/bold cyan]"  # type: ignore[arg-type]
                         )
 
@@ -907,7 +916,7 @@ class Worker:
                         if _chunk_notify is not None:
                             try:
                                 _chunk_notify({
-                                    "chunkIndex": chunk_idx,
+                                    "chunkIndex": global_chunk_idx,
                                     "totalChunks": total_chunks,
                                     "chunkSize": len(chunk_ids) if chunk_ids else 0,
                                     "durationMs": round(chunk_elapsed_ms),
@@ -918,8 +927,10 @@ class Worker:
 
                     if total_chunks > 1 and not self._shutdown.is_set():
                         console.print(
-                            f"[green]Chunk {chunk_idx + 1}/{total_chunks} complete ✓[/green]"
+                            f"[green]Chunk {global_chunk_idx + 1}/{total_chunks} complete ✓[/green]"
                         )
+
+                chunk_offset += len(chunks)
 
                 # ════════════════════════════════════════════════════════════════
                 # Independent GPU modules — currently empty (perception moved into
