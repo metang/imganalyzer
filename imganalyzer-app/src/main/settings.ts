@@ -298,7 +298,6 @@ function buildWorkerSetupInfo(settings: AppSettings): WorkerSetupInfo {
     command: [
       'imganalyzer run-distributed-worker',
       `  --coordinator ${coordinatorUrl}`,
-      '  --worker-id worker-01',
       '  --auto-update',
       ...mappingSegments,
       tokenSegment ? ` ${tokenSegment.trimStart()}` : '',
