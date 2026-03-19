@@ -14,8 +14,39 @@ CACHE_DIR = os.getenv("IMGANALYZER_MODEL_CACHE", str(Path.home() / ".cache" / "i
 _INSIGHTFACE_HOME = str(Path(CACHE_DIR) / "insightface")
 
 
+def _get_pil_exif_orientation(img: "Any") -> int:
+    """Extract EXIF orientation tag from a PIL Image, defaulting to 1 (normal)."""
+    try:
+        exif = img.getexif()
+        return exif.get(0x0112, 1)  # 0x0112 = Orientation tag
+    except Exception:
+        return 1
+
+
+def _apply_orientation(crop: "Any", orientation: int) -> "Any":
+    """Apply EXIF orientation transform to a PIL Image crop."""
+    from PIL import Image
+
+    if orientation == 2:
+        return crop.transpose(Image.FLIP_LEFT_RIGHT)
+    elif orientation == 3:
+        return crop.transpose(Image.ROTATE_180)
+    elif orientation == 4:
+        return crop.transpose(Image.FLIP_TOP_BOTTOM)
+    elif orientation == 5:
+        return crop.transpose(Image.TRANSPOSE)
+    elif orientation == 6:
+        return crop.transpose(Image.ROTATE_270)
+    elif orientation == 7:
+        return crop.transpose(Image.TRANSVERSE)
+    elif orientation == 8:
+        return crop.transpose(Image.ROTATE_90)
+    return crop
+
+
 def _crop_thumbnail(
-    rgb: np.ndarray, bbox: np.ndarray, max_dim: int = 200, quality: int = 85
+    rgb: np.ndarray, bbox: np.ndarray, max_dim: int = 200, quality: int = 85,
+    exif_orientation: int = 1,
 ) -> bytes:
     """Crop a face from *rgb* using *bbox* [x1,y1,x2,y2] and return JPEG bytes."""
     import io
@@ -34,6 +65,10 @@ def _crop_thumbnail(
 
     crop_arr = rgb[y1:y2, x1:x2]
     pil_crop = Image.fromarray(crop_arr)
+
+    # Apply EXIF orientation so the face appears upright
+    if exif_orientation != 1:
+        pil_crop = _apply_orientation(pil_crop, exif_orientation)
 
     cw, ch = pil_crop.size
     if cw > max_dim or ch > max_dim:
@@ -94,6 +129,9 @@ class FaceAnalyzer:
             )
 
         rgb: np.ndarray = image_data["rgb_array"]
+        # Extract EXIF orientation from source image for thumbnail rotation
+        pil_img = image_data.get("pil_image")
+        exif_orientation = _get_pil_exif_orientation(pil_img) if pil_img is not None else 1
         # InsightFace expects BGR
         bgr = rgb[:, :, ::-1].copy()
 
@@ -164,7 +202,7 @@ class FaceAnalyzer:
                 occ["embedding"] = embedding.astype(np.float32).tobytes()
 
             # Pre-generate thumbnail from the in-memory rgb_array
-            occ["thumbnail"] = _crop_thumbnail(rgb, bbox)
+            occ["thumbnail"] = _crop_thumbnail(rgb, bbox, exif_orientation=exif_orientation)
             occurrences.append(occ)
 
         return {

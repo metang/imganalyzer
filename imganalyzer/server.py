@@ -2854,6 +2854,7 @@ _RAW_FACE_CROP_EXTS = {
 def _open_face_crop_image(path: Path):
     from PIL import Image
     from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
+    from imganalyzer.analysis.ai.faces import _get_pil_exif_orientation
 
     if not path.exists():
         raise FileNotFoundError(f"Image file not found: {path}")
@@ -2866,15 +2867,17 @@ def _open_face_crop_image(path: Path):
             raw_ctx = rawpy.imread(str(path))
         with raw_ctx as raw:
             rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
-        return Image.fromarray(rgb)
+        return Image.fromarray(rgb), 1  # RAW files have no EXIF orientation
 
     with pillow_decode_guard(path):
         img = Image.open(path)
-        return img.convert("RGB")
+        orientation = _get_pil_exif_orientation(img)
+        return img.convert("RGB"), orientation
 
 
-def _render_face_occurrence_thumbnail(occ: dict[str, Any], img) -> bytes:
+def _render_face_occurrence_thumbnail(occ: dict[str, Any], img, exif_orientation: int = 1) -> bytes:
     from PIL import Image
+    from imganalyzer.analysis.ai.faces import _apply_orientation
 
     # Crop face region with some padding. IMPORTANT: bbox coordinates were
     # computed on a pre-resized image (max 1920px long edge) — scale them to
@@ -2904,6 +2907,10 @@ def _render_face_occurrence_thumbnail(occ: dict[str, Any], img) -> bytes:
 
     crop = img.crop((x1, y1, x2, y2))
 
+    # Apply EXIF orientation so the face appears upright
+    if exif_orientation != 1:
+        crop = _apply_orientation(crop, exif_orientation)
+
     # Resize to max 200px on the longest side
     max_dim = 200
     cw, ch = crop.size
@@ -2919,16 +2926,16 @@ def _render_face_occurrence_thumbnail(occ: dict[str, Any], img) -> bytes:
 
 
 def _generate_face_occurrence_thumbnail(
-    occ: dict[str, Any], img=None
+    occ: dict[str, Any], img=None, exif_orientation: int = 1,
 ) -> bytes:
     file_path = occ["file_path"]
     path = Path(file_path)
     if img is not None:
-        return _render_face_occurrence_thumbnail(occ, img)
+        return _render_face_occurrence_thumbnail(occ, img, exif_orientation)
 
-    source = _open_face_crop_image(path)
+    source, orientation = _open_face_crop_image(path)
     try:
-        return _render_face_occurrence_thumbnail(occ, source)
+        return _render_face_occurrence_thumbnail(occ, source, orientation)
     finally:
         close = getattr(source, "close", None)
         if callable(close):
@@ -2999,10 +3006,12 @@ def _handle_faces_crop_batch(params: dict) -> dict:
 
     updated = False
     for file_path, group in missing_rows_by_path.items():
-        img = _open_face_crop_image(Path(file_path))
+        img, orientation = _open_face_crop_image(Path(file_path))
         try:
             for row_d in group:
-                thumbnail = _generate_face_occurrence_thumbnail(row_d, img=img)
+                thumbnail = _generate_face_occurrence_thumbnail(
+                    row_d, img=img, exif_orientation=orientation,
+                )
                 repo.set_face_occurrence_thumbnail(row_d["id"], thumbnail)
                 thumbnails[str(row_d["id"])] = base64.b64encode(thumbnail).decode("ascii")
                 updated = True

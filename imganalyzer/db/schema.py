@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -45,6 +45,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         19: _migrate_v19,
         20: _migrate_v20,
         21: _migrate_v21,
+        22: _migrate_v22,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -758,4 +759,14 @@ def _migrate_v21(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE job_queue ADD COLUMN processing_ms INTEGER")
     except sqlite3.OperationalError:
         pass  # column already exists
+
+
+def _migrate_v22(conn: sqlite3.Connection) -> None:
+    """Clear pre-generated face thumbnails so they regenerate with EXIF orientation.
+
+    Previously, face crop thumbnails were generated from un-rotated pixel data,
+    causing upside-down or sideways crops for images with EXIF orientation tags.
+    Clearing the cached thumbnails forces on-the-fly regeneration with the fix.
+    """
+    conn.execute("UPDATE face_occurrences SET thumbnail = NULL WHERE thumbnail IS NOT NULL")
 
