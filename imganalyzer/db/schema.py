@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -44,6 +44,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         18: _migrate_v18,
         19: _migrate_v19,
         20: _migrate_v20,
+        21: _migrate_v21,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -741,4 +742,20 @@ def _migrate_v20(conn: sqlite3.Connection) -> None:
         """CREATE INDEX IF NOT EXISTS idx_worker_module_stats_updated
            ON worker_module_stats(updated_at)"""
     )
+
+
+# ── Migration v21: Add processing_ms to job_queue ────────────────────────────
+
+def _migrate_v21(conn: sqlite3.Connection) -> None:
+    """Add processing_ms column to job_queue for accurate per-job timing.
+
+    Previously, module_avg_processing_ms() used ``completed_at − started_at``
+    which is inflated for batch-claimed jobs because ``started_at`` is set at
+    claim time for the entire batch, not when each job actually begins
+    processing.  Storing the actual processing duration fixes this.
+    """
+    try:
+        conn.execute("ALTER TABLE job_queue ADD COLUMN processing_ms INTEGER")
+    except sqlite3.OperationalError:
+        pass  # column already exists
 

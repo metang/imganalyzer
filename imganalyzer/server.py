@@ -1338,6 +1338,7 @@ def _handle_jobs_complete(params: dict) -> dict:
         conn.execute(
             """UPDATE job_queue
                SET status = 'done',
+                   processing_ms = CASE WHEN ? > 0 THEN ? ELSE NULL END,
                    started_at = CASE
                        WHEN ? > 0 THEN strftime(
                            '%Y-%m-%d %H:%M:%f',
@@ -1347,7 +1348,7 @@ def _handle_jobs_complete(params: dict) -> dict:
                    END,
                    completed_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
                WHERE id = ?""",
-            [processing_ms, processing_ms, job_id],
+            [processing_ms, processing_ms, processing_ms, processing_ms, job_id],
         )
         conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
         conn.commit()

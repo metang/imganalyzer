@@ -1139,7 +1139,7 @@ class Worker:
                 image_id = job["image_id"]
                 image_row = repo.get_image(image_id)
                 path_str = image_row["file_path"] if image_row else f"id={image_id}"
-                queue.mark_done(job["id"])
+                queue.mark_done(job["id"], processing_ms=per_image_ms)
                 _emit_result(path_str, module, "done", per_image_ms)
                 batch_stats["done"] += 1
 
@@ -1214,7 +1214,7 @@ class Worker:
             # ── Run the module ───────────────────────────────────────────────
             result = runner.run(image_id, module)
             elapsed = int(time.time() * 1000) - start_ms
-            queue.mark_done(job_id)
+            queue.mark_done(job_id, processing_ms=elapsed)
             kw = result.get("keywords") if module == "caption" and result else None
             _emit_result(path, module, "done", elapsed, keywords=kw)
 

@@ -412,7 +412,7 @@ class JobQueue:
             self.conn.rollback()
             raise
 
-    def mark_done_leased(self, job_id: int, lease_token: str) -> bool:
+    def mark_done_leased(self, job_id: int, lease_token: str, processing_ms: int | None = None) -> bool:
         """Mark a leased job done if the lease token matches."""
         self.conn.execute("BEGIN IMMEDIATE")
         try:
@@ -424,8 +424,11 @@ class JobQueue:
                 self.conn.rollback()
                 return False
             self.conn.execute(
-                "UPDATE job_queue SET status = 'done', completed_at = ? WHERE id = ?",
-                [_now(), job_id],
+                """UPDATE job_queue
+                   SET status = 'done', completed_at = ?,
+                       processing_ms = ?
+                   WHERE id = ?""",
+                [_now(), processing_ms, job_id],
             )
             self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
             self.conn.commit()
@@ -485,10 +488,13 @@ class JobQueue:
 
     # ── Complete / Fail / Skip ─────────────────────────────────────────────
 
-    def mark_done(self, job_id: int) -> None:
+    def mark_done(self, job_id: int, processing_ms: int | None = None) -> None:
         self.conn.execute(
-            "UPDATE job_queue SET status = 'done', completed_at = ? WHERE id = ?",
-            [_now(), job_id],
+            """UPDATE job_queue
+               SET status = 'done', completed_at = ?,
+                   processing_ms = ?
+               WHERE id = ?""",
+            [_now(), processing_ms, job_id],
         )
         self.conn.commit()
 
@@ -783,21 +789,31 @@ class JobQueue:
     def module_avg_processing_ms(self, last_n: int = 100) -> dict[str, float]:
         """Average processing time per module from the last *last_n* done jobs.
 
-        Uses ``completed_at − started_at`` and only includes jobs in ``done``
-        state.  Returns ``{module: avg_ms}``.
+        Prefers the explicit ``processing_ms`` column (actual elapsed time
+        reported by the worker) over ``completed_at − started_at`` (which is
+        inflated for batch-claimed jobs where ``started_at`` is set at claim
+        time for the whole batch, not per-job start).
+
+        Returns ``{module: avg_ms}``.
         """
         rows = self.conn.execute(
             """SELECT module,
-                      AVG((julianday(completed_at) - julianday(started_at)) * 86400000) AS avg_ms
+                      AVG(
+                          CASE
+                              WHEN processing_ms IS NOT NULL AND processing_ms > 0
+                                  THEN processing_ms
+                              ELSE (julianday(completed_at) - julianday(started_at)) * 86400000
+                          END
+                      ) AS avg_ms
                 FROM (
-                    SELECT module, started_at, completed_at,
+                    SELECT module, started_at, completed_at, processing_ms,
                            ROW_NUMBER() OVER (
                                PARTITION BY module ORDER BY completed_at DESC
                            ) AS rn
                     FROM job_queue
                     WHERE status = 'done'
-                      AND started_at IS NOT NULL
-                      AND completed_at IS NOT NULL
+                      AND (processing_ms IS NOT NULL
+                           OR (started_at IS NOT NULL AND completed_at IS NOT NULL))
                 )
                 WHERE rn <= ?
                 GROUP BY module""",

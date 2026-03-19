@@ -710,7 +710,7 @@ async function doPoll(): Promise<void> {
       modulesWithSpeed[mod] = {
         ...(modStats as unknown as BatchModuleStats),
         imagesPerSec: moduleMetrics[mod]?.imagesPerSec ?? 0,
-        avgMsPerImage: moduleAvgMs[mod] ?? 0,
+        avgMsPerImage: moduleMetrics[mod]?.avgMsPerImage || moduleAvgMs[mod] || 0,
       }
     }
 
