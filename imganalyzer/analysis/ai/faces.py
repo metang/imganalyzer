@@ -15,7 +15,14 @@ _INSIGHTFACE_HOME = str(Path(CACHE_DIR) / "insightface")
 
 
 def _get_pil_exif_orientation(img: "Any") -> int:
-    """Extract EXIF orientation tag from a PIL Image, defaulting to 1 (normal)."""
+    """Extract EXIF orientation tag from a PIL Image, defaulting to 1 (normal).
+
+    Returns 1 for HEIF/AVIF formats because pillow-heif auto-applies
+    EXIF orientation during decoding — reading the tag would double-rotate.
+    """
+    fmt = getattr(img, "format", None)
+    if fmt and fmt.upper() in ("HEIF", "HEIC", "AVIF"):
+        return 1
     try:
         exif = img.getexif()
         return exif.get(0x0112, 1)  # 0x0112 = Orientation tag

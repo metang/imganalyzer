@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -46,6 +46,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         20: _migrate_v20,
         21: _migrate_v21,
         22: _migrate_v22,
+        23: _migrate_v23,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -767,6 +768,17 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
     Previously, face crop thumbnails were generated from un-rotated pixel data,
     causing upside-down or sideways crops for images with EXIF orientation tags.
     Clearing the cached thumbnails forces on-the-fly regeneration with the fix.
+    """
+    conn.execute("UPDATE face_occurrences SET thumbnail = NULL WHERE thumbnail IS NOT NULL")
+
+
+def _migrate_v23(conn: sqlite3.Connection) -> None:
+    """Re-clear face thumbnails after fixing detection-resolution scale factor.
+
+    Migration v22 cleared thumbnails, but on-the-fly regeneration used a
+    hardcoded 1920px detection long-edge while the actual value was 1024px.
+    This caused crops from wrong image regions.  Also fixes HEIF/AVIF
+    double-rotation (pillow-heif auto-applies EXIF orientation).
     """
     conn.execute("UPDATE face_occurrences SET thumbnail = NULL WHERE thumbnail IS NOT NULL")
 

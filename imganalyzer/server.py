@@ -2872,18 +2872,26 @@ def _open_face_crop_image(path: Path):
     with pillow_decode_guard(path):
         img = Image.open(path)
         orientation = _get_pil_exif_orientation(img)
+        # Belt-and-suspenders: pillow-heif auto-rotates HEIC/HEIF/AVIF;
+        # if _get_pil_exif_orientation didn't catch it via format, check ext.
+        if ext in (".heic", ".heif", ".avif"):
+            orientation = 1
         return img.convert("RGB"), orientation
 
 
 def _render_face_occurrence_thumbnail(occ: dict[str, Any], img, exif_orientation: int = 1) -> bytes:
     from PIL import Image
     from imganalyzer.analysis.ai.faces import _apply_orientation
+    from imganalyzer.pipeline.modules import _AI_MAX_LONG_EDGE
 
-    # Crop face region with some padding. IMPORTANT: bbox coordinates were
-    # computed on a pre-resized image (max 1920px long edge) — scale them to
-    # the original resolution.
+    # Crop face region with some padding. bbox coordinates were computed on a
+    # pre-resized image (max _AI_MAX_LONG_EDGE on the long edge) — scale them
+    # to the original resolution.
     w, h = img.size
-    det_long_edge = 1920  # _AI_MAX_LONG_EDGE in modules.py
+    # Infer detection resolution: faces analyzed before _AI_MAX_LONG_EDGE was
+    # reduced from 1920 to 1024 have bbox coords that may exceed 1024.
+    max_bbox = max(occ["bbox_x2"], occ["bbox_y2"])
+    det_long_edge = 1920 if max_bbox > _AI_MAX_LONG_EDGE else _AI_MAX_LONG_EDGE
     orig_long_edge = max(w, h)
     if orig_long_edge > det_long_edge:
         scale = orig_long_edge / det_long_edge
