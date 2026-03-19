@@ -143,6 +143,9 @@ contextBridge.exposeInMainWorld('api', {
   searchImages: (filters: SearchFilters): Promise<SearchResponse> =>
     ipcRenderer.invoke('search:run', filters),
 
+  getImageDetails: (params: { image_id?: number; file_path?: string }): Promise<{ result: SearchResult | null; error?: string }> =>
+    ipcRenderer.invoke('image:details', params),
+
   resolveSearchFaceQuery: (query: string) =>
     ipcRenderer.invoke('search:resolve-face-query', query),
 

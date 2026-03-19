@@ -201,4 +201,13 @@ export function registerSearchHandlers(): void {
       }
     }
   })
+
+  ipcMain.handle('image:details', async (_evt, params: { image_id?: number; file_path?: string }): Promise<{ result: SearchResult | null; error?: string }> => {
+    try {
+      await ensureServerRunning()
+      return await rpc.call('image/details', params) as { result: SearchResult | null; error?: string }
+    } catch (err) {
+      return { result: null, error: String(err) }
+    }
+  })
 }

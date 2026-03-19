@@ -3025,6 +3025,155 @@ def _handle_faces_crop_batch(params: dict) -> dict:
 
     return {"thumbnails": thumbnails}
 
+
+# ── Image details (single-image metadata lookup) ────────────────────────────
+
+
+def _handle_image_details(params: dict) -> dict:
+    """Return full analysis metadata for a single image by image_id or file_path.
+
+    Reuses the same column set as the search handler so the result can
+    be rendered by the same AnalysisSidebar component on the frontend.
+    """
+    import json as _json
+
+    conn = _get_db()
+    image_id = params.get("image_id")
+    file_path = params.get("file_path")
+    if image_id is None and not file_path:
+        return {"result": None, "error": "Must provide image_id or file_path"}
+
+    select_cols = """
+        i.id AS image_id, i.file_path, i.width, i.height, i.file_size,
+        m.camera_make, m.camera_model, m.lens_model, m.focal_length,
+        m.f_number, m.exposure_time, m.iso, m.date_time_original,
+        m.gps_latitude, m.gps_longitude, m.location_city, m.location_state,
+        m.location_country,
+        t.sharpness_score, t.sharpness_label, t.exposure_ev, t.exposure_label,
+        t.noise_level, t.noise_label, t.snr_db, t.dynamic_range_stops,
+        t.highlight_clipping_pct, t.shadow_clipping_pct, t.avg_saturation,
+        t.dominant_colors,
+        COALESCE(la.description, b2.description) AS description,
+        COALESCE(la.scene_type, b2.scene_type) AS scene_type,
+        COALESCE(la.main_subject, b2.main_subject) AS main_subject,
+        COALESCE(la.lighting, b2.lighting) AS lighting,
+        COALESCE(la.mood, b2.mood) AS mood,
+        COALESCE(la.keywords, b2.keywords) AS keywords,
+        COALESCE(la.detected_objects, ob.detected_objects) AS detected_objects,
+        COALESCE(la.face_count, af.face_count) AS face_count,
+        COALESCE(la.face_identities, af.face_identities) AS face_identities,
+        COALESCE(la.has_people, ob.has_person) AS has_people,
+        COALESCE(la.ocr_text, ocr.ocr_text) AS ocr_text,
+        (
+            SELECT ca.description
+            FROM analysis_cloud_ai ca
+            WHERE ca.image_id = i.id
+              AND ca.description IS NOT NULL
+              AND TRIM(ca.description) != ''
+            ORDER BY ca.analyzed_at DESC, ca.id DESC
+            LIMIT 1
+        ) AS cloud_description,
+        COALESCE(ap.perception_iaa, ae.aesthetic_score) AS aesthetic_score,
+        COALESCE(ap.perception_iaa_label, ae.aesthetic_label) AS aesthetic_label,
+        NULL AS aesthetic_reason,
+        ap.perception_iaa, ap.perception_iaa_label,
+        ap.perception_iqa, ap.perception_iqa_label,
+        ap.perception_ista, ap.perception_ista_label
+    """
+    joins = """
+        FROM images i
+        LEFT JOIN analysis_metadata    m  ON m.image_id  = i.id
+        LEFT JOIN analysis_technical   t  ON t.image_id  = i.id
+        LEFT JOIN analysis_caption     la ON la.image_id = i.id
+        LEFT JOIN analysis_blip2       b2 ON b2.image_id = i.id
+        LEFT JOIN analysis_objects     ob ON ob.image_id = i.id
+        LEFT JOIN analysis_ocr        ocr ON ocr.image_id = i.id
+        LEFT JOIN analysis_faces       af ON af.image_id = i.id
+        LEFT JOIN analysis_aesthetic   ae ON ae.image_id = i.id
+        LEFT JOIN analysis_perception  ap ON ap.image_id = i.id
+    """
+
+    if image_id is not None:
+        where = "WHERE i.id = ?"
+        sql_params: list[Any] = [int(image_id)]
+    else:
+        where = "WHERE i.file_path = ?"
+        sql_params = [str(file_path)]
+
+    row = conn.execute(
+        f"SELECT {select_cols} {joins} {where} LIMIT 1",
+        sql_params,
+    ).fetchone()
+
+    if row is None:
+        return {"result": None}
+
+    def _jf(val: Any) -> Any:
+        if val is None:
+            return None
+        if isinstance(val, str):
+            try:
+                return _json.loads(val)
+            except (ValueError, TypeError):
+                return [val]
+        return val
+
+    record = {
+        "image_id": int(row["image_id"]),
+        "file_path": row["file_path"],
+        "score": None,
+        "width": row["width"],
+        "height": row["height"],
+        "file_size": row["file_size"],
+        "camera_make": row["camera_make"],
+        "camera_model": row["camera_model"],
+        "lens_model": row["lens_model"],
+        "focal_length": row["focal_length"],
+        "f_number": row["f_number"],
+        "exposure_time": row["exposure_time"],
+        "iso": row["iso"],
+        "date_time_original": row["date_time_original"],
+        "gps_latitude": row["gps_latitude"],
+        "gps_longitude": row["gps_longitude"],
+        "location_city": row["location_city"],
+        "location_state": row["location_state"],
+        "location_country": row["location_country"],
+        "sharpness_score": row["sharpness_score"],
+        "sharpness_label": row["sharpness_label"],
+        "exposure_ev": row["exposure_ev"],
+        "exposure_label": row["exposure_label"],
+        "noise_level": row["noise_level"],
+        "noise_label": row["noise_label"],
+        "snr_db": row["snr_db"],
+        "dynamic_range_stops": row["dynamic_range_stops"],
+        "highlight_clipping_pct": row["highlight_clipping_pct"],
+        "shadow_clipping_pct": row["shadow_clipping_pct"],
+        "avg_saturation": row["avg_saturation"],
+        "dominant_colors": _jf(row["dominant_colors"]),
+        "description": row["description"],
+        "scene_type": row["scene_type"],
+        "main_subject": row["main_subject"],
+        "lighting": row["lighting"],
+        "mood": row["mood"],
+        "keywords": _jf(row["keywords"]),
+        "detected_objects": _jf(row["detected_objects"]),
+        "face_count": row["face_count"],
+        "face_identities": _jf(row["face_identities"]),
+        "has_people": bool(row["has_people"]) if row["has_people"] is not None else None,
+        "ocr_text": row["ocr_text"],
+        "cloud_description": row["cloud_description"],
+        "aesthetic_score": row["aesthetic_score"],
+        "aesthetic_label": row["aesthetic_label"],
+        "aesthetic_reason": row["aesthetic_reason"],
+        "perception_iaa": row["perception_iaa"],
+        "perception_iaa_label": row["perception_iaa_label"],
+        "perception_iqa": row["perception_iqa"],
+        "perception_iqa_label": row["perception_iqa_label"],
+        "perception_ista": row["perception_ista"],
+        "perception_ista_label": row["perception_ista_label"],
+    }
+    return {"result": record}
+
 
 # ── Method dispatch ──────────────────────────────────────────────────────────
 
@@ -3049,6 +3198,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "rebuild": _handle_rebuild,
     "search": _handle_search,
     "search/resolveFaceQuery": _handle_search_resolve_face_query,
+    "image/details": _handle_image_details,
     "gallery/listFolders": _handle_gallery_list_folders,
     "gallery/listImagesChunk": _handle_gallery_list_images_chunk,
     "thumbnail": _handle_thumbnail,

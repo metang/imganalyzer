@@ -15,7 +15,7 @@ interface SearchLightboxProps {
   item: SearchResult
   items: SearchResult[]
   onClose: () => void
-  onFindSimilar: (item: SearchResult) => void
+  onFindSimilar?: (item: SearchResult) => void
   onNavigate: (item: SearchResult) => void
 }
 
@@ -28,7 +28,7 @@ function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min
 
 // ── Analysis sidebar ──────────────────────────────────────────────────────────
 
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
+export function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex gap-2 py-1 border-b border-neutral-800 last:border-0">
       <span className="text-neutral-500 text-xs w-32 shrink-0">{label}</span>
@@ -37,7 +37,7 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   )
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+export function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mb-4">
       <h3 className="text-[11px] font-semibold uppercase tracking-widest text-neutral-500 mb-1 px-4">{title}</h3>
@@ -46,7 +46,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function ScoreBar({ value, max = 10 }: { value: number | null | undefined; max?: number }) {
+export function ScoreBar({ value, max = 10 }: { value: number | null | undefined; max?: number }) {
   const v = typeof value === 'number' && Number.isFinite(value) ? value : 0
   const safeMax = max > 0 ? max : 1
   const pct = Math.min(100, (v / safeMax) * 100)
@@ -61,7 +61,7 @@ function ScoreBar({ value, max = 10 }: { value: number | null | undefined; max?:
   )
 }
 
-function TagList({ items }: { items: string[] }) {
+export function TagList({ items }: { items: string[] }) {
   if (!items.length) return <span className="text-neutral-600 text-xs">—</span>
   return (
     <div className="flex flex-wrap gap-1">
@@ -74,12 +74,12 @@ function TagList({ items }: { items: string[] }) {
   )
 }
 
-function AnalysisSidebar({
+export function AnalysisSidebar({
   item,
   onFindSimilar,
 }: {
   item: SearchResult
-  onFindSimilar: () => void
+  onFindSimilar?: () => void
 }) {
   const filename = item.file_path.split(/[/\\]/).pop() ?? ''
 
@@ -91,13 +91,15 @@ function AnalysisSidebar({
         {item.score != null && (
           <span className="text-xs text-neutral-500">Match: {(item.score * 100).toFixed(0)}%</span>
         )}
-        <button
-          type="button"
-          onClick={onFindSimilar}
-          className="mt-3 w-full rounded-md border border-neutral-700 px-3 py-2 text-xs font-medium text-neutral-200 hover:border-neutral-500 hover:bg-neutral-800 transition-colors"
-        >
-          Find similar photos
-        </button>
+        {onFindSimilar && (
+          <button
+            type="button"
+            onClick={onFindSimilar}
+            className="mt-3 w-full rounded-md border border-neutral-700 px-3 py-2 text-xs font-medium text-neutral-200 hover:border-neutral-500 hover:bg-neutral-800 transition-colors"
+          >
+            Find similar photos
+          </button>
+        )}
       </div>
 
       {/* Scrollable content */}
@@ -552,7 +554,7 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
       </div>
 
       {/* ── Analysis sidebar (right) ────────────────────────────────────────── */}
-      <AnalysisSidebar item={item} onFindSimilar={() => onFindSimilar(item)} />
+      <AnalysisSidebar item={item} onFindSimilar={onFindSimilar ? () => onFindSimilar(item) : undefined} />
     </div>
   )
 }

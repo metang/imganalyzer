@@ -466,6 +466,7 @@ declare global {
 
       // Search
       searchImages(filters: SearchFilters): Promise<SearchResponse>
+      getImageDetails(params: { image_id?: number; file_path?: string }): Promise<{ result: SearchResult | null; error?: string }>
       resolveSearchFaceQuery(query: string): Promise<SearchFaceResolution>
       planSearchQuery(request: SearchPlanRequest): Promise<SearchPlanResponse>
       galleryListFolders(): Promise<{ folders: GalleryFolderNode[]; totalImages: number; error?: string }>
