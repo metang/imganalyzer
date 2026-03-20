@@ -84,9 +84,12 @@ export function AnalysisSidebar({
   const filename = item.file_path.split(/[/\\]/).pop() ?? ''
 
   return (
-    <div className="w-80 shrink-0 flex flex-col bg-neutral-900 border-l border-neutral-800 overflow-hidden">
+    <div className="w-80 shrink-0 flex flex-col bg-neutral-900 border-l border-neutral-800 overflow-hidden h-full">
       {/* Header */}
       <div className="px-4 py-3 border-b border-neutral-800">
+        {item.date_time_original && (
+          <span className="text-xs text-neutral-500 block mb-1">{item.date_time_original}</span>
+        )}
         <span className="text-sm font-medium truncate text-neutral-200 block" title={filename}>{filename}</span>
         {item.score != null && (
           <span className="text-xs text-neutral-500">Match: {(item.score * 100).toFixed(0)}%</span>

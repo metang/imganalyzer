@@ -338,7 +338,7 @@ function FaceImageLightbox({
 
       {/* Metadata sidebar */}
       {metadata && (
-        <div onClick={(e) => e.stopPropagation()}>
+        <div className="h-full" onClick={(e) => e.stopPropagation()}>
           <AnalysisSidebar item={metadata} />
         </div>
       )}
