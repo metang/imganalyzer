@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -48,6 +48,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         22: _migrate_v22,
         23: _migrate_v23,
         24: _migrate_v24,
+        25: _migrate_v25,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -793,4 +794,13 @@ def _migrate_v24(conn: sqlite3.Connection) -> None:
     image's aspect ratio), we know it was analyzed at 1920px.
     """
     conn.execute("UPDATE face_occurrences SET thumbnail = NULL WHERE thumbnail IS NOT NULL")
+
+
+def _migrate_v25(conn: sqlite3.Connection) -> None:
+    """Add face_cluster_deferred table for parking clusters for later review."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS face_cluster_deferred (
+            cluster_id INTEGER PRIMARY KEY
+        )
+    """)
 

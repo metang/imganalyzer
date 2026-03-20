@@ -190,7 +190,7 @@ contextBridge.exposeInMainWorld('api', {
   setFaceAlias: (canonicalName: string, displayName: string, clusterId?: number | null): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('faces:setAlias', canonicalName, displayName, clusterId ?? null),
 
-  listFaceClusters: (limit?: number, offset?: number): Promise<{ clusters: Array<{ cluster_id: number | null; identity_name: string; display_name: string | null; identity_id: number | null; image_count: number; face_count: number; representative_id: number | null; person_id: number | null }>; has_occurrences: boolean; total_count: number; error?: string }> =>
+  listFaceClusters: (limit?: number, offset?: number): Promise<{ clusters: Array<{ cluster_id: number | null; identity_name: string; display_name: string | null; identity_id: number | null; image_count: number; face_count: number; representative_id: number | null; person_id: number | null }>; has_occurrences: boolean; total_count: number; deferred_cluster_ids: number[]; error?: string }> =>
     ipcRenderer.invoke('faces:clusters', limit, offset),
 
   getFaceClusterImages: (clusterId: number | null, identityName: string | null, limit?: number): Promise<{ occurrences: Array<{ id: number; image_id: number; file_path: string; face_idx: number; bbox_x1: number; bbox_y1: number; bbox_x2: number; bbox_y2: number; age: number | null; gender: string | null; identity_name: string }>; error?: string }> =>
@@ -198,6 +198,15 @@ contextBridge.exposeInMainWorld('api', {
 
   relinkFaceCluster: (clusterId: number, displayName: string | null, personId?: number | null, updatePerson?: boolean): Promise<{ ok: boolean; updated: number; error?: string }> =>
     ipcRenderer.invoke('faces:clusterRelink', clusterId, displayName, personId ?? null, updatePerson ?? false),
+
+  deferFaceCluster: (clusterId: number): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('faces:clusterDefer', clusterId),
+
+  undeferFaceCluster: (clusterId: number): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('faces:clusterUndefer', clusterId),
+
+  undeferAllFaceClusters: (): Promise<{ ok: boolean; cleared: number; error?: string }> =>
+    ipcRenderer.invoke('faces:clusterUndeferAll'),
 
   getClusterLinkSuggestions: (
     clusterId: number,

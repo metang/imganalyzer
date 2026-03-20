@@ -453,6 +453,10 @@ export function FacesView() {
   const [unlinkPersonOnAliasRelink, setUnlinkPersonOnAliasRelink] = useState(false)
   const relinkSearchRef = useRef<HTMLInputElement>(null)
 
+  // Cluster defer (park for later)
+  const [deferredClusterIds, setDeferredClusterIds] = useState<Set<number>>(new Set())
+  const [unlinkedSubFilter, setUnlinkedSubFilter] = useState<'active' | 'deferred'>('active')
+
   // ── Load data ─────────────────────────────────────────────────────────────
 
   const loadData = useCallback(async () => {
@@ -499,6 +503,8 @@ export function FacesView() {
         setHasOccurrences(true)
         setClusters(loadedClusters)
         setLegacyFaces([])
+        // Extract deferred cluster IDs from first page response
+        setDeferredClusterIds(new Set(clusterResult.deferred_cluster_ids ?? []))
       } else {
         setTotalClusterCount(clusterResult.total_count)
         // Fallback to legacy identity-name mode
@@ -1205,9 +1211,19 @@ export function FacesView() {
     () => clusters.filter((c) => c.cluster_id !== null && !c.person_id),
     [clusters],
   )
+  const activeUnlinkedClusters = useMemo(
+    () => unlinkedClusters.filter((c) => c.cluster_id !== null && !deferredClusterIds.has(c.cluster_id!)),
+    [unlinkedClusters, deferredClusterIds],
+  )
+  const deferredUnlinkedClusters = useMemo(
+    () => unlinkedClusters.filter((c) => c.cluster_id !== null && deferredClusterIds.has(c.cluster_id!)),
+    [unlinkedClusters, deferredClusterIds],
+  )
   const visibleUnlinkedClusters = useMemo(
-    () => unlinkedClusters.slice(0, UNLINKED_CLUSTER_TARGET),
-    [unlinkedClusters],
+    () => (unlinkedSubFilter === 'deferred'
+      ? deferredUnlinkedClusters
+      : activeUnlinkedClusters.slice(0, UNLINKED_CLUSTER_TARGET)),
+    [unlinkedSubFilter, activeUnlinkedClusters, deferredUnlinkedClusters],
   )
   const activePerson = useMemo(
     () => persons.find((person) => person.id === expandedPersonId) ?? null,
@@ -2430,7 +2446,7 @@ export function FacesView() {
                       {([
                         ['linked', 'Linked', `${activeLinkedCount}`],
                         ['suggested', 'Suggested', `${activeSuggestedClusters.length}`],
-                        ['unlinked', 'Unlinked', `${visibleUnlinkedClusters.length}`],
+                        ['unlinked', 'Unlinked', `${activeUnlinkedClusters.length > UNLINKED_CLUSTER_TARGET ? UNLINKED_CLUSTER_TARGET + '+' : activeUnlinkedClusters.length}`],
                         ['inspector', 'Inspector', inspectorCluster ? '1' : '0'],
                       ] as Array<[PeopleStage, string, string]>).map(([stage, label, count]) => {
                         const isDisabled = stage === 'inspector' && !inspectorCluster
@@ -2705,19 +2721,61 @@ export function FacesView() {
 
                     {peopleStage === 'unlinked' && (
                       <div className="space-y-4">
-                        <div>
-                          <p className="text-[11px] uppercase tracking-wide text-blue-300/90">Unlinked clusters</p>
-                          <p className="mt-1 text-xs text-neutral-500">
-                            Hunt for missed matches for {activePerson.name}. Showing {visibleUnlinkedClusters.length}
-                            {unlinkedClusters.length > visibleUnlinkedClusters.length ? ` of ${unlinkedClusters.length}` : ''} unlinked clusters.
-                          </p>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-[11px] uppercase tracking-wide text-blue-300/90">Unlinked clusters</p>
+                            <p className="mt-1 text-xs text-neutral-500">
+                              {unlinkedSubFilter === 'deferred'
+                                ? `${deferredUnlinkedClusters.length} deferred cluster${deferredUnlinkedClusters.length !== 1 ? 's' : ''} parked for later.`
+                                : <>Hunt for missed matches for {activePerson?.name ?? '…'}. Showing {visibleUnlinkedClusters.length}
+                                  {activeUnlinkedClusters.length > UNLINKED_CLUSTER_TARGET ? ` of ${activeUnlinkedClusters.length}` : ''} active clusters.</>
+                              }
+                            </p>
+                          </div>
+                          {/* Active / Deferred toggle */}
+                          <div className="flex shrink-0 rounded-full border border-neutral-700 bg-neutral-900 p-0.5 text-xs">
+                            <button
+                              type="button"
+                              onClick={() => setUnlinkedSubFilter('active')}
+                              className={`rounded-full px-2.5 py-1 transition-colors ${
+                                unlinkedSubFilter === 'active' ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-400 hover:text-neutral-200'
+                              }`}
+                            >
+                              Active <span className="text-neutral-500">{activeUnlinkedClusters.length > UNLINKED_CLUSTER_TARGET ? `${UNLINKED_CLUSTER_TARGET}+` : activeUnlinkedClusters.length}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setUnlinkedSubFilter('deferred')}
+                              className={`rounded-full px-2.5 py-1 transition-colors ${
+                                unlinkedSubFilter === 'deferred' ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-400 hover:text-neutral-200'
+                              }`}
+                            >
+                              Deferred <span className="text-neutral-500">{deferredUnlinkedClusters.length}</span>
+                            </button>
+                          </div>
                         </div>
+
+                        {/* Bulk restore for deferred view */}
+                        {unlinkedSubFilter === 'deferred' && deferredUnlinkedClusters.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await window.api.undeferAllFaceClusters()
+                              setDeferredClusterIds(new Set())
+                              setUnlinkedSubFilter('active')
+                            }}
+                            className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                          >
+                            ↩ Restore all deferred clusters
+                          </button>
+                        )}
 
                         {visibleUnlinkedClusters.length > 0 ? (
                           <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-4">
                             {visibleUnlinkedClusters.map((cluster) => {
                               const key = `cluster:${cluster.cluster_id}`
                               const isSelected = expandedKey === key && peopleStage === 'inspector'
+                              const isDeferred = cluster.cluster_id !== null && deferredClusterIds.has(cluster.cluster_id)
                               return (
                                 <div
                                   key={`unlinked:${cluster.cluster_id}`}
@@ -2752,11 +2810,43 @@ export function FacesView() {
                                       <p className="mt-1 text-[11px] text-neutral-500">{cluster.face_count} faces</p>
                                     </div>
                                   </button>
+                                  {/* Defer / Restore + Link buttons */}
                                   {cluster.cluster_id !== null && (
                                     <div
-                                      className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100"
+                                      className="absolute right-2 top-2 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100"
                                       onClick={(e) => e.stopPropagation()}
                                     >
+                                      {isDeferred ? (
+                                        <button
+                                          type="button"
+                                          title="Restore cluster"
+                                          onClick={async () => {
+                                            const cid = cluster.cluster_id!
+                                            setDeferredClusterIds((prev) => { const next = new Set(prev); next.delete(cid); return next })
+                                            await window.api.undeferFaceCluster(cid)
+                                          }}
+                                          className="rounded-full bg-black/60 p-1.5 text-blue-400 hover:bg-black/80 hover:text-blue-300 transition-colors"
+                                        >
+                                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
+                                          </svg>
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          title="Skip — defer for later"
+                                          onClick={async () => {
+                                            const cid = cluster.cluster_id!
+                                            setDeferredClusterIds((prev) => new Set([...prev, cid]))
+                                            await window.api.deferFaceCluster(cid)
+                                          }}
+                                          className="rounded-full bg-black/60 p-1.5 text-neutral-400 hover:bg-black/80 hover:text-amber-400 transition-colors"
+                                        >
+                                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                                          </svg>
+                                        </button>
+                                      )}
                                       <div className="relative">
                                         {renderLinkDropdown(cluster.cluster_id)}
                                       </div>
@@ -2768,7 +2858,9 @@ export function FacesView() {
                           </div>
                         ) : (
                           <div className="rounded-xl border border-dashed border-neutral-800 px-4 py-10 text-sm text-neutral-600">
-                            No unlinked clusters available.
+                            {unlinkedSubFilter === 'deferred'
+                              ? 'No deferred clusters.'
+                              : 'No unlinked clusters available.'}
                           </div>
                         )}
                       </div>

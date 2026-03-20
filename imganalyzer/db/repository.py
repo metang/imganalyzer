@@ -674,6 +674,35 @@ class Repository:
         self.conn.commit()
         return cur.rowcount
 
+    # ── Cluster defer (park for later) ───────────────────────────────────────
+
+    def defer_cluster(self, cluster_id: int) -> None:
+        """Mark a cluster as deferred (parked for later review)."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO face_cluster_deferred (cluster_id) VALUES (?)",
+            [cluster_id],
+        )
+        self.conn.commit()
+
+    def undefer_cluster(self, cluster_id: int) -> None:
+        """Remove deferred status from a cluster."""
+        self.conn.execute(
+            "DELETE FROM face_cluster_deferred WHERE cluster_id = ?",
+            [cluster_id],
+        )
+        self.conn.commit()
+
+    def undefer_all_clusters(self) -> int:
+        """Remove deferred status from all clusters. Returns count cleared."""
+        cur = self.conn.execute("DELETE FROM face_cluster_deferred")
+        self.conn.commit()
+        return cur.rowcount
+
+    def get_deferred_cluster_ids(self) -> set[int]:
+        """Return the set of cluster IDs currently deferred."""
+        rows = self.conn.execute("SELECT cluster_id FROM face_cluster_deferred").fetchall()
+        return {row[0] for row in rows}
+
     def get_person_clusters(self, person_id: int) -> list[dict]:
         """Return clusters belonging to a person, with face counts.
 

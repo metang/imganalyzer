@@ -2648,10 +2648,12 @@ def _handle_faces_clusters(params: dict) -> dict:
     offset = params.get("offset", 0)
     clusters, total_count = repo.list_face_clusters(limit=limit, offset=offset)
     has_occurrences = repo.get_face_occurrences_count() > 0
+    deferred_ids = sorted(repo.get_deferred_cluster_ids())
     return {
         "clusters": clusters,
         "has_occurrences": has_occurrences,
         "total_count": total_count,
+        "deferred_cluster_ids": deferred_ids,
     }
 
 
@@ -2680,6 +2682,36 @@ def _handle_faces_cluster_relink(params: dict) -> dict:
     )
     _invalidate_person_link_suggestion_cache()
     return {"ok": True, "updated": updated}
+
+
+def _handle_faces_cluster_defer(params: dict) -> dict:
+    """Mark a cluster as deferred (parked for later review)."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    repo.defer_cluster(int(params["cluster_id"]))
+    return {"ok": True}
+
+
+def _handle_faces_cluster_undefer(params: dict) -> dict:
+    """Remove deferred status from a cluster."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    repo.undefer_cluster(int(params["cluster_id"]))
+    return {"ok": True}
+
+
+def _handle_faces_cluster_undefer_all(params: dict) -> dict:
+    """Remove deferred status from all clusters."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    cleared = repo.undefer_all_clusters()
+    return {"ok": True, "cleared": cleared}
 
 
 def _handle_faces_cluster_link_suggestions(params: dict) -> dict:
@@ -3235,6 +3267,9 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/set-alias": _handle_faces_set_alias,
     "faces/clusters": _handle_faces_clusters,
     "faces/cluster-relink": _handle_faces_cluster_relink,
+    "faces/cluster-defer": _handle_faces_cluster_defer,
+    "faces/cluster-undefer": _handle_faces_cluster_undefer,
+    "faces/cluster-undefer-all": _handle_faces_cluster_undefer_all,
     "faces/cluster-link-suggestions": _handle_faces_cluster_link_suggestions,
     "faces/cluster-images": _handle_faces_cluster_images,
     "faces/crop": _handle_faces_crop,

@@ -483,9 +483,12 @@ declare global {
       listFaces(): Promise<{ faces: FaceSummary[]; error?: string }>
       getFaceImages(name: string, limit?: number): Promise<{ images: FaceImage[]; error?: string }>
       setFaceAlias(canonicalName: string, displayName: string, clusterId?: number | null): Promise<{ ok: boolean; error?: string }>
-      listFaceClusters(limit?: number, offset?: number): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; total_count: number; error?: string }>
+      listFaceClusters(limit?: number, offset?: number): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; total_count: number; deferred_cluster_ids: number[]; error?: string }>
       getFaceClusterImages(clusterId: number | null, identityName: string | null, limit?: number): Promise<{ occurrences: FaceOccurrence[]; error?: string }>
       relinkFaceCluster(clusterId: number, displayName: string | null, personId?: number | null, updatePerson?: boolean): Promise<{ ok: boolean; updated: number; error?: string }>
+      deferFaceCluster(clusterId: number): Promise<{ ok: boolean; error?: string }>
+      undeferFaceCluster(clusterId: number): Promise<{ ok: boolean; error?: string }>
+      undeferAllFaceClusters(): Promise<{ ok: boolean; cleared: number; error?: string }>
       getClusterLinkSuggestions(clusterId: number, limit?: number): Promise<{ suggestions: FaceLinkSuggestion[]; error?: string }>
       getFaceCrop(occurrenceId: number): Promise<{ data?: string; error?: string }>
       getFaceCropBatch(ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }>

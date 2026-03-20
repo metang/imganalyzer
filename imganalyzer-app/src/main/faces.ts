@@ -282,7 +282,7 @@ export function registerFaceHandlers(): void {
       _evt,
       limit?: number,
       offset?: number
-    ): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; total_count: number; error?: string }> => {
+    ): Promise<{ clusters: FaceCluster[]; has_occurrences: boolean; total_count: number; deferred_cluster_ids: number[]; error?: string }> => {
       try {
         await ensureServerRunning()
         const params: Record<string, number> = {}
@@ -294,14 +294,16 @@ export function registerFaceHandlers(): void {
           clusters: FaceCluster[]
           has_occurrences: boolean
           total_count: number
+          deferred_cluster_ids: number[]
         }
         return {
           clusters: result.clusters,
           has_occurrences: result.has_occurrences,
           total_count: result.total_count,
+          deferred_cluster_ids: result.deferred_cluster_ids ?? [],
         }
       } catch (err) {
-        return { clusters: [], has_occurrences: false, total_count: 0, error: String(err) }
+        return { clusters: [], has_occurrences: false, total_count: 0, deferred_cluster_ids: [], error: String(err) }
       }
     }
   )
@@ -348,6 +350,45 @@ export function registerFaceHandlers(): void {
         return { ok: true, updated: result.updated }
       } catch (err) {
         return { ok: false, updated: 0, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:clusterDefer',
+    async (_evt, clusterId: number): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        await rpc.call('faces/cluster-defer', { cluster_id: clusterId })
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:clusterUndefer',
+    async (_evt, clusterId: number): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        await rpc.call('faces/cluster-undefer', { cluster_id: clusterId })
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:clusterUndeferAll',
+    async (): Promise<{ ok: boolean; cleared: number; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/cluster-undefer-all', {}) as { cleared: number }
+        return { ok: true, cleared: result.cleared }
+      } catch (err) {
+        return { ok: false, cleared: 0, error: String(err) }
       }
     }
   )
