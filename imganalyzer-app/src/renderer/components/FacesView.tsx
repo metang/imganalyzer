@@ -1577,7 +1577,7 @@ export function FacesView() {
           e.stopPropagation()
           void openRelinkDialog(cluster)
         }}
-        className="text-xs text-violet-400/80 hover:text-violet-300 transition-colors shrink-0"
+        className="rounded-lg border border-violet-800/60 bg-violet-950/20 px-3 py-1.5 text-xs text-violet-200 hover:bg-violet-900/30 transition-colors shrink-0"
         title="Relink this cluster to another alias or person"
       >
         Relink
@@ -2880,7 +2880,7 @@ export function FacesView() {
                                   {inspectorCluster.face_count} faces · {inspectorCluster.image_count} images
                                 </p>
                               </div>
-                              <div className="flex flex-wrap items-center gap-2">
+                              <div className="flex flex-wrap items-center gap-3">
                                 {renderRelinkButton(inspectorCluster)}
                                 {inspectorCluster.cluster_id != null && (
                                   <div className="relative">
@@ -2896,12 +2896,43 @@ export function FacesView() {
                                     Unlink
                                   </button>
                                 )}
+                                {inspectorCluster.cluster_id != null && !inspectorCluster.person_id && (
+                                  (() => {
+                                    const cid = inspectorCluster.cluster_id!
+                                    const isDeferred = deferredClusterIds.has(cid)
+                                    return isDeferred ? (
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          setDeferredClusterIds((prev) => { const next = new Set(prev); next.delete(cid); return next })
+                                          await window.api.undeferFaceCluster(cid)
+                                        }}
+                                        className="rounded-lg border border-blue-800/60 bg-blue-950/20 px-3 py-1.5 text-xs text-blue-200 hover:bg-blue-900/30"
+                                      >
+                                        Restore
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          setDeferredClusterIds((prev) => new Set([...prev, cid]))
+                                          await window.api.deferFaceCluster(cid)
+                                          setPeopleStage(inspectorReturnStage)
+                                        }}
+                                        className="rounded-lg border border-amber-800/60 bg-amber-950/20 px-3 py-1.5 text-xs text-amber-200 hover:bg-amber-900/30"
+                                      >
+                                        Defer
+                                      </button>
+                                    )
+                                  })()
+                                )}
+                                <span className="mx-1 text-neutral-700">|</span>
                                 <button
                                   type="button"
                                   onClick={() => setPeopleStage(inspectorReturnStage)}
-                                  className="text-xs text-neutral-500 hover:text-neutral-300"
+                                  className="rounded-lg border border-neutral-700 px-3 py-1.5 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200 transition-colors"
                                 >
-                                  Back to {inspectorReturnStage}
+                                  ← Back to {inspectorReturnStage}
                                 </button>
                               </div>
                             </div>
