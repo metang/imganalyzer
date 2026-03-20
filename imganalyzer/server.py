@@ -3022,15 +3022,24 @@ def _handle_faces_crop_batch(params: dict) -> dict:
 
     updated = False
     for file_path, group in missing_rows_by_path.items():
-        img, orientation = _open_face_crop_image(Path(file_path))
+        try:
+            img, orientation = _open_face_crop_image(Path(file_path))
+        except Exception:
+            sys.stderr.write(f"[faces/crop-batch] cannot open {file_path}\n")
+            continue
         try:
             for row_d in group:
-                thumbnail = _generate_face_occurrence_thumbnail(
-                    row_d, img=img, exif_orientation=orientation,
-                )
-                repo.set_face_occurrence_thumbnail(row_d["id"], thumbnail)
-                thumbnails[str(row_d["id"])] = base64.b64encode(thumbnail).decode("ascii")
-                updated = True
+                try:
+                    thumbnail = _generate_face_occurrence_thumbnail(
+                        row_d, img=img, exif_orientation=orientation,
+                    )
+                    repo.set_face_occurrence_thumbnail(row_d["id"], thumbnail)
+                    thumbnails[str(row_d["id"])] = base64.b64encode(thumbnail).decode("ascii")
+                    updated = True
+                except Exception:
+                    sys.stderr.write(
+                        f"[faces/crop-batch] crop failed for occ {row_d['id']}\n"
+                    )
         finally:
             close = getattr(img, "close", None)
             if callable(close):

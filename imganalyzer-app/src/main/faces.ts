@@ -132,7 +132,7 @@ async function getFaceCropBatchCached(ids: number[]): Promise<Record<string, str
   }
 
   if (missingIds.length > 0) {
-    const result = await rpc.call('faces/crop-batch', { ids: missingIds }) as {
+    const result = await rpc.call('faces/crop-batch', { ids: missingIds }, undefined, 120_000) as {
       thumbnails?: Record<string, string>
     }
     for (const occurrenceId of missingIds) {
