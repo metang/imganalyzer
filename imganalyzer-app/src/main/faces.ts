@@ -47,7 +47,7 @@ function faceCropCacheSet(occurrenceId: number, base64Jpeg: string): void {
 async function faceCropCacheFilePath(occurrenceId: number): Promise<string> {
   const cfg = await getThumbnailCacheConfig()
   const hash = createHash('sha1')
-    .update(`face-crop-v1|${occurrenceId}`)
+    .update(`face-crop-v2|${occurrenceId}`)
     .digest('hex')
   return join(cfg.directory, 'faces', hash.slice(0, 2), `${hash}.jpg`)
 }
