@@ -310,12 +310,12 @@ function FaceImageLightbox({
         </button>
 
         {/* Image */}
-        <div className="flex-1 flex items-center justify-center p-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex-1 overflow-hidden flex items-center justify-center p-4 min-w-0" onClick={(e) => e.stopPropagation()}>
           {src ? (
             <img
               src={src}
               alt=""
-              className="max-w-full max-h-full object-contain rounded shadow-2xl"
+              className="max-w-full max-h-full object-contain rounded shadow-2xl select-none"
               draggable={false}
             />
           ) : (
