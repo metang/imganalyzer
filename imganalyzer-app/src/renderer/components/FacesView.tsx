@@ -457,6 +457,10 @@ export function FacesView() {
   const [deferredClusterIds, setDeferredClusterIds] = useState<Set<number>>(new Set())
   const [unlinkedSubFilter, setUnlinkedSubFilter] = useState<'active' | 'deferred'>('active')
 
+  // Inspector similarity suggestions
+  const [inspectorSuggestions, setInspectorSuggestions] = useState<FaceLinkSuggestion[]>([])
+  const [inspectorSuggestionsLoading, setInspectorSuggestionsLoading] = useState(false)
+
   // ── Load data ─────────────────────────────────────────────────────────────
 
   const loadData = useCallback(async () => {
@@ -1123,6 +1127,16 @@ export function FacesView() {
       setInspectorCluster(cluster)
       setInspectorReturnStage(returnStage)
       setPeopleStage('inspector')
+      // Clear stale suggestions and load fresh ones async
+      setInspectorSuggestions([])
+      if (cluster.cluster_id != null && !cluster.person_id) {
+        setInspectorSuggestionsLoading(true)
+        window.api.getClusterLinkSuggestions(cluster.cluster_id, 6).then((result) => {
+          if (!result.error) {
+            setInspectorSuggestions(result.suggestions.filter((s) => s.score >= 0.45))
+          }
+        }).catch(() => {}).finally(() => setInspectorSuggestionsLoading(false))
+      }
       await ensureExpandedDetailLoaded(key, cluster, null)
     },
     [ensureExpandedDetailLoaded]
@@ -2936,6 +2950,47 @@ export function FacesView() {
                                 </button>
                               </div>
                             </div>
+
+                            {/* Similarity suggestions (async-loaded) */}
+                            {inspectorCluster.cluster_id != null && !inspectorCluster.person_id && (
+                              inspectorSuggestionsLoading ? (
+                                <div className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/40 px-4 py-2.5 text-xs text-neutral-500">
+                                  <span className="w-3.5 h-3.5 border-2 border-neutral-700 border-t-neutral-400 rounded-full animate-spin" />
+                                  Checking for similar identities…
+                                </div>
+                              ) : inspectorSuggestions.length > 0 ? (
+                                <div className="rounded-lg border border-cyan-800/40 bg-cyan-950/20 px-4 py-3">
+                                  <p className="text-[11px] uppercase tracking-wide text-cyan-400/80 mb-2">Similar identities found</p>
+                                  <div className="flex flex-wrap gap-2">
+                                    {inspectorSuggestions.map((s) => (
+                                      <button
+                                        key={`${s.target_type}:${s.person_id ?? s.label}`}
+                                        type="button"
+                                        onClick={async () => {
+                                          if (s.target_type === 'person' && s.person_id != null && inspectorCluster.cluster_id != null) {
+                                            await window.api.linkClusterToPerson(inspectorCluster.cluster_id, s.person_id)
+                                            setInspectorSuggestions([])
+                                            await loadData()
+                                            await loadPersonClusters(s.person_id, true)
+                                          } else if (s.target_type === 'alias' && inspectorCluster.cluster_id != null) {
+                                            void openRelinkDialog(inspectorCluster)
+                                          }
+                                        }}
+                                        className="flex items-center gap-2 rounded-lg border border-neutral-700 bg-neutral-900/80 px-3 py-1.5 text-xs hover:border-cyan-700 hover:bg-cyan-950/30 transition-colors"
+                                      >
+                                        {s.representative_id != null && (
+                                          <div className="w-7 h-7 shrink-0">
+                                            <FaceCropThumbnail occurrenceId={s.representative_id} size="fill" />
+                                          </div>
+                                        )}
+                                        <span className="text-neutral-200">{s.label}</span>
+                                        <span className="text-neutral-500">{(s.score * 100).toFixed(0)}%</span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              ) : null
+                            )}
 
                             <div className="rounded-xl border border-neutral-800 bg-neutral-900/60 p-4">
                               <div className="flex flex-col gap-4 xl:flex-row">
