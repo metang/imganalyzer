@@ -2888,15 +2888,23 @@ def _render_face_occurrence_thumbnail(occ: dict[str, Any], img, exif_orientation
     # pre-resized image (max _AI_MAX_LONG_EDGE on the long edge) — scale them
     # to the original resolution.
     w, h = img.size
-    # Infer detection resolution: faces analyzed before _AI_MAX_LONG_EDGE was
-    # reduced from 1920 to 1024 have bbox coords that may exceed 1024.
-    max_bbox = max(occ["bbox_x2"], occ["bbox_y2"])
-    det_long_edge = 1920 if max_bbox > _AI_MAX_LONG_EDGE else _AI_MAX_LONG_EDGE
     orig_long_edge = max(w, h)
-    if orig_long_edge > det_long_edge:
-        scale = orig_long_edge / det_long_edge
-    else:
+    if orig_long_edge <= _AI_MAX_LONG_EDGE:
+        # Image wasn't resized during detection — bbox coords are at original res
         scale = 1.0
+    else:
+        # Determine detection resolution by checking if the stored bbox fits
+        # within the current _AI_MAX_LONG_EDGE detection frame (accounting for
+        # aspect ratio).  Faces analyzed at the legacy 1920px long edge may
+        # have bbox coords that exceed the current 1024px detection dimensions.
+        det_ratio = _AI_MAX_LONG_EDGE / orig_long_edge
+        det_w = w * det_ratio
+        det_h = h * det_ratio
+        if occ["bbox_x2"] <= det_w and occ["bbox_y2"] <= det_h:
+            scale = orig_long_edge / _AI_MAX_LONG_EDGE
+        else:
+            # bbox exceeds current detection frame — legacy 1920 detection
+            scale = orig_long_edge / 1920
 
     x1 = max(0, int(occ["bbox_x1"] * scale))
     y1 = max(0, int(occ["bbox_y1"] * scale))

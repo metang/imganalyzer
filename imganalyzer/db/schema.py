@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -47,6 +47,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         21: _migrate_v21,
         22: _migrate_v22,
         23: _migrate_v23,
+        24: _migrate_v24,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -779,6 +780,17 @@ def _migrate_v23(conn: sqlite3.Connection) -> None:
     hardcoded 1920px detection long-edge while the actual value was 1024px.
     This caused crops from wrong image regions.  Also fixes HEIF/AVIF
     double-rotation (pillow-heif auto-applies EXIF orientation).
+    """
+    conn.execute("UPDATE face_occurrences SET thumbnail = NULL WHERE thumbnail IS NOT NULL")
+
+
+def _migrate_v24(conn: sqlite3.Connection) -> None:
+    """Re-clear face thumbnails after improving detection-resolution heuristic.
+
+    The simple max(bbox) > 1024 heuristic failed for faces near the origin of
+    large images analyzed at legacy 1920px.  Now uses aspect-ratio-aware check:
+    if bbox exceeds the 1024-detection-frame dimensions (accounting for the
+    image's aspect ratio), we know it was analyzed at 1920px.
     """
     conn.execute("UPDATE face_occurrences SET thumbnail = NULL WHERE thumbnail IS NOT NULL")
 
