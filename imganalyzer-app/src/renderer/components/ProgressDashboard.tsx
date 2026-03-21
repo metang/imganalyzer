@@ -109,6 +109,24 @@ function QueuePill({
   )
 }
 
+function CachePill({
+  preDecode,
+}: {
+  preDecode: { done: number; failed: number; total: number; running: boolean }
+}) {
+  return (
+    <div className="rounded-full border border-cyan-800/70 px-3 py-1.5 text-xs text-cyan-300">
+      <span className="text-neutral-500">Decoded</span>
+      <span className="ml-2 font-mono">
+        {preDecode.done.toLocaleString()} / {preDecode.total.toLocaleString()}
+      </span>
+      {preDecode.running && (
+        <span className="ml-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" />
+      )}
+    </div>
+  )
+}
+
 function ModuleTableRow({ name, stats }: { name: string; stats: BatchModuleStats }) {
   const total = stats.pending + stats.running + stats.done + stats.failed + stats.skipped
   const complete = stats.done + stats.failed + stats.skipped
@@ -470,6 +488,9 @@ export function ProgressDashboard({
           <QueuePill label="Done" value={totals.done} />
           <QueuePill label="Failed" value={totals.failed} tone="danger" />
           <QueuePill label="Skipped" value={totals.skipped} tone="warning" />
+          {stats.preDecode && stats.preDecode.total > 0 && (
+            <CachePill preDecode={stats.preDecode} />
+          )}
         </div>
       </section>
 
