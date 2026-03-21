@@ -38,6 +38,52 @@ MODULE_TABLE_MAP: dict[str, str] = {
 _LEGACY_MODULES = frozenset({"blip2", "cloud_ai", "aesthetic", "local_ai", "ocr"})
 ALL_MODULES = [m for m in MODULE_TABLE_MAP if m not in _LEGACY_MODULES]
 
+# ── Suggestion algorithm tuning ───────────────────────────────────────────────
+_MAX_REPRESENTATIVES = 150          # cap on person representative centroids
+_EMBEDDINGS_PER_CLUSTER_PERSON = 5  # stratified sample size for person clusters
+_EMBEDDINGS_PER_CLUSTER_CANDIDATE = 5  # stratified sample size for candidates
+_CANDIDATE_POOL_MULTIPLIER = 50     # candidate_pool = max(limit * this, 500)
+
+
+def _farthest_point_sample(
+    matrix: "numpy.ndarray",  # noqa: F821 — lazy import
+    k: int,
+) -> list[int]:
+    """Select *k* maximally-spread rows from an (N, D) L2-normalised matrix.
+
+    Uses the greedy farthest-point sampling (FPS) algorithm:
+    1. Start from row 0.
+    2. At each step pick the row whose *minimum* cosine similarity to all
+       previously selected rows is the *lowest* (i.e., the farthest point).
+
+    Returns a list of *k* row indices.  If ``k >= N`` returns all indices.
+
+    Complexity: O(k × N) dot products — dominated by a single (N,) update per
+    iteration, fully vectorised with numpy.
+    """
+    import numpy as _np
+
+    n = matrix.shape[0]
+    if k >= n:
+        return list(range(n))
+
+    selected: list[int] = [0]
+    # Track the *maximum* similarity each row has to any already-selected row.
+    # (Higher similarity = closer = less interesting.)
+    max_sim = matrix @ matrix[0]  # (N,) — similarity to seed
+
+    for _ in range(1, k):
+        # The next representative is the point least similar to its
+        # closest already-selected representative.
+        max_sim[selected[-1]] = 2.0  # exclude already-selected
+        idx = int(_np.argmin(max_sim))
+        selected.append(idx)
+        # Update max_sim: for each row, keep the larger of old max and new sim
+        new_sim = matrix @ matrix[idx]
+        _np.maximum(max_sim, new_sim, out=max_sim)
+
+    return selected
+
 
 class Repository:
     """Data access layer for the imganalyzer database."""
@@ -780,7 +826,15 @@ class Repository:
         *,
         limit: int = 12,
     ) -> list[dict[str, Any]]:
-        """Rank unlinked clusters by likely match against ``person_id`` embeddings."""
+        """Rank unlinked clusters by likely match against ``person_id`` embeddings.
+
+        Uses **multi-representative matching**: instead of a single centroid,
+        builds up to ``_MAX_REPRESENTATIVES`` diverse centroids (one per linked
+        cluster, downsampled via farthest-point sampling when the person has
+        many clusters).  Each candidate is scored against the *closest*
+        representative, so clusters similar to the person at *any* age or
+        appearance are surfaced.
+        """
         if limit <= 0 or not self._table_exists("face_occurrences"):
             return []
 
@@ -804,21 +858,68 @@ class Repository:
                 return None
             return center / center_norm
 
+        # ── Phase 1: build person representative centroids ────────────────
         person_rows = self.conn.execute(
-            """
-            SELECT embedding
-            FROM face_occurrences
-            WHERE person_id = ?
-              AND embedding IS NOT NULL
+            f"""
+            SELECT cluster_id, embedding
+            FROM (
+                SELECT
+                    cluster_id,
+                    embedding,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY cluster_id ORDER BY id DESC
+                    ) AS rn
+                FROM face_occurrences
+                WHERE person_id = ?
+                  AND cluster_id IS NOT NULL
+                  AND embedding IS NOT NULL
+            )
+            WHERE rn <= ?
             """,
-            [person_id],
+            [person_id, _EMBEDDINGS_PER_CLUSTER_PERSON],
         ).fetchall()
-        person_centroid = _centroid([row["embedding"] for row in person_rows])
-        if person_centroid is None:
-            return []
 
-        # Bound candidate set up-front to avoid scanning every cluster in large DBs.
-        candidate_pool = max(limit * 20, 200)
+        if not person_rows:
+            # Fallback: person has embeddings but no cluster_id set —
+            # compute a single centroid from all available embeddings.
+            fallback_rows = self.conn.execute(
+                """
+                SELECT embedding
+                FROM face_occurrences
+                WHERE person_id = ?
+                  AND embedding IS NOT NULL
+                """,
+                [person_id],
+            ).fetchall()
+            fallback_centroid = _centroid([r["embedding"] for r in fallback_rows])
+            if fallback_centroid is None:
+                return []
+            rep_matrix = fallback_centroid.reshape(1, -1)
+        else:
+            # Group embeddings by cluster and compute per-cluster centroids
+            cluster_blobs: dict[int, list[bytes]] = {}
+            for row in person_rows:
+                cid = int(row["cluster_id"])
+                cluster_blobs.setdefault(cid, []).append(row["embedding"])
+
+            centroids: list[_np.ndarray] = []
+            for blobs in cluster_blobs.values():
+                c = _centroid(blobs)
+                if c is not None:
+                    centroids.append(c)
+
+            if not centroids:
+                return []
+
+            rep_matrix = _np.vstack(centroids).astype(_np.float32)  # (N, D)
+
+            # Downsample via FPS if too many clusters
+            if rep_matrix.shape[0] > _MAX_REPRESENTATIVES:
+                indices = _farthest_point_sample(rep_matrix, _MAX_REPRESENTATIVES)
+                rep_matrix = rep_matrix[indices]
+
+        # ── Phase 2: build candidate pool ─────────────────────────────────
+        candidate_pool = max(limit * _CANDIDATE_POOL_MULTIPLIER, 500)
         candidate_rows = self.conn.execute(
             """
             SELECT
@@ -863,7 +964,6 @@ class Repository:
 
         candidate_cluster_ids = sorted(candidate_meta.keys())
         placeholders = ",".join("?" for _ in candidate_cluster_ids)
-        max_vectors_per_cluster = 48
         candidate_embeddings_rows = self.conn.execute(
             f"""
             SELECT cluster_id, embedding
@@ -871,7 +971,9 @@ class Repository:
                 SELECT
                     cluster_id,
                     embedding,
-                    ROW_NUMBER() OVER (PARTITION BY cluster_id ORDER BY id DESC) AS rn
+                    ROW_NUMBER() OVER (
+                        PARTITION BY cluster_id ORDER BY id DESC
+                    ) AS rn
                 FROM face_occurrences
                 WHERE cluster_id IN ({placeholders})
                   AND person_id IS NULL
@@ -879,27 +981,48 @@ class Repository:
             )
             WHERE rn <= ?
             """,
-            [*candidate_cluster_ids, max_vectors_per_cluster],
+            [*candidate_cluster_ids, _EMBEDDINGS_PER_CLUSTER_CANDIDATE],
         ).fetchall()
 
-        candidate_embeddings: dict[int, list[bytes]] = {}
+        # Compute per-candidate centroids
+        cand_blobs: dict[int, list[bytes]] = {}
         for row in candidate_embeddings_rows:
-            cluster_id = int(row["cluster_id"])
-            candidate_embeddings.setdefault(cluster_id, []).append(row["embedding"])
+            cid = int(row["cluster_id"])
+            cand_blobs.setdefault(cid, []).append(row["embedding"])
+
+        cand_ids: list[int] = []
+        cand_centroids: list[_np.ndarray] = []
+        for cid in candidate_cluster_ids:
+            blobs = cand_blobs.get(cid)
+            if not blobs:
+                continue
+            c = _centroid(blobs)
+            if c is not None:
+                cand_ids.append(cid)
+                cand_centroids.append(c)
+
+        if not cand_centroids:
+            return []
+
+        cand_matrix = _np.vstack(cand_centroids).astype(_np.float32)  # (M, D)
+
+        # ── Phase 3: vectorised scoring ───────────────────────────────────
+        # sim_matrix shape: (K, M) — similarity of each rep to each candidate
+        sim_matrix = rep_matrix @ cand_matrix.T
+        # For each candidate, take the best match across all representatives
+        max_scores = sim_matrix.max(axis=0)  # (M,)
 
         suggestions: list[dict[str, Any]] = []
-        for cluster_id, blobs in candidate_embeddings.items():
-            centroid = _centroid(blobs)
-            meta = candidate_meta.get(cluster_id)
-            if centroid is None or meta is None:
+        for i, cid in enumerate(cand_ids):
+            meta = candidate_meta.get(cid)
+            if meta is None:
                 continue
-
-            score = float(_np.dot(person_centroid, centroid))
+            score = float(max_scores[i])
             display_name = meta.get("display_name")
             label = str(display_name) if display_name else "Unknown"
             suggestions.append(
                 {
-                    "cluster_id": cluster_id,
+                    "cluster_id": cid,
                     "label": label,
                     "score": score,
                     "representative_id": (

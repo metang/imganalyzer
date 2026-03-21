@@ -456,6 +456,7 @@ export function FacesView() {
   // Cluster defer (park for later)
   const [deferredClusterIds, setDeferredClusterIds] = useState<Set<number>>(new Set())
   const [unlinkedSubFilter, setUnlinkedSubFilter] = useState<'active' | 'deferred'>('active')
+  const [suggestedSubFilter, setSuggestedSubFilter] = useState<'active' | 'deferred'>('active')
 
   // Inspector similarity suggestions
   const [inspectorSuggestions, setInspectorSuggestions] = useState<FaceLinkSuggestion[]>([])
@@ -1260,7 +1261,7 @@ export function FacesView() {
     }
     return ids
   }, [clusters])
-  const activeSuggestedClusters = useMemo(
+  const allSuggestedClusters = useMemo(
     () => (
       expandedPersonId == null
         ? []
@@ -1272,6 +1273,17 @@ export function FacesView() {
     ),
     [expandedPersonId, linkedClusterIds, personLinkSuggestions],
   )
+  const activeSuggestedClusters = useMemo(
+    () => allSuggestedClusters.filter((s) => !deferredClusterIds.has(s.cluster_id)),
+    [allSuggestedClusters, deferredClusterIds],
+  )
+  const deferredSuggestedClusters = useMemo(
+    () => allSuggestedClusters.filter((s) => deferredClusterIds.has(s.cluster_id)),
+    [allSuggestedClusters, deferredClusterIds],
+  )
+  const visibleSuggestedClusters = suggestedSubFilter === 'deferred'
+    ? deferredSuggestedClusters
+    : activeSuggestedClusters
   const activePersonLoading =
     expandedPersonId != null && loadingDetail === `person-clusters:${expandedPersonId}`
   const activePersonClusterError =
@@ -2593,17 +2605,43 @@ export function FacesView() {
                           <div>
                             <p className="text-[11px] uppercase tracking-wide text-amber-300/90">Suggested links</p>
                             <p className="mt-1 text-xs text-neutral-500">
-                              Review AI-proposed matches for {activePerson.name}.
+                              {suggestedSubFilter === 'deferred'
+                                ? `${deferredSuggestedClusters.length} deferred suggestion${deferredSuggestedClusters.length !== 1 ? 's' : ''} parked for later.`
+                                : <>Review AI-proposed matches for {activePerson.name}.</>
+                              }
                             </p>
                           </div>
                           <div className="flex flex-wrap items-center gap-2">
+                            {/* Active / Deferred toggle */}
+                            {(deferredSuggestedClusters.length > 0 || suggestedSubFilter === 'deferred') && (
+                              <div className="flex shrink-0 rounded-full border border-neutral-700 bg-neutral-900 p-0.5 text-xs">
+                                <button
+                                  type="button"
+                                  onClick={() => setSuggestedSubFilter('active')}
+                                  className={`rounded-full px-2.5 py-1 transition-colors ${
+                                    suggestedSubFilter === 'active' ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-400 hover:text-neutral-200'
+                                  }`}
+                                >
+                                  Active <span className="text-neutral-500">{activeSuggestedClusters.length}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setSuggestedSubFilter('deferred')}
+                                  className={`rounded-full px-2.5 py-1 transition-colors ${
+                                    suggestedSubFilter === 'deferred' ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-400 hover:text-neutral-200'
+                                  }`}
+                                >
+                                  Deferred <span className="text-neutral-500">{deferredSuggestedClusters.length}</span>
+                                </button>
+                              </div>
+                            )}
                             {activeSuggestionsLoading && (
                               <span className="inline-flex items-center gap-1 text-[11px] text-neutral-500">
                                 <span className="h-3 w-3 rounded-full border border-neutral-600 border-t-neutral-300 animate-spin" />
                                 Scoring...
                               </span>
                             )}
-                            {activeSuggestedClusters.length > 0 && (
+                            {suggestedSubFilter === 'active' && activeSuggestedClusters.length > 0 && (
                               <>
                                 <button
                                   type="button"
@@ -2651,9 +2689,9 @@ export function FacesView() {
                             <p>Couldn&apos;t load suggested links right now.</p>
                             <p className="mt-1 text-xs text-amber-200/80">{activeSuggestionsError}</p>
                           </div>
-                        ) : activeSuggestedClusters.length > 0 ? (
+                        ) : visibleSuggestedClusters.length > 0 ? (
                           <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-4">
-                            {activeSuggestedClusters.map((suggestion) => {
+                            {visibleSuggestedClusters.map((suggestion) => {
                               const sourceCluster = clusters.find(
                                 (cluster) => cluster.cluster_id === suggestion.cluster_id
                               ) ?? {
@@ -2669,6 +2707,7 @@ export function FacesView() {
                               const key = `cluster:${suggestion.cluster_id}`
                               const isSelected = expandedKey === key && peopleStage === 'inspector'
                               const isBatchSelected = selectedSuggestedClusterIds.includes(suggestion.cluster_id)
+                              const isDeferred = deferredClusterIds.has(suggestion.cluster_id)
 
                               return (
                                 <div
@@ -2685,7 +2724,7 @@ export function FacesView() {
                                     className="block w-full text-left"
                                   >
                                     <div className="absolute left-2 top-2 rounded px-1.5 py-0.5 text-[10px] text-amber-100 bg-amber-900/60 border border-amber-700/60 z-10">
-                                      Suggested
+                                      {isDeferred ? 'Deferred' : 'Suggested'}
                                     </div>
                                     <div className="aspect-square w-full overflow-hidden rounded-t-xl bg-neutral-800">
                                       {suggestion.representative_id != null ? (
@@ -2707,27 +2746,31 @@ export function FacesView() {
                                       </p>
                                     </div>
                                   </button>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation()
-                                      toggleSuggestedClusterSelection(suggestion.cluster_id)
-                                    }}
-                                    className={`absolute right-2 top-2 z-10 rounded px-1.5 py-0.5 text-[10px] border ${
-                                      isBatchSelected
-                                        ? 'border-emerald-500/70 bg-emerald-900/70 text-emerald-100'
-                                        : 'border-neutral-600 bg-black/55 text-neutral-200'
-                                    }`}
-                                  >
-                                    {isBatchSelected ? 'Selected' : 'Select'}
-                                  </button>
+                                  {!isDeferred && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        toggleSuggestedClusterSelection(suggestion.cluster_id)
+                                      }}
+                                      className={`absolute right-2 top-2 z-10 rounded px-1.5 py-0.5 text-[10px] border ${
+                                        isBatchSelected
+                                          ? 'border-emerald-500/70 bg-emerald-900/70 text-emerald-100'
+                                          : 'border-neutral-600 bg-black/55 text-neutral-200'
+                                      }`}
+                                    >
+                                      {isBatchSelected ? 'Selected' : 'Select'}
+                                    </button>
+                                  )}
                                 </div>
                               )
                             })}
                           </div>
                         ) : !activeSuggestionsLoading ? (
                           <div className="rounded-xl border border-dashed border-neutral-800 px-4 py-10 text-sm text-neutral-600">
-                            No suggested links from current embeddings.
+                            {suggestedSubFilter === 'deferred'
+                              ? 'No deferred suggestions.'
+                              : 'No suggested links from current embeddings.'}
                           </div>
                         ) : null}
                       </div>

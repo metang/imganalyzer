@@ -2633,6 +2633,65 @@ class TestFacePersons:
         assert len(suggestions) == 1
         assert suggestions[0]["cluster_id"] == 2
 
+    def test_suggest_person_link_clusters_multi_cluster_diversity(self, tmp_path):
+        """A person with clusters at two orthogonal extremes should find
+        candidates near EITHER extreme, not just the centroid average."""
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        for i in range(1, 8):
+            conn.execute(
+                "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+                [i, f"/img/diversity_{i}.jpg", f"hash_diversity_{i}", 100],
+            )
+
+        def emb(values: list[float]) -> bytes:
+            return np.array(values, dtype=np.float32).tobytes()
+
+        person_id = repo.create_person("Diverse Person")
+
+        # Cluster 1 (linked): points along axis 0  — "young" appearance
+        # Cluster 2 (linked): points along axis 1  — "old" appearance
+        # Cluster 3 (unlinked): close to axis 0 → should match "young"
+        # Cluster 4 (unlinked): close to axis 1 → should match "old"
+        # Cluster 5 (unlinked): opposite direction → should NOT match well
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, "
+            "cluster_id, person_id, identity_name, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                # Person cluster 1 — "young" (axis 0)
+                (1, 1, 0, emb([1.0, 0.0, 0.0]), 1, person_id, "Unknown", 0, 0, 2, 2),
+                (2, 1, 1, emb([0.98, 0.02, 0.0]), 1, person_id, "Unknown", 0, 0, 2, 2),
+                # Person cluster 2 — "old" (axis 1)
+                (3, 2, 0, emb([0.0, 1.0, 0.0]), 2, person_id, "Unknown", 0, 0, 2, 2),
+                (4, 2, 1, emb([0.02, 0.98, 0.0]), 2, person_id, "Unknown", 0, 0, 2, 2),
+                # Unlinked cluster 3 — close to "young"
+                (5, 3, 0, emb([0.95, 0.05, 0.0]), 3, None, "Unknown", 0, 0, 2, 2),
+                # Unlinked cluster 4 — close to "old"
+                (6, 4, 0, emb([0.05, 0.95, 0.0]), 4, None, "Unknown", 0, 0, 2, 2),
+                # Unlinked cluster 5 — opposite direction
+                (7, 5, 0, emb([-1.0, 0.0, 0.0]), 5, None, "Unknown", 0, 0, 2, 2),
+            ],
+        )
+        conn.commit()
+
+        suggestions = repo.suggest_person_link_clusters(person_id, limit=10)
+
+        # Both cluster 3 ("young"-like) and cluster 4 ("old"-like) should
+        # score highly — the algorithm must not average the person into a
+        # midpoint that matches neither.
+        scores = {s["cluster_id"]: s["score"] for s in suggestions}
+        assert 3 in scores, "Candidate near 'young' extreme should be found"
+        assert 4 in scores, "Candidate near 'old' extreme should be found"
+        assert scores[3] > 0.9, f"'Young' candidate score {scores[3]:.3f} should be > 0.9"
+        assert scores[4] > 0.9, f"'Old' candidate score {scores[4]:.3f} should be > 0.9"
+        # Opposite-direction cluster should score poorly
+        if 5 in scores:
+            assert scores[5] < 0.0, f"Opposite cluster score {scores[5]:.3f} should be negative"
+
     def test_relink_cluster_updates_label_and_person_together(self, tmp_path):
         from imganalyzer.db.repository import Repository
         conn = _make_test_db(tmp_path)
