@@ -25,6 +25,7 @@ def test_server_worker_pause_resume_controls_claim(tmp_path, monkeypatch):
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._active_worker = None
 
     server._handle_workers_register(
@@ -76,6 +77,7 @@ def test_server_worker_pause_immediate_releases_leases(tmp_path, monkeypatch):
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._active_worker = None
     server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
 
@@ -153,6 +155,7 @@ def test_server_master_worker_lifecycle_visible_in_status_and_workers_list(tmp_p
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._active_worker = None
     server._run_thread = None
 
@@ -200,6 +203,7 @@ def test_server_master_pause_blocks_new_runs_until_resumed(tmp_path, monkeypatch
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._active_worker = None
     server._run_thread = None
 

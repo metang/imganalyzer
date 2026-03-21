@@ -198,6 +198,7 @@ class JobQueue:
         exclude_modules: list[str] | None = None,
         prefer_module: str | None = None,
         prefer_image_ids: set[int] | None = None,
+        restrict_image_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Atomically claim jobs and create leases for distributed workers.
 
@@ -207,6 +208,9 @@ class JobQueue:
         If *prefer_image_ids* is given, jobs for those images are sorted
         first (chunk affinity) so distributed workers focus on the same
         chunk as the coordinator.
+
+        If *restrict_image_ids* is given, ONLY jobs for those image IDs are
+        eligible (cache-gated dispatch).
         """
         where = "WHERE status = 'pending'"
         params: list[Any] = []
@@ -221,6 +225,12 @@ class JobQueue:
             excl_ph = ",".join("?" * len(exclude_modules))
             where += f" AND module NOT IN ({excl_ph})"
             params.extend(exclude_modules)
+        if restrict_image_ids is not None:
+            if not restrict_image_ids:
+                return []  # empty set — nothing eligible
+            rid_ph = ",".join("?" * len(restrict_image_ids))
+            where += f" AND image_id IN ({rid_ph})"
+            params.extend(restrict_image_ids)
 
         # Build ORDER BY with optional chunk and module affinity
         order_parts: list[str] = []

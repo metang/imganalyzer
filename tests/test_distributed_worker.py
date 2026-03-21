@@ -500,6 +500,7 @@ def test_server_get_db_is_thread_local(tmp_path, monkeypatch):
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     conn_ids: list[int] = []
     errors: list[Exception] = []
 
@@ -613,6 +614,7 @@ def test_server_jobs_claim_packages_embedding_context(tmp_path, monkeypatch):
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
     result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1})
 
@@ -643,6 +645,7 @@ def test_server_jobs_claim_reserves_work_for_idle_master(tmp_path, monkeypatch):
         total_chunks = 1
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._active_worker = ActiveWorkerStub()
     try:
         server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
@@ -687,6 +690,7 @@ def test_server_jobs_claim_allows_worker_when_master_is_busy(tmp_path, monkeypat
         total_chunks = 1
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._active_worker = ActiveWorkerStub()
     try:
         server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
@@ -720,6 +724,7 @@ def test_server_jobs_skip_cascades_corrupt_file_to_pending_sibling_jobs(tmp_path
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
 
     result = server._handle_jobs_skip(
         {
@@ -785,6 +790,7 @@ def test_server_jobs_claim_scans_past_prereq_blocked_jobs(tmp_path, monkeypatch)
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
     result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "faces"})
 
@@ -814,6 +820,7 @@ def test_server_jobs_claim_skips_when_prerequisite_failed(tmp_path, monkeypatch)
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
     result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "faces"})
     assert result["jobs"] == []
@@ -855,6 +862,7 @@ def test_server_jobs_claim_skips_already_analyzed_without_force_marker(tmp_path,
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
     result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "perception"})
     assert result["jobs"] == []
@@ -896,6 +904,7 @@ def test_server_jobs_claim_honors_force_marker_from_queue(tmp_path, monkeypatch)
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
     result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "aesthetic"})
     assert len(result["jobs"]) == 1
@@ -934,6 +943,7 @@ def test_server_jobs_complete_persists_embedding_payload(tmp_path, monkeypatch):
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     result = server._handle_jobs_complete(
         {
             "jobId": lease["id"],
@@ -1007,6 +1017,7 @@ def test_server_jobs_complete_emits_caption_keywords_from_legacy_keyword_field(t
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     emitted: list[tuple[str, dict[str, object]]] = []
 
     def _capture_notification(method: str, params: dict[str, object]) -> None:
@@ -1080,6 +1091,7 @@ def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkey
     import imganalyzer.server as server
 
     server._db_local = threading.local()
+    server._decoded_store = None
     status = server._handle_status({})
 
     assert status["remaining_images"] == 2

@@ -1212,15 +1212,16 @@ def _handle_jobs_claim(params: dict) -> dict:
     # available.  Jobs for images not yet cached are released (stay pending)
     # so workers never need NAS access.  The pre-decoder populates the cache
     # in the background and jobs become claimable as images are decoded.
+    # Cache-gated dispatch: only activate when the decoded store has been
+    # initialised (by ingest, status poll, or auto-trigger).  Jobs are
+    # restricted to cached images so workers never need NAS access.
     cache_gate_ids: set[int] | None = None
-    try:
-        store = _get_decoded_store()
-        cache_gate_ids = store.cached_image_ids()
-        # Auto-trigger pre-decode when the master worker is idle.
-        # Deferred until master finishes to avoid HDD I/O contention.
-        _auto_trigger_pre_decode()
-    except Exception:
-        pass  # No cache configured — skip gating
+    if _decoded_store is not None:
+        try:
+            cache_gate_ids = _decoded_store.cached_image_ids() or None
+            _auto_trigger_pre_decode()
+        except Exception:
+            pass
     # When a module yields only invalid jobs for several consecutive batches,
     # exclude it so lower-priority modules (e.g. embedding) can be reached.
     exhausted_modules: set[str] = set()
@@ -1238,6 +1239,7 @@ def _handle_jobs_claim(params: dict) -> dict:
             exclude_modules=excl,
             prefer_module=prefer_module,
             prefer_image_ids=prefer_image_ids,
+            restrict_image_ids=cache_gate_ids,
         )
         if not claimed:
             break
@@ -1257,13 +1259,6 @@ def _handle_jobs_claim(params: dict) -> dict:
 
             image_id = int(job["image_id"])
             module_name = str(job["module"])
-
-            # Cache-gated: skip jobs whose image isn't cached yet.
-            # Release (don't fail/skip) so the job stays pending until
-            # pre-decode populates the cache.
-            if cache_gate_ids is not None and image_id not in cache_gate_ids:
-                queue.release_leased(job["id"], job["lease_token"])
-                continue
 
             job_force = force or str(job.get("last_node_role") or "").lower() == "force"
 
@@ -1301,7 +1296,7 @@ def _handle_jobs_claim(params: dict) -> dict:
                 },
                 "context": _build_distributed_job_context(repo, image_id, module_name),
             }
-            if cache_gate_ids is not None and image_id in cache_gate_ids:
+            if cache_gate_ids is not None:
                 job_entry["hasDecodedCache"] = True
             jobs.append(job_entry)
 
