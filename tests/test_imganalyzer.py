@@ -2692,6 +2692,171 @@ class TestFacePersons:
         if 5 in scores:
             assert scores[5] < 0.0, f"Opposite cluster score {scores[5]:.3f} should be negative"
 
+    def test_split_cluster_separates_mixed_embeddings(self, tmp_path):
+        """Cluster with two distinct embedding groups should split into 2 sub-clusters."""
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        conn.execute(
+            "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+            [1, "/img/split_1.jpg", "hash_split_1", 100],
+        )
+
+        def emb(values: list[float]) -> bytes:
+            return np.array(values, dtype=np.float32).tobytes()
+
+        # All in cluster 1 — but group A (ids 1-3) and group B (ids 4-5) are orthogonal
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, "
+            "identity_name, bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 1, 0, emb([1.0, 0.0, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+                (2, 1, 1, emb([0.98, 0.02, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+                (3, 1, 2, emb([0.97, 0.03, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+                (4, 1, 3, emb([0.0, 1.0, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+                (5, 1, 4, emb([0.02, 0.98, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+            ],
+        )
+        conn.commit()
+
+        result = repo.split_cluster(1)
+        assert result["split_count"] == 2
+        assert len(result["new_cluster_ids"]) == 1
+
+        # Largest sub-cluster (3 faces) should keep cluster_id 1
+        kept = conn.execute(
+            "SELECT COUNT(*) FROM face_occurrences WHERE cluster_id = 1"
+        ).fetchone()[0]
+        assert kept == 3
+
+        new_cid = result["new_cluster_ids"][0]
+        moved = conn.execute(
+            "SELECT COUNT(*) FROM face_occurrences WHERE cluster_id = ?", [new_cid]
+        ).fetchone()[0]
+        assert moved == 2
+
+    def test_split_cluster_preserves_person_on_largest(self, tmp_path):
+        """When splitting a linked cluster, person_id stays on largest sub-cluster."""
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        conn.execute(
+            "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+            [1, "/img/split_person.jpg", "hash_sp", 100],
+        )
+
+        person_id = repo.create_person("Split Test Person")
+
+        def emb(values: list[float]) -> bytes:
+            return np.array(values, dtype=np.float32).tobytes()
+
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, "
+            "person_id, identity_name, bbox_x1, bbox_y1, bbox_x2, bbox_y2) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 1, 0, emb([1.0, 0.0, 0.0]), 1, person_id, "Unknown", 0, 0, 2, 2),
+                (2, 1, 1, emb([0.98, 0.02, 0.0]), 1, person_id, "Unknown", 0, 0, 2, 2),
+                (3, 1, 2, emb([0.97, 0.03, 0.0]), 1, person_id, "Unknown", 0, 0, 2, 2),
+                (4, 1, 3, emb([0.0, 1.0, 0.0]), 1, person_id, "Unknown", 0, 0, 2, 2),
+            ],
+        )
+        conn.commit()
+
+        result = repo.split_cluster(1)
+        assert result["split_count"] == 2
+
+        # Largest (3 faces) keeps person_id
+        kept_person = conn.execute(
+            "SELECT person_id FROM face_occurrences WHERE cluster_id = 1 LIMIT 1"
+        ).fetchone()[0]
+        assert kept_person == person_id
+
+        # Smaller sub-cluster has person_id cleared
+        new_cid = result["new_cluster_ids"][0]
+        split_person = conn.execute(
+            "SELECT person_id FROM face_occurrences WHERE cluster_id = ?", [new_cid]
+        ).fetchone()[0]
+        assert split_person is None
+
+    def test_split_cluster_no_op_on_pure(self, tmp_path):
+        """A pure cluster (all similar embeddings) should not be split."""
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        conn.execute(
+            "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+            [1, "/img/pure.jpg", "hash_pure", 100],
+        )
+
+        def emb(values: list[float]) -> bytes:
+            return np.array(values, dtype=np.float32).tobytes()
+
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, "
+            "identity_name, bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 1, 0, emb([1.0, 0.0, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+                (2, 1, 1, emb([0.99, 0.01, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+                (3, 1, 2, emb([0.98, 0.02, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+            ],
+        )
+        conn.commit()
+
+        result = repo.split_cluster(1)
+        assert result["split_count"] == 1
+        assert result["new_cluster_ids"] == []
+
+    def test_compute_cluster_purity(self, tmp_path):
+        """Purity score should be low for mixed clusters, high for pure clusters."""
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        conn.execute(
+            "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+            [1, "/img/purity.jpg", "hash_purity", 100],
+        )
+
+        def emb(values: list[float]) -> bytes:
+            return np.array(values, dtype=np.float32).tobytes()
+
+        # Pure cluster (cluster 1)
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, "
+            "identity_name, bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 1, 0, emb([1.0, 0.0, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+                (2, 1, 1, emb([0.99, 0.01, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+                (3, 1, 2, emb([0.98, 0.02, 0.0]), 1, "Unknown", 0, 0, 2, 2),
+            ],
+        )
+        # Mixed cluster (cluster 2) — orthogonal embeddings
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, "
+            "identity_name, bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (4, 1, 3, emb([1.0, 0.0, 0.0]), 2, "Unknown", 0, 0, 2, 2),
+                (5, 1, 4, emb([0.0, 1.0, 0.0]), 2, "Unknown", 0, 0, 2, 2),
+            ],
+        )
+        conn.commit()
+
+        pure = repo.compute_cluster_purity(1)
+        mixed = repo.compute_cluster_purity(2)
+
+        assert pure["purity_score"] > 0.95, f"Pure cluster purity {pure['purity_score']} should be > 0.95"
+        assert mixed["purity_score"] < 0.8, f"Mixed cluster purity {mixed['purity_score']} should be < 0.8"
+        assert pure["member_count"] == 3
+        assert mixed["member_count"] == 2
+
     def test_relink_cluster_updates_label_and_person_together(self, tmp_path):
         from imganalyzer.db.repository import Repository
         conn = _make_test_db(tmp_path)

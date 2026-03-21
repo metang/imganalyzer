@@ -208,6 +208,17 @@ contextBridge.exposeInMainWorld('api', {
   undeferAllFaceClusters: (): Promise<{ ok: boolean; cleared: number; error?: string }> =>
     ipcRenderer.invoke('faces:clusterUndeferAll'),
 
+  splitCluster: (
+    clusterId: number,
+    threshold?: number,
+  ): Promise<{ split_count: number; new_cluster_ids: number[]; error?: string }> =>
+    ipcRenderer.invoke('faces:splitCluster', clusterId, threshold),
+
+  getClusterPurity: (
+    clusterId: number,
+  ): Promise<{ purity_score: number; member_count: number; error?: string }> =>
+    ipcRenderer.invoke('faces:clusterPurity', clusterId),
+
   getClusterLinkSuggestions: (
     clusterId: number,
     limit?: number,

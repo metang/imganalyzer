@@ -489,6 +489,8 @@ declare global {
       deferFaceCluster(clusterId: number): Promise<{ ok: boolean; error?: string }>
       undeferFaceCluster(clusterId: number): Promise<{ ok: boolean; error?: string }>
       undeferAllFaceClusters(): Promise<{ ok: boolean; cleared: number; error?: string }>
+      splitCluster(clusterId: number, threshold?: number): Promise<{ split_count: number; new_cluster_ids: number[]; error?: string }>
+      getClusterPurity(clusterId: number): Promise<{ purity_score: number; member_count: number; error?: string }>
       getClusterLinkSuggestions(clusterId: number, limit?: number): Promise<{ suggestions: FaceLinkSuggestion[]; error?: string }>
       getFaceCrop(occurrenceId: number): Promise<{ data?: string; error?: string }>
       getFaceCropBatch(ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }>

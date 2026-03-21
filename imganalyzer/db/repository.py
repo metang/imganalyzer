@@ -749,6 +749,212 @@ class Repository:
         rows = self.conn.execute("SELECT cluster_id FROM face_cluster_deferred").fetchall()
         return {row[0] for row in rows}
 
+    # ── Cluster purity & splitting ───────────────────────────────────────
+
+    def compute_cluster_purity(
+        self,
+        cluster_id: int,
+        *,
+        sample_size: int = 20,
+    ) -> dict[str, Any]:
+        """Return a purity score for *cluster_id*.
+
+        Purity = minimum cosine similarity between any sampled member
+        embedding and the cluster centroid.  Lower values indicate likely
+        mixed-identity clusters.
+        """
+        import numpy as _np
+
+        rows = self.conn.execute(
+            """
+            SELECT embedding FROM (
+                SELECT embedding,
+                       ROW_NUMBER() OVER (ORDER BY id) AS rn
+                FROM face_occurrences
+                WHERE cluster_id = ?
+                  AND embedding IS NOT NULL
+            ) WHERE rn <= ?
+            """,
+            [cluster_id, sample_size],
+        ).fetchall()
+
+        if not rows:
+            return {"purity_score": 1.0, "member_count": 0}
+
+        vectors: list[_np.ndarray] = []
+        for row in rows:
+            vec = _np.frombuffer(row["embedding"], dtype=_np.float32).copy()
+            norm = float(_np.linalg.norm(vec))
+            if norm > 0:
+                vec /= norm
+            vectors.append(vec)
+
+        if len(vectors) < 2:
+            return {"purity_score": 1.0, "member_count": len(vectors)}
+
+        mat = _np.vstack(vectors)
+        centroid = mat.mean(axis=0)
+        c_norm = float(_np.linalg.norm(centroid))
+        if c_norm > 0:
+            centroid /= c_norm
+
+        sims = mat @ centroid
+        return {
+            "purity_score": round(float(sims.min()), 4),
+            "member_count": len(vectors),
+        }
+
+    def get_impure_clusters(
+        self,
+        *,
+        purity_threshold: float = 0.75,
+        min_faces: int = 3,
+        limit: int = 50,
+        sample_size: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return clusters whose purity score is below *purity_threshold*.
+
+        Only considers clusters with at least *min_faces* occurrences.
+        Results sorted by purity ascending (worst first).
+        """
+        cluster_rows = self.conn.execute(
+            """
+            SELECT cluster_id, COUNT(*) AS face_count
+            FROM face_occurrences
+            WHERE cluster_id IS NOT NULL
+              AND embedding IS NOT NULL
+            GROUP BY cluster_id
+            HAVING COUNT(*) >= ?
+            ORDER BY face_count DESC
+            """,
+            [min_faces],
+        ).fetchall()
+
+        impure: list[dict[str, Any]] = []
+        for row in cluster_rows:
+            cid = int(row["cluster_id"])
+            info = self.compute_cluster_purity(cid, sample_size=sample_size)
+            if info["purity_score"] < purity_threshold:
+                impure.append({
+                    "cluster_id": cid,
+                    "face_count": int(row["face_count"]),
+                    "purity_score": info["purity_score"],
+                })
+
+        impure.sort(key=lambda x: x["purity_score"])
+        return impure[:limit]
+
+    def split_cluster(
+        self,
+        cluster_id: int,
+        *,
+        threshold: float = 0.65,
+    ) -> dict[str, Any]:
+        """Split a mixed-identity cluster into sub-clusters.
+
+        Re-runs greedy agglomerative clustering on the embeddings within
+        *cluster_id* at a tighter *threshold*.  The largest sub-cluster
+        keeps the original ``cluster_id`` (and its ``person_id``); smaller
+        sub-clusters receive new IDs with ``person_id`` cleared.
+
+        Returns ``{"split_count": int, "new_cluster_ids": list[int]}``.
+        """
+        import numpy as _np
+
+        rows = self.conn.execute(
+            """
+            SELECT id, embedding
+            FROM face_occurrences
+            WHERE cluster_id = ?
+              AND embedding IS NOT NULL
+            ORDER BY id
+            """,
+            [cluster_id],
+        ).fetchall()
+
+        if len(rows) < 2:
+            return {"split_count": 0 if rows else 0, "new_cluster_ids": []}
+
+        occ_ids: list[int] = []
+        vectors: list[_np.ndarray] = []
+        for row in rows:
+            vec = _np.frombuffer(row["embedding"], dtype=_np.float32).copy()
+            norm = float(_np.linalg.norm(vec))
+            if norm > 0:
+                vec /= norm
+            vectors.append(vec)
+            occ_ids.append(int(row["id"]))
+
+        mat = _np.vstack(vectors)
+        n = mat.shape[0]
+        dim = mat.shape[1]
+
+        # Greedy agglomerative within this cluster
+        max_sub = min(n, 64)
+        centroid_mat = _np.empty((max_sub, dim), dtype=_np.float32)
+        sub_ids: list[list[int]] = []  # sub_cluster_idx -> list of occ_ids
+        sub_counts: list[int] = []
+        n_sub = 0
+
+        for i in range(n):
+            vec = mat[i]
+            matched_idx = -1
+
+            if n_sub > 0:
+                sims = centroid_mat[:n_sub] @ vec
+                best_idx = int(_np.argmax(sims))
+                if sims[best_idx] >= threshold:
+                    matched_idx = best_idx
+
+            if matched_idx >= 0:
+                sub_ids[matched_idx].append(occ_ids[i])
+                cnt = sub_counts[matched_idx] + 1
+                centroid_mat[matched_idx] = (
+                    centroid_mat[matched_idx] * ((cnt - 1) / cnt) + vec * (1.0 / cnt)
+                )
+                sub_counts[matched_idx] = cnt
+            else:
+                if n_sub >= max_sub:
+                    max_sub *= 2
+                    new_mat = _np.empty((max_sub, dim), dtype=_np.float32)
+                    new_mat[:n_sub] = centroid_mat[:n_sub]
+                    centroid_mat = new_mat
+                centroid_mat[n_sub] = vec
+                sub_ids.append([occ_ids[i]])
+                sub_counts.append(1)
+                n_sub += 1
+
+        if n_sub <= 1:
+            return {"split_count": 1, "new_cluster_ids": []}
+
+        # Sort sub-clusters by size descending; largest keeps original cluster_id
+        order = sorted(range(n_sub), key=lambda j: sub_counts[j], reverse=True)
+
+        # Get next available cluster_id
+        max_existing = self.conn.execute(
+            "SELECT COALESCE(MAX(cluster_id), 0) FROM face_occurrences"
+        ).fetchone()[0]
+
+        new_cluster_ids: list[int] = []
+        for rank, idx in enumerate(order):
+            if rank == 0:
+                # Largest sub-cluster keeps original cluster_id + person_id
+                continue
+            new_id = max_existing + rank
+            new_cluster_ids.append(new_id)
+            placeholders = ",".join("?" for _ in sub_ids[idx])
+            self.conn.execute(
+                f"UPDATE face_occurrences SET cluster_id = ?, person_id = NULL "
+                f"WHERE id IN ({placeholders})",
+                [new_id, *sub_ids[idx]],
+            )
+
+        self.conn.commit()
+        return {
+            "split_count": n_sub,
+            "new_cluster_ids": new_cluster_ids,
+        }
+
     def get_person_clusters(self, person_id: int) -> list[dict]:
         """Return clusters belonging to a person, with face counts.
 

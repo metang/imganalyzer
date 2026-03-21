@@ -394,6 +394,44 @@ export function registerFaceHandlers(): void {
   )
 
   ipcMain.handle(
+    'faces:splitCluster',
+    async (
+      _evt,
+      clusterId: number,
+      threshold?: number,
+    ): Promise<{ split_count: number; new_cluster_ids: number[]; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/split-cluster', {
+          cluster_id: clusterId,
+          threshold: threshold ?? 0.65,
+        }) as { split_count: number; new_cluster_ids: number[] }
+        return result
+      } catch (err) {
+        return { split_count: 0, new_cluster_ids: [], error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:clusterPurity',
+    async (
+      _evt,
+      clusterId: number,
+    ): Promise<{ purity_score: number; member_count: number; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/cluster-purity', {
+          cluster_id: clusterId,
+        }) as { purity_score: number; member_count: number }
+        return result
+      } catch (err) {
+        return { purity_score: 1.0, member_count: 0, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
     'faces:clusterLinkSuggestions',
     async (
       _evt,

@@ -2714,6 +2714,47 @@ def _handle_faces_cluster_undefer_all(params: dict) -> dict:
     return {"ok": True, "cleared": cleared}
 
 
+def _handle_faces_split_cluster(params: dict) -> dict:
+    """Split a mixed-identity cluster into sub-clusters."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    cluster_id = int(params["cluster_id"])
+    threshold = float(params.get("threshold", 0.65))
+    result = repo.split_cluster(cluster_id, threshold=threshold)
+    _invalidate_person_link_suggestion_cache()
+    return result
+
+
+def _handle_faces_cluster_purity(params: dict) -> dict:
+    """Compute purity score for a cluster."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    cluster_id = int(params["cluster_id"])
+    sample_size = int(params.get("sample_size", 20))
+    return repo.compute_cluster_purity(cluster_id, sample_size=sample_size)
+
+
+def _handle_faces_impure_clusters(params: dict) -> dict:
+    """List clusters with purity below threshold."""
+    from imganalyzer.db.repository import Repository
+
+    conn = _get_db()
+    repo = Repository(conn)
+    purity_threshold = float(params.get("purity_threshold", 0.75))
+    min_faces = int(params.get("min_faces", 3))
+    limit = int(params.get("limit", 50))
+    clusters = repo.get_impure_clusters(
+        purity_threshold=purity_threshold,
+        min_faces=min_faces,
+        limit=limit,
+    )
+    return {"clusters": clusters}
+
+
 def _handle_faces_cluster_link_suggestions(params: dict) -> dict:
     """Suggest likely person/alias targets for a cluster relink action."""
     from imganalyzer.db.repository import Repository
@@ -3270,6 +3311,9 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/cluster-defer": _handle_faces_cluster_defer,
     "faces/cluster-undefer": _handle_faces_cluster_undefer,
     "faces/cluster-undefer-all": _handle_faces_cluster_undefer_all,
+    "faces/split-cluster": _handle_faces_split_cluster,
+    "faces/cluster-purity": _handle_faces_cluster_purity,
+    "faces/impure-clusters": _handle_faces_impure_clusters,
     "faces/cluster-link-suggestions": _handle_faces_cluster_link_suggestions,
     "faces/cluster-images": _handle_faces_cluster_images,
     "faces/crop": _handle_faces_crop,

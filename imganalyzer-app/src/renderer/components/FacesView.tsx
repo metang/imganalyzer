@@ -2983,6 +2983,35 @@ export function FacesView() {
                                     )
                                   })()
                                 )}
+                                {inspectorCluster.cluster_id != null && (inspectorCluster.face_count ?? 0) >= 2 && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      const cid = inspectorCluster.cluster_id!
+                                      const result = await window.api.splitCluster(cid)
+                                      if (result.error) {
+                                        setError(result.error)
+                                        return
+                                      }
+                                      if (result.split_count <= 1) {
+                                        setError(null)
+                                        // Inform user cluster is pure
+                                        return
+                                      }
+                                      setError(null)
+                                      await loadData()
+                                      if (expandedPersonId != null) {
+                                        await loadPersonClusters(expandedPersonId, true)
+                                        await loadPersonLinkSuggestions(expandedPersonId, true)
+                                      }
+                                      setPeopleStage(inspectorReturnStage)
+                                    }}
+                                    className="rounded-lg border border-purple-800/60 bg-purple-950/20 px-3 py-1.5 text-xs text-purple-200 hover:bg-purple-900/30"
+                                    title="Split this cluster into sub-clusters using a tighter similarity threshold"
+                                  >
+                                    ✂ Split
+                                  </button>
+                                )}
                                 <span className="mx-1 text-neutral-700">|</span>
                                 <button
                                   type="button"
