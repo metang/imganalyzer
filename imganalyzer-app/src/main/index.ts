@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } from 'elect
 import { join } from 'path'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
-import { listImages, getThumbnail, getFullImage, getThumbnailCacheConfig, setThumbnailCacheConfig } from './images'
+import { listImages, getThumbnail, getFullImage, getCachedImage, getThumbnailCacheConfig, setThumbnailCacheConfig } from './images'
 import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
@@ -148,6 +148,11 @@ ipcMain.handle('settings:stopCoordinator', async () => {
 // ─── IPC: Get full-resolution image for lightbox ──────────────────────────────
 ipcMain.handle('fs:getFullImage', async (_evt, imagePath: string) => {
   return getFullImage(imagePath)
+})
+
+// ─── IPC: Get cached 1024px decoded image (tier 2 lightbox) ──────────────────
+ipcMain.handle('fs:getCachedImage', async (_evt, imagePath: string) => {
+  return getCachedImage(imagePath)
 })
 
 // ─── IPC: Open file in default system viewer ─────────────────────────────────

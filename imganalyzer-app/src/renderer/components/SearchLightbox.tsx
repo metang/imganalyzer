@@ -281,6 +281,7 @@ export function AnalysisSidebar({
 
 export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate }: SearchLightboxProps) {
   const [thumb, setThumb] = useState<string>('')
+  const [cached, setCached] = useState<string>('')   // Tier 2: 1024px decoded cache
   const [src, setSrc] = useState<string>('')
   const [loadError, setLoadError] = useState(false)
 
@@ -297,10 +298,11 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
     setOffset({ x: 0, y: 0 })
   }, [item.file_path])
 
-  // Load thumbnail → full-res
+  // Load thumbnail → cached 1024px → full-res (three-tier)
   useEffect(() => {
     let cancelled = false
     setThumb('')
+    setCached('')
     setSrc('')
     setLoadError(false)
 
@@ -314,6 +316,12 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
     }).catch(() => {
       if (!cancelled) setLoadError(true)
     })
+
+    // Tier 2: cached 1024px decoded image
+    window.api.getCachedImage(item.file_path).then((url) => {
+      if (cancelled || !url) return
+      setCached(url)
+    }).catch(() => { /* non-critical */ })
 
     window.api.getFullImage(item.file_path).then((url) => {
       if (cancelled) return
@@ -496,17 +504,18 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
           onMouseLeave={handleMouseUp}
           onDoubleClick={handleDblClick}
         >
-          {!thumb && !src && !loadError && (
+          {!thumb && !src && !cached && !loadError && (
             <div className="w-8 h-8 border-2 border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
           )}
 
-          {loadError && !src && !thumb && (
+          {loadError && !src && !cached && !thumb && (
             <div className="flex items-center justify-center w-full h-full text-zinc-400">
               <span>Failed to load image</span>
             </div>
           )}
 
-          {thumb && !src && (
+          {/* Tier 1: blurred thumbnail */}
+          {thumb && !cached && !src && (
             <img
               src={thumb}
               alt=""
@@ -516,6 +525,18 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
             />
           )}
 
+          {/* Tier 2: sharp 1024px cached image */}
+          {cached && !src && (
+            <img
+              src={cached}
+              alt=""
+              className="max-w-full max-h-full object-contain select-none"
+              style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`, transformOrigin: 'center center', transition: isPanning.current ? 'none' : 'transform 0.1s ease-out' }}
+              draggable={false}
+            />
+          )}
+
+          {/* Tier 3: full-res */}
           {src && (
             <img
               src={src}
@@ -526,7 +547,7 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
             />
           )}
 
-          {thumb && !src && (
+          {(thumb || cached) && !src && (
             <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/60 text-neutral-400 text-xs">
               <div className="w-3 h-3 border border-neutral-500 border-t-neutral-300 rounded-full animate-spin" />
               Loading full resolution…

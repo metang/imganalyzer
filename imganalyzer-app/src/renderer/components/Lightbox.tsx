@@ -30,6 +30,7 @@ function hasPeople(state: ReturnType<typeof useAnalysis>['state']): boolean {
 
 export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) {
   const [thumb, setThumb] = useState<string>('')
+  const [cached, setCached] = useState<string>('')   // Tier 2: 1024px decoded cache
   const [src, setSrc] = useState<string>('')
   const [loadError, setLoadError] = useState(false)
 
@@ -64,10 +65,11 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
     setOffset({ x: 0, y: 0 })
   }, [image.path])
 
-  // Load thumbnail first, then replace with full-res
+  // Load thumbnail first, then cached 1024px, then full-res (three-tier)
   useEffect(() => {
     let cancelled = false
     setThumb('')
+    setCached('')
     setSrc('')
     setLoadError(false)
 
@@ -81,6 +83,12 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
     }).catch(() => {
       if (!cancelled) setLoadError(true)
     })
+
+    // Tier 2: Request cached 1024px decoded image (nearly instant for pre-decoded images)
+    window.api.getCachedImage(image.path).then((url) => {
+      if (cancelled || !url) return
+      setCached(url)
+    }).catch(() => { /* non-critical — skip tier 2 */ })
 
     window.api.getFullImage(image.path).then((url) => {
       if (cancelled) return
@@ -309,17 +317,18 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
           onMouseLeave={handleMouseUp}
           onDoubleClick={handleDblClick}
         >
-          {!thumb && !src && !loadError && (
+          {!thumb && !src && !cached && !loadError && (
             <div className="w-8 h-8 border-2 border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
           )}
 
-          {loadError && !src && !thumb && (
+          {loadError && !src && !cached && !thumb && (
             <div className="flex items-center justify-center w-full h-full text-zinc-400">
               <span>Failed to load image</span>
             </div>
           )}
 
-          {thumb && !src && (
+          {/* Tier 1: blurred thumbnail (shown until cached or full-res arrives) */}
+          {thumb && !cached && !src && (
             <img
               src={thumb}
               alt={image.name}
@@ -333,6 +342,22 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
             />
           )}
 
+          {/* Tier 2: sharp 1024px cached image (shown until full-res arrives) */}
+          {cached && !src && (
+            <img
+              src={cached}
+              alt={image.name}
+              className="max-w-full max-h-full object-contain select-none"
+              style={{
+                transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+                transformOrigin: 'center center',
+                transition: isPanning.current ? 'none' : 'transform 0.1s ease-out',
+              }}
+              draggable={false}
+            />
+          )}
+
+          {/* Tier 3: full-res image */}
           {src && (
             <img
               src={src}
@@ -347,7 +372,8 @@ export function Lightbox({ image, images, onClose, onNavigate }: LightboxProps) 
             />
           )}
 
-          {thumb && !src && (
+          {/* Loading indicator: show while full-res is still loading */}
+          {(thumb || cached) && !src && (
             <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/60 text-neutral-400 text-xs">
               <div className="w-3 h-3 border border-neutral-500 border-t-neutral-300 rounded-full animate-spin" />
               Loading full resolution…

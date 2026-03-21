@@ -32,6 +32,9 @@ contextBridge.exposeInMainWorld('api', {
   getFullImage: (imagePath: string): Promise<string> =>
     ipcRenderer.invoke('fs:getFullImage', imagePath),
 
+  getCachedImage: (imagePath: string): Promise<string> =>
+    ipcRenderer.invoke('fs:getCachedImage', imagePath),
+
   openPath: (filePath: string): Promise<string> =>
     ipcRenderer.invoke('shell:openPath', filePath),
 

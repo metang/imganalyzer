@@ -198,6 +198,9 @@ class ModuleRunner:
         # automatically when a different path is requested.
         self._image_cache_path: Path | None = None
         self._image_cache_data: dict[str, Any] | None = None
+        # Pre-extracted image headers from the coordinator's decoded cache
+        # sidecar.  When set, the metadata module skips reading from disk.
+        self._cached_header_data: dict[str, Any] | None = None
 
     def _cached_read_image(self, path: Path, image_id: int | None = None) -> dict[str, Any]:
         """Return decoded image_data, using a single-entry cache.
@@ -281,7 +284,12 @@ class ModuleRunner:
         if module == "embedding":
             return self._run_embedding(image_id, path)
 
-        if not path.exists():
+        # When the image cache is primed (e.g. from coordinator's decoded
+        # store) the file need not exist locally — skip the check.
+        has_cached = (
+            self._image_cache_path == path and self._image_cache_data is not None
+        )
+        if not has_cached and not path.exists():
             raise FileNotFoundError(f"Image file not found: {path}")
 
         # Dispatch to the appropriate module
@@ -305,7 +313,12 @@ class ModuleRunner:
     def _run_metadata(self, image_id: int, path: Path) -> dict[str, Any]:
         # Header-only read: skip full pixel decode (demosaic) since metadata
         # extraction only needs EXIF headers and RAW sensor info.
-        image_data = _read_image_headers(path)
+        # If cached header data is available (e.g. from coordinator's decoded
+        # store sidecar), use it instead of reading from disk.
+        if self._cached_header_data is not None:
+            image_data = self._cached_header_data
+        else:
+            image_data = _read_image_headers(path)
 
         # Update image dimensions if not set
         self.repo.update_image(
@@ -343,8 +356,17 @@ class ModuleRunner:
     def _run_caption(self, image_id: int, path: Path) -> dict[str, Any]:
         from imganalyzer.analysis.ai.ollama import OllamaAI
 
+        # If we have a cached decoded image (e.g. from coordinator), pass it
+        # directly so Ollama doesn't need to read from disk / NAS.
+        pil_img = None
+        if self._image_cache_data is not None and self._image_cache_path == path:
+            from PIL import Image as _PILImage
+            rgb = self._image_cache_data.get("rgb_array")
+            if rgb is not None:
+                pil_img = _PILImage.fromarray(rgb)
+
         ollama = OllamaAI()
-        result = ollama.analyze(path, {})
+        result = ollama.analyze(path, {}, pil_image=pil_img)
 
         with _transaction(self.conn):
             self.repo.upsert_caption(image_id, result)
@@ -383,7 +405,15 @@ class ModuleRunner:
     def _run_perception(self, image_id: int, path: Path) -> dict[str, Any]:
         from imganalyzer.analysis.perception import analyze as perception_analyze
 
-        result = perception_analyze(path)
+        # Pass cached decoded image if available (avoids NAS read).
+        pil_img = None
+        if self._image_cache_data is not None and self._image_cache_path == path:
+            from PIL import Image as _PILImage
+            rgb = self._image_cache_data.get("rgb_array")
+            if rgb is not None:
+                pil_img = _PILImage.fromarray(rgb)
+
+        result = perception_analyze(path, pil_image=pil_img)
 
         with _transaction(self.conn):
             self.repo.upsert_perception(image_id, result)

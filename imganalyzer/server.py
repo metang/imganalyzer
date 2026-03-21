@@ -199,6 +199,45 @@ _LEGACY_QUEUE_MODULE_MAP: dict[str, str] = {
 _PERSON_LINK_SUGGESTION_CACHE_TTL_SECONDS = 30.0
 _person_link_suggestion_cache: dict[tuple[int, int], tuple[float, list[dict[str, Any]]]] = {}
 
+# ── Decoded image cache (coordinator-mediated distribution) ──────────────────
+
+_decoded_store: Any = None  # DecodedImageStore | None
+_pre_decoder: Any = None    # PreDecoder | None
+
+
+def _get_decoded_store() -> Any:
+    """Return the global DecodedImageStore, creating it lazily on first use."""
+    global _decoded_store
+    if _decoded_store is None:
+        from imganalyzer.cache.decoded_store import DecodedImageStore
+        cache_dir = os.getenv("IMGANALYZER_DECODED_CACHE_DIR", "")
+        max_gb = float(os.getenv("IMGANALYZER_DECODED_CACHE_MAX_GB", "300"))
+        resolution = int(os.getenv("IMGANALYZER_DECODED_CACHE_RESOLUTION", "1024"))
+        fmt = os.getenv("IMGANALYZER_DECODED_CACHE_FORMAT", "webp")
+        quality = int(os.getenv("IMGANALYZER_DECODED_CACHE_QUALITY", "95"))
+        from pathlib import Path
+        _decoded_store = DecodedImageStore(
+            cache_dir=Path(cache_dir) if cache_dir else None,
+            max_bytes=int(max_gb * 1024 * 1024 * 1024),
+            resolution=resolution,
+            fmt=fmt,
+            quality=quality,
+        )
+        sys.stderr.write(f"[server] decoded image store: {_decoded_store}\n")
+    return _decoded_store
+
+
+def _get_pre_decoder() -> Any:
+    """Return the global PreDecoder, creating it lazily on first use."""
+    global _pre_decoder
+    if _pre_decoder is None:
+        from imganalyzer.cache.pre_decode import PreDecoder
+        store = _get_decoded_store()
+        max_workers_str = os.getenv("IMGANALYZER_PRE_DECODE_WORKERS", "")
+        max_workers = int(max_workers_str) if max_workers_str else None
+        _pre_decoder = PreDecoder(store, max_workers=max_workers)
+    return _pre_decoder
+
 
 def _invalidate_person_link_suggestion_cache() -> None:
     _person_link_suggestion_cache.clear()
@@ -372,6 +411,17 @@ def _handle_status(params: dict) -> dict:
         "recent_results": _recent_queue_results(conn),
     }
 
+    # Pre-decode progress (if active)
+    try:
+        decoder = _get_pre_decoder()
+        decode_prog = decoder.progress()
+        if decode_prog["total"] > 0:
+            result["pre_decode"] = decode_prog
+    except Exception:
+        pass
+
+    return result
+
 
 def _handle_ingest(req_id: int | str, params: dict) -> None:
     """Ingest folders — streaming progress notifications, then final result."""
@@ -439,6 +489,25 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
         builtins.print = _orig_print
 
     conn.close()
+
+    # Trigger pre-decode for newly ingested images so workers can start
+    # processing them without NAS access.
+    try:
+        from imganalyzer.db.connection import get_db_path as _gdp
+        _conn2 = sqlite3.connect(str(_gdp()), timeout=10, check_same_thread=False)
+        _conn2.row_factory = sqlite3.Row
+        _conn2.execute("PRAGMA journal_mode=WAL")
+        rows = _conn2.execute(
+            "SELECT id, file_path FROM images ORDER BY id"
+        ).fetchall()
+        _conn2.close()
+        items = [(int(r["id"]), str(r["file_path"])) for r in rows]
+        if items:
+            decoder = _get_pre_decoder()
+            decoder.start(items)
+    except Exception as exc:
+        sys.stderr.write(f"[server] pre-decode trigger failed: {exc}\n")
+
     _send_result(req_id, {
         "ok": True,
         "registered": ingest_stats.get("registered", 0),
@@ -1078,6 +1147,16 @@ def _handle_jobs_claim(params: dict) -> dict:
     )
     jobs: list[dict[str, Any]] = []
     scanned_candidates = 0
+    # Cache-gated dispatch: if a decoded image cache is active, only dispatch
+    # jobs whose images are already cached.  This prevents workers from needing
+    # NAS access and avoids on-demand decode bottlenecks.
+    cache_gate_ids: set[int] | None = None
+    try:
+        store = _get_decoded_store()
+        if store.entry_count > 0:
+            cache_gate_ids = store.cached_image_ids()
+    except Exception:
+        pass  # No cache configured or not populated — skip gating
     # When a module yields only invalid jobs for several consecutive batches,
     # exclude it so lower-priority modules (e.g. embedding) can be reached.
     exhausted_modules: set[str] = set()
@@ -1114,6 +1193,14 @@ def _handle_jobs_claim(params: dict) -> dict:
 
             image_id = int(job["image_id"])
             module_name = str(job["module"])
+
+            # Cache-gated: skip jobs whose image isn't cached yet.
+            # Release (don't fail/skip) so the job stays pending until
+            # pre-decode populates the cache.
+            if cache_gate_ids is not None and image_id not in cache_gate_ids:
+                queue.release_leased(job["id"], job["lease_token"])
+                continue
+
             job_force = force or str(job.get("last_node_role") or "").lower() == "force"
 
             already_analyzed = repo.is_analyzed(image_id, module_name)
@@ -1135,7 +1222,7 @@ def _handle_jobs_claim(params: dict) -> dict:
                 continue
 
             batch_valid_modules.add(module_name)
-            jobs.append({
+            job_entry: dict[str, Any] = {
                 "id": job["id"],
                 "imageId": image_id,
                 "module": module_name,
@@ -1149,7 +1236,10 @@ def _handle_jobs_claim(params: dict) -> dict:
                     "format": image.get("format"),
                 },
                 "context": _build_distributed_job_context(repo, image_id, module_name),
-            })
+            }
+            if cache_gate_ids is not None and image_id in cache_gate_ids:
+                job_entry["hasDecodedCache"] = True
+            jobs.append(job_entry)
 
         # Track per-module miss streaks to detect exhausted modules.
         # Only in multi-module mode — single-module filter is explicit.
@@ -2585,6 +2675,61 @@ def _handle_fullimage(params: dict) -> dict:
     return {"native": False, "data": base64.b64encode(jpeg_bytes).decode("ascii")}
 
 
+def _handle_cachedimage(params: dict) -> dict:
+    """Return a pre-decoded cached image (1024px) as base64 JPEG for lightbox.
+
+    This is the middle tier of the three-tier lightbox:
+    thumbnail (400×300) → cached (1024px) → full-res (3840px background).
+
+    Accepts either ``imageId`` (int) or ``imagePath`` (str).  When only
+    ``imagePath`` is provided the image ID is resolved via the DB.
+    """
+    image_id = params.get("imageId")
+    image_path = params.get("imagePath")
+
+    if image_id is None and image_path is not None:
+        db = get_db()
+        repo = Repository(db)
+        row = repo.get_image_by_path(str(image_path))
+        if row is None:
+            return {"available": False}
+        image_id = row["id"]
+
+    if image_id is None:
+        raise ValueError("imageId or imagePath is required")
+    image_id = int(image_id)
+
+    try:
+        store = _get_decoded_store()
+        result = store.get(image_id)
+    except Exception:
+        return {"available": False}
+
+    if result is None:
+        return {"available": False}
+
+    pil_image, _meta = result
+    buf = io.BytesIO()
+    pil_image.save(buf, format="JPEG", quality=92)
+    jpeg_bytes = buf.getvalue()
+
+    return {
+        "available": True,
+        "data": base64.b64encode(jpeg_bytes).decode("ascii"),
+        "width": pil_image.width,
+        "height": pil_image.height,
+    }
+
+
+def _handle_decode_status(params: dict) -> dict:
+    """Return pre-decode pipeline progress."""
+    try:
+        decoder = _get_pre_decoder()
+        return decoder.progress()
+    except Exception:
+        return {"done": 0, "failed": 0, "total": 0, "running": False}
+
+
 # ── Face management handlers ─────────────────────────────────────────────────
 
 def _handle_faces_list(params: dict) -> dict:
@@ -3301,6 +3446,8 @@ _SYNC_METHODS: dict[str, Any] = {
     "gallery/listImagesChunk": _handle_gallery_list_images_chunk,
     "thumbnail": _handle_thumbnail,
     "fullimage": _handle_fullimage,
+    "cachedimage": _handle_cachedimage,
+    "decode/status": _handle_decode_status,
     "cancel_run": _handle_cancel_run,
     "cancel_analyze": _handle_cancel_analyze,
     "faces/list": _handle_faces_list,
@@ -3485,7 +3632,77 @@ def _serve_http_jsonrpc(
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+
+            # Decoded image serving: GET /images/decoded/{image_id}
+            if self.path.startswith("/images/decoded/"):
+                if not self._check_auth():
+                    return
+                self._serve_decoded_image()
+                return
+
             self.send_error(405, "Method Not Allowed")
+
+        def _serve_decoded_image(self) -> None:
+            """Serve a pre-decoded image from the DecodedImageStore."""
+            parts = self.path.split("/")
+            # /images/decoded/{image_id} or /images/decoded/{image_id}/meta
+            if len(parts) < 4:
+                self.send_error(400, "Bad Request")
+                return
+
+            try:
+                image_id = int(parts[3].split("?")[0])
+            except (ValueError, IndexError):
+                self.send_error(400, "Invalid image ID")
+                return
+
+            is_meta = len(parts) >= 5 and parts[4] == "meta"
+
+            try:
+                store = _get_decoded_store()
+            except Exception:
+                self.send_error(503, "Decoded image store not available")
+                return
+
+            if is_meta:
+                meta = store.get_metadata(image_id)
+                if meta is None:
+                    self.send_error(404, "Not Found")
+                    return
+                from imganalyzer.cache.decoded_store import _encode_binary_fields
+                body = json.dumps(
+                    _encode_binary_fields(meta),
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            img_bytes = store.get_image_bytes(image_id)
+            if img_bytes is None:
+                self.send_error(404, "Not Found")
+                return
+
+            meta = store.get_metadata(image_id) or {}
+            content_type = {
+                "webp": "image/webp",
+                "jpeg": "image/jpeg",
+                "png": "image/png",
+            }.get(store._fmt, "application/octet-stream")
+
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(img_bytes)))
+            self.send_header("X-Image-Width", str(meta.get("width", "")))
+            self.send_header("X-Image-Height", str(meta.get("height", "")))
+            self.send_header("X-Original-Format", str(meta.get("format", "")))
+            self.send_header("X-Is-Raw", str(meta.get("is_raw", False)).lower())
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(img_bytes)
 
         def log_message(self, fmt: str, *args: Any) -> None:
             # Keep logs on stderr, stdout is reserved in stdio mode.
@@ -3606,7 +3823,56 @@ def main() -> None:
         "--rpc-path",
         default=os.getenv("IMGANALYZER_COORDINATOR_RPC_PATH", "/jsonrpc"),
     )
+    parser.add_argument(
+        "--decoded-cache-dir",
+        default=os.getenv("IMGANALYZER_DECODED_CACHE_DIR", ""),
+        help="Directory for the decoded image cache (default: ~/.cache/imganalyzer/decoded)",
+    )
+    parser.add_argument(
+        "--decoded-cache-max-gb",
+        type=float,
+        default=float(os.getenv("IMGANALYZER_DECODED_CACHE_MAX_GB", "300")),
+        help="Maximum decoded cache size in GB (default: 300)",
+    )
+    parser.add_argument(
+        "--decoded-cache-resolution",
+        type=int,
+        default=int(os.getenv("IMGANALYZER_DECODED_CACHE_RESOLUTION", "1024")),
+        help="Max long-edge resolution for cached images (default: 1024)",
+    )
+    parser.add_argument(
+        "--decoded-cache-format",
+        choices=("webp", "jpeg", "png"),
+        default=os.getenv("IMGANALYZER_DECODED_CACHE_FORMAT", "webp"),
+        help="Image format for decoded cache (default: webp)",
+    )
+    parser.add_argument(
+        "--decoded-cache-quality",
+        type=int,
+        default=int(os.getenv("IMGANALYZER_DECODED_CACHE_QUALITY", "95")),
+        help="Compression quality 1-100 for decoded cache (default: 95)",
+    )
+    parser.add_argument(
+        "--pre-decode-workers",
+        type=int,
+        default=_env_int("IMGANALYZER_PRE_DECODE_WORKERS", 0),
+        help="Number of pre-decode threads (default: cpu_count())",
+    )
     args, _unknown = parser.parse_known_args(sys.argv[1:])
+
+    # Propagate CLI args to env vars so lazy-init functions pick them up.
+    if args.decoded_cache_dir:
+        os.environ["IMGANALYZER_DECODED_CACHE_DIR"] = args.decoded_cache_dir
+    if args.decoded_cache_max_gb != 300:
+        os.environ["IMGANALYZER_DECODED_CACHE_MAX_GB"] = str(args.decoded_cache_max_gb)
+    if args.decoded_cache_resolution != 1024:
+        os.environ["IMGANALYZER_DECODED_CACHE_RESOLUTION"] = str(args.decoded_cache_resolution)
+    if args.decoded_cache_format != "webp":
+        os.environ["IMGANALYZER_DECODED_CACHE_FORMAT"] = args.decoded_cache_format
+    if args.decoded_cache_quality != 95:
+        os.environ["IMGANALYZER_DECODED_CACHE_QUALITY"] = str(args.decoded_cache_quality)
+    if args.pre_decode_workers:
+        os.environ["IMGANALYZER_PRE_DECODE_WORKERS"] = str(args.pre_decode_workers)
 
     _ensure_runtime_state_reconciled(
         context="startup",

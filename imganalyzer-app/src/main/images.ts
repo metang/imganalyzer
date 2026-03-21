@@ -348,3 +348,27 @@ export async function getFullImage(imagePath: string): Promise<string> {
   fullResInFlight.set(imagePath, promise)
   return promise
 }
+
+/**
+ * Return a 1024px cached image (from the coordinator's decoded image store)
+ * as a data URL, or empty string if not available.
+ *
+ * This is Tier 2 in the three-tier lightbox:
+ * thumbnail (400×300 blurred) → cached (1024px sharp) → full-res (3840px).
+ */
+export async function getCachedImage(imagePath: string): Promise<string> {
+  try {
+    const result = await rpc.call('cachedimage', { imagePath }) as {
+      available: boolean
+      data?: string
+      width?: number
+      height?: number
+    }
+    if (result?.available && result.data) {
+      return `data:image/jpeg;base64,${result.data}`
+    }
+    return ''
+  } catch {
+    return ''
+  }
+}

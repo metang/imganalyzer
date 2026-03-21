@@ -17,7 +17,10 @@ from __future__ import annotations
 import gc
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 log = logging.getLogger(__name__)
 
@@ -256,8 +259,20 @@ _TASKS: dict[str, str] = {
 }
 
 
-def analyze(image_path: Path) -> dict[str, Any]:
+def analyze(
+    image_path: Path,
+    *,
+    pil_image: Image.Image | None = None,
+) -> dict[str, Any]:
     """Run UniPercept perceptual scoring on a single image.
+
+    Parameters
+    ----------
+    image_path:
+        Path to the image file (used only if *pil_image* is None).
+    pil_image:
+        Optional pre-decoded PIL image.  When provided, ``open_as_pil``
+        is skipped — this supports workers without NAS access.
 
     Returns a dict with keys:
       perception_iaa, perception_iaa_label,
@@ -267,11 +282,17 @@ def analyze(image_path: Path) -> dict[str, Any]:
     """
     import torch
     from PIL import Image
-    from imganalyzer.readers import open_as_pil
 
     _holder.load()
 
-    img = open_as_pil(image_path)
+    if pil_image is not None:
+        img = pil_image
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+    else:
+        from imganalyzer.readers import open_as_pil
+        img = open_as_pil(image_path)
+
     # Resize large images to avoid excessive memory usage
     MAX_DIM = 1280
     if max(img.size) > MAX_DIM:

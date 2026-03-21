@@ -456,6 +456,7 @@ declare global {
       listImages(folderPath: string): Promise<ImageFile[]>
       getThumbnail(imagePath: string): Promise<string>
       getFullImage(imagePath: string): Promise<string>
+      getCachedImage(imagePath: string): Promise<string>
       openPath(filePath: string): Promise<string>
       copyText(value: string): Promise<void>
       readXmp(imagePath: string): Promise<XmpData | null>

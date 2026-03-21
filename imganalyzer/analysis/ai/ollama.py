@@ -15,7 +15,10 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 log = logging.getLogger(__name__)
 
@@ -27,12 +30,29 @@ _RETRIES = 3
 _TIMEOUT = 300  # seconds per Ollama request
 
 
-def _encode_image(path: Path, max_dim: int = _MAX_DIM) -> str:
-    """Return base64-encoded JPEG string, resized to *max_dim* px."""
-    from PIL import Image
-    from imganalyzer.readers import open_as_pil
+def _encode_image(
+    path: Path | None = None,
+    *,
+    pil_image: Image.Image | None = None,
+    max_dim: int = _MAX_DIM,
+) -> str:
+    """Return base64-encoded JPEG string, resized to *max_dim* px.
 
-    img = open_as_pil(path)
+    Accepts either a file *path* (decoded via ``open_as_pil``) or a
+    pre-decoded *pil_image*.  When *pil_image* is provided the file
+    system is not touched — this allows workers without NAS access to
+    use a coordinator-served decoded image.
+    """
+    from PIL import Image
+    if pil_image is not None:
+        img = pil_image
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+    elif path is not None:
+        from imganalyzer.readers import open_as_pil
+        img = open_as_pil(path)
+    else:
+        raise ValueError("Either path or pil_image must be provided")
 
     w, h = img.size
     if max(w, h) > max_dim:
@@ -104,20 +124,29 @@ class OllamaAI:
         except (URLError, OSError) as exc:
             log.warning("Failed to unload Ollama model: %s", exc)
 
-    def analyze(self, path: Path, image_data: dict[str, Any]) -> dict[str, Any]:
+    def analyze(
+        self,
+        path: Path,
+        image_data: dict[str, Any],
+        *,
+        pil_image: Image.Image | None = None,
+    ) -> dict[str, Any]:
         """Analyze a single image via Ollama.
 
         Args:
-            path: Path to the image file.
+            path: Path to the image file (used only if *pil_image* is None).
             image_data: Pipeline image data dict (rgb_array, etc.). Currently
                         unused — we re-encode from *path* for Ollama at 1024px.
+            pil_image: Optional pre-decoded PIL image.  When provided, the
+                       file at *path* is never read — this supports workers
+                       without NAS access.
 
         Returns:
             Dict with description, scene_type, main_subject, lighting, mood,
             keywords, technical_notes, aesthetic_score, aesthetic_label,
             aesthetic_reason.
         """
-        b64 = _encode_image(path)
+        b64 = _encode_image(path, pil_image=pil_image)
         return self._call_ollama(b64)
 
     def analyze_batch(

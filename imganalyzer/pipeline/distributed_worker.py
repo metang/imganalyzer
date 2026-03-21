@@ -318,6 +318,52 @@ class CoordinatorClient:
             raise RuntimeError(f"Coordinator returned invalid result for {method}")
         return result
 
+    def fetch_decoded_image(self, image_id: int) -> bytes | None:
+        """Fetch a pre-decoded image from the coordinator's HTTP endpoint.
+
+        Returns raw image bytes (WebP/JPEG) or None if not available.
+        """
+        # Build the GET URL from the JSON-RPC URL
+        parsed = parse.urlparse(self.url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        img_url = f"{base_url}/images/decoded/{image_id}"
+
+        headers: dict[str, str] = {}
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+
+        req = request.Request(img_url, headers=headers, method="GET")
+        try:
+            with self._opener.open(req, timeout=self.timeout_seconds) as resp:
+                if resp.status == 200:
+                    return resp.read()
+                return None
+        except (error.HTTPError, error.URLError, TimeoutError):
+            return None
+
+    def fetch_decoded_metadata(self, image_id: int) -> dict[str, Any] | None:
+        """Fetch sidecar metadata for a pre-decoded image."""
+        parsed = parse.urlparse(self.url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        meta_url = f"{base_url}/images/decoded/{image_id}/meta"
+
+        headers: dict[str, str] = {"Accept": "application/json"}
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+
+        req = request.Request(meta_url, headers=headers, method="GET")
+        try:
+            with self._opener.open(req, timeout=self.timeout_seconds) as resp:
+                if resp.status == 200:
+                    raw = resp.read()
+                    meta = json.loads(raw.decode("utf-8"))
+                    # Decode base64 binary fields
+                    from imganalyzer.cache.decoded_store import _decode_binary_fields
+                    return _decode_binary_fields(meta)
+                return None
+        except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError):
+            return None
+
 
 class DistributedWorker:
     """Lease jobs from a coordinator and execute them locally."""
@@ -384,6 +430,12 @@ class DistributedWorker:
         self._claim_attempts = 0
         self._empty_claim_polls = 0
         self._startup_lease_recovery_done = False
+
+        # In-memory cache for pre-fetched decoded images from the coordinator.
+        # Key: image_id, Value: (image_bytes, metadata_dict | None).
+        # Avoids re-downloading when multiple jobs share the same image.
+        self._prefetch_cache: dict[int, tuple[bytes, dict[str, Any] | None]] = {}
+        self._prefetch_cache_max = 100
 
         # Auto-update: check git for new commits and restart when found.
         self._auto_update = auto_update
@@ -627,10 +679,112 @@ class DistributedWorker:
                 verbose=self.verbose,
                 path_mappings=self.path_mappings,
             )
+
+            # If coordinator signals a decoded cache is available, fetch the
+            # pre-decoded image and prime the runner's cache.  This removes
+            # the worker's dependency on NAS.
+            if job.get("hasDecodedCache"):
+                self._prime_from_coordinator(runner, image_id, file_path)
+
             return conn, repo, runner
         except Exception:
             conn.close()
             raise
+
+    def _batch_prefetch_decoded(self, jobs: list[dict[str, Any]]) -> None:
+        """Prefetch decoded images for a batch of claimed jobs.
+
+        Identifies unique image IDs that have ``hasDecodedCache`` set and
+        downloads their bytes + metadata in parallel before the sequential
+        processing loop begins.  Results are stored in ``_prefetch_cache``.
+        """
+        ids_to_fetch: list[int] = []
+        seen: set[int] = set()
+        for job in jobs:
+            if not job.get("hasDecodedCache"):
+                continue
+            img_id = int(job.get("imageId", 0))
+            if img_id and img_id not in seen and img_id not in self._prefetch_cache:
+                ids_to_fetch.append(img_id)
+                seen.add(img_id)
+
+        if not ids_to_fetch:
+            return
+
+        import concurrent.futures
+
+        console.print(
+            f"  [dim]Prefetching {len(ids_to_fetch)} decoded image(s) from coordinator…[/dim]"
+        )
+
+        def _fetch_one(image_id: int) -> tuple[int, bytes | None, dict[str, Any] | None]:
+            img_bytes = self.client.fetch_decoded_image(image_id)
+            meta: dict[str, Any] | None = None
+            if img_bytes is not None:
+                meta = self.client.fetch_decoded_metadata(image_id)
+            return image_id, img_bytes, meta
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(_fetch_one, iid): iid for iid in ids_to_fetch}
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    image_id, img_bytes, meta = fut.result()
+                    if img_bytes is not None:
+                        # Evict oldest entries if cache is full
+                        while len(self._prefetch_cache) >= self._prefetch_cache_max:
+                            first_key = next(iter(self._prefetch_cache))
+                            del self._prefetch_cache[first_key]
+                        self._prefetch_cache[image_id] = (img_bytes, meta)
+                except Exception as exc:
+                    iid = futures[fut]
+                    sys.stderr.write(
+                        f"[worker] Prefetch failed for image {iid}: {exc}\n"
+                    )
+
+    def _prime_from_coordinator(
+        self, runner: ModuleRunner, image_id: int, file_path: str
+    ) -> None:
+        """Fetch a pre-decoded image from the coordinator and prime the runner cache."""
+        import io
+        import numpy as np
+        from PIL import Image as PILImage
+
+        try:
+            # Check prefetch cache first
+            cached = self._prefetch_cache.pop(image_id, None)
+            if cached is not None:
+                img_bytes, meta = cached
+            else:
+                img_bytes = self.client.fetch_decoded_image(image_id)
+                meta = None
+
+            if img_bytes is None:
+                return
+
+            pil_img = PILImage.open(io.BytesIO(img_bytes))
+            pil_img.load()
+            rgb_array = np.asarray(pil_img.convert("RGB"))
+
+            path = Path(file_path)
+            image_data = {
+                "rgb_array": rgb_array,
+                "width": rgb_array.shape[1],
+                "height": rgb_array.shape[0],
+                "format": path.suffix.lstrip(".").upper(),
+                "is_raw": False,
+            }
+            runner.prime_image_cache(path, image_data)
+
+            # Also fetch sidecar metadata for the metadata module
+            if meta is None:
+                meta = self.client.fetch_decoded_metadata(image_id)
+            if meta:
+                runner._cached_header_data = meta
+
+        except Exception as exc:
+            sys.stderr.write(
+                f"[worker] Failed to fetch decoded image {image_id}: {exc}\n"
+            )
 
     def _coordinator_call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Delegate a request to the coordinator client."""
@@ -1355,6 +1509,7 @@ class DistributedWorker:
                 self._empty_claim_polls = 0
                 console.print(f"[cyan]Claimed {len(jobs)} job(s)[/cyan]")
                 self._mark_all_active(jobs)
+                self._batch_prefetch_decoded(jobs)
                 for job in jobs:
                     if self._shutdown.is_set() or self._is_paused():
                         self._release_all_active_leases()
