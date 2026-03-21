@@ -67,7 +67,9 @@ class PreDecoder:
         max_workers: int | None = None,
     ) -> None:
         self._store = store
-        self._max_workers = max_workers or os.cpu_count() or 4
+        # Default to 2 threads: pre-decode is I/O-bound on HDDs and too many
+        # concurrent random reads cause head thrashing (100% active, ~7 MB/s).
+        self._max_workers = max_workers or 2
         self._executor: ThreadPoolExecutor | None = None
         self._futures: list[Future[bool]] = []
 
@@ -199,7 +201,9 @@ class PreDecoder:
         2. All remaining images (background cache warming)
 
         Within each tier, RAW files come before standard formats when
-        *raw_first* is True.
+        *raw_first* is True.  Within each RAW/standard partition, items
+        are sorted by file path for disk locality — nearby files on an
+        HDD have less seek overhead.
         """
         if pending_ids:
             tier1 = [(iid, fp) for iid, fp in items if iid in pending_ids]
@@ -217,7 +221,10 @@ class PreDecoder:
     def _sort_raw_first(
         self, items: list[tuple[int, str]]
     ) -> list[tuple[int, str]]:
-        """Sort items: RAW files first, then standard formats."""
+        """Sort items: RAW files first, then standard formats.
+
+        Within each group, sort by file path for disk locality on HDDs.
+        """
         from imganalyzer.analyzer import RAW_EXTENSIONS
 
         raw: list[tuple[int, str]] = []
@@ -228,6 +235,8 @@ class PreDecoder:
                 raw.append((iid, fp))
             else:
                 std.append((iid, fp))
+        raw.sort(key=lambda x: x[1])
+        std.sort(key=lambda x: x[1])
         return raw + std
 
     def _decode_one(self, image_id: int, file_path: str) -> bool:
