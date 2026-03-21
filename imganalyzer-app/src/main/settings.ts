@@ -303,8 +303,8 @@ function buildWorkerSetupInfo(settings: AppSettings): WorkerSetupInfo {
       tokenSegment ? ` ${tokenSegment.trimStart()}` : '',
     ].filter(Boolean).join(' \\\n'),
     notes: [
-      'Workers only need coordinator HTTP access plus read-only access to the shared image files; they no longer open the coordinator SQLite database directly.',
-      'Workers must either read the stored image paths directly or remap them with --path-mapping when the NAS mount root differs.',
+      'Workers only need HTTP access to the coordinator. When the decoded image cache is active on the coordinator, workers receive pre-decoded images over HTTP and do not need NAS or file share access at all.',
+      'Path mappings are only needed when the decoded image cache is disabled and workers read image files directly from a NAS mount.',
       'Add one --path-mapping SOURCE_PREFIX=LOCAL_PREFIX flag per differing NAS mount root.',
       'Analysis results are sent back to the coordinator, which remains the only database writer.',
       '--auto-update makes the worker check git for new commits every 60s and automatically pull + restart when updates are found.',

@@ -507,6 +507,7 @@ export function SettingsView() {
             <h2 className="text-base font-semibold text-neutral-100">Worker setup</h2>
             <p className="text-sm text-neutral-400">
               Use this on worker machines to connect back to the coordinator hosted by this app.
+              Workers receive pre-decoded images over HTTP — no NAS connection required.
             </p>
           </div>
 
@@ -515,7 +516,8 @@ export function SettingsView() {
               <div>
                 <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Path remapping</p>
                 <p className="mt-1 text-sm text-neutral-400">
-                  Use these rules when a worker mounts the same NAS share at a different root path.
+                  Only needed when workers read files directly from a NAS mount (decoded image cache disabled).
+                  Maps the coordinator's path prefix to the worker's local mount point.
                 </p>
               </div>
               <button
