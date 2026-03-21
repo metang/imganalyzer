@@ -337,8 +337,14 @@ class CoordinatorClient:
             with self._opener.open(req, timeout=self.timeout_seconds) as resp:
                 if resp.status == 200:
                     return resp.read()
+                sys.stderr.write(
+                    f"[worker] HTTP {resp.status} fetching decoded image {image_id}\n"
+                )
                 return None
-        except (error.HTTPError, error.URLError, TimeoutError):
+        except (error.HTTPError, error.URLError, TimeoutError) as exc:
+            sys.stderr.write(
+                f"[worker] HTTP error fetching decoded image {image_id}: {exc}\n"
+            )
             return None
 
     def fetch_decoded_metadata(self, image_id: int) -> dict[str, Any] | None:
@@ -759,6 +765,10 @@ class DistributedWorker:
                 meta = None
 
             if img_bytes is None:
+                sys.stderr.write(
+                    f"[worker] Decoded image not available from coordinator"
+                    f" for image {image_id} ({file_path})\n"
+                )
                 return
 
             pil_img = PILImage.open(io.BytesIO(img_bytes))
@@ -783,7 +793,7 @@ class DistributedWorker:
 
         except Exception as exc:
             sys.stderr.write(
-                f"[worker] Failed to fetch decoded image {image_id}: {exc}\n"
+                f"[worker] Failed to prime image {image_id}: {exc}\n"
             )
 
     def _coordinator_call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:

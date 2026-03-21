@@ -290,7 +290,10 @@ class ModuleRunner:
             self._image_cache_path == path and self._image_cache_data is not None
         )
         if not has_cached and not path.exists():
-            raise FileNotFoundError(f"Image file not found: {path}")
+            raise FileNotFoundError(
+                f"Image file not found: {path}"
+                " (decoded cache prime may have failed — check worker stderr)"
+            )
 
         # Dispatch to the appropriate module
         if module == "metadata":
