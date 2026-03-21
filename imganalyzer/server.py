@@ -239,6 +239,40 @@ def _get_pre_decoder() -> Any:
     return _pre_decoder
 
 
+_pre_decode_auto_triggered = False
+
+
+def _auto_trigger_pre_decode() -> None:
+    """Start pre-decoding all images if it hasn't been triggered yet.
+
+    Called on the first ``jobs/claim`` when the decoded cache is empty,
+    handling queues that were created before the decoded cache feature.
+    """
+    global _pre_decode_auto_triggered
+    if _pre_decode_auto_triggered:
+        return
+    _pre_decode_auto_triggered = True
+
+    try:
+        from imganalyzer.db.connection import get_db_path as _gdp
+        conn2 = sqlite3.connect(str(_gdp()), timeout=10, check_same_thread=False)
+        conn2.row_factory = sqlite3.Row
+        conn2.execute("PRAGMA journal_mode=WAL")
+        rows = conn2.execute(
+            "SELECT id, file_path FROM images ORDER BY id"
+        ).fetchall()
+        conn2.close()
+        items = [(int(r["id"]), str(r["file_path"])) for r in rows]
+        if items:
+            decoder = _get_pre_decoder()
+            decoder.start(items)
+            sys.stderr.write(
+                f"[server] auto-triggered pre-decode for {len(items)} images\n"
+            )
+    except Exception as exc:
+        sys.stderr.write(f"[server] auto pre-decode trigger failed: {exc}\n")
+
+
 def _invalidate_person_link_suggestion_cache() -> None:
     _person_link_suggestion_cache.clear()
 
@@ -1147,16 +1181,20 @@ def _handle_jobs_claim(params: dict) -> dict:
     )
     jobs: list[dict[str, Any]] = []
     scanned_candidates = 0
-    # Cache-gated dispatch: if a decoded image cache is active, only dispatch
-    # jobs whose images are already cached.  This prevents workers from needing
-    # NAS access and avoids on-demand decode bottlenecks.
+    # Cache-gated dispatch: always activate when the decoded store is
+    # available.  Jobs for images not yet cached are released (stay pending)
+    # so workers never need NAS access.  The pre-decoder populates the cache
+    # in the background and jobs become claimable as images are decoded.
     cache_gate_ids: set[int] | None = None
     try:
         store = _get_decoded_store()
-        if store.entry_count > 0:
-            cache_gate_ids = store.cached_image_ids()
+        cache_gate_ids = store.cached_image_ids()
+        # Auto-trigger pre-decode if the cache is empty but there are
+        # pending jobs — handles queues created before this feature.
+        if store.entry_count == 0:
+            _auto_trigger_pre_decode()
     except Exception:
-        pass  # No cache configured or not populated — skip gating
+        pass  # No cache configured — skip gating
     # When a module yields only invalid jobs for several consecutive batches,
     # exclude it so lower-priority modules (e.g. embedding) can be reached.
     exhausted_modules: set[str] = set()
