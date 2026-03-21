@@ -452,12 +452,27 @@ def _handle_status(params: dict) -> dict:
         "recent_results": _recent_queue_results(conn),
     }
 
-    # Pre-decode progress (if active)
+    # Pre-decode / image cache progress.  Always report the cache fill
+    # state so the dashboard shows the bar even when pre-decode hasn't been
+    # explicitly triggered (e.g. "resume pending" without a fresh ingest).
     try:
+        store = _get_decoded_store()
         decoder = _get_pre_decoder()
         decode_prog = decoder.progress()
+
         if decode_prog["total"] > 0:
+            # Pre-decoder has been started — use its counters
             result["pre_decode"] = decode_prog
+        else:
+            # Pre-decoder not started yet — derive from cache + DB
+            cached_count = store.entry_count
+            if total_images > 0:
+                result["pre_decode"] = {
+                    "done": min(cached_count, total_images),
+                    "failed": 0,
+                    "total": total_images,
+                    "running": False,
+                }
     except Exception:
         pass
 
