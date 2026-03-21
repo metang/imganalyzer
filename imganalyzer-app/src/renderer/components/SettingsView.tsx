@@ -511,57 +511,6 @@ export function SettingsView() {
             </p>
           </div>
 
-          <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-4 py-4 flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Path remapping</p>
-                <p className="mt-1 text-sm text-neutral-400">
-                  Only needed when workers read files directly from a NAS mount (decoded image cache disabled).
-                  Maps the coordinator's path prefix to the worker's local mount point.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={addPathMapping}
-                className="px-3 py-2 rounded-lg bg-neutral-800 text-sm text-neutral-200 hover:bg-neutral-700"
-              >
-                Add mapping
-              </button>
-            </div>
-
-            {settings.distributed.workerPathMappings.length === 0 && (
-              <p className="text-sm text-neutral-500">
-                No mappings configured. Example: `Z:\photos` on the coordinator to `/Volumes/photos` on macOS.
-              </p>
-            )}
-
-            <div className="flex flex-col gap-3">
-              {settings.distributed.workerPathMappings.map((mapping, index) => (
-                <div key={index} className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end">
-                  <Field
-                    label="Stored path prefix"
-                    value={mapping.sourcePrefix}
-                    onChange={(value) => updatePathMapping(index, 'sourcePrefix', value)}
-                    help="Prefix currently stored in the shared database, such as Z:\\photos."
-                  />
-                  <Field
-                    label="Worker-local prefix"
-                    value={mapping.targetPrefix}
-                    onChange={(value) => updatePathMapping(index, 'targetPrefix', value)}
-                    help="Equivalent path on this worker, such as /Volumes/photos."
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removePathMapping(index)}
-                    className="px-3 py-2 rounded-lg bg-neutral-800 text-sm text-neutral-200 hover:bg-neutral-700"
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-
           <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-4 py-3">
             <div className="flex items-start justify-between gap-3">
               <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Coordinator URL</p>
