@@ -690,7 +690,11 @@ class DistributedWorker:
             # pre-decoded image and prime the runner's cache.  This removes
             # the worker's dependency on NAS.
             if job.get("hasDecodedCache"):
-                self._prime_from_coordinator(runner, image_id, file_path)
+                primed = self._prime_from_coordinator(runner, image_id, file_path)
+                if not primed:
+                    raise FileNotFoundError(
+                        f"Could not fetch decoded image {image_id} from coordinator"
+                    )
 
             return conn, repo, runner
         except Exception:
@@ -749,8 +753,11 @@ class DistributedWorker:
 
     def _prime_from_coordinator(
         self, runner: ModuleRunner, image_id: int, file_path: str
-    ) -> None:
-        """Fetch a pre-decoded image from the coordinator and prime the runner cache."""
+    ) -> bool:
+        """Fetch a pre-decoded image from the coordinator and prime the runner cache.
+
+        Returns True if the cache was successfully primed.
+        """
         import io
         import numpy as np
         from PIL import Image as PILImage
@@ -769,7 +776,7 @@ class DistributedWorker:
                     f"[worker] Decoded image not available from coordinator"
                     f" for image {image_id} ({file_path})\n"
                 )
-                return
+                return False
 
             pil_img = PILImage.open(io.BytesIO(img_bytes))
             pil_img.load()
@@ -791,10 +798,13 @@ class DistributedWorker:
             if meta:
                 runner._cached_header_data = meta
 
+            return True
+
         except Exception as exc:
             sys.stderr.write(
                 f"[worker] Failed to prime image {image_id}: {exc}\n"
             )
+            return False
 
     def _coordinator_call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Delegate a request to the coordinator client."""
@@ -1270,6 +1280,30 @@ class DistributedWorker:
                     f"complete {complete_ms / 1000:.2f}s)"
                 )
             return "done"
+
+        except FileNotFoundError as exc:
+            # Prime failed — decoded image not available from coordinator.
+            # Release the job back to pending so it can be retried once the
+            # image is cached, instead of marking it as permanently failed.
+            elapsed = int((time.monotonic() - started_monotonic) * 1000)
+            try:
+                self._coordinator_call(
+                    "jobs/release",
+                    {"jobId": job_id, "leaseToken": lease_token},
+                )
+            except Exception:
+                pass
+            self._safe_emit_result(
+                path=path,
+                module=module,
+                status="skipped",
+                elapsed_ms=elapsed,
+                error=f"decoded image unavailable: {exc}",
+            )
+            console.print(
+                f"  [yellow]⊘[/yellow] [bold]{module}[/bold] released (image not cached) ← {short_path}"
+            )
+            return "skipped"
 
         except ImportError as exc:
             elapsed = int((time.monotonic() - started_monotonic) * 1000)
