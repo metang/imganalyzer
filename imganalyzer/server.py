@@ -246,17 +246,12 @@ def _auto_trigger_pre_decode() -> None:
     """Start pre-decoding all images if it hasn't been triggered yet.
 
     Called on ``jobs/claim`` when the decoded cache has uncached images.
-    Defers if the master worker is still running to avoid competing for
-    HDD I/O — the next ``jobs/claim`` will retry.
+    Runs with a small thread pool (default 2) alongside the master worker
+    to avoid overwhelming the HDD.
     """
     global _pre_decode_auto_triggered
     if _pre_decode_auto_triggered:
         return
-
-    # Don't compete with the master worker for disk I/O.
-    if _master_worker_runtime_status() == "online":
-        return
-
     _pre_decode_auto_triggered = True
 
     try:
@@ -536,9 +531,28 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
 
     conn.close()
 
-    # Pre-decode is deferred until the master worker finishes or a
-    # distributed worker connects via jobs/claim.  Starting it here would
-    # compete with the master worker for HDD I/O.
+    # Trigger pre-decode in the background so distributed workers can start
+    # receiving cached images.  Runs with 2 threads (default) to coexist
+    # with the master worker's disk I/O.
+    try:
+        from imganalyzer.db.connection import get_db_path as _gdp
+        _conn2 = sqlite3.connect(str(_gdp()), timeout=10, check_same_thread=False)
+        _conn2.row_factory = sqlite3.Row
+        _conn2.execute("PRAGMA journal_mode=WAL")
+        rows = _conn2.execute(
+            "SELECT id, file_path FROM images ORDER BY id"
+        ).fetchall()
+        pending_rows = _conn2.execute(
+            "SELECT DISTINCT image_id FROM job_queue WHERE status = 'pending'"
+        ).fetchall()
+        _conn2.close()
+        items = [(int(r["id"]), str(r["file_path"])) for r in rows]
+        pending_ids = {int(r["image_id"]) for r in pending_rows}
+        if items:
+            decoder = _get_pre_decoder()
+            decoder.start(items, pending_ids=pending_ids)
+    except Exception as exc:
+        sys.stderr.write(f"[server] pre-decode trigger failed: {exc}\n")
 
     _send_result(req_id, {
         "ok": True,
