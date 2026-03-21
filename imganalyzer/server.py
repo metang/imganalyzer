@@ -1213,17 +1213,15 @@ def _handle_jobs_claim(params: dict) -> dict:
     )
     jobs: list[dict[str, Any]] = []
     scanned_candidates = 0
-    # Cache-gated dispatch: always activate when the decoded store is
-    # available.  Jobs for images not yet cached are released (stay pending)
-    # so workers never need NAS access.  The pre-decoder populates the cache
-    # in the background and jobs become claimable as images are decoded.
     # Cache-gated dispatch: only activate when the decoded store has been
-    # initialised (by ingest, status poll, or auto-trigger).  Jobs are
-    # restricted to cached images so workers never need NAS access.
+    # initialised (by server startup or status poll).  Jobs are restricted
+    # to cached images so workers never need NAS access.  When the cache is
+    # empty the gate returns an empty set → no jobs dispatched → workers
+    # keep polling until the pre-decoder populates the cache.
     cache_gate_ids: set[int] | None = None
     if _decoded_store is not None:
         try:
-            cache_gate_ids = _decoded_store.cached_image_ids() or None
+            cache_gate_ids = _decoded_store.cached_image_ids()
             _auto_trigger_pre_decode()
         except Exception:
             pass
@@ -3802,6 +3800,18 @@ def _serve_http_jsonrpc(
                 )
 
     server = _WatchdogHTTPServer((host, port), _JsonRpcHandler)
+
+    # Eagerly initialise the decoded image store so the cache gate is
+    # active from the very first jobs/claim request.  Without this,
+    # workers could receive jobs before any status poll triggers lazy init
+    # and then fail because hasDecodedCache is not set.
+    try:
+        _get_decoded_store()
+    except Exception as exc:
+        sys.stderr.write(
+            f"[server.http] decoded store init failed (will retry lazily): {exc}\n"
+        )
+
     sys.stderr.write(
         f"[server.http] listening on http://{host}:{port}{normalized_path} "
         f"(auth={'on' if auth_token else 'off'})\n"
