@@ -88,6 +88,7 @@ class PreDecoder:
         items: list[tuple[int, str]],
         *,
         raw_first: bool = True,
+        pending_ids: set[int] | None = None,
     ) -> None:
         """Begin pre-decoding *items* in the background.
 
@@ -97,6 +98,9 @@ class PreDecoder:
             List of ``(image_id, file_path)`` pairs.
         raw_first:
             When True, RAW files are decoded before standard formats.
+        pending_ids:
+            Image IDs that have pending analysis jobs.  These are decoded
+            first so that workers are unblocked as quickly as possible.
         """
         if self._running:
             log.warning("PreDecoder already running — ignoring start()")
@@ -110,8 +114,7 @@ class PreDecoder:
             log.info("All %d images already cached — nothing to pre-decode", len(items))
             return
 
-        if raw_first:
-            pending = self._sort_raw_first(pending)
+        pending = self._prioritize(pending, raw_first=raw_first, pending_ids=pending_ids)
 
         with self._lock:
             self._done = 0
@@ -181,6 +184,35 @@ class PreDecoder:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _prioritize(
+        self,
+        items: list[tuple[int, str]],
+        *,
+        raw_first: bool = True,
+        pending_ids: set[int] | None = None,
+    ) -> list[tuple[int, str]]:
+        """Order items by priority for decoding.
+
+        Priority tiers (highest first):
+        1. Images with pending analysis jobs (``pending_ids``)
+        2. All remaining images (background cache warming)
+
+        Within each tier, RAW files come before standard formats when
+        *raw_first* is True.
+        """
+        if pending_ids:
+            tier1 = [(iid, fp) for iid, fp in items if iid in pending_ids]
+            tier2 = [(iid, fp) for iid, fp in items if iid not in pending_ids]
+        else:
+            tier1 = []
+            tier2 = items
+
+        if raw_first:
+            tier1 = self._sort_raw_first(tier1)
+            tier2 = self._sort_raw_first(tier2)
+
+        return tier1 + tier2
 
     def _sort_raw_first(
         self, items: list[tuple[int, str]]

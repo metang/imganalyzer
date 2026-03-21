@@ -216,3 +216,66 @@ class TestPreDecoder:
         assert "format" in meta
         assert "width" in meta
         assert "height" in meta
+
+
+class TestPriorityOrdering:
+    """Test that images with pending jobs are decoded before others."""
+
+    def test_pending_ids_come_first(
+        self, store: DecodedImageStore, image_dir: Path
+    ) -> None:
+        """Images with pending_ids are decoded before non-pending images."""
+        decode_order: list[int] = []
+        original_decode = PreDecoder._decode_one
+
+        def tracking_decode(self_decoder, image_id: int, file_path: str) -> bool:
+            decode_order.append(image_id)
+            return original_decode(self_decoder, image_id, file_path)
+
+        items = [(i, str(image_dir / f"img_{i}.jpg")) for i in range(5)]
+        # Images 3 and 4 have pending jobs — should be decoded first
+        pending_ids = {3, 4}
+
+        decoder = PreDecoder(store, max_workers=1)
+        with patch.object(PreDecoder, "_decode_one", tracking_decode):
+            decoder.start(items, pending_ids=pending_ids)
+            timeout = 10.0
+            t0 = time.time()
+            while decoder.is_running and time.time() - t0 < timeout:
+                time.sleep(0.1)
+
+        # Images 3 and 4 should appear before images 0, 1, 2
+        assert len(decode_order) == 5
+        pending_positions = [decode_order.index(i) for i in pending_ids]
+        non_pending_positions = [decode_order.index(i) for i in range(3)]
+        assert max(pending_positions) < min(non_pending_positions)
+
+    def test_no_pending_ids_falls_back_to_default(
+        self, store: DecodedImageStore, image_dir: Path
+    ) -> None:
+        """Without pending_ids, all images are treated equally."""
+        items = [(i, str(image_dir / f"img_{i}.jpg")) for i in range(3)]
+        decoder = PreDecoder(store, max_workers=2)
+        decoder.start(items, pending_ids=None)
+
+        timeout = 10.0
+        t0 = time.time()
+        while decoder.is_running and time.time() - t0 < timeout:
+            time.sleep(0.1)
+
+        assert decoder.progress()["done"] == 3
+
+    def test_empty_pending_ids(
+        self, store: DecodedImageStore, image_dir: Path
+    ) -> None:
+        """Empty pending_ids set behaves same as None."""
+        items = [(i, str(image_dir / f"img_{i}.jpg")) for i in range(3)]
+        decoder = PreDecoder(store, max_workers=2)
+        decoder.start(items, pending_ids=set())
+
+        timeout = 10.0
+        t0 = time.time()
+        while decoder.is_running and time.time() - t0 < timeout:
+            time.sleep(0.1)
+
+        assert decoder.progress()["done"] == 3

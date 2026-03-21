@@ -261,13 +261,19 @@ def _auto_trigger_pre_decode() -> None:
         rows = conn2.execute(
             "SELECT id, file_path FROM images ORDER BY id"
         ).fetchall()
+        # Query image IDs that have pending jobs — these get priority.
+        pending_rows = conn2.execute(
+            "SELECT DISTINCT image_id FROM job_queue WHERE status = 'pending'"
+        ).fetchall()
         conn2.close()
         items = [(int(r["id"]), str(r["file_path"])) for r in rows]
+        pending_ids = {int(r["image_id"]) for r in pending_rows}
         if items:
             decoder = _get_pre_decoder()
-            decoder.start(items)
+            decoder.start(items, pending_ids=pending_ids)
             sys.stderr.write(
-                f"[server] auto-triggered pre-decode for {len(items)} images\n"
+                f"[server] auto-triggered pre-decode for {len(items)} images"
+                f" ({len(pending_ids)} with pending jobs)\n"
             )
     except Exception as exc:
         sys.stderr.write(f"[server] auto pre-decode trigger failed: {exc}\n")
@@ -534,11 +540,15 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
         rows = _conn2.execute(
             "SELECT id, file_path FROM images ORDER BY id"
         ).fetchall()
+        pending_rows = _conn2.execute(
+            "SELECT DISTINCT image_id FROM job_queue WHERE status = 'pending'"
+        ).fetchall()
         _conn2.close()
         items = [(int(r["id"]), str(r["file_path"])) for r in rows]
+        pending_ids = {int(r["image_id"]) for r in pending_rows}
         if items:
             decoder = _get_pre_decoder()
-            decoder.start(items)
+            decoder.start(items, pending_ids=pending_ids)
     except Exception as exc:
         sys.stderr.write(f"[server] pre-decode trigger failed: {exc}\n")
 
