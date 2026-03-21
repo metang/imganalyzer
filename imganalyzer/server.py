@@ -245,12 +245,18 @@ _pre_decode_auto_triggered = False
 def _auto_trigger_pre_decode() -> None:
     """Start pre-decoding all images if it hasn't been triggered yet.
 
-    Called on the first ``jobs/claim`` when the decoded cache is empty,
-    handling queues that were created before the decoded cache feature.
+    Called on ``jobs/claim`` when the decoded cache has uncached images.
+    Defers if the master worker is still running to avoid competing for
+    HDD I/O — the next ``jobs/claim`` will retry.
     """
     global _pre_decode_auto_triggered
     if _pre_decode_auto_triggered:
         return
+
+    # Don't compete with the master worker for disk I/O.
+    if _master_worker_runtime_status() == "online":
+        return
+
     _pre_decode_auto_triggered = True
 
     try:
@@ -530,27 +536,9 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
 
     conn.close()
 
-    # Trigger pre-decode for newly ingested images so workers can start
-    # processing them without NAS access.
-    try:
-        from imganalyzer.db.connection import get_db_path as _gdp
-        _conn2 = sqlite3.connect(str(_gdp()), timeout=10, check_same_thread=False)
-        _conn2.row_factory = sqlite3.Row
-        _conn2.execute("PRAGMA journal_mode=WAL")
-        rows = _conn2.execute(
-            "SELECT id, file_path FROM images ORDER BY id"
-        ).fetchall()
-        pending_rows = _conn2.execute(
-            "SELECT DISTINCT image_id FROM job_queue WHERE status = 'pending'"
-        ).fetchall()
-        _conn2.close()
-        items = [(int(r["id"]), str(r["file_path"])) for r in rows]
-        pending_ids = {int(r["image_id"]) for r in pending_rows}
-        if items:
-            decoder = _get_pre_decoder()
-            decoder.start(items, pending_ids=pending_ids)
-    except Exception as exc:
-        sys.stderr.write(f"[server] pre-decode trigger failed: {exc}\n")
+    # Pre-decode is deferred until the master worker finishes or a
+    # distributed worker connects via jobs/claim.  Starting it here would
+    # compete with the master worker for HDD I/O.
 
     _send_result(req_id, {
         "ok": True,
@@ -1199,10 +1187,9 @@ def _handle_jobs_claim(params: dict) -> dict:
     try:
         store = _get_decoded_store()
         cache_gate_ids = store.cached_image_ids()
-        # Auto-trigger pre-decode if the cache is empty but there are
-        # pending jobs — handles queues created before this feature.
-        if store.entry_count == 0:
-            _auto_trigger_pre_decode()
+        # Auto-trigger pre-decode when the master worker is idle.
+        # Deferred until master finishes to avoid HDD I/O contention.
+        _auto_trigger_pre_decode()
     except Exception:
         pass  # No cache configured — skip gating
     # When a module yields only invalid jobs for several consecutive batches,
