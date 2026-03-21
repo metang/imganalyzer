@@ -202,13 +202,18 @@ _person_link_suggestion_cache: dict[tuple[int, int], tuple[float, list[dict[str,
 # ── Decoded image cache (coordinator-mediated distribution) ──────────────────
 
 _decoded_store: Any = None  # DecodedImageStore | None
+_decoded_store_lock = threading.Lock()
 _pre_decoder: Any = None    # PreDecoder | None
 
 
 def _get_decoded_store() -> Any:
     """Return the global DecodedImageStore, creating it lazily on first use."""
     global _decoded_store
-    if _decoded_store is None:
+    if _decoded_store is not None:
+        return _decoded_store
+    with _decoded_store_lock:
+        if _decoded_store is not None:
+            return _decoded_store
         from imganalyzer.cache.decoded_store import DecodedImageStore
         cache_dir = os.getenv("IMGANALYZER_DECODED_CACHE_DIR", "")
         max_gb = float(os.getenv("IMGANALYZER_DECODED_CACHE_MAX_GB", "300"))

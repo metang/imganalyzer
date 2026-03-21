@@ -130,8 +130,36 @@ class DecodedImageStore:
     # ------------------------------------------------------------------
 
     def _load_cached_ids(self) -> set[int]:
+        """Load cached IDs from the DB index, removing stale entries.
+
+        An entry is stale if the DB row exists but the image file is missing
+        on disk (e.g. after a crash during eviction, manual file deletion, or
+        a cache directory change).
+        """
         rows = self._conn.execute("SELECT image_id FROM entries").fetchall()
-        return {r[0] for r in rows}
+        valid: set[int] = set()
+        stale: list[int] = []
+        for r in rows:
+            image_id = r[0]
+            if self._image_path(image_id).exists():
+                valid.add(image_id)
+            else:
+                stale.append(image_id)
+        if stale:
+            log.info(
+                "Purging %d stale cache index entries (files missing on disk)",
+                len(stale),
+            )
+            for image_id in stale:
+                # Remove DB entry and any leftover sidecar
+                meta = self._meta_path(image_id)
+                if meta.exists():
+                    meta.unlink(missing_ok=True)
+                self._conn.execute(
+                    "DELETE FROM entries WHERE image_id = ?", (image_id,)
+                )
+            self._conn.commit()
+        return valid
 
     def _shard_dir(self, image_id: int) -> Path:
         level1 = image_id // 10000
@@ -237,10 +265,25 @@ class DecodedImageStore:
         """Return raw image file bytes without PIL decode.
 
         Useful for HTTP serving where we send binary directly.
-        Updates LRU timestamp.
+        Updates LRU timestamp.  Automatically purges stale index entries
+        when the file is missing on disk.
         """
         img_path = self._image_path(image_id)
         if not img_path.exists():
+            # Self-heal: remove stale DB/index entry so the cache gate
+            # won't dispatch jobs for this image again.
+            with self._ids_lock:
+                if image_id in self._cached_ids:
+                    self._cached_ids.discard(image_id)
+                    with self._db_lock:
+                        self._conn.execute(
+                            "DELETE FROM entries WHERE image_id = ?",
+                            (image_id,),
+                        )
+                        self._conn.commit()
+                    log.debug(
+                        "Purged stale cache entry %d (file missing)", image_id
+                    )
             return None
 
         try:

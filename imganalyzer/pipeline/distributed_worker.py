@@ -322,8 +322,8 @@ class CoordinatorClient:
         """Fetch a pre-decoded image from the coordinator's HTTP endpoint.
 
         Returns raw image bytes (WebP/JPEG) or None if not available.
+        Retries once on transient network errors.
         """
-        # Build the GET URL from the JSON-RPC URL
         parsed = parse.urlparse(self.url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         img_url = f"{base_url}/images/decoded/{image_id}"
@@ -332,20 +332,43 @@ class CoordinatorClient:
         if self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"
 
-        req = request.Request(img_url, headers=headers, method="GET")
-        try:
-            with self._opener.open(req, timeout=self.timeout_seconds) as resp:
-                if resp.status == 200:
-                    return resp.read()
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            req = request.Request(img_url, headers=headers, method="GET")
+            try:
+                with self._opener.open(req, timeout=self.timeout_seconds) as resp:
+                    if resp.status == 200:
+                        return resp.read()
+                    # 404 = image not cached; don't retry
+                    if resp.status == 404:
+                        return None
+                    sys.stderr.write(
+                        f"[worker] HTTP {resp.status} fetching decoded image"
+                        f" {image_id} (attempt {attempt + 1})\n"
+                    )
+            except error.HTTPError as exc:
+                if exc.code == 404:
+                    return None
+                last_exc = exc
                 sys.stderr.write(
-                    f"[worker] HTTP {resp.status} fetching decoded image {image_id}\n"
+                    f"[worker] HTTP {exc.code} fetching decoded image"
+                    f" {image_id} (attempt {attempt + 1}): {exc}\n"
                 )
-                return None
-        except (error.HTTPError, error.URLError, TimeoutError) as exc:
+            except (error.URLError, TimeoutError, OSError) as exc:
+                last_exc = exc
+                sys.stderr.write(
+                    f"[worker] Network error fetching decoded image"
+                    f" {image_id} (attempt {attempt + 1}): {exc}\n"
+                )
+            if attempt == 0:
+                time.sleep(0.5)
+
+        if last_exc is not None:
             sys.stderr.write(
-                f"[worker] HTTP error fetching decoded image {image_id}: {exc}\n"
+                f"[worker] Giving up on decoded image {image_id}"
+                f" after 2 attempts: {last_exc}\n"
             )
-            return None
+        return None
 
     def fetch_decoded_metadata(self, image_id: int) -> dict[str, Any] | None:
         """Fetch sidecar metadata for a pre-decoded image."""
