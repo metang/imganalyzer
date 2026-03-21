@@ -342,6 +342,7 @@ export interface BatchStats {
   queue: BatchQueueSummary
   nodes: BatchNode[]
   chunk?: { size: number; index: number; total: number; modules: Record<string, number> }
+  preDecode?: { done: number; failed: number; total: number; running: boolean }
 }
 
 export interface BatchResult {

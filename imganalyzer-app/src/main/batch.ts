@@ -111,6 +111,7 @@ export interface BatchStats {
   queue: BatchQueueSummary
   nodes: BatchNode[]
   chunk?: { size: number; index: number; total: number; modules: Record<string, number> }
+  preDecode?: { done: number; failed: number; total: number; running: boolean }
 }
 
 export type BatchStatus =
@@ -221,6 +222,7 @@ interface ServerStatusPayload {
     workers?: ServerWorkerNode[]
   }
   recent_results?: ServerRecentResult[]
+  pre_decode?: { done: number; failed: number; total: number; running: boolean }
 }
 
 // ── Module-scope state ────────────────────────────────────────────────────────
@@ -747,6 +749,7 @@ async function doPoll(): Promise<void> {
       },
       nodes: buildBatchNodes(data),
       chunk,
+      preDecode: data.pre_decode ?? undefined,
     }
 
     emitTick(stats)

@@ -244,6 +244,57 @@ function NodeContribution({ nodes }: { nodes: BatchNode[] }) {
   )
 }
 
+function PreDecodeProgress({
+  preDecode,
+}: {
+  preDecode: { done: number; failed: number; total: number; running: boolean }
+}) {
+  const cached = preDecode.done
+  const pct = preDecode.total > 0 ? Math.round((cached / preDecode.total) * 100) : 0
+  const remaining = preDecode.total - cached - preDecode.failed
+
+  return (
+    <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm font-semibold text-neutral-100">
+          Image cache
+          {preDecode.running && (
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-cyan-400" title="Pre-decoding in progress" />
+          )}
+        </div>
+        <span className="text-xs font-mono text-neutral-500">{pct}%</span>
+      </div>
+      <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-neutral-800">
+        <div
+          className="h-full rounded-full bg-cyan-600 transition-all duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="flex flex-wrap gap-3 text-xs text-neutral-400">
+        <span>
+          <span className="font-mono text-neutral-200">{cached.toLocaleString()}</span>
+          <span className="ml-1 text-neutral-500">cached</span>
+        </span>
+        {remaining > 0 && (
+          <span>
+            <span className="font-mono text-neutral-300">{remaining.toLocaleString()}</span>
+            <span className="ml-1 text-neutral-500">remaining</span>
+          </span>
+        )}
+        {preDecode.failed > 0 && (
+          <span>
+            <span className="font-mono text-red-400">{preDecode.failed.toLocaleString()}</span>
+            <span className="ml-1 text-neutral-500">failed</span>
+          </span>
+        )}
+        <span className="ml-auto text-neutral-600">
+          of {preDecode.total.toLocaleString()} images
+        </span>
+      </div>
+    </section>
+  )
+}
+
 function ChunkProgress({
   chunk,
 }: {
@@ -421,6 +472,10 @@ export function ProgressDashboard({
           <QueuePill label="Skipped" value={totals.skipped} tone="warning" />
         </div>
       </section>
+
+      {stats.preDecode && stats.preDecode.total > 0 && (
+        <PreDecodeProgress preDecode={stats.preDecode} />
+      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <NodeContribution nodes={nodes} />
