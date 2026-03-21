@@ -473,8 +473,8 @@ def _handle_status(params: dict) -> dict:
                     "total": total_images,
                     "running": False,
                 }
-    except Exception:
-        pass
+    except Exception as exc:
+        sys.stderr.write(f"[server] pre_decode status error: {exc}\n")
 
     return result
 
