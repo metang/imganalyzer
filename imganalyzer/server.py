@@ -562,6 +562,15 @@ def _handle_status(params: dict) -> dict:
     except Exception as exc:
         sys.stderr.write(f"[server] pre_decode status error: {exc}\n")
 
+    # Drive the decode pipeline on every status poll (~1 s) so the
+    # pre-decoder keeps running even when no distributed workers are
+    # actively claiming.  The 5 s internal throttle prevents excessive
+    # DB queries.
+    try:
+        _replenish_decode_buffer()
+    except Exception:
+        pass
+
     return result
 
 
