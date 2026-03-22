@@ -13,6 +13,7 @@ interface Props {
   onResume(): void
   onPauseTarget(target: BatchControlTarget, mode?: BatchPauseMode): void
   onResumeTarget(target: BatchControlTarget): void
+  onRemoveWorker(workerId: string): void
   onStop(): void
   onRetryFailed(modules: string[]): void
   onClearQueue(): void
@@ -370,6 +371,7 @@ export function ProgressDashboard({
   onResume,
   onPauseTarget,
   onResumeTarget,
+  onRemoveWorker,
   onStop,
   onRetryFailed,
   onClearQueue,
@@ -616,6 +618,13 @@ export function ProgressDashboard({
                 }`}
               >
                 {isNodePaused(node) ? 'Resume' : 'Pause'}
+              </button>
+              <button
+                onClick={() => onRemoveWorker(node.id)}
+                className="rounded-md px-2 py-1 text-[11px] text-red-400 transition-colors hover:bg-red-900/40 hover:text-red-300"
+                title="Remove this worker"
+              >
+                ✕
               </button>
             </div>
           ))}

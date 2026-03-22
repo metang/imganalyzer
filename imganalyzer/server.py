@@ -1135,6 +1135,37 @@ def _handle_workers_resume(params: dict) -> dict:
     return result
 
 
+def _handle_workers_remove(params: dict) -> dict:
+    """Remove (deregister) a distributed worker node.
+
+    Releases any leased jobs back to pending and deletes the worker row
+    from ``worker_nodes``.  Cannot remove the master/coordinator node.
+    """
+    from imganalyzer.db.queue import JobQueue
+
+    worker_id = str(params.get("workerId", "")).strip()
+    if not worker_id:
+        raise ValueError("workerId is required")
+    if worker_id == _MASTER_WORKER_ID:
+        raise ValueError("Cannot remove the coordinator node")
+
+    conn = _get_db()
+
+    # Release any leased jobs so they return to pending
+    queue = JobQueue(conn)
+    released_leases = queue.release_worker_leases(worker_id)
+
+    # Delete the worker record
+    conn.execute("DELETE FROM worker_nodes WHERE id = ?", [worker_id])
+    conn.commit()
+
+    return {
+        "workerId": worker_id,
+        "ok": True,
+        "releasedLeases": released_leases,
+    }
+
+
 def _upsert_master_worker_node(conn: sqlite3.Connection, status: str = "online") -> None:
     """Keep the coordinator represented in ``worker_nodes`` as a local worker."""
     from imganalyzer.db.queue import _now
@@ -3524,6 +3555,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "workers/list": _handle_workers_list,
     "workers/pause": _handle_workers_pause,
     "workers/resume": _handle_workers_resume,
+    "workers/remove": _handle_workers_remove,
     "jobs/claim": _handle_jobs_claim,
     "jobs/release-expired": _handle_jobs_release_expired,
     "jobs/heartbeat": _handle_jobs_heartbeat,

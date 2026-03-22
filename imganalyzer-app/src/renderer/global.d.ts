@@ -532,6 +532,7 @@ declare global {
       batchPauseTarget(target: BatchControlTarget, mode?: BatchPauseMode): Promise<void>
       batchResume(): Promise<void>
       batchResumeTarget(target: BatchControlTarget): Promise<void>
+      batchRemoveWorker(workerId: string): Promise<void>
       batchStop(folder: string): Promise<void>
       batchCheckPending(): Promise<{ pending: number; running: number }>
       batchMonitorExisting(): Promise<boolean>

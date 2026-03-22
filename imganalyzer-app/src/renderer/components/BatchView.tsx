@@ -424,6 +424,7 @@ export function BatchRunView({
           onResume={handleResume}
           onPauseTarget={batch.pauseTarget}
           onResumeTarget={batch.resumeTarget}
+          onRemoveWorker={batch.removeWorker}
           onStop={() => setShowStopDialog(true)}
           onRetryFailed={batch.retryFailed}
           onClearQueue={handleClearQueue}

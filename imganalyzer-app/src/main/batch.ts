@@ -1179,6 +1179,19 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     }
   )
 
+  // ── batch:remove-worker ─────────────────────────────────────────────────
+  ipcMain.handle(
+    'batch:remove-worker',
+    async (_evt, workerId: string): Promise<void> => {
+      if (!workerId || typeof workerId !== 'string') {
+        throw new Error('workerId is required')
+      }
+      await ensureServerRunning()
+      await rpc.call('workers/remove', { workerId })
+      await doPoll()
+    }
+  )
+
   // ── batch:stop ────────────────────────────────────────────────────────────
   ipcMain.handle('batch:stop', async (_evt, folder: string): Promise<void> => {
     // Cancel the active run

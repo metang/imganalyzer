@@ -94,6 +94,9 @@ contextBridge.exposeInMainWorld('api', {
   batchResumeTarget: (target: BatchControlTarget): Promise<void> =>
     ipcRenderer.invoke('batch:resume-target', target),
 
+  batchRemoveWorker: (workerId: string): Promise<void> =>
+    ipcRenderer.invoke('batch:remove-worker', workerId),
+
   batchStop: (folder: string): Promise<void> =>
     ipcRenderer.invoke('batch:stop', folder),
 

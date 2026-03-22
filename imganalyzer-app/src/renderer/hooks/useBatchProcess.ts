@@ -94,6 +94,7 @@ export interface UseBatchProcessReturn {
   pauseTarget(target: BatchControlTarget, mode?: BatchPauseMode): Promise<void>
   resume(): Promise<void>
   resumeTarget(target: BatchControlTarget): Promise<void>
+  removeWorker(workerId: string): Promise<void>
   stop(folder: string): Promise<void>
 }
 
@@ -225,6 +226,14 @@ export function useBatchProcess(): UseBatchProcessReturn {
     }
   }, [])
 
+  const removeWorker = useCallback(async (workerId: string) => {
+    try {
+      await window.api.batchRemoveWorker(workerId)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [])
+
   const stop = useCallback(async (folder: string) => {
     try {
       await window.api.batchStop(folder)
@@ -330,6 +339,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
     pauseTarget,
     resume,
     resumeTarget,
+    removeWorker,
     stop,
   }
 }
