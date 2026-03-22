@@ -248,7 +248,10 @@ _pre_decode_auto_triggered = False
 
 # Demand-driven decode buffer: decode enough images to keep workers fed
 # without queuing the entire image set upfront.
+# _DECODE_BUFFER_SIZE is the *maximum* batch; actual feed size is adapted
+# based on CPU and disk I/O via ResourceSampler.
 _DECODE_BUFFER_SIZE = int(os.getenv("IMGANALYZER_DECODE_BUFFER_SIZE", "100"))
+_MIN_DECODE_BUFFER = 20  # never let in-flight drop below this
 _last_replenish_time: float = 0.0
 _REPLENISH_INTERVAL: float = 5.0  # seconds between buffer checks
 
@@ -259,15 +262,21 @@ def _auto_trigger_pre_decode() -> None:
 
 
 def _replenish_decode_buffer() -> None:
-    """Feed images to the pre-decoder to maintain a decode-ahead buffer.
+    """Feed images to the pre-decoder based on CPU and disk availability.
 
-    Called from ``_handle_jobs_claim`` on every request.  Checks how many
-    decode tasks are still in-flight (queued but not yet completed).  When
-    the in-flight count drops below ``_DECODE_BUFFER_SIZE``, feeds another
-    batch of uncached pending images to the pre-decoder.
+    Called from ``_handle_jobs_claim`` on every request.  Uses a
+    :class:`~imganalyzer.cache.pre_decode.ResourceSampler` to check
+    system utilisation before deciding whether (and how much) to feed.
 
-    Throttled to run at most every ``_REPLENISH_INTERVAL`` seconds to
-    avoid expensive DB queries on every claim.
+    * **High capacity** (CPU < 40 %, disk < 50 %): feed up to
+      ``_DECODE_BUFFER_SIZE`` images.
+    * **Medium capacity** (CPU < 70 %, disk < 80 %): feed half the
+      buffer.
+    * **Low capacity** (CPU ≥ 70 % AND disk ≥ 80 %): feed nothing —
+      *unless* in-flight is below ``_MIN_DECODE_BUFFER``, in which
+      case we feed the minimum to prevent worker starvation.
+
+    Throttled to run at most every ``_REPLENISH_INTERVAL`` seconds.
     """
     global _last_replenish_time
 
@@ -281,8 +290,27 @@ def _replenish_decode_buffer() -> None:
         prog = decoder.progress()
         in_flight = prog["total"] - prog["done"] - prog["failed"]
 
-        if in_flight >= _DECODE_BUFFER_SIZE:
-            return  # enough decode work already queued
+        # Sample resources for adaptive scheduling
+        sampler = decoder._resource_sampler
+        res = sampler.sample()
+
+        if not sampler.should_feed(in_flight, min_buffer=_MIN_DECODE_BUFFER):
+            sys.stderr.write(
+                f"[server] decode throttled: CPU {res['cpu_pct']:.0f}%"
+                f" disk {res['disk_busy_pct']:.0f}%"
+                f" in-flight {in_flight}\n"
+            )
+            return
+
+        # Adaptive batch size: large when idle, small when busy
+        batch_size = sampler.recommended_batch_size(
+            max_batch=_DECODE_BUFFER_SIZE,
+            min_batch=_MIN_DECODE_BUFFER,
+        )
+
+        need = batch_size - max(in_flight, 0)
+        if need <= 0:
+            return
 
         store = _get_decoded_store()
         cached_ids = store.cached_image_ids()
@@ -306,8 +334,6 @@ def _replenish_decode_buffer() -> None:
             conn2.close()
             return
 
-        # Feed uncached pending images to fill the decode queue
-        need = _DECODE_BUFFER_SIZE - max(in_flight, 0)
         uncached = [iid for iid in pending_ids if iid not in cached_ids][:need]
 
         if not uncached:
@@ -328,7 +354,10 @@ def _replenish_decode_buffer() -> None:
             if added:
                 sys.stderr.write(
                     f"[server] decode buffer: fed {added} images"
-                    f" (in-flight {in_flight}, cached {len(cached_ids)})\n"
+                    f" (in-flight {in_flight}, batch {batch_size},"
+                    f" CPU {res['cpu_pct']:.0f}%,"
+                    f" disk {res['disk_busy_pct']:.0f}%,"
+                    f" cached {len(cached_ids)})\n"
                 )
     except Exception as exc:
         sys.stderr.write(f"[server] decode buffer replenish failed: {exc}\n")
@@ -516,12 +545,20 @@ def _handle_status(params: dict) -> dict:
         is_running = decoder.is_running
 
         if total_images > 0:
-            result["pre_decode"] = {
+            pre_decode_info: dict[str, Any] = {
                 "done": min(cached_count, total_images),
                 "failed": 0,
                 "total": total_images,
                 "running": is_running,
             }
+            # Include resource utilisation so the dashboard can show load
+            res = decoder._resource_sampler.snapshot
+            pre_decode_info["resources"] = {
+                "cpu_pct": round(res["cpu_pct"], 1),
+                "disk_read_mbps": round(res["disk_read_mbps"], 1),
+                "disk_busy_pct": round(res["disk_busy_pct"], 1),
+            }
+            result["pre_decode"] = pre_decode_info
     except Exception as exc:
         sys.stderr.write(f"[server] pre_decode status error: {exc}\n")
 

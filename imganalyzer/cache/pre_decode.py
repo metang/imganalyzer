@@ -12,6 +12,9 @@ Design principles:
 * **Parallel throughput** — RAW demosaic via rawpy releases the GIL during
   LibRaw C-level processing, so threads parallelise effectively.  At 8
   threads × ~2.5 s avg decode ≈ 3.2 images/s.
+* **Adaptive scheduling** — a :class:`ResourceSampler` monitors CPU and
+  disk I/O so the decode pipeline ramps up when idle and backs off under
+  load, keeping the system responsive for GPU passes and the server.
 * **Priority** — RAW files first (most expensive), then standard formats.
 * **Idempotent** — already-cached images are skipped.
 """
@@ -30,6 +33,122 @@ from PIL import Image
 from imganalyzer.cache.decoded_store import DecodedImageStore
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Adaptive resource monitoring
+# ---------------------------------------------------------------------------
+
+# Thresholds for resource-aware scheduling
+_CPU_HIGH_PCT = 70.0    # CPU% above which we reduce decode throughput
+_CPU_LOW_PCT = 40.0     # CPU% below which we can ramp up aggressively
+_DISK_BUSY_PCT = 80.0   # disk busy% above which we throttle feeding
+
+
+class ResourceSampler:
+    """Lightweight CPU and disk I/O sampler for adaptive decode scheduling.
+
+    Uses ``psutil`` when available.  Falls back to a no-op that always
+    reports zero utilisation (decode runs at full speed without gating).
+    """
+
+    def __init__(self) -> None:
+        self._cpu_pct: float = 0.0
+        self._disk_read_mbps: float = 0.0
+        self._disk_busy_pct: float = 0.0
+        self._last_disk_counters: Any = None
+        self._last_sample_time: float = 0.0
+        self._has_psutil = False
+        try:
+            import psutil  # type: ignore[import-untyped]
+
+            self._has_psutil = True
+            # Prime CPU measurement (first call always returns 0.0)
+            psutil.cpu_percent(interval=None)
+            self._last_disk_counters = psutil.disk_io_counters()
+            self._last_sample_time = time.monotonic()
+        except (ImportError, Exception):
+            pass
+
+    # -- Sampling ----------------------------------------------------------
+
+    def sample(self) -> dict[str, float]:
+        """Collect one resource snapshot.  Call periodically (e.g. every 5 s).
+
+        Returns ``{cpu_pct, disk_read_mbps, disk_busy_pct}``.
+        """
+        if not self._has_psutil:
+            return {"cpu_pct": 0.0, "disk_read_mbps": 0.0, "disk_busy_pct": 0.0}
+
+        import psutil  # type: ignore[import-untyped]
+
+        now = time.monotonic()
+        cpu_pct = psutil.cpu_percent(interval=None)
+
+        disk = psutil.disk_io_counters()
+        disk_read_mbps = 0.0
+        disk_busy_pct = 0.0
+
+        if self._last_disk_counters is not None:
+            dt = now - self._last_sample_time
+            if dt > 0.5:
+                read_delta = disk.read_bytes - self._last_disk_counters.read_bytes
+                # read_time is cumulative milliseconds spent reading
+                time_delta_ms = disk.read_time - self._last_disk_counters.read_time
+
+                disk_read_mbps = (read_delta / dt) / (1024 * 1024)
+                disk_busy_pct = min(100.0, (time_delta_ms / (dt * 1000)) * 100)
+
+                self._last_disk_counters = disk
+                self._last_sample_time = now
+
+        self._cpu_pct = cpu_pct
+        self._disk_read_mbps = disk_read_mbps
+        self._disk_busy_pct = disk_busy_pct
+
+        return {
+            "cpu_pct": cpu_pct,
+            "disk_read_mbps": disk_read_mbps,
+            "disk_busy_pct": disk_busy_pct,
+        }
+
+    # -- Decision helpers --------------------------------------------------
+
+    def should_feed(self, in_flight: int, min_buffer: int = 20) -> bool:
+        """Whether the scheduler should queue more decode work.
+
+        Always returns *True* when *in_flight* is below *min_buffer* to
+        prevent worker starvation.  Otherwise checks CPU and disk load.
+        """
+        if in_flight < min_buffer:
+            return True
+        if not self._has_psutil:
+            return True
+        if self._cpu_pct > _CPU_HIGH_PCT and self._disk_busy_pct > _DISK_BUSY_PCT:
+            return False
+        if self._disk_busy_pct > 90.0:
+            return False
+        return True
+
+    def recommended_batch_size(
+        self, max_batch: int = 100, min_batch: int = 20
+    ) -> int:
+        """How many images to feed given current resource utilisation."""
+        if not self._has_psutil:
+            return max_batch
+        if self._cpu_pct < _CPU_LOW_PCT and self._disk_busy_pct < 50.0:
+            return max_batch
+        if self._cpu_pct < _CPU_HIGH_PCT and self._disk_busy_pct < _DISK_BUSY_PCT:
+            return max(min_batch, max_batch // 2)
+        return min_batch
+
+    @property
+    def snapshot(self) -> dict[str, float]:
+        """Last sampled values without taking a new sample."""
+        return {
+            "cpu_pct": self._cpu_pct,
+            "disk_read_mbps": self._disk_read_mbps,
+            "disk_busy_pct": self._disk_busy_pct,
+        }
 
 # Keys to exclude from the sidecar metadata (they're either the image
 # pixels or objects that can't be JSON-serialised).
@@ -66,18 +185,27 @@ class PreDecoder:
     store:
         The decoded image cache to populate.
     max_workers:
-        Number of threads in the decode pool.  Defaults to ``os.cpu_count()``.
+        Number of threads in the decode pool.  Defaults to
+        ``min(os.cpu_count() - 2, 6)`` (clamped ≥ 2), leaving headroom
+        for GPU passes, the JSON-RPC server, and the OS.
+    resource_sampler:
+        Optional :class:`ResourceSampler` for adaptive scheduling.  When
+        provided, the pre-decoder will check CPU and disk I/O before
+        starting new decode tasks.
     """
 
     def __init__(
         self,
         store: DecodedImageStore,
         max_workers: int | None = None,
+        resource_sampler: ResourceSampler | None = None,
     ) -> None:
         self._store = store
-        # Default to 2 threads: pre-decode is I/O-bound on HDDs and too many
-        # concurrent random reads cause head thrashing (100% active, ~7 MB/s).
-        self._max_workers = max_workers or 2
+        # Scale to available cores, leaving 2 for server + GPU pipeline.
+        # RAW demosaic via rawpy releases the GIL, so threads parallelise.
+        cpu = os.cpu_count() or 4
+        self._max_workers = max_workers or max(2, min(cpu - 2, 6))
+        self._resource_sampler = resource_sampler or ResourceSampler()
         self._executor: ThreadPoolExecutor | None = None
         self._futures: list[Future[bool]] = []
 
@@ -236,14 +364,16 @@ class PreDecoder:
             return self._running
 
     def progress(self) -> dict[str, Any]:
-        """Return ``{done, failed, total, running}``."""
+        """Return ``{done, failed, total, running, resources}``."""
         with self._lock:
-            return {
+            result: dict[str, Any] = {
                 "done": self._done,
                 "failed": self._failed,
                 "total": self._total,
                 "running": self._running,
             }
+        result["resources"] = self._resource_sampler.snapshot
+        return result
 
     # ------------------------------------------------------------------
     # Internal
