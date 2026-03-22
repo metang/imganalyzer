@@ -246,43 +246,95 @@ def _get_pre_decoder() -> Any:
 
 _pre_decode_auto_triggered = False
 
+# Demand-driven decode buffer: decode enough images to keep workers fed
+# without queuing the entire image set upfront.
+_DECODE_BUFFER_SIZE = int(os.getenv("IMGANALYZER_DECODE_BUFFER_SIZE", "100"))
+_last_replenish_time: float = 0.0
+_REPLENISH_INTERVAL: float = 5.0  # seconds between buffer checks
+
 
 def _auto_trigger_pre_decode() -> None:
-    """Start pre-decoding all images if it hasn't been triggered yet.
+    """Kept for backward compatibility — calls _replenish_decode_buffer."""
+    _replenish_decode_buffer()
 
-    Called on ``jobs/claim`` when the decoded cache has uncached images.
-    Runs with a small thread pool (default 2) alongside the master worker
-    to avoid overwhelming the HDD.
+
+def _replenish_decode_buffer() -> None:
+    """Feed images to the pre-decoder to maintain a decode-ahead buffer.
+
+    Called from ``_handle_jobs_claim`` on every request.  Queries the job
+    queue for pending images, checks how many are already cached, and
+    feeds a small batch to the pre-decoder so there are always decoded
+    images available for workers to claim.
+
+    Throttled to run at most every ``_REPLENISH_INTERVAL`` seconds to
+    avoid expensive DB queries on every claim.
     """
-    global _pre_decode_auto_triggered
-    if _pre_decode_auto_triggered:
+    global _last_replenish_time
+
+    now = time.monotonic()
+    if now - _last_replenish_time < _REPLENISH_INTERVAL:
         return
-    _pre_decode_auto_triggered = True
+    _last_replenish_time = now
 
     try:
+        store = _get_decoded_store()
+        cached_ids = store.cached_image_ids()
+
         from imganalyzer.db.connection import get_db_path as _gdp
         conn2 = sqlite3.connect(str(_gdp()), timeout=10, check_same_thread=False)
         conn2.row_factory = sqlite3.Row
         conn2.execute("PRAGMA journal_mode=WAL")
-        rows = conn2.execute(
-            "SELECT id, file_path FROM images ORDER BY id"
-        ).fetchall()
-        # Query image IDs that have pending jobs — these get priority.
+
+        # Get image IDs with pending jobs, ordered by number of pending
+        # modules descending (images needing more work are more valuable
+        # to decode first).
         pending_rows = conn2.execute(
-            "SELECT DISTINCT image_id FROM job_queue WHERE status = 'pending'"
+            "SELECT image_id, COUNT(*) AS cnt "
+            "FROM job_queue WHERE status = 'pending' "
+            "GROUP BY image_id ORDER BY cnt DESC"
+        ).fetchall()
+        pending_ids = [int(r["image_id"]) for r in pending_rows]
+
+        if not pending_ids:
+            conn2.close()
+            return
+
+        # How many pending images are already cached (decode buffer)?
+        cached_pending = sum(1 for iid in pending_ids if iid in cached_ids)
+
+        if cached_pending >= _DECODE_BUFFER_SIZE:
+            conn2.close()
+            return  # buffer is full — workers have enough cached images
+
+        # Feed the next batch of uncached pending images
+        need = _DECODE_BUFFER_SIZE - cached_pending
+        uncached = [iid for iid in pending_ids if iid not in cached_ids][:need]
+
+        if not uncached:
+            conn2.close()
+            return
+
+        # Fetch file paths for the batch
+        ph = ",".join("?" * len(uncached))
+        rows = conn2.execute(
+            f"SELECT id, file_path FROM images WHERE id IN ({ph})",
+            uncached,
         ).fetchall()
         conn2.close()
+
         items = [(int(r["id"]), str(r["file_path"])) for r in rows]
-        pending_ids = {int(r["image_id"]) for r in pending_rows}
         if items:
             decoder = _get_pre_decoder()
-            decoder.start(items, pending_ids=pending_ids)
-            sys.stderr.write(
-                f"[server] auto-triggered pre-decode for {len(items)} images"
-                f" ({len(pending_ids)} with pending jobs)\n"
-            )
+            added = decoder.feed(items)
+            if added:
+                sys.stderr.write(
+                    f"[server] decode buffer: fed {added} images"
+                    f" (buffer {cached_pending}/{_DECODE_BUFFER_SIZE},"
+                    f" {len(pending_ids) - len([i for i in pending_ids if i in cached_ids])}"
+                    f" uncached pending)\n"
+                )
     except Exception as exc:
-        sys.stderr.write(f"[server] auto pre-decode trigger failed: {exc}\n")
+        sys.stderr.write(f"[server] decode buffer replenish failed: {exc}\n")
 
 
 def _invalidate_person_link_suggestion_cache() -> None:
@@ -437,7 +489,7 @@ def _handle_status(params: dict) -> dict:
             "modules": chunk_modules,
         }
 
-    return {
+    result = {
         "total_images": total_images,
         "modules": modules_out,
         "module_avg_ms": module_avg_ms,
@@ -457,27 +509,22 @@ def _handle_status(params: dict) -> dict:
         "recent_results": _recent_queue_results(conn),
     }
 
-    # Pre-decode / image cache progress.  Always report the cache fill
-    # state so the dashboard shows the bar even when pre-decode hasn't been
-    # explicitly triggered (e.g. "resume pending" without a fresh ingest).
+    # Pre-decode / image cache progress.  Always report the overall cache
+    # fill state (cached vs total images in DB) so the dashboard progress
+    # bar is meaningful even with incremental demand-driven decoding.
     try:
         store = _get_decoded_store()
+        cached_count = store.entry_count
         decoder = _get_pre_decoder()
-        decode_prog = decoder.progress()
+        is_running = decoder.is_running
 
-        if decode_prog["total"] > 0:
-            # Pre-decoder has been started — use its counters
-            result["pre_decode"] = decode_prog
-        else:
-            # Pre-decoder not started yet — derive from cache + DB
-            cached_count = store.entry_count
-            if total_images > 0:
-                result["pre_decode"] = {
-                    "done": min(cached_count, total_images),
-                    "failed": 0,
-                    "total": total_images,
-                    "running": False,
-                }
+        if total_images > 0:
+            result["pre_decode"] = {
+                "done": min(cached_count, total_images),
+                "failed": 0,
+                "total": total_images,
+                "running": is_running,
+            }
     except Exception as exc:
         sys.stderr.write(f"[server] pre_decode status error: {exc}\n")
 
@@ -551,26 +598,11 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
 
     conn.close()
 
-    # Trigger pre-decode in the background so distributed workers can start
-    # receiving cached images.  Runs with 2 threads (default) to coexist
-    # with the master worker's disk I/O.
+    # Trigger demand-driven pre-decode: feed an initial batch so
+    # distributed workers can start receiving cached images immediately.
+    # The buffer will be replenished automatically on subsequent claims.
     try:
-        from imganalyzer.db.connection import get_db_path as _gdp
-        _conn2 = sqlite3.connect(str(_gdp()), timeout=10, check_same_thread=False)
-        _conn2.row_factory = sqlite3.Row
-        _conn2.execute("PRAGMA journal_mode=WAL")
-        rows = _conn2.execute(
-            "SELECT id, file_path FROM images ORDER BY id"
-        ).fetchall()
-        pending_rows = _conn2.execute(
-            "SELECT DISTINCT image_id FROM job_queue WHERE status = 'pending'"
-        ).fetchall()
-        _conn2.close()
-        items = [(int(r["id"]), str(r["file_path"])) for r in rows]
-        pending_ids = {int(r["image_id"]) for r in pending_rows}
-        if items:
-            decoder = _get_pre_decoder()
-            decoder.start(items, pending_ids=pending_ids)
+        _replenish_decode_buffer()
     except Exception as exc:
         sys.stderr.write(f"[server] pre-decode trigger failed: {exc}\n")
 

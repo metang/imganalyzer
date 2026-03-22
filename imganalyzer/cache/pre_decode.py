@@ -53,6 +53,14 @@ def _extract_sidecar_meta(image_data: dict[str, Any]) -> dict[str, Any]:
 class PreDecoder:
     """Background image decoder that populates a :class:`DecodedImageStore`.
 
+    Supports two modes:
+
+    * **Bulk** via :meth:`start` — decode a fixed list in one shot (legacy /
+      CLI usage).
+    * **Demand-driven** via :meth:`feed` — add small batches incrementally
+      as workers need more cached images.  The coordinator's scheduler
+      calls :meth:`feed` to keep a decode-ahead buffer for workers.
+
     Parameters
     ----------
     store:
@@ -72,6 +80,9 @@ class PreDecoder:
         self._max_workers = max_workers or 2
         self._executor: ThreadPoolExecutor | None = None
         self._futures: list[Future[bool]] = []
+
+        # Track which IDs have been submitted to avoid duplicates
+        self._queued_ids: set[int] = set()
 
         # Progress tracking
         self._lock = threading.Lock()
@@ -123,6 +134,7 @@ class PreDecoder:
             self._failed = 0
             self._total = len(pending)
             self._running = True
+            self._queued_ids = {iid for iid, _ in pending}
         self._cancel_event.clear()
 
         log.info(
@@ -147,6 +159,56 @@ class PreDecoder:
             daemon=True,
             name="predecode-monitor",
         ).start()
+
+    def feed(
+        self,
+        items: list[tuple[int, str]],
+        *,
+        raw_first: bool = True,
+    ) -> int:
+        """Add images to the decode pipeline incrementally.
+
+        Unlike :meth:`start`, this can be called many times.  Images
+        already cached or already queued are silently skipped.  The
+        internal thread-pool is created on first call and reused.
+
+        Returns the number of new images actually enqueued.
+        """
+        if self._cancel_event.is_set():
+            return 0
+
+        cached = self._store.cached_image_ids()
+        with self._lock:
+            new = [
+                (iid, fp)
+                for iid, fp in items
+                if iid not in cached and iid not in self._queued_ids
+            ]
+        if not new:
+            return 0
+
+        if raw_first:
+            new = self._sort_raw_first(new)
+
+        # Create executor on first feed (lazy start)
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=self._max_workers,
+                thread_name_prefix="predecode",
+            )
+            self._cancel_event.clear()
+
+        with self._lock:
+            for iid, _ in new:
+                self._queued_ids.add(iid)
+            self._total += len(new)
+            self._running = True
+
+        for iid, fp in new:
+            self._executor.submit(self._decode_one, iid, fp)
+
+        log.info("Fed %d images to pre-decoder (total queued: %d)", len(new), self._total)
+        return len(new)
 
     def stop(self) -> None:
         """Cancel any in-progress pre-decode work."""
@@ -349,16 +411,18 @@ class PreDecoder:
             except Exception:
                 pass  # Already handled in _decode_one
 
+        # Only mark not-running if no new work was fed while we waited.
+        # feed() may have added items after start()'s initial batch.
         with self._lock:
-            self._running = False
+            if self._done + self._failed >= self._total:
+                self._running = False
 
         log.info(
-            "Pre-decode complete: %d done, %d failed, %d total",
+            "Pre-decode batch complete: %d done, %d failed, %d total",
             self._done,
             self._failed,
             self._total,
         )
 
-        if self._executor:
-            self._executor.shutdown(wait=False)
-            self._executor = None
+        # Don't shut down the executor — feed() may add more work later.
+        # The executor is cleaned up in stop().
