@@ -55,6 +55,21 @@ def _encode_binary_fields(d: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+class _MetaEncoder(json.JSONEncoder):
+    """JSON encoder that handles EXIF types (IFDRational, Fraction, etc.)."""
+
+    def default(self, o: Any) -> Any:
+        # piexif IFDRational, fractions.Fraction, or any Rational-like
+        if hasattr(o, "numerator") and hasattr(o, "denominator"):
+            denom = o.denominator
+            if denom == 0:
+                return 0.0
+            return o.numerator / denom
+        if isinstance(o, bytes):
+            return base64.b64encode(o).decode("ascii")
+        return super().default(o)
+
+
 def _decode_binary_fields(d: dict[str, Any]) -> dict[str, Any]:
     """Reverse of :func:`_encode_binary_fields`."""
     out: dict[str, Any] = {}
@@ -342,7 +357,8 @@ class DecodedImageStore:
         if metadata:
             encoded = _encode_binary_fields(metadata)
             with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(encoded, f, ensure_ascii=False, separators=(",", ":"))
+                json.dump(encoded, f, ensure_ascii=False, separators=(",", ":"),
+                          cls=_MetaEncoder)
             meta_size = meta_path.stat().st_size
 
         now = time.time()
