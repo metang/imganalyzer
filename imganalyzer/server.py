@@ -261,10 +261,10 @@ def _auto_trigger_pre_decode() -> None:
 def _replenish_decode_buffer() -> None:
     """Feed images to the pre-decoder to maintain a decode-ahead buffer.
 
-    Called from ``_handle_jobs_claim`` on every request.  Queries the job
-    queue for pending images, checks how many are already cached, and
-    feeds a small batch to the pre-decoder so there are always decoded
-    images available for workers to claim.
+    Called from ``_handle_jobs_claim`` on every request.  Checks how many
+    decode tasks are still in-flight (queued but not yet completed).  When
+    the in-flight count drops below ``_DECODE_BUFFER_SIZE``, feeds another
+    batch of uncached pending images to the pre-decoder.
 
     Throttled to run at most every ``_REPLENISH_INTERVAL`` seconds to
     avoid expensive DB queries on every claim.
@@ -277,6 +277,13 @@ def _replenish_decode_buffer() -> None:
     _last_replenish_time = now
 
     try:
+        decoder = _get_pre_decoder()
+        prog = decoder.progress()
+        in_flight = prog["total"] - prog["done"] - prog["failed"]
+
+        if in_flight >= _DECODE_BUFFER_SIZE:
+            return  # enough decode work already queued
+
         store = _get_decoded_store()
         cached_ids = store.cached_image_ids()
 
@@ -299,15 +306,8 @@ def _replenish_decode_buffer() -> None:
             conn2.close()
             return
 
-        # How many pending images are already cached (decode buffer)?
-        cached_pending = sum(1 for iid in pending_ids if iid in cached_ids)
-
-        if cached_pending >= _DECODE_BUFFER_SIZE:
-            conn2.close()
-            return  # buffer is full — workers have enough cached images
-
-        # Feed the next batch of uncached pending images
-        need = _DECODE_BUFFER_SIZE - cached_pending
+        # Feed uncached pending images to fill the decode queue
+        need = _DECODE_BUFFER_SIZE - max(in_flight, 0)
         uncached = [iid for iid in pending_ids if iid not in cached_ids][:need]
 
         if not uncached:
@@ -324,14 +324,11 @@ def _replenish_decode_buffer() -> None:
 
         items = [(int(r["id"]), str(r["file_path"])) for r in rows]
         if items:
-            decoder = _get_pre_decoder()
             added = decoder.feed(items)
             if added:
                 sys.stderr.write(
                     f"[server] decode buffer: fed {added} images"
-                    f" (buffer {cached_pending}/{_DECODE_BUFFER_SIZE},"
-                    f" {len(pending_ids) - len([i for i in pending_ids if i in cached_ids])}"
-                    f" uncached pending)\n"
+                    f" (in-flight {in_flight}, cached {len(cached_ids)})\n"
                 )
     except Exception as exc:
         sys.stderr.write(f"[server] decode buffer replenish failed: {exc}\n")
