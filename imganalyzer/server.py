@@ -250,8 +250,8 @@ _pre_decode_auto_triggered = False
 # without queuing the entire image set upfront.
 # _DECODE_BUFFER_SIZE is the *maximum* batch; actual feed size is adapted
 # based on CPU and disk I/O via ResourceSampler.
-_DECODE_BUFFER_SIZE = int(os.getenv("IMGANALYZER_DECODE_BUFFER_SIZE", "100"))
-_MIN_DECODE_BUFFER = 20  # never let in-flight drop below this
+_DECODE_BUFFER_SIZE = int(os.getenv("IMGANALYZER_DECODE_BUFFER_SIZE", "10"))
+_MIN_DECODE_BUFFER = 5  # never let in-flight drop below this
 _last_replenish_time: float = 0.0
 _REPLENISH_INTERVAL: float = 5.0  # seconds between buffer checks
 

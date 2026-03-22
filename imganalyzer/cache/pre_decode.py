@@ -130,7 +130,7 @@ class ResourceSampler:
         return True
 
     def recommended_batch_size(
-        self, max_batch: int = 100, min_batch: int = 20
+        self, max_batch: int = 10, min_batch: int = 5
     ) -> int:
         """How many images to feed given current resource utilisation."""
         if not self._has_psutil:
