@@ -42,7 +42,7 @@ local-ai = [
     "transformers>=4.40",
     "torch>=2.5",
     "accelerate>=0.29",
-    "unipercept-reward; platform_system != 'Darwin'",
+    "unipercept-reward; platform_system == 'Linux'",
     "open_clip_torch>=2.24",
     "huggingface_hub>=0.23",
     "insightface>=0.7",
