@@ -228,6 +228,13 @@ export interface PersonLinkSuggestion {
   reason: string
 }
 
+export interface PersonSimilarImage {
+  image_id: number
+  file_path: string
+  similarity: number
+  best_occurrence_id: number
+}
+
 // ── IPC Registration ──────────────────────────────────────────────────────────
 
 export function registerFaceHandlers(): void {
@@ -626,6 +633,22 @@ export function registerFaceHandlers(): void {
         return { suggestions: result.suggestions }
       } catch (err) {
         return { suggestions: [], error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personSimilarImages',
+    async (_evt, personId: number, limit?: number): Promise<{ images: PersonSimilarImage[]; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/person-similar-images', {
+          person_id: personId,
+          limit: limit ?? 100,
+        }) as { images: PersonSimilarImage[] }
+        return { images: result.images }
+      } catch (err) {
+        return { images: [], error: String(err) }
       }
     }
   )

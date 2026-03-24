@@ -85,6 +85,74 @@ def _farthest_point_sample(
     return selected
 
 
+class _FaceEmbeddingCache:
+    """Cached (N, 512) float32 matrix for face_occurrences embeddings.
+
+    Loads all face occurrence embedding vectors into a contiguous numpy array
+    with aligned ``occurrence_ids`` and ``image_ids`` lists.  A row-count
+    check detects when new face analysis has run so the matrix is rebuilt.
+    """
+
+    def __init__(self) -> None:
+        self.matrix: Any = None  # np.ndarray (N, 512) float32, L2-normalised
+        self.occurrence_ids: list[int] = []
+        self.image_ids: list[int] = []
+        self.person_ids: list[int | None] = []
+        self._row_count: int = 0
+
+    def get(
+        self, conn: sqlite3.Connection
+    ) -> tuple[Any, list[int], list[int], list[int | None]]:
+        """Return ``(matrix, occurrence_ids, image_ids, person_ids)``.
+
+        Rebuilds automatically when new embeddings appear (row-count check).
+        """
+        import numpy as _np
+
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM face_occurrences WHERE embedding IS NOT NULL"
+        ).fetchone()
+        current_count: int = row["cnt"] if row else 0
+
+        if self.matrix is not None and current_count == self._row_count:
+            return self.matrix, self.occurrence_ids, self.image_ids, self.person_ids
+
+        rows = conn.execute(
+            "SELECT id, image_id, person_id, embedding "
+            "FROM face_occurrences WHERE embedding IS NOT NULL ORDER BY id"
+        ).fetchall()
+
+        if not rows:
+            empty = _np.empty((0, 0), dtype=_np.float32)
+            self.matrix = empty
+            self.occurrence_ids = []
+            self.image_ids = []
+            self.person_ids = []
+            self._row_count = 0
+            return empty, [], [], []
+
+        occ_ids: list[int] = []
+        img_ids: list[int] = []
+        p_ids: list[int | None] = []
+        vecs: list[Any] = []
+        for r in rows:
+            occ_ids.append(r["id"])
+            img_ids.append(r["image_id"])
+            p_ids.append(r["person_id"])
+            vec = _np.frombuffer(r["embedding"], dtype=_np.float32).copy()
+            norm = float(_np.linalg.norm(vec))
+            if norm > 0:
+                vec /= norm
+            vecs.append(vec)
+
+        self.matrix = _np.vstack(vecs)  # (N, 512)
+        self.occurrence_ids = occ_ids
+        self.image_ids = img_ids
+        self.person_ids = p_ids
+        self._row_count = current_count
+        return self.matrix, self.occurrence_ids, self.image_ids, self.person_ids
+
+
 class Repository:
     """Data access layer for the imganalyzer database."""
 
@@ -95,6 +163,7 @@ class Repository:
         # Loaded lazily on first _apply_override_mask call.  At 500K images
         # with ~0.01% override rate, this avoids ~4.5M empty SELECT queries.
         self._override_ids: set[int] | None = None
+        self._face_emb_cache = _FaceEmbeddingCache()
 
     def _known_columns(self, table: str) -> set[str]:
         """Return the set of column names for *table* (cached per instance)."""
@@ -2155,6 +2224,99 @@ class Repository:
         """Return total number of face occurrences stored."""
         row = self.conn.execute("SELECT COUNT(*) AS cnt FROM face_occurrences").fetchone()
         return row["cnt"] if row else 0
+
+    def find_similar_images_for_person(
+        self,
+        person_id: int,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Find images containing faces most similar to a person's identity.
+
+        Uses the cached face embedding matrix for vectorised scoring.
+        Returns up to *limit* images ranked by best face similarity,
+        excluding images already linked to this person's clusters.
+        """
+        import numpy as _np
+
+        if not self._table_exists("face_occurrences") or not self._table_exists("face_persons"):
+            return []
+
+        # 1. Collect person's linked cluster IDs and their image IDs to exclude.
+        person_occ_rows = self.conn.execute(
+            "SELECT DISTINCT image_id FROM face_occurrences WHERE person_id = ?",
+            [person_id],
+        ).fetchall()
+        exclude_image_ids: set[int] = {r["image_id"] for r in person_occ_rows}
+
+        # 2. Compute person centroid from linked face embeddings.
+        centroid_rows = self.conn.execute(
+            "SELECT embedding FROM face_occurrences "
+            "WHERE person_id = ? AND embedding IS NOT NULL",
+            [person_id],
+        ).fetchall()
+        if not centroid_rows:
+            return []
+
+        vectors: list[Any] = []
+        for row in centroid_rows:
+            vec = _np.frombuffer(row["embedding"], dtype=_np.float32).copy()
+            norm = float(_np.linalg.norm(vec))
+            if norm > 0:
+                vectors.append((vec / norm).astype(_np.float32))
+        if not vectors:
+            return []
+
+        centroid = _np.vstack(vectors).mean(axis=0).astype(_np.float32)
+        c_norm = float(_np.linalg.norm(centroid))
+        if c_norm <= 0:
+            return []
+        centroid /= c_norm  # (512,)
+
+        # 3. Get cached embedding matrix (auto-rebuilds if stale).
+        matrix, occ_ids, img_ids, _p_ids = self._face_emb_cache.get(self.conn)
+        if matrix is None or len(occ_ids) == 0:
+            return []
+
+        # 4. Vectorised scoring: single BLAS call.
+        scores = matrix @ centroid  # (N,)
+
+        # 5. Group by image_id, take max similarity per image.
+        #    Exclude images already linked to this person.
+        best_per_image: dict[int, tuple[float, int]] = {}  # image_id → (score, occ_id)
+        for i in range(len(occ_ids)):
+            iid = img_ids[i]
+            if iid in exclude_image_ids:
+                continue
+            s = float(scores[i])
+            cur = best_per_image.get(iid)
+            if cur is None or s > cur[0]:
+                best_per_image[iid] = (s, occ_ids[i])
+
+        if not best_per_image:
+            return []
+
+        # 6. Sort by similarity descending, take top N.
+        ranked = sorted(best_per_image.items(), key=lambda x: x[1][0], reverse=True)[:limit]
+        result_image_ids = [r[0] for r in ranked]
+
+        # 7. Fetch file paths.
+        placeholders = ",".join("?" * len(result_image_ids))
+        path_rows = self.conn.execute(
+            f"SELECT id, file_path FROM images WHERE id IN ({placeholders})",
+            result_image_ids,
+        ).fetchall()
+        path_map = {r["id"]: r["file_path"] for r in path_rows}
+
+        return [
+            {
+                "image_id": iid,
+                "file_path": path_map.get(iid, ""),
+                "similarity": round(sim, 4),
+                "best_occurrence_id": occ_id,
+            }
+            for iid, (sim, occ_id) in ranked
+            if iid in path_map
+        ]
 
     # ── Embeddings (CLIP) ──────────────────────────────────────────────────
 

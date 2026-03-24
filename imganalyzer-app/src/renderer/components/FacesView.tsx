@@ -8,6 +8,7 @@ import type {
   PersonCluster,
   FaceLinkSuggestion,
   PersonLinkSuggestion,
+  PersonSimilarImage,
   SearchResult,
 } from '../global'
 import { AnalysisSidebar } from './SearchLightbox'
@@ -252,6 +253,91 @@ function ImageThumbnail({ filePath }: { filePath: string }) {
   )
 }
 
+// ── Similar image card with lazy thumbnail loading ────────────────────────────
+
+const SimilarImageCard = memo(function SimilarImageCard({
+  image,
+  cachedThumb,
+  onThumbLoaded,
+  onOpenLightbox,
+}: {
+  image: PersonSimilarImage
+  cachedThumb: string | undefined
+  onThumbLoaded: (filePath: string, thumb: string) => void
+  onOpenLightbox: (filePath: string, imageId: number) => void
+}) {
+  const [thumb, setThumb] = useState<string | null>(cachedThumb ?? null)
+  const [faceCrop, setFaceCrop] = useState<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (thumb) return
+    if (cachedThumb) { setThumb(cachedThumb); return }
+
+    let cancelled = false
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return
+        observer.disconnect()
+        window.api.getThumbnail(image.file_path).then((t) => {
+          if (!cancelled && t) {
+            setThumb(t)
+            onThumbLoaded(image.file_path, t)
+          }
+        }).catch(() => { /* ignore */ })
+      },
+      { rootMargin: '200px' }
+    )
+    if (containerRef.current) observer.observe(containerRef.current)
+    return () => { cancelled = true; observer.disconnect() }
+  }, [image.file_path, thumb, cachedThumb, onThumbLoaded])
+
+  useEffect(() => {
+    if (image.best_occurrence_id == null) return
+    let cancelled = false
+    window.api.getFaceCropBatch([image.best_occurrence_id]).then((res) => {
+      if (!cancelled) {
+        const crop = res.thumbnails?.[image.best_occurrence_id]
+        if (crop) setFaceCrop(crop)
+      }
+    }).catch(() => { /* ignore */ })
+    return () => { cancelled = true }
+  }, [image.best_occurrence_id])
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative rounded-xl border border-amber-800/40 bg-amber-950/10 hover:bg-amber-900/15 transition-colors cursor-pointer overflow-hidden"
+      onClick={() => onOpenLightbox(image.file_path, image.image_id)}
+    >
+      <div className="absolute left-2 top-2 rounded px-1.5 py-0.5 text-[10px] text-amber-200/80 bg-black/60 border border-amber-700/40 z-10">
+        {(image.similarity * 100).toFixed(1)}%
+      </div>
+      {faceCrop && (
+        <div className="absolute right-2 top-2 z-10 h-8 w-8 rounded-full border-2 border-amber-600/70 overflow-hidden bg-neutral-800">
+          <img src={`data:image/jpeg;base64,${faceCrop}`} alt="" className="h-full w-full object-cover" />
+        </div>
+      )}
+      <div className="aspect-[4/3] w-full overflow-hidden rounded-t-xl bg-neutral-800">
+        {thumb ? (
+          <img src={`data:image/jpeg;base64,${thumb}`} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center">
+            <svg className="h-8 w-8 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z" />
+            </svg>
+          </div>
+        )}
+      </div>
+      <div className="px-3 py-2">
+        <p className="truncate text-[11px] text-neutral-400">
+          {image.file_path.split(/[\\/]/).pop() ?? image.file_path}
+        </p>
+      </div>
+    </div>
+  )
+})
+
 // ── Inline image lightbox (for viewing source image in-app) ───────────────────
 
 function FaceImageLightbox({
@@ -461,6 +547,12 @@ export function FacesView() {
   // Inspector similarity suggestions
   const [inspectorSuggestions, setInspectorSuggestions] = useState<FaceLinkSuggestion[]>([])
   const [inspectorSuggestionsLoading, setInspectorSuggestionsLoading] = useState(false)
+
+  // Similar images for person (Suggested → Images sub-tab)
+  const [personSimilarImages, setPersonSimilarImages] = useState<Record<number, PersonSimilarImage[]>>({})
+  const [loadingPersonSimilarImagesId, setLoadingPersonSimilarImagesId] = useState<number | null>(null)
+  const [suggestedInnerTab, setSuggestedInnerTab] = useState<'clusters' | 'images'>('clusters')
+  const [similarImageThumbs, setSimilarImageThumbs] = useState<Record<string, string>>({}) // file_path → base64
 
   // ── Load data ─────────────────────────────────────────────────────────────
 
@@ -926,6 +1018,46 @@ export function FacesView() {
     [personLinkSuggestions]
   )
 
+  const loadPersonSimilarImages = useCallback(
+    async (personId: number, force = false) => {
+      if (!force && personSimilarImages[personId] !== undefined) {
+        return
+      }
+
+      const startedAt = performance.now()
+      setLoadingPersonSimilarImagesId(personId)
+      try {
+        const result = await window.api.getPersonSimilarImages(personId, 100)
+        if (result.error) {
+          setPersonSimilarImages((prev) => ({ ...prev, [personId]: [] }))
+          return
+        }
+        setPersonSimilarImages((prev) => ({ ...prev, [personId]: result.images }))
+
+        // Pre-load thumbnails for the first batch of images
+        const imagesToLoad = result.images.slice(0, 30)
+        for (const img of imagesToLoad) {
+          if (!similarImageThumbs[img.file_path]) {
+            window.api.getThumbnail(img.file_path).then((thumb) => {
+              if (thumb) {
+                setSimilarImageThumbs((prev) => ({ ...prev, [img.file_path]: thumb }))
+              }
+            }).catch(() => { /* ignore thumbnail failures */ })
+          }
+        }
+      } catch {
+        setPersonSimilarImages((prev) => ({ ...prev, [personId]: [] }))
+      } finally {
+        if (import.meta.env.DEV) {
+          const elapsed = Math.round(performance.now() - startedAt)
+          console.debug(`[FacesView] similarImages(${personId}) loaded in ${elapsed}ms`)
+        }
+        setLoadingPersonSimilarImagesId((current) => (current === personId ? null : current))
+      }
+    },
+    [personSimilarImages, similarImageThumbs]
+  )
+
   const loadPersonClusters = useCallback(
     async (personId: number, force = false) => {
       if (!force && personClusters[personId] !== undefined) {
@@ -1009,6 +1141,27 @@ export function FacesView() {
     loadPersonLinkSuggestions,
     loadingPersonLinkSuggestionsId,
     personLinkSuggestions,
+  ])
+
+  // Load similar images when the user switches to the Images sub-tab
+  useEffect(() => {
+    if (
+      expandedPersonId == null
+      || peopleStage !== 'suggested'
+      || suggestedInnerTab !== 'images'
+      || personSimilarImages[expandedPersonId] !== undefined
+      || loadingPersonSimilarImagesId === expandedPersonId
+    ) {
+      return
+    }
+    void loadPersonSimilarImages(expandedPersonId)
+  }, [
+    expandedPersonId,
+    peopleStage,
+    suggestedInnerTab,
+    loadPersonSimilarImages,
+    loadingPersonSimilarImagesId,
+    personSimilarImages,
   ])
 
   const toggleSuggestedClusterSelection = useCallback((clusterId: number) => {
@@ -2601,6 +2754,37 @@ export function FacesView() {
 
                     {peopleStage === 'suggested' && (
                       <div className="space-y-4">
+                        {/* Inner tab toggle: Clusters | Images */}
+                        <div className="flex items-center gap-3">
+                          <div className="flex shrink-0 rounded-full border border-neutral-700 bg-neutral-900 p-0.5 text-xs">
+                            <button
+                              type="button"
+                              onClick={() => setSuggestedInnerTab('clusters')}
+                              className={`rounded-full px-3 py-1 transition-colors ${
+                                suggestedInnerTab === 'clusters' ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-400 hover:text-neutral-200'
+                              }`}
+                            >
+                              Clusters <span className="text-neutral-500">{activeSuggestedClusters.length}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSuggestedInnerTab('images')}
+                              className={`rounded-full px-3 py-1 transition-colors ${
+                                suggestedInnerTab === 'images' ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-400 hover:text-neutral-200'
+                              }`}
+                            >
+                              Images <span className="text-neutral-500">
+                                {expandedPersonId != null
+                                  ? (personSimilarImages[expandedPersonId]?.length ?? (loadingPersonSimilarImagesId === expandedPersonId ? '…' : ''))
+                                  : ''}
+                              </span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* ── Clusters sub-tab ── */}
+                        {suggestedInnerTab === 'clusters' && (
+                          <>
                         <div className="flex flex-wrap items-center justify-between gap-3">
                           <div>
                             <p className="text-[11px] uppercase tracking-wide text-amber-300/90">Suggested links</p>
@@ -2773,6 +2957,45 @@ export function FacesView() {
                               : 'No suggested links from current embeddings.'}
                           </div>
                         ) : null}
+                          </>
+                        )}
+
+                        {/* ── Images sub-tab ── */}
+                        {suggestedInnerTab === 'images' && (
+                          <>
+                            <div>
+                              <p className="text-[11px] uppercase tracking-wide text-amber-300/90">Similar images</p>
+                              <p className="mt-1 text-xs text-neutral-500">
+                                Top images containing faces similar to {activePerson.name}.
+                              </p>
+                            </div>
+                            {loadingPersonSimilarImagesId === expandedPersonId ? (
+                              <div className="flex items-center gap-2 py-8 justify-center text-neutral-500 text-sm">
+                                <span className="h-4 w-4 rounded-full border-2 border-neutral-600 border-t-neutral-300 animate-spin" />
+                                Searching similar faces…
+                              </div>
+                            ) : (personSimilarImages[expandedPersonId!] ?? []).length > 0 ? (
+                              <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-4">
+                                {(personSimilarImages[expandedPersonId!] ?? []).map((img) => (
+                                  <SimilarImageCard
+                                    key={img.image_id}
+                                    image={img}
+                                    cachedThumb={similarImageThumbs[img.file_path]}
+                                    onThumbLoaded={(fp, t) => setSimilarImageThumbs((prev) => ({ ...prev, [fp]: t }))}
+                                    onOpenLightbox={(fp, iid) => {
+                                      setLightboxPath(fp)
+                                      setLightboxImageId(iid)
+                                    }}
+                                  />
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="rounded-xl border border-dashed border-neutral-800 px-4 py-10 text-sm text-neutral-600">
+                                No similar images found for this person.
+                              </div>
+                            )}
+                          </>
+                        )}
                       </div>
                     )}
 

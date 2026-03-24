@@ -3188,6 +3188,20 @@ def _handle_faces_person_link_suggestions(params: dict) -> dict:
     return {"suggestions": suggestions}
 
 
+def _handle_faces_person_similar_images(params: dict) -> dict:
+    """Find images containing faces similar to a person's identity."""
+    from imganalyzer.db.repository import Repository
+
+    person_id = int(params["person_id"])
+    limit = int(params.get("limit", 100))
+    limit = max(1, min(limit, 500))
+
+    conn = _get_db()
+    repo = Repository(conn)
+    images = repo.find_similar_images_for_person(person_id, limit=limit)
+    return {"images": images}
+
+
 def _handle_faces_cluster_images(params: dict) -> dict:
     """Get face occurrences for a specific cluster or identity."""
     from imganalyzer.db.repository import Repository
@@ -3642,6 +3656,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/person-unlink-cluster": _handle_faces_person_unlink,
     "faces/person-clusters": _handle_faces_person_clusters,
     "faces/person-link-suggestions": _handle_faces_person_link_suggestions,
+    "faces/person-similar-images": _handle_faces_person_similar_images,
 }
 
 # Methods that send their own result/error asynchronously (streaming).
