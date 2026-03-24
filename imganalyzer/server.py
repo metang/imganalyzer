@@ -3202,6 +3202,43 @@ def _handle_faces_person_similar_images(params: dict) -> dict:
     return {"images": images}
 
 
+def _handle_faces_person_link_occurrences(params: dict) -> dict:
+    """Link specific face occurrences to a person (direct link, no cluster required)."""
+    from imganalyzer.db.repository import Repository
+
+    person_id = int(params["person_id"])
+    occurrence_ids = [int(x) for x in params.get("occurrence_ids", [])]
+    if not occurrence_ids:
+        return {"ok": False, "updated": 0, "error": "No occurrence IDs provided"}
+
+    conn = _get_db()
+    repo = Repository(conn)
+    updated = repo.link_occurrences_to_person(occurrence_ids, person_id)
+    return {"ok": True, "updated": updated}
+
+
+def _handle_faces_person_unlink_occurrence(params: dict) -> dict:
+    """Unlink a single face occurrence from its person (clear person_id)."""
+    from imganalyzer.db.repository import Repository
+
+    occurrence_id = int(params["occurrence_id"])
+    conn = _get_db()
+    repo = Repository(conn)
+    updated = repo.unlink_occurrence_from_person(occurrence_id)
+    return {"ok": True, "updated": updated}
+
+
+def _handle_faces_person_direct_links(params: dict) -> dict:
+    """Get face occurrences directly linked to a person (not via cluster)."""
+    from imganalyzer.db.repository import Repository
+
+    person_id = int(params["person_id"])
+    conn = _get_db()
+    repo = Repository(conn)
+    links = repo.get_person_direct_links(person_id)
+    return {"links": links}
+
+
 def _handle_faces_cluster_images(params: dict) -> dict:
     """Get face occurrences for a specific cluster or identity."""
     from imganalyzer.db.repository import Repository
@@ -3657,6 +3694,9 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/person-clusters": _handle_faces_person_clusters,
     "faces/person-link-suggestions": _handle_faces_person_link_suggestions,
     "faces/person-similar-images": _handle_faces_person_similar_images,
+    "faces/person-link-occurrences": _handle_faces_person_link_occurrences,
+    "faces/person-unlink-occurrence": _handle_faces_person_unlink_occurrence,
+    "faces/person-direct-links": _handle_faces_person_direct_links,
 }
 
 # Methods that send their own result/error asynchronously (streaming).

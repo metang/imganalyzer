@@ -789,6 +789,78 @@ class Repository:
         self.conn.commit()
         return cur.rowcount
 
+    def link_occurrences_to_person(
+        self, occurrence_ids: list[int], person_id: int
+    ) -> int:
+        """Set person_id on specific face occurrences. Returns rows updated."""
+        if not occurrence_ids:
+            return 0
+        placeholders = ",".join("?" * len(occurrence_ids))
+        cur = self.conn.execute(
+            f"UPDATE face_occurrences SET person_id = ? WHERE id IN ({placeholders})",
+            [person_id, *occurrence_ids],
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def unlink_occurrence_from_person(self, occurrence_id: int) -> int:
+        """Clear person_id on a single face occurrence. Returns rows updated."""
+        cur = self.conn.execute(
+            "UPDATE face_occurrences SET person_id = NULL WHERE id = ?",
+            [occurrence_id],
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def get_person_direct_links(self, person_id: int) -> list[dict[str, Any]]:
+        """Return face occurrences linked directly to a person (not via a linked cluster).
+
+        These are occurrences where ``person_id`` is set but either:
+        - ``cluster_id`` is NULL, or
+        - the cluster is not linked to this person (majority of cluster has a different person_id).
+        """
+        # Find cluster IDs that are fully linked to this person
+        linked_cluster_rows = self.conn.execute(
+            """
+            SELECT DISTINCT cluster_id
+            FROM face_occurrences
+            WHERE person_id = ? AND cluster_id IS NOT NULL
+            GROUP BY cluster_id
+            HAVING COUNT(*) = SUM(CASE WHEN person_id = ? THEN 1 ELSE 0 END)
+            """,
+            [person_id, person_id],
+        ).fetchall()
+        linked_cluster_ids = {r["cluster_id"] for r in linked_cluster_rows}
+
+        rows = self.conn.execute(
+            """
+            SELECT fo.id AS occurrence_id, fo.image_id, fo.cluster_id,
+                   i.file_path
+            FROM face_occurrences fo
+            JOIN images i ON i.id = fo.image_id
+            WHERE fo.person_id = ?
+            ORDER BY fo.id DESC
+            """,
+            [person_id],
+        ).fetchall()
+
+        results: list[dict[str, Any]] = []
+        seen_images: set[int] = set()
+        for r in rows:
+            cid = r["cluster_id"]
+            if cid is not None and cid in linked_cluster_ids:
+                continue
+            iid = r["image_id"]
+            if iid in seen_images:
+                continue
+            seen_images.add(iid)
+            results.append({
+                "occurrence_id": r["occurrence_id"],
+                "image_id": iid,
+                "file_path": r["file_path"],
+            })
+        return results
+
     # ── Cluster defer (park for later) ───────────────────────────────────────
 
     def defer_cluster(self, cluster_id: int) -> None:

@@ -457,6 +457,12 @@ export interface PersonSimilarImage {
   best_occurrence_id: number
 }
 
+export interface PersonDirectLink {
+  occurrence_id: number
+  image_id: number
+  file_path: string
+}
+
 declare global {
   interface Window {
     api: {
@@ -517,6 +523,9 @@ declare global {
       getPersonClusters(personId: number): Promise<{ clusters: PersonCluster[]; error?: string }>
       getPersonLinkSuggestions(personId: number, limit?: number): Promise<{ suggestions: PersonLinkSuggestion[]; error?: string }>
       getPersonSimilarImages(personId: number, limit?: number): Promise<{ images: PersonSimilarImage[]; error?: string }>
+      linkOccurrencesToPerson(personId: number, occurrenceIds: number[]): Promise<{ ok: boolean; updated: number; error?: string }>
+      unlinkOccurrenceFromPerson(occurrenceId: number): Promise<{ ok: boolean; updated: number; error?: string }>
+      getPersonDirectLinks(personId: number): Promise<{ links: PersonDirectLink[]; error?: string }>
 
       // Batch processing
       batchIngest(

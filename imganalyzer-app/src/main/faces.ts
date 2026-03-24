@@ -235,6 +235,12 @@ export interface PersonSimilarImage {
   best_occurrence_id: number
 }
 
+export interface PersonDirectLink {
+  occurrence_id: number
+  image_id: number
+  file_path: string
+}
+
 // ── IPC Registration ──────────────────────────────────────────────────────────
 
 export function registerFaceHandlers(): void {
@@ -649,6 +655,52 @@ export function registerFaceHandlers(): void {
         return { images: result.images }
       } catch (err) {
         return { images: [], error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personLinkOccurrences',
+    async (_evt, personId: number, occurrenceIds: number[]): Promise<{ ok: boolean; updated: number; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/person-link-occurrences', {
+          person_id: personId,
+          occurrence_ids: occurrenceIds,
+        }) as { ok: boolean; updated: number }
+        return { ok: result.ok, updated: result.updated }
+      } catch (err) {
+        return { ok: false, updated: 0, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personUnlinkOccurrence',
+    async (_evt, occurrenceId: number): Promise<{ ok: boolean; updated: number; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/person-unlink-occurrence', {
+          occurrence_id: occurrenceId,
+        }) as { ok: boolean; updated: number }
+        return { ok: result.ok, updated: result.updated }
+      } catch (err) {
+        return { ok: false, updated: 0, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'faces:personDirectLinks',
+    async (_evt, personId: number): Promise<{ links: PersonDirectLink[]; error?: string }> => {
+      try {
+        await ensureServerRunning()
+        const result = await rpc.call('faces/person-direct-links', {
+          person_id: personId,
+        }) as { links: PersonDirectLink[] }
+        return { links: result.links }
+      } catch (err) {
+        return { links: [], error: String(err) }
       }
     }
   )

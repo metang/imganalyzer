@@ -288,4 +288,13 @@ contextBridge.exposeInMainWorld('api', {
 
   getPersonSimilarImages: (personId: number, limit?: number): Promise<{ images: Array<{ image_id: number; file_path: string; similarity: number; best_occurrence_id: number }>; error?: string }> =>
     ipcRenderer.invoke('faces:personSimilarImages', personId, limit),
+
+  linkOccurrencesToPerson: (personId: number, occurrenceIds: number[]): Promise<{ ok: boolean; updated: number; error?: string }> =>
+    ipcRenderer.invoke('faces:personLinkOccurrences', personId, occurrenceIds),
+
+  unlinkOccurrenceFromPerson: (occurrenceId: number): Promise<{ ok: boolean; updated: number; error?: string }> =>
+    ipcRenderer.invoke('faces:personUnlinkOccurrence', occurrenceId),
+
+  getPersonDirectLinks: (personId: number): Promise<{ links: Array<{ occurrence_id: number; image_id: number; file_path: string }>; error?: string }> =>
+    ipcRenderer.invoke('faces:personDirectLinks', personId),
 })
