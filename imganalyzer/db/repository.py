@@ -1849,7 +1849,7 @@ class Repository:
                     SELECT
                         ca.cluster_id,
                         ci.identity_name,
-                        COALESCE(fcl.display_name, fi.display_name) AS display_name,
+                        COALESCE(fcl.display_name, fp.name, fi.display_name) AS display_name,
                         fi.id AS identity_id,
                         ca.image_count,
                         ca.face_count,
@@ -1866,6 +1866,8 @@ class Repository:
                         ON fi.canonical_name = ci.identity_name
                     LEFT JOIN face_cluster_labels fcl
                         ON fcl.cluster_id = ca.cluster_id
+                    LEFT JOIN face_persons fp
+                        ON fp.id = cp.person_id
                 ),
                 unclustered_agg AS (
                     SELECT
