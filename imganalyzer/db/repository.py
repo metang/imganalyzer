@@ -2288,6 +2288,8 @@ class Repository:
             if iid in exclude_image_ids:
                 continue
             s = float(scores[i])
+            if s < 0.3:
+                continue
             cur = best_per_image.get(iid)
             if cur is None or s > cur[0]:
                 best_per_image[iid] = (s, occ_ids[i])

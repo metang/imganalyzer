@@ -257,40 +257,22 @@ function ImageThumbnail({ filePath }: { filePath: string }) {
 
 const SimilarImageCard = memo(function SimilarImageCard({
   image,
-  cachedThumb,
-  onThumbLoaded,
   onOpenLightbox,
 }: {
   image: PersonSimilarImage
-  cachedThumb: string | undefined
-  onThumbLoaded: (filePath: string, thumb: string) => void
   onOpenLightbox: (filePath: string, imageId: number) => void
 }) {
-  const [thumb, setThumb] = useState<string | null>(cachedThumb ?? null)
+  const [thumb, setThumb] = useState<string | null>(null)
   const [faceCrop, setFaceCrop] = useState<string | null>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
+  const requested = useRef(false)
 
   useEffect(() => {
-    if (thumb) return
-    if (cachedThumb) { setThumb(cachedThumb); return }
-
-    let cancelled = false
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry.isIntersecting) return
-        observer.disconnect()
-        window.api.getThumbnail(image.file_path).then((t) => {
-          if (!cancelled && t) {
-            setThumb(t)
-            onThumbLoaded(image.file_path, t)
-          }
-        }).catch(() => { /* ignore */ })
-      },
-      { rootMargin: '200px' }
-    )
-    if (containerRef.current) observer.observe(containerRef.current)
-    return () => { cancelled = true; observer.disconnect() }
-  }, [image.file_path, thumb, cachedThumb, onThumbLoaded])
+    if (requested.current) return
+    requested.current = true
+    window.api.getThumbnail(image.file_path)
+      .then((t) => { if (t) setThumb(`data:image/jpeg;base64,${t}`) })
+      .catch(() => { /* ignore */ })
+  }, [image.file_path])
 
   useEffect(() => {
     if (image.best_occurrence_id == null) return
@@ -306,7 +288,6 @@ const SimilarImageCard = memo(function SimilarImageCard({
 
   return (
     <div
-      ref={containerRef}
       className="relative rounded-xl border border-amber-800/40 bg-amber-950/10 hover:bg-amber-900/15 transition-colors cursor-pointer overflow-hidden"
       onClick={() => onOpenLightbox(image.file_path, image.image_id)}
     >
@@ -320,10 +301,10 @@ const SimilarImageCard = memo(function SimilarImageCard({
       )}
       <div className="aspect-[4/3] w-full overflow-hidden rounded-t-xl bg-neutral-800">
         {thumb ? (
-          <img src={`data:image/jpeg;base64,${thumb}`} alt="" className="h-full w-full object-cover" />
+          <img src={thumb} alt="" className="h-full w-full object-cover" />
         ) : (
           <div className="flex h-full w-full items-center justify-center">
-            <svg className="h-8 w-8 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
+            <svg className="h-8 w-8 text-neutral-700 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z" />
             </svg>
           </div>
@@ -552,7 +533,6 @@ export function FacesView() {
   const [personSimilarImages, setPersonSimilarImages] = useState<Record<number, PersonSimilarImage[]>>({})
   const [loadingPersonSimilarImagesId, setLoadingPersonSimilarImagesId] = useState<number | null>(null)
   const [suggestedInnerTab, setSuggestedInnerTab] = useState<'clusters' | 'images'>('clusters')
-  const [similarImageThumbs, setSimilarImageThumbs] = useState<Record<string, string>>({}) // file_path → base64
 
   // ── Load data ─────────────────────────────────────────────────────────────
 
@@ -1033,18 +1013,6 @@ export function FacesView() {
           return
         }
         setPersonSimilarImages((prev) => ({ ...prev, [personId]: result.images }))
-
-        // Pre-load thumbnails for the first batch of images
-        const imagesToLoad = result.images.slice(0, 30)
-        for (const img of imagesToLoad) {
-          if (!similarImageThumbs[img.file_path]) {
-            window.api.getThumbnail(img.file_path).then((thumb) => {
-              if (thumb) {
-                setSimilarImageThumbs((prev) => ({ ...prev, [img.file_path]: thumb }))
-              }
-            }).catch(() => { /* ignore thumbnail failures */ })
-          }
-        }
       } catch {
         setPersonSimilarImages((prev) => ({ ...prev, [personId]: [] }))
       } finally {
@@ -1055,7 +1023,7 @@ export function FacesView() {
         setLoadingPersonSimilarImagesId((current) => (current === personId ? null : current))
       }
     },
-    [personSimilarImages, similarImageThumbs]
+    [personSimilarImages]
   )
 
   const loadPersonClusters = useCallback(
@@ -2980,8 +2948,6 @@ export function FacesView() {
                                   <SimilarImageCard
                                     key={img.image_id}
                                     image={img}
-                                    cachedThumb={similarImageThumbs[img.file_path]}
-                                    onThumbLoaded={(fp, t) => setSimilarImageThumbs((prev) => ({ ...prev, [fp]: t }))}
                                     onOpenLightbox={(fp, iid) => {
                                       setLightboxPath(fp)
                                       setLightboxImageId(iid)
