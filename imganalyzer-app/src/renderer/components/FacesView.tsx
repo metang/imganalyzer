@@ -275,7 +275,7 @@ const SimilarImageCard = memo(function SimilarImageCard({
     if (requested.current) return
     requested.current = true
     window.api.getThumbnail(image.file_path)
-      .then((t) => { if (t) setThumb(`data:image/jpeg;base64,${t}`) })
+      .then((t) => { if (t) setThumb(t) })
       .catch(() => { /* ignore */ })
   }, [image.file_path])
 
@@ -367,7 +367,7 @@ const DirectLinkCard = memo(function DirectLinkCard({
     if (requested.current) return
     requested.current = true
     window.api.getThumbnail(link.file_path)
-      .then((t) => { if (t) setThumb(`data:image/jpeg;base64,${t}`) })
+      .then((t) => { if (t) setThumb(t) })
       .catch(() => { /* ignore */ })
   }, [link.file_path])
 
