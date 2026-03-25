@@ -113,7 +113,11 @@ function dedupeStrings(values: string[]): string[] {
 }
 
 function splitFaceInput(value: string): string[] {
-  return dedupeStrings(value.split(/[,\n]/))
+  return dedupeStrings(
+    value
+      .replace(/\r/g, '\n')
+      .split(/\s*(?:,|;|\n|\band\b|&)\s*/i)
+  )
 }
 
 function parseQuery(raw: string): ParsedQuery {
@@ -349,7 +353,9 @@ function buildFilters(draft: SearchDraft): SearchFilters {
   if (faces.length > 0) {
     filters.faces = faces
     filters.face = faces[0]
-    if (faces.length > 1) filters.faceMatch = draft.faceMatch
+    if (faces.length > 1) {
+      filters.faceMatch = patches.faceMatch ?? (draft.faces.length > 1 ? draft.faceMatch : 'all')
+    }
   }
   if (draft.country.trim()) filters.country = draft.country.trim()
   if (draft.location.trim()) filters.location = draft.location.trim()
@@ -807,7 +813,7 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                     setDraft((prev) => ({
                       ...prev,
                       faces,
-                      faceMatch: faces.length > 1 ? prev.faceMatch : 'all',
+                      faceMatch: 'all',
                     }))
                   }}
                 />
