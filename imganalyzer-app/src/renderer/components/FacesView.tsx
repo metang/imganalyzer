@@ -23,7 +23,7 @@ const pendingCallbacks = new Map<number, Array<(src: string | null) => void>>()
 let batchTimer: ReturnType<typeof setTimeout> | null = null
 
 const CLUSTER_PAGE_SIZE = 200
-const UNLINKED_CLUSTER_TARGET = 60
+const UNLINKED_CLUSTER_TARGET = 100
 const DEFAULT_SIMILARITY_THRESHOLD = 0.35
 
 function normalizeImageSrc(value: string | null | undefined): string | null {
@@ -42,9 +42,18 @@ function normalizeImageSrc(value: string | null | undefined): string | null {
   return `data:image/jpeg;base64,${trimmed}`
 }
 
-function countUnlinkedClusters(clusters: FaceCluster[]): number {
+function countActiveUnlinkedClusters(
+  clusters: FaceCluster[],
+  deferredClusterIds: Set<number>,
+): number {
   return clusters.reduce(
-    (count, cluster) => (cluster.cluster_id !== null && !cluster.person_id ? count + 1 : count),
+    (count, cluster) => (
+      cluster.cluster_id !== null
+      && !cluster.person_id
+      && !deferredClusterIds.has(cluster.cluster_id)
+        ? count + 1
+        : count
+    ),
     0,
   )
 }
@@ -678,11 +687,13 @@ export function FacesView() {
       if (clusterResult.has_occurrences && clusterResult.clusters.length > 0) {
         let loadedClusters = clusterResult.clusters
         let loadedTotalCount = clusterResult.total_count
+        const deferredIds = new Set(clusterResult.deferred_cluster_ids ?? [])
+        setDeferredClusterIds(deferredIds)
         const shouldEnsureUnlinked = !personsResult.error && personsResult.persons.length > 0
 
         if (shouldEnsureUnlinked) {
           let offset = loadedClusters.length
-          let unlinkedCount = countUnlinkedClusters(loadedClusters)
+          let unlinkedCount = countActiveUnlinkedClusters(loadedClusters, deferredIds)
 
           while (unlinkedCount < UNLINKED_CLUSTER_TARGET && offset < loadedTotalCount) {
             const nextPage = await window.api.listFaceClusters(CLUSTER_PAGE_SIZE, offset)
@@ -696,7 +707,7 @@ export function FacesView() {
             loadedClusters = [...loadedClusters, ...nextPage.clusters]
             loadedTotalCount = nextPage.total_count
             offset = loadedClusters.length
-            unlinkedCount = countUnlinkedClusters(loadedClusters)
+            unlinkedCount = countActiveUnlinkedClusters(loadedClusters, deferredIds)
           }
         }
 
@@ -704,8 +715,6 @@ export function FacesView() {
         setHasOccurrences(true)
         setClusters(loadedClusters)
         setLegacyFaces([])
-        // Extract deferred cluster IDs from first page response
-        setDeferredClusterIds(new Set(clusterResult.deferred_cluster_ids ?? []))
       } else {
         setTotalClusterCount(clusterResult.total_count)
         // Fallback to legacy identity-name mode
