@@ -639,6 +639,325 @@ class SearchEngine:
         if not channels:
             return []
 
+        informative_tokens = [
+            token.casefold()
+            for token in _FTS_TOKEN_RE.findall(query)
+            if len(token) >= 4
+        ]
+        # Require that all informative query tokens exist in the authoritative
+        # current analysis text for lexical FTS hits. This filters stale token
+        # ghosts and weak OR-only matches (e.g. "woman in tube" matching images
+        # that only contain "woman").
+        required_tokens: list[str] = []
+        if strict_query:
+            required_tokens = informative_tokens
+        elif phrase_query:
+            required_tokens = informative_tokens
+        elif subphrase_query:
+            subphrase_tokens = [
+                token.casefold()
+                for token in _FTS_TOKEN_RE.findall(subphrase_query)
+                if len(token) >= 4
+            ]
+            required_tokens = list(dict.fromkeys(subphrase_tokens)) or informative_tokens
+        else:
+            required_tokens = []
+        enforce_consistency_guard = len(required_tokens) >= 2
+        min_token_overlap = (
+            len(required_tokens)
+            if len(required_tokens) <= 2
+            else 2 if len(required_tokens) == 3 else 1
+        )
+        table_exists_cache: dict[str, bool] = {}
+        table_columns_cache: dict[str, set[str]] = {}
+        current_text_cache: dict[int, str] = {}
+        search_row_text_cache: dict[int, str] = {}
+        has_analysis_rows_cache: dict[int, bool] = {}
+        has_any_analysis_data: bool | None = None
+
+        def _table_exists(name: str) -> bool:
+            exists = table_exists_cache.get(name)
+            if exists is None:
+                exists = self.repo._table_exists(name)
+                table_exists_cache[name] = exists
+            return exists
+
+        def _table_columns(name: str) -> set[str]:
+            cols = table_columns_cache.get(name)
+            if cols is None:
+                try:
+                    rows = self.conn.execute(f"PRAGMA table_info({name})").fetchall()
+                except sqlite3.OperationalError:
+                    cols = set()
+                else:
+                    cols = {str(row["name"]) for row in rows}
+                table_columns_cache[name] = cols
+            return cols
+
+        def _first_available(columns: set[str], *candidates: str) -> str | None:
+            for candidate in candidates:
+                if candidate in columns:
+                    return candidate
+            return None
+
+        def _extend_json_text(parts: list[str], raw: Any) -> None:
+            if raw is None:
+                return
+            if isinstance(raw, list):
+                parts.extend(str(item) for item in raw if item is not None)
+                return
+            if not isinstance(raw, str):
+                parts.append(str(raw))
+                return
+            text = raw.strip()
+            if not text:
+                return
+            try:
+                decoded = json.loads(text)
+            except (TypeError, ValueError):
+                parts.append(text)
+                return
+            if isinstance(decoded, list):
+                parts.extend(str(item) for item in decoded if item is not None)
+            elif decoded is not None:
+                parts.append(str(decoded))
+
+        def _build_authoritative_text_blob(image_id: int) -> str:
+            cached = current_text_cache.get(image_id)
+            if cached is not None:
+                return cached
+
+            parts: list[str] = []
+
+            if _table_exists("analysis_caption"):
+                caption_cols = _table_columns("analysis_caption")
+                if not caption_cols:
+                    caption_cols = {"description", "scene_type", "main_subject", "keywords", "mood", "lighting", "detected_objects", "face_identities", "ocr_text"}
+                desc_col = _first_available(caption_cols, "description")
+                scene_col = _first_available(caption_cols, "scene_type")
+                subject_col = _first_available(caption_cols, "main_subject")
+                keywords_col = _first_available(caption_cols, "keywords")
+                mood_col = _first_available(caption_cols, "mood")
+                lighting_col = _first_available(caption_cols, "lighting")
+                objects_col = _first_available(caption_cols, "detected_objects")
+                faces_col = _first_available(caption_cols, "face_identities")
+                ocr_col = _first_available(caption_cols, "ocr_text")
+
+                select_cols = [col for col in (
+                    desc_col,
+                    scene_col,
+                    subject_col,
+                    keywords_col,
+                    mood_col,
+                    lighting_col,
+                    objects_col,
+                    faces_col,
+                    ocr_col,
+                ) if col]
+                if not select_cols:
+                    select_cols = ["description"]
+                row = self.conn.execute(
+                    f"SELECT {', '.join(select_cols)} FROM analysis_caption WHERE image_id = ?",
+                    [image_id],
+                ).fetchone()
+                if row:
+                    for field in (desc_col, scene_col, subject_col, mood_col, lighting_col, ocr_col):
+                        if field and field in row.keys() and row[field]:
+                            parts.append(str(row[field]))
+                    if keywords_col and keywords_col in row.keys():
+                        _extend_json_text(parts, row[keywords_col])
+                    if objects_col and objects_col in row.keys():
+                        _extend_json_text(parts, row[objects_col])
+                    if faces_col and faces_col in row.keys():
+                        _extend_json_text(parts, row[faces_col])
+            elif _table_exists("search_index"):
+                row = self.conn.execute(
+                    """
+                    SELECT description_text, subjects_text, keywords_text, faces_text, exif_text
+                    FROM search_index
+                    WHERE rowid = ?
+                    """,
+                    [image_id],
+                ).fetchone()
+                if row:
+                    for field in ("description_text", "subjects_text", "keywords_text", "faces_text", "exif_text"):
+                        if row[field]:
+                            parts.append(str(row[field]))
+
+            if _table_exists("analysis_blip2"):
+                blip_cols = _table_columns("analysis_blip2")
+                desc_col = _first_available(blip_cols, "description")
+                scene_col = _first_available(blip_cols, "scene_type")
+                subject_col = _first_available(blip_cols, "main_subject")
+                keywords_col = _first_available(blip_cols, "keywords")
+                mood_col = _first_available(blip_cols, "mood")
+                lighting_col = _first_available(blip_cols, "lighting")
+                select_cols = [col for col in (desc_col, scene_col, subject_col, keywords_col, mood_col, lighting_col) if col]
+                if not select_cols:
+                    select_cols = ["description"]
+                row = self.conn.execute(
+                    f"SELECT {', '.join(select_cols)} FROM analysis_blip2 WHERE image_id = ?",
+                    [image_id],
+                ).fetchone()
+                if row:
+                    for field in (desc_col, scene_col, subject_col, mood_col, lighting_col):
+                        if field and field in row.keys() and row[field]:
+                            parts.append(str(row[field]))
+                    if keywords_col and keywords_col in row.keys():
+                        _extend_json_text(parts, row[keywords_col])
+
+            if _table_exists("analysis_cloud_ai"):
+                cloud_cols = _table_columns("analysis_cloud_ai")
+                desc_col = _first_available(cloud_cols, "description")
+                scene_col = _first_available(cloud_cols, "scene_type")
+                subject_col = _first_available(cloud_cols, "main_subject")
+                keywords_col = _first_available(cloud_cols, "keywords")
+                analyzed_at_col = _first_available(cloud_cols, "analyzed_at")
+                id_col = _first_available(cloud_cols, "id")
+                select_cols = [col for col in (desc_col, scene_col, subject_col, keywords_col) if col]
+                if not select_cols:
+                    select_cols = ["description"]
+                order_by_parts: list[str] = []
+                if analyzed_at_col:
+                    order_by_parts.append(f"{analyzed_at_col} DESC")
+                if id_col:
+                    order_by_parts.append(f"{id_col} DESC")
+                order_by = f" ORDER BY {', '.join(order_by_parts)}" if order_by_parts else ""
+                rows = self.conn.execute(
+                    f"SELECT {', '.join(select_cols)} FROM analysis_cloud_ai WHERE image_id = ?{order_by}",
+                    [image_id],
+                ).fetchall()
+                for row in rows:
+                    for field in (desc_col, scene_col, subject_col):
+                        if field and field in row.keys() and row[field]:
+                            parts.append(str(row[field]))
+                    if keywords_col and keywords_col in row.keys():
+                        _extend_json_text(parts, row[keywords_col])
+
+            if _table_exists("analysis_faces"):
+                row = self.conn.execute(
+                    "SELECT face_identities FROM analysis_faces WHERE image_id = ?",
+                    [image_id],
+                ).fetchone()
+                if row:
+                    _extend_json_text(parts, row["face_identities"])
+
+            if _table_exists("analysis_metadata"):
+                row = self.conn.execute(
+                    """
+                    SELECT camera_make, camera_model, lens_model,
+                           location_city, location_state, location_country
+                    FROM analysis_metadata
+                    WHERE image_id = ?
+                    """,
+                    [image_id],
+                ).fetchone()
+                if row:
+                    for field in (
+                        "camera_make",
+                        "camera_model",
+                        "lens_model",
+                        "location_city",
+                        "location_state",
+                        "location_country",
+                    ):
+                        if row[field]:
+                            parts.append(str(row[field]))
+
+            blob = " ".join(parts).casefold()
+            current_text_cache[image_id] = blob
+            return blob
+
+        def _build_search_index_row_blob(image_id: int) -> str:
+            cached = search_row_text_cache.get(image_id)
+            if cached is not None:
+                return cached
+            row = self.conn.execute(
+                """
+                SELECT description_text, subjects_text, keywords_text, faces_text, exif_text
+                FROM search_index
+                WHERE rowid = ?
+                """,
+                [image_id],
+            ).fetchone()
+            if row is None:
+                blob = ""
+            else:
+                blob = " ".join(
+                    str(row[field])
+                    for field in ("description_text", "subjects_text", "keywords_text", "faces_text", "exif_text")
+                    if row[field]
+                ).casefold()
+            search_row_text_cache[image_id] = blob
+            return blob
+
+        def _has_analysis_rows(image_id: int) -> bool:
+            cached = has_analysis_rows_cache.get(image_id)
+            if cached is not None:
+                return cached
+
+            checks = (
+                "analysis_caption",
+                "analysis_blip2",
+                "analysis_cloud_ai",
+                "analysis_faces",
+            )
+            found = False
+            for table in checks:
+                if not _table_exists(table):
+                    continue
+                row = self.conn.execute(
+                    f"SELECT 1 FROM {table} WHERE image_id = ? LIMIT 1",
+                    [image_id],
+                ).fetchone()
+                if row is not None:
+                    found = True
+                    break
+
+            has_analysis_rows_cache[image_id] = found
+            return found
+
+        def _has_any_text_analysis_data() -> bool:
+            nonlocal has_any_analysis_data
+            if has_any_analysis_data is not None:
+                return has_any_analysis_data
+
+            checks = (
+                "analysis_caption",
+                "analysis_blip2",
+                "analysis_cloud_ai",
+                "analysis_faces",
+            )
+            has_any = False
+            for table in checks:
+                if not _table_exists(table):
+                    continue
+                row = self.conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                if row is not None:
+                    has_any = True
+                    break
+            has_any_analysis_data = has_any
+            return has_any
+
+        def _passes_consistency_guard(image_id: int) -> bool:
+            if not enforce_consistency_guard:
+                return True
+            # Test fixtures and minimal DBs may only have search_index rows and no
+            # analysis tables populated. In that case, keep legacy behavior.
+            if not _has_any_text_analysis_data():
+                return True
+            if _has_analysis_rows(image_id):
+                blob = _build_authoritative_text_blob(image_id)
+            else:
+                # For rows without current analysis tables, only trust visible
+                # FTS row text. Legacy ghost-token rows in contentless FTS often
+                # have empty visible columns but still match via stale postings.
+                blob = _build_search_index_row_blob(image_id)
+                if not blob:
+                    return False
+            overlap = sum(1 for token in required_tokens if token in blob)
+            return overlap >= min_token_overlap
+
         channel_limit_base = max(limit, 40)
         fused_scores: dict[int, float] = {}
         path_by_id: dict[int, str] = {}
@@ -662,6 +981,8 @@ class SearchEngine:
             ).fetchall()
             for rank, row in enumerate(rows):
                 image_id = int(row["image_id"])
+                if enforce_consistency_guard and not _passes_consistency_guard(image_id):
+                    continue
                 fused_scores[image_id] = fused_scores.get(image_id, 0.0) + (weight * _rrf_score(rank))
                 path_by_id.setdefault(image_id, row["file_path"])
                 snippet_by_id.setdefault(image_id, row["snippet"])

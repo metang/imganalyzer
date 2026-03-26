@@ -1592,7 +1592,7 @@ def _handle_jobs_complete(params: dict) -> dict:
             payload=payload,
         )
         if module_name in _DISTRIBUTED_SEARCH_MODULES:
-            repo.update_search_index(image_id)
+            repo.update_search_artifacts(image_id)
 
         conn.execute(
             """UPDATE job_queue

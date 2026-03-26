@@ -246,7 +246,7 @@ def _persist_result_to_db(
                     cloud_data.pop("aesthetic_reason", None)
                     repo.upsert_cloud_ai(image_id, ai_backend, cloud_data)
 
-            repo.update_search_index(image_id)
+            repo.update_search_artifacts(image_id)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")

@@ -1981,11 +1981,11 @@ class TestWorkerFlushRecovery:
         worker = Worker(conn, workers=1)
         worker._fts_dirty = {101, 102}
 
-        def _update_search_index(image_id: int) -> None:
+        def _update_search_artifacts(image_id: int) -> None:
             if image_id == 102:
                 raise RuntimeError("fts rebuild failed")
 
-        worker.repo.update_search_index = _update_search_index  # type: ignore[method-assign]
+        worker.repo.update_search_artifacts = _update_search_artifacts  # type: ignore[method-assign]
 
         rebuilt = worker._flush_fts_dirty()
         assert rebuilt == 1
@@ -2186,6 +2186,117 @@ class TestSearchIndex:
             ["Canon"],
         ).fetchone()
         assert row is not None
+
+    def test_search_index_update_replaces_old_tokens(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        img_id = repo.register_image(file_path="/photos/token-update.jpg")
+
+        repo.upsert_caption(img_id, {
+            "description": "pink cloud sky",
+            "scene_type": "sky",
+            "main_subject": "cloud",
+            "keywords": ["pink", "cloud"],
+            "face_count": 0,
+            "has_people": False,
+        })
+        repo.update_search_artifacts(img_id)
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT rowid FROM search_index WHERE search_index MATCH ? AND rowid = ?",
+            ["pink", img_id],
+        ).fetchone()
+        assert row is not None
+
+        repo.upsert_caption(img_id, {
+            "description": "child with red boots on street",
+            "scene_type": "street",
+            "main_subject": "child",
+            "keywords": ["child", "boots"],
+            "face_count": 0,
+            "has_people": False,
+        })
+        repo.update_search_artifacts(img_id)
+        conn.commit()
+
+        old_row = conn.execute(
+            "SELECT rowid FROM search_index WHERE search_index MATCH ? AND rowid = ?",
+            ["pink", img_id],
+        ).fetchone()
+        assert old_row is None
+
+        new_row = conn.execute(
+            "SELECT rowid FROM search_index WHERE search_index MATCH ? AND rowid = ?",
+            ["child", img_id],
+        ).fetchone()
+        assert new_row is not None
+
+    def test_search_index_update_replaces_tokens_on_legacy_contentless_table(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        # Simulate legacy DBs created before contentless_delete support.
+        conn.execute("DROP TABLE IF EXISTS search_index")
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE search_index USING fts5(
+                image_id,
+                description_text,
+                subjects_text,
+                keywords_text,
+                faces_text,
+                exif_text,
+                content='',
+                tokenize='porter unicode61'
+            )
+            """
+        )
+
+        img_id = repo.register_image(file_path="/photos/legacy-contentless.jpg")
+        repo.upsert_caption(img_id, {
+            "description": "pink cloud sky",
+            "scene_type": "sky",
+            "main_subject": "cloud",
+            "keywords": ["pink", "cloud"],
+            "face_count": 0,
+            "has_people": False,
+        })
+        repo.update_search_artifacts(img_id)
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT rowid FROM search_index WHERE search_index MATCH ? AND rowid = ?",
+            ["pink", img_id],
+        ).fetchone()
+        assert row is not None
+
+        # Existing-row refresh should remove old tokens even on legacy contentless FTS.
+        repo.upsert_caption(img_id, {
+            "description": "child with red boots on street",
+            "scene_type": "street",
+            "main_subject": "child",
+            "keywords": ["child", "boots"],
+            "face_count": 0,
+            "has_people": False,
+        })
+        repo.update_search_artifacts(img_id)
+        conn.commit()
+
+        old_row = conn.execute(
+            "SELECT rowid FROM search_index WHERE search_index MATCH ? AND rowid = ?",
+            ["pink", img_id],
+        ).fetchone()
+        assert old_row is None
+
+        new_row = conn.execute(
+            "SELECT rowid FROM search_index WHERE search_index MATCH ? AND rowid = ?",
+            ["child", img_id],
+        ).fetchone()
+        assert new_row is not None
 
 
 class TestFaceIdentityDB:

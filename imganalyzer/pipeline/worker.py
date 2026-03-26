@@ -1332,9 +1332,13 @@ class Worker:
                 try:
                     for image_id in chunk:
                         try:
-                            self.repo.update_search_index(image_id)
-                        except Exception:
+                            self.repo.update_search_artifacts(image_id)
+                        except Exception as exc:
                             failed_ids.append(image_id)
+                            if self.verbose:
+                                console.print(
+                                    f"  [yellow]FTS refresh failed for image {image_id}: {exc}[/yellow]"
+                                )
                     self.conn.commit()
                 except Exception:
                     self.conn.rollback()
@@ -1415,10 +1419,14 @@ class Worker:
             try:
                 for image_id in chunk:
                     try:
-                        self.repo.update_search_index(image_id)
+                        self.repo.update_search_artifacts(image_id)
                         rebuilt += 1
-                    except Exception:
+                    except Exception as exc:
                         failed_ids.append(image_id)
+                        if self.verbose:
+                            console.print(
+                                f"  [yellow]FTS refresh failed for image {image_id}: {exc}[/yellow]"
+                            )
                 self.conn.commit()
             except Exception:
                 self.conn.rollback()

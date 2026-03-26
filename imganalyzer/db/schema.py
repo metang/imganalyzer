@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -50,6 +50,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         24: _migrate_v24,
         25: _migrate_v25,
         26: _migrate_v26,
+        27: _migrate_v27,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -847,3 +848,54 @@ def _migrate_v26(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_search_features_quality
             ON search_features(perception_iaa, sharpness_score, noise_level);
     """)
+
+
+def _migrate_v27(conn: sqlite3.Connection) -> None:
+    """Enable safer FTS delete semantics where supported.
+
+    Existing databases may have large contentless FTS indexes; rebuilding them
+    in migration could be very expensive. We only recreate the table when it's
+    empty. Otherwise, runtime update logic handles legacy contentless deletes.
+    """
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='search_index'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    row = conn.execute("SELECT COUNT(*) AS cnt FROM search_index").fetchone()
+    if row is None or int(row["cnt"]) != 0:
+        return
+
+    conn.execute("DROP TABLE IF EXISTS search_index")
+    try:
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE search_index USING fts5(
+                image_id,
+                description_text,
+                subjects_text,
+                keywords_text,
+                faces_text,
+                exif_text,
+                content='',
+                contentless_delete=1,
+                tokenize='porter unicode61'
+            )
+            """
+        )
+    except sqlite3.OperationalError:
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE search_index USING fts5(
+                image_id,
+                description_text,
+                subjects_text,
+                keywords_text,
+                faces_text,
+                exif_text,
+                content='',
+                tokenize='porter unicode61'
+            )
+            """
+        )

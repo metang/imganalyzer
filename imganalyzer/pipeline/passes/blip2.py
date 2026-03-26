@@ -23,7 +23,7 @@ def run_blip2(
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_blip2(image_id, result)
-        repo.update_search_index(image_id)
+        repo.update_search_artifacts(image_id)
 
     return result
 
@@ -46,6 +46,6 @@ def run_blip2_batch(
     with _transaction(conn):
         for image_id, result in zip(image_ids, results):
             repo.upsert_blip2(image_id, result)
-            repo.update_search_index(image_id)
+            repo.update_search_artifacts(image_id)
 
     return results

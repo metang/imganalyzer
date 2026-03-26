@@ -2424,6 +2424,64 @@ class Repository:
 
     # ── Search index ───────────────────────────────────────────────────────
 
+    _SEARCH_INDEX_COLS = (
+        "image_id",
+        "description_text",
+        "subjects_text",
+        "keywords_text",
+        "faces_text",
+        "exif_text",
+    )
+
+    def _delete_search_index_row(self, image_id: int) -> None:
+        """Delete one FTS row, including legacy contentless fallback path."""
+        try:
+            self.conn.execute("DELETE FROM search_index WHERE rowid = ?", [image_id])
+            return
+        except sqlite3.OperationalError as exc:
+            # Legacy DBs use contentless FTS without contentless_delete=1.
+            # Plain DELETE fails there; use explicit FTS delete command with the
+            # currently indexed token stream for the target doc.
+            if "contentless fts5 table" not in str(exc).lower():
+                raise
+        self._delete_search_index_row_contentless(image_id)
+
+    def _delete_search_index_row_contentless(self, image_id: int) -> None:
+        """Delete a row from legacy contentless FTS using fts5vocab terms."""
+        self.conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS search_index_vocab "
+            "USING fts5vocab(search_index, 'instance')"
+        )
+        vocab_rows = self.conn.execute(
+            """
+            SELECT term, col, offset
+            FROM search_index_vocab
+            WHERE doc = ?
+            ORDER BY col, offset
+            """,
+            [image_id],
+        ).fetchall()
+        if not vocab_rows:
+            return
+
+        tokens_by_col: dict[str, list[str]] = {col: [] for col in self._SEARCH_INDEX_COLS}
+        for row in vocab_rows:
+            col = row["col"]
+            if col in tokens_by_col:
+                tokens_by_col[col].append(row["term"])
+
+        delete_values = [" ".join(tokens_by_col[col]) for col in self._SEARCH_INDEX_COLS]
+        self.conn.execute(
+            """
+            INSERT INTO search_index(
+                search_index, rowid, image_id, description_text,
+                subjects_text, keywords_text, faces_text, exif_text
+            )
+            VALUES('delete', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [image_id, *delete_values],
+        )
+
     def update_search_index(self, image_id: int) -> None:
         """Rebuild search artifacts for a single image.
 
@@ -2568,10 +2626,9 @@ class Repository:
         kw_parts = list(dict.fromkeys(kw_parts))
         faces_parts = list(dict.fromkeys(faces_parts))
 
-        # Delete old entry then insert
-        self.conn.execute(
-            "DELETE FROM search_index WHERE rowid = ?", [image_id]
-        )
+        # Delete old entry then insert.
+        # Legacy contentless FTS DBs require explicit delete command semantics.
+        self._delete_search_index_row(image_id)
         self.conn.execute(
             """INSERT INTO search_index
                (rowid, image_id, description_text, subjects_text, keywords_text, faces_text, exif_text)

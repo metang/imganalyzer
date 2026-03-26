@@ -40,7 +40,7 @@ def run_ollama_ai(
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_blip2(image_id, result)
-        repo.update_search_index(image_id)
+        repo.update_search_artifacts(image_id)
 
     return result
 
@@ -72,6 +72,6 @@ def run_ollama_ai_for_cloud(
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_cloud_ai(image_id, "ollama-qwen3.5", result)
-        repo.update_search_index(image_id)
+        repo.update_search_artifacts(image_id)
 
     return result

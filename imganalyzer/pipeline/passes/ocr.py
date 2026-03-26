@@ -49,6 +49,6 @@ def run_ocr(
     from imganalyzer.pipeline.modules import _transaction
     with _transaction(conn):
         repo.upsert_ocr(image_id, result)
-        repo.update_search_index(image_id)
+        repo.update_search_artifacts(image_id)
 
     return result
