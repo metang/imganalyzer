@@ -2901,6 +2901,93 @@ class TestFacePersons:
         ).fetchall()
         assert {row["person_id"] for row in person_ids} == {None}
 
+    def test_get_person_direct_links_excludes_only_fully_linked_clusters(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        # Images
+        for i in range(1, 5):
+            conn.execute(
+                "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+                [i, f"/img/direct_{i}.jpg", f"hash_direct_{i}", 100],
+            )
+
+        pid = repo.create_person("Direct Link Person")
+        other_pid = repo.create_person("Other Person")
+
+        emb = np.zeros(512, dtype=np.float32).tobytes()
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, person_id, identity_name, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                # Cluster 10 is fully linked to pid -> should be excluded from direct links
+                (1, 1, 0, emb, 10, pid, "Unknown", 0.0, 0.0, 1.0, 1.0),
+                (2, 1, 1, emb, 10, pid, "Unknown", 0.0, 0.0, 1.0, 1.0),
+                # Cluster 20 is partially linked -> should be included as direct link
+                (3, 2, 0, emb, 20, pid, "Unknown", 0.0, 0.0, 1.0, 1.0),
+                (4, 2, 1, emb, 20, None, "Unknown", 0.0, 0.0, 1.0, 1.0),
+                # Cluster 30 has only one linked occurrence for pid but others for another person
+                (5, 3, 0, emb, 30, pid, "Unknown", 0.0, 0.0, 1.0, 1.0),
+                (6, 3, 1, emb, 30, other_pid, "Unknown", 0.0, 0.0, 1.0, 1.0),
+                # Unclustered linked occurrence -> should be included
+                (7, 4, 0, emb, None, pid, "Unknown", 0.0, 0.0, 1.0, 1.0),
+            ],
+        )
+        conn.commit()
+
+        links = repo.get_person_direct_links(pid)
+        image_ids = {row["image_id"] for row in links}
+        assert 1 not in image_ids
+        assert 2 in image_ids
+        assert 3 in image_ids
+        assert 4 in image_ids
+
+    def test_find_similar_images_for_person_respects_min_similarity(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        for i in range(1, 4):
+            conn.execute(
+                "INSERT INTO images (id, file_path, file_hash, file_size) VALUES (?, ?, ?, ?)",
+                [i, f"/img/sim_{i}.jpg", f"hash_sim_{i}", 100],
+            )
+
+        pid = repo.create_person("Similarity Person")
+
+        def emb(values: list[float]) -> bytes:
+            vec = np.array(values, dtype=np.float32)
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            return vec.tobytes()
+
+        conn.executemany(
+            "INSERT INTO face_occurrences (id, image_id, face_idx, embedding, cluster_id, person_id, identity_name, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                # Person reference embedding (image 1 is excluded from results)
+                (1, 1, 0, emb([1.0, 0.0, 0.0]), 10, pid, "Unknown", 0.0, 0.0, 1.0, 1.0),
+                # High-similarity candidate (~0.80)
+                (2, 2, 0, emb([0.8, 0.6, 0.0]), 20, None, "Unknown", 0.0, 0.0, 1.0, 1.0),
+                # Borderline candidate (~0.34)
+                (3, 3, 0, emb([0.34, 0.94, 0.0]), 30, None, "Unknown", 0.0, 0.0, 1.0, 1.0),
+            ],
+        )
+        conn.commit()
+
+        relaxed = repo.find_similar_images_for_person(pid, limit=10, min_similarity=0.3)
+        strict = repo.find_similar_images_for_person(pid, limit=10, min_similarity=0.5)
+
+        relaxed_ids = {row["image_id"] for row in relaxed}
+        strict_ids = {row["image_id"] for row in strict}
+
+        assert relaxed_ids == {2, 3}
+        assert strict_ids == {2}
+
 
 class TestPersistResultToDB:
     """Test the _persist_result_to_db helper used by the analyze command."""
@@ -2951,7 +3038,7 @@ class TestPersistResultToDB:
         data = dict(result.ai_analysis)
         data.setdefault("has_people", bool(data.get("face_count", 0) > 0))
         repo.upsert_caption(image_id, data)
-        repo.update_search_index(image_id)
+        repo.update_search_artifacts(image_id)
         conn.execute("COMMIT")
 
         # Verify everything was stored

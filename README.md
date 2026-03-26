@@ -1,6 +1,6 @@
 # imganalyzer
 
-> A powerful CLI tool for analyzing images and camera RAW files. Extracts EXIF metadata, computes technical quality scores, and runs AI-powered content analysis. Outputs **Adobe Lightroom-compatible XMP sidecar files**.
+> Analyze and catalog large image libraries with local AI. Extracts EXIF metadata, computes technical quality scores, detects objects and faces, generates captions, and scores aesthetics — all on your own hardware. Outputs **Adobe Lightroom-compatible XMP sidecar files**. Includes an Electron desktop app and a CLI.
 
 ---
 
@@ -9,70 +9,130 @@
 - 📷 **All major formats** — JPEG, PNG, TIFF, WEBP, HEIC/HEIF, BMP, GIF, and more
 - 🎞️ **Camera RAW files** — CR2, CR3 (Canon), NEF (Nikon), ARW/SR2 (Sony), DNG (Adobe/Leica/etc.), ORF (Olympus), RW2 (Panasonic), PEF (Pentax), RAF (Fujifilm), and more via LibRaw
 - 🗂️ **EXIF metadata** — Camera model, lens, ISO, aperture, shutter speed, focal length, GPS location (with reverse geocoding)
-- 📊 **Technical analysis** — Sharpness score, exposure statistics, noise level, histogram, color profile, dynamic range estimate
-- 🤖 **AI analysis** — Scene description, detected objects, dominant colors, aesthetic/mood scoring
-  - **Local**: BLIP-2 via HuggingFace Transformers (offline, no API key needed)
-  - **Cloud**: OpenAI GPT-4o Vision, Anthropic Claude 3.5 Sonnet, Google Vision API
-- 📄 **XMP output** — Lightroom-compatible `.xmp` sidecar files you can import directly into Lightroom
+- 📊 **Technical analysis** — Sharpness, exposure, noise, SNR, dynamic range, dominant colors, saturation
+- 🤖 **Local AI pipeline** (GPU, no API keys needed):
+  - **Captioning** — Qwen 3.5 9B via [Ollama](https://ollama.com)
+  - **Object detection** — GroundingDINO (zero-shot, batched)
+  - **Face recognition** — InsightFace buffalo_l (detection + ArcFace embeddings)
+  - **Aesthetic scoring** — UniPercept (IAA, IQA, ISTA metrics; CUDA only)
+  - **Semantic embeddings** — OpenCLIP ViT-L/14 (768-d vectors for search)
+- ☁️ **Cloud AI** (optional) — OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, Google Vision, GitHub Copilot
+- 🔍 **Search** — Hybrid FTS5 full-text + CLIP semantic search with Reciprocal Rank Fusion
+- 🖥️ **Desktop app** — Electron + React GUI with Gallery, Batch, Running, Search, and Faces tabs
+- 🌐 **Distributed processing** — HTTP JSON-RPC coordinator with remote workers for multi-machine batch analysis
+- 📄 **XMP output** — Lightroom-compatible `.xmp` sidecar files you can import directly
+
+---
+
+## Prerequisites
+
+- **Python 3.10+** (3.10, 3.11, or 3.12)
+- **[Ollama](https://ollama.com)** — required for AI captioning. Install it, then pull the model:
+  ```bash
+  ollama pull qwen3.5:9b
+  ```
+- **CUDA GPU** (recommended) — needed for object detection, faces, embeddings, and perception scoring. CPU-only works for metadata + technical analysis.
+- **Node.js 18+** — only needed if running the desktop app
 
 ---
 
 ## Installation
 
 ```bash
-pip install imganalyzer
+# Clone and install in editable mode
+git clone <repo-url> && cd imganalyzer
+pip install -e .
 
-# With local AI support (downloads ~3GB BLIP-2 model on first use)
-pip install "imganalyzer[local-ai]"
+# With local AI models (GroundingDINO, InsightFace, OpenCLIP, UniPercept)
+pip install -e ".[local-ai]"
 
 # With cloud AI support
-pip install "imganalyzer[openai]"
-pip install "imganalyzer[anthropic]"
-pip install "imganalyzer[google]"
+pip install -e ".[openai]"
+pip install -e ".[anthropic]"
+pip install -e ".[google]"
+pip install -e ".[copilot]"
 
 # Everything
-pip install "imganalyzer[all-ai]"
+pip install -e ".[all-ai]"
+
+# Dev tools (pytest, ruff, mypy)
+pip install -e ".[dev]"
 ```
+
+> **Conda recommended for GPU dependencies.** See [Worker Bootstrap](#quick-worker-bootstrap) for automated Conda setup scripts that handle PyTorch CUDA/MPS installation.
 
 ---
 
 ## Quick Start
 
+### Single-file analysis
+
 ```bash
-# Analyze a RAW file (metadata + technical only)
+# Metadata + technical only (no GPU needed)
 imganalyzer analyze photo.cr2
 
-# Full analysis with OpenAI Vision
-imganalyzer analyze photo.nef --ai openai
+# Full analysis with local AI (Ollama must be running)
+imganalyzer analyze photo.nef --ai local
 
-# Use local BLIP-2 model (no internet/API key needed)
-imganalyzer analyze photo.arw --ai local
+# Cloud AI (requires API key in .env)
+imganalyzer analyze photo.arw --ai openai
 
-# Batch analyze a folder
-imganalyzer analyze ./photos/*.jpg --ai openai
+# Recursive directory scan
+imganalyzer analyze ./photos/ --recursive --ai local
 
-# Quick EXIF info in terminal (no XMP file)
+# Skip XMP sidecar generation (DB-only)
+imganalyzer analyze photo.jpg --ai local --no-xmp
+```
+
+### Batch processing (large libraries)
+
+```bash
+# 1. Scan and register images into the database
+imganalyzer ingest /path/to/photos
+
+# 2. Process the job queue (all AI modules)
+imganalyzer run
+
+# 3. Check progress
+imganalyzer status
+
+# Ctrl+C pauses gracefully — resume with:
+imganalyzer run
+
+# Retry previously failed jobs
+imganalyzer run --retry-failed
+```
+
+### Quick info
+
+```bash
+# EXIF info in terminal (no XMP, no AI)
 imganalyzer info photo.dng
-
-# Specify output path
-imganalyzer analyze photo.cr3 --output ./sidecars/photo.xmp
-
-# Skip AI, metadata + technical only
-imganalyzer analyze photo.jpg --no-ai
+imganalyzer info photo.dng --format json
 ```
 
 ---
 
-## Distributed Coordinator + Workers
+## Desktop App
 
-The distributed batch prototype uses the existing JSON-RPC server in HTTP mode as
-the coordinator and one or more `run-distributed-worker` agents as workers.
+The Electron GUI provides a visual interface with five tabs: **Gallery**, **Batch**, **Running**, **Search**, and **Faces**.
 
-If you use `imganalyzer-app`, you can now manage this from the desktop UI: open
-the new **Settings** page from the gear icon, enable the distributed job server,
-set host/port/auth options, and optionally have the coordinator start
-automatically when the app launches. That page also shows the worker command to
-run on other machines.
+```bash
+cd imganalyzer-app
+npm install
+npm run dev      # Dev mode with hot reload
+npm run build    # Production build
+```
+
+The app spawns `python -m imganalyzer.server` as a persistent child process at startup — all communication uses JSON-RPC 2.0 over stdin/stdout.
+
+---
+
+## Distributed Processing
+
+The JSON-RPC server doubles as an HTTP coordinator. Remote workers connect, claim jobs, and return results — the coordinator handles all DB writes and XMP generation.
+
+The desktop app can manage this from **Settings** (gear icon): enable the distributed job server, set host/port/auth, and optionally auto-start with the app.
 
 ### Start the coordinator
 
@@ -119,127 +179,97 @@ Override defaults with environment variables:
 
 Platform notes:
 - **Windows**: PyTorch is installed from the official PyTorch CUDA index
-  (`https://download.pytorch.org/whl/cu128`) for GPU support. The setup
-  script handles this automatically.
+  (`https://download.pytorch.org/whl/cu128`) for GPU support.
 - **macOS**: PyTorch is installed via `conda install -c pytorch` (not pip) because
-  PyPI only hosts older macOS wheels that are incompatible with numpy ≥2. The
-  setup script handles this automatically. If you see errors like
-  *"A module compiled using NumPy 1.x cannot be run in NumPy 2.x"* or
-  *"Symbol not found"* in `libtorch_cpu`, clean-reinstall torch from one source:
-  ```bash
-  pip uninstall torch torchvision torchaudio -y
-  conda install -n imganalyzer312 pytorch torchvision torchaudio -c pytorch --force-reinstall
-  ```
+  PyPI only hosts older macOS wheels incompatible with numpy ≥2.
   **Never mix pip and conda torch packages** — their native libraries conflict.
-- macOS uses CPU `onnxruntime` (no `onnxruntime-gpu` wheels available); the
-  setup script pre-installs it from `conda-forge`.
-- Windows/Linux use `onnxruntime-gpu`.
+- macOS uses CPU `onnxruntime` (`conda-forge`); Windows/Linux use `onnxruntime-gpu`.
 
-### Firewall setup for remote workers (Windows coordinator)
+### Worker options
 
-If workers are on another machine/LAN, you need both a port rule and a Python
-program rule on the coordinator host:
+| Flag | Description |
+|---|---|
+| `--module metadata` | Dedicate a worker to a single module |
+| `--batch-size 1` | Tune lease claim granularity |
+| `--poll-interval 5` | How often empty queues are re-polled (seconds) |
+| `--lease-ttl 300` | Request longer job leases |
+| `--heartbeat-interval 15` | Refresh worker and lease liveness more often |
+| `--path-mapping "SRC=LOCAL"` | Remap shared-NAS paths for a different mount root |
+| `--auth-token TOKEN` | Authenticate when coordinator requires HTTP auth |
+| `--no-xmp` | Skip coordinator-side XMP writes for this worker |
+
+### Firewall (Windows coordinator, remote workers)
 
 ```powershell
-# 1) Allow coordinator port
+# Allow coordinator port
 New-NetFirewallRule -DisplayName "imganalyzer Coordinator TCP 8765" `
   -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow
 
-# 2) Allow Python process that hosts the coordinator
+# Allow the Python process
 New-NetFirewallRule -DisplayName "imganalyzer Python Inbound" `
   -Direction Inbound -Program "C:\Users\<you>\miniconda3\envs\imganalyzer\python.exe" `
   -Protocol TCP -Action Allow
 ```
 
-If connectivity still times out, check for an auto-created inbound **block**
-rule like `TCP Query User ... python.exe` and disable it:
-
-```powershell
-Get-NetFirewallRule -Enabled True -Direction Inbound -Action Block |
-  Where-Object { $_.DisplayName -like "*python.exe*" } |
-  Set-NetFirewallRule -Enabled False
-```
-
-If `netsh advfirewall show currentprofile` reports
-`LocalFirewallRules N/A (GPO-store only)`, local rules are ignored and the same
-allow rules must be added in domain Group Policy.
-
-Useful worker options:
-
-- `--module metadata` to dedicate a worker to a single module
-- `--batch-size 1` to tune lease claim granularity
-- `--poll-interval 5` to tune how often empty queues are re-polled
-- `--lease-ttl 300` to request longer job leases
-- `--heartbeat-interval 15` to refresh worker and lease liveness more often
-- `--path-mapping "SOURCE_PREFIX=LOCAL_PREFIX"` to remap shared-NAS paths on a worker with a different mount root
-- `--auth-token YOUR_TOKEN` when the coordinator requires HTTP auth
-- `--no-xmp` to skip coordinator-side XMP writes for that worker's completions
-
-### Current assumptions
-
-- The coordinator is the only SQLite reader/writer; workers return structured
-  results over HTTP and do not need direct DB access.
-- Scheduler policy is coordinator-driven (`jobs/claim`) with per-worker pause/resume
-  control (`workers/pause`, `workers/resume`) and capability-aware routing.
-- Workers need read-only access to the shared image files and must either read
-  the stored paths directly or provide `--path-mapping` rules when their NAS
-  mount root differs.
-- XMP sidecar generation, when enabled, happens on the coordinator after the
-  last queued job for an image completes.
-- The current implementation has been validated with local HTTP coordinator/worker
-  smoke tests, including two concurrent workers claiming jobs without duplicate
-  execution.
-
 ---
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in your API keys:
+Copy `.env.example` to `.env` and fill in your API keys (only needed for cloud AI):
 
 ```bash
 cp .env.example .env
 ```
 
 ```env
-# OpenAI
+# Cloud AI (optional — local AI via Ollama needs no keys)
 OPENAI_API_KEY=sk-...
-
-# Anthropic
 ANTHROPIC_API_KEY=sk-ant-...
-
-# Google Vision (path to service account JSON)
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
+
+# Default AI backend (default: none)
+IMGANALYZER_DEFAULT_AI=none
+
+# Object detection prompt (categories separated by ' . ')
+IMGANALYZER_DETECTION_PROMPT=person . animal . vehicle . building .
+
+# Object detection confidence threshold (0.0–1.0, default: 0.30)
+IMGANALYZER_DETECTION_THRESHOLD=0.30
+
+# Face recognition cosine similarity threshold (0.0–1.0, default: 0.40)
+IMGANALYZER_FACE_DB_THRESHOLD=0.40
 ```
+
+---
+
+## Pipeline Modules
+
+The batch worker processes images through a multi-phase GPU pipeline:
+
+| Phase | Module | Model | VRAM |
+|---|---|---|---|
+| 0 | `caption` | Qwen 3.5 9B (Ollama) | ~8.7 GB |
+| 1 | `objects` | GroundingDINO | ~2.4 GB |
+| 2 | `faces` | InsightFace buffalo_l | ~1.0 GB |
+| 2 | `embedding` | OpenCLIP ViT-L/14 | ~0.95 GB |
+| 3 | `perception` | UniPercept (CUDA only) | ~13.8 GB |
+
+`metadata` and `technical` run on CPU with no GPU requirements.
+
+Phases load/unload models sequentially for GPU memory efficiency. Within a phase, co-resident modules (e.g., `faces` + `embedding`) share VRAM.
 
 ---
 
 ## XMP Output
 
-The generated `.xmp` file is a standard XML sidecar compatible with Adobe Lightroom, Bridge, and Camera Raw. Example:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/">
-  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-    <rdf:Description
-      xmlns:dc="http://purl.org/dc/elements/1.1/"
-      xmlns:exif="http://ns.adobe.com/exif/1.0/"
-      xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-      dc:description="A golden hour landscape with mountains..."
-      exif:ISOSpeedRatings="400"
-      exif:FNumber="2.8"
-      ...
-    />
-  </rdf:RDF>
-</x:xmpmeta>
-```
+The generated `.xmp` file is a standard XML sidecar compatible with Adobe Lightroom, Bridge, and Camera Raw.
 
 ### Lightroom Import
 
 1. Place the `.xmp` file alongside the image file (same name, `.xmp` extension)
 2. In Lightroom: **Metadata → Read Metadata from Files**
 3. AI-generated keywords appear under **Metadata → Keywords**
-4. AI description appears in **Caption** field
+4. AI description appears in the **Caption** field
 
 ---
 
@@ -265,27 +295,67 @@ The generated `.xmp` file is a standard XML sidecar compatible with Adobe Lightr
 
 ## CLI Reference
 
-```
-imganalyzer analyze [OPTIONS] IMAGE...
+### Image analysis
 
-  Analyze one or more image files and generate XMP sidecar files.
+| Command | Description |
+|---|---|
+| `analyze IMAGE...` | Analyze images and generate XMP sidecars |
+| `info IMAGE` | Display EXIF metadata in the terminal |
 
-Options:
-  --ai [openai|anthropic|google|local|none]  AI backend for content analysis [default: none]
-  --output PATH                              Output XMP file path (single file only)
-  --no-ai                                    Skip AI analysis
-  --no-technical                             Skip technical analysis
-  --overwrite                                Overwrite existing XMP files
-  --verbose / --quiet                        Verbosity
-  --help                                     Show this message and exit.
+### Batch processing
 
-imganalyzer info [OPTIONS] IMAGE
+| Command | Description |
+|---|---|
+| `ingest PATH` | Scan a folder and register images into the database |
+| `run` | Process the job queue (local worker) |
+| `run-distributed-worker` | Run as a remote worker connecting to an HTTP coordinator |
+| `status` | Display queue status and worker metrics |
+| `queue-clear` | Clear all jobs from the queue |
+| `rebuild` | Re-enqueue module jobs for reprocessing |
+| `purge-missing` | Remove database entries for files that no longer exist |
 
-  Display EXIF and metadata in the terminal (no XMP output).
+### Face management
 
-Options:
-  --format [table|json|yaml]  Output format [default: table]
-  --help                      Show this message and exit.
+| Command | Description |
+|---|---|
+| `register-face` | Register a face identity with a reference image |
+| `list-faces` | List registered face identities |
+| `remove-face` | Remove a registered face identity |
+| `alias-face` | Create an alias for a face identity |
+| `rename-face` | Rename a face identity |
+| `merge-face` | Merge two face identities into one |
+
+### Search
+
+| Command | Description |
+|---|---|
+| `search QUERY` | Search the image library (text output) |
+| `search-json QUERY` | Search with JSON output (FTS5, CLIP, or hybrid mode) |
+
+### Maintenance
+
+| Command | Description |
+|---|---|
+| `override` | Set manual overrides on analysis fields |
+| `cleanup-sessions` | Delete GitHub Copilot cloud AI sessions |
+| `profile-report` | Generate performance profiling reports |
+
+---
+
+## Development
+
+```bash
+# Install with dev tools
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Lint
+ruff check imganalyzer/
+
+# Type check
+mypy imganalyzer/
 ```
 
 ---

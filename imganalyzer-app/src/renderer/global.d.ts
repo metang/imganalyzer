@@ -104,13 +104,19 @@ export interface SearchFilters {
   query?: string
   mode?: 'text' | 'semantic' | 'hybrid' | 'browse'
   semanticWeight?: number
+  semanticProfile?: SearchSemanticProfile
   intent?: SearchIntent
   similarToImageId?: number
   country?: string
   recurringMonthDay?: string
   timeOfDay?: SearchTimeOfDay
   sortBy?: SearchSortBy
+  rankPreference?: SearchRankPreference
   expandedTerms?: string[]
+  mustTerms?: string[]
+  shouldTerms?: string[]
+  debugSearch?: boolean
+  facetRequest?: boolean
   face?: string
   faces?: string[]
   faceMatch?: SearchFaceMatch
@@ -137,6 +143,8 @@ export type SearchIntent = 'people' | 'wildlife' | 'best-shot' | 'general'
 export type SearchTimeOfDay = 'morning' | 'afternoon' | 'evening' | 'night'
 export type SearchSortBy = 'relevance' | 'best' | 'aesthetic' | 'sharpness' | 'cleanest' | 'newest'
 export type SearchFaceMatch = 'any' | 'all'
+export type SearchRankPreference = 'relevance' | 'quality' | 'recency' | 'aesthetic' | 'cleanest' | 'sharpest'
+export type SearchSemanticProfile = 'image_dominant' | 'balanced' | 'description_dominant'
 
 export interface SearchResult {
   image_id: number
@@ -522,7 +530,7 @@ declare global {
       unlinkClusterFromPerson(clusterId: number): Promise<{ ok: boolean; updated: number; error?: string }>
       getPersonClusters(personId: number): Promise<{ clusters: PersonCluster[]; error?: string }>
       getPersonLinkSuggestions(personId: number, limit?: number): Promise<{ suggestions: PersonLinkSuggestion[]; error?: string }>
-      getPersonSimilarImages(personId: number, limit?: number): Promise<{ images: PersonSimilarImage[]; error?: string }>
+      getPersonSimilarImages(personId: number, limit?: number, minSimilarity?: number): Promise<{ images: PersonSimilarImage[]; error?: string }>
       linkOccurrencesToPerson(personId: number, occurrenceIds: number[]): Promise<{ ok: boolean; updated: number; error?: string }>
       unlinkOccurrenceFromPerson(occurrenceId: number): Promise<{ ok: boolean; updated: number; error?: string }>
       getPersonDirectLinks(personId: number): Promise<{ links: PersonDirectLink[]; error?: string }>

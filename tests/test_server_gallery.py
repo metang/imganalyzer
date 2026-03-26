@@ -140,6 +140,34 @@ CREATE TABLE analysis_perception (
     perception_ista_label TEXT,
     analyzed_at TEXT
 );
+CREATE TABLE search_features (
+    image_id INTEGER PRIMARY KEY,
+    desc_lex TEXT,
+    desc_summary TEXT,
+    desc_quality REAL,
+    keywords_text TEXT,
+    objects_text TEXT,
+    ocr_text TEXT,
+    faces_text TEXT,
+    camera_make TEXT,
+    camera_model TEXT,
+    lens_model TEXT,
+    date_time_original TEXT,
+    location_city TEXT,
+    location_state TEXT,
+    location_country TEXT,
+    sharpness_score REAL,
+    noise_level REAL,
+    snr_db REAL,
+    dynamic_range_stops REAL,
+    perception_iaa REAL,
+    perception_iqa REAL,
+    perception_ista REAL,
+    aesthetic_score REAL,
+    face_count INTEGER,
+    has_people INTEGER,
+    updated_at TEXT
+);
 CREATE TABLE embeddings (
     image_id INTEGER,
     embedding_type TEXT,
@@ -229,10 +257,10 @@ def _insert_search_index_row(
     conn.execute(
         """
         INSERT INTO search_index
-            (image_id, description_text, subjects_text, keywords_text, faces_text, exif_text)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (rowid, image_id, description_text, subjects_text, keywords_text, faces_text, exif_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (str(image_id), description_text, subjects_text, keywords_text, faces_text, exif_text),
+        (image_id, str(image_id), description_text, subjects_text, keywords_text, faces_text, exif_text),
     )
 
 
@@ -373,6 +401,7 @@ def test_search_ranked_pagination_returns_later_page(
             limit: int,
             semantic_weight: float = 0.5,
             mode: str = "hybrid",
+            semantic_profile: str | None = None,
         ) -> list[dict[str, object]]:
             ranked = [
                 {"image_id": 1, "score": 0.96},
@@ -765,10 +794,11 @@ def test_fts_match_query_handles_periods_and_boolean_words() -> None:
         gallery_db.execute(
             """
             INSERT INTO search_index
-                (image_id, description_text, subjects_text, keywords_text, faces_text, exif_text)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (rowid, image_id, description_text, subjects_text, keywords_text, faces_text, exif_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                1,
                 "1",
                 "group picture 10 or more people cxc and meng are in the picture",
                 "",
@@ -790,6 +820,94 @@ def test_fts_match_query_handles_periods_and_boolean_words() -> None:
         assert len(rows) == 1
     finally:
         gallery_db.close()
+
+
+def test_fts_soft_match_query_supports_partial_description_overlap() -> None:
+    from imganalyzer.db.search import _build_fts_soft_match_query
+
+    gallery_db = sqlite3.connect(":memory:")
+    try:
+        gallery_db.execute(
+            """
+            CREATE VIRTUAL TABLE search_index USING fts5(
+                image_id,
+                description_text,
+                subjects_text,
+                keywords_text,
+                faces_text,
+                exif_text,
+                content='',
+                tokenize='porter unicode61'
+            )
+            """
+        )
+        gallery_db.executemany(
+            """
+            INSERT INTO search_index
+                (rowid, image_id, description_text, subjects_text, keywords_text, faces_text, exif_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    1,
+                    "1",
+                    (
+                        "A woman in a colorful striped dress under a black cardigan sits "
+                        "inside a freestanding white bathtub in a modern bathroom."
+                    ),
+                    "",
+                    "",
+                    "",
+                    "",
+                ),
+                (2, "2", "Golden sunset over ocean horizon.", "", "", "", ""),
+            ],
+        )
+
+        soft_query = _build_fts_soft_match_query("striped cardigan bathtub sunset")
+        rows = gallery_db.execute(
+            """
+            SELECT rowid
+            FROM search_index
+            WHERE search_index MATCH ?
+            ORDER BY bm25(search_index, 0.0, 3.8, 3.2, 2.2, 2.6, 0.6)
+            """,
+            [soft_query],
+        ).fetchall()
+
+        assert '"striped"' in soft_query
+        assert '"cardigan"' in soft_query
+        assert '"bathtub"' in soft_query
+        assert [row[0] for row in rows][:1] == [1]
+    finally:
+        gallery_db.close()
+
+
+def test_hybrid_search_semantic_primary_keeps_lexical_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from imganalyzer.db.search import SearchEngine
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        engine = SearchEngine(conn)
+        monkeypatch.setattr(
+            engine,
+            "_fts_search",
+            lambda _query, _limit: [{"image_id": 101, "file_path": "/fts.jpg", "score": 0.9}],
+        )
+        monkeypatch.setattr(
+            engine,
+            "_semantic_search",
+            lambda _query, _limit, _profile=None: [{"image_id": 202, "file_path": "/sem.jpg", "score": 0.8}],
+        )
+
+        results = engine._hybrid_search("striped cardigan", limit=20, semantic_weight=0.5)
+        ids = {item["image_id"] for item in results}
+        assert ids == {101, 202}
+    finally:
+        conn.close()
 
 
 def test_search_alias_prompt_combines_face_and_activity_terms(
@@ -827,6 +945,7 @@ def test_search_alias_prompt_combines_face_and_activity_terms(
             limit: int,
             semantic_weight: float = 0.5,
             mode: str = "hybrid",
+            semantic_profile: str | None = None,
         ) -> list[dict[str, object]]:
             if query != "playing basketball":
                 return []
@@ -887,6 +1006,7 @@ def test_search_multi_face_prompt_combines_people_and_activity_terms(
             limit: int,
             semantic_weight: float = 0.5,
             mode: str = "hybrid",
+            semantic_profile: str | None = None,
         ) -> list[dict[str, object]]:
             if query != "at the beach":
                 return []
@@ -940,6 +1060,7 @@ def test_search_aesthetic_sort_uses_broader_candidate_pool(
             limit: int,
             semantic_weight: float = 0.5,
             mode: str = "hybrid",
+            semantic_profile: str | None = None,
         ) -> list[dict[str, object]]:
             assert query == "flock of birds"
             search_limits.append(limit)
@@ -1020,6 +1141,7 @@ def test_search_expanded_terms_merge_ranked_results(
             limit: int,
             semantic_weight: float = 0.5,
             mode: str = "hybrid",
+            semantic_profile: str | None = None,
         ) -> list[dict[str, object]]:
             if query == "duck":
                 return [{"image_id": 1, "score": 0.9}, {"image_id": 2, "score": 0.8}][:limit]
@@ -1045,3 +1167,188 @@ def test_search_expanded_terms_merge_ranked_results(
 
     assert result["total"] == 3
     assert [item["image_id"] for item in result["results"]] == [2, 1, 3]
+
+
+def test_search_rank_preference_recency_maps_to_newest_sort(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\rank\img1.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\rank\img2.jpg")
+    gallery_db.execute(
+        "UPDATE analysis_metadata SET date_time_original = ? WHERE image_id = ?",
+        ("2025-01-01T08:00:00", 1),
+    )
+    gallery_db.execute(
+        "UPDATE analysis_metadata SET date_time_original = ? WHERE image_id = ?",
+        ("2026-01-01T08:00:00", 2),
+    )
+
+    class FakeSearchEngine:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+
+        def search(
+            self,
+            query: str,
+            limit: int,
+            semantic_weight: float = 0.5,
+            mode: str = "hybrid",
+            semantic_profile: str | None = None,
+        ) -> list[dict[str, object]]:
+            return [
+                {"image_id": 1, "score": 0.99},
+                {"image_id": 2, "score": 0.50},
+            ][:limit]
+
+    import imganalyzer.db.search as search_module
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    monkeypatch.setattr(search_module, "SearchEngine", FakeSearchEngine)
+    result = server._handle_search({
+        "query": "city",
+        "rankPreference": "recency",
+        "limit": 10,
+        "offset": 0,
+    })
+
+    assert result["total"] == 2
+    assert [item["image_id"] for item in result["results"]] == [2, 1]
+
+
+def test_search_rejects_invalid_rank_preference(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    with pytest.raises(ValueError, match="rankPreference must be one of"):
+        server._handle_search({"query": "test", "rankPreference": "fastest"})
+
+
+def test_search_rejects_invalid_semantic_profile(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    with pytest.raises(ValueError, match="semanticProfile must be one of"):
+        server._handle_search({"query": "test", "semanticProfile": "desc_only"})
+
+
+def test_search_rejects_invalid_must_terms_shape(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    with pytest.raises(ValueError, match="mustTerms must be an array"):
+        server._handle_search({"query": "test", "mustTerms": "ball"})
+    with pytest.raises(ValueError, match="mustTerms entries must be strings"):
+        server._handle_search({"query": "test", "mustTerms": ["ball", 2]})
+
+
+def test_search_must_terms_support_person_identity_resolution(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\cxc.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\people\other.jpg")
+    gallery_db.execute("INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)", (1, "cxc", None))
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=1,
+        image_id=1,
+        identity_name="chen_xc",
+        cluster_id=10,
+        person_id=1,
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=2,
+        image_id=2,
+        identity_name="someone_else",
+        cluster_id=20,
+        person_id=None,
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({
+        "mustTerms": ["cxc"],
+        "mode": "hybrid",
+        "limit": 10,
+        "offset": 0,
+    })
+
+    assert result["total"] == 1
+    assert [item["image_id"] for item in result["results"]] == [1]
+
+
+def test_search_passes_semantic_profile_to_engine_search(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\semantic\img1.jpg")
+    seen_profiles: list[str | None] = []
+
+    class FakeSearchEngine:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+
+        def search(
+            self,
+            query: str,
+            limit: int,
+            semantic_weight: float = 0.5,
+            mode: str = "hybrid",
+            semantic_profile: str | None = None,
+        ) -> list[dict[str, object]]:
+            seen_profiles.append(semantic_profile)
+            return [{"image_id": 1, "score": 0.99}]
+
+    import imganalyzer.db.search as search_module
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    monkeypatch.setattr(search_module, "SearchEngine", FakeSearchEngine)
+    result = server._handle_search(
+        {
+            "query": "portrait",
+            "mode": "semantic",
+            "semanticProfile": "description_dominant",
+            "limit": 10,
+            "offset": 0,
+        }
+    )
+
+    assert result["total"] == 1
+    assert [item["image_id"] for item in result["results"]] == [1]
+    assert seen_profiles and seen_profiles[0] == "description_dominant"
+
+
+def test_search_text_mode_handles_partial_description_query(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\desc\target.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\desc\other.jpg")
+    _insert_search_index_row(
+        gallery_db,
+        image_id=1,
+        description_text=(
+            "A woman sits comfortably inside a large freestanding white bathtub in "
+            "a modern bathroom. She wears a colorful striped dress under a black cardigan."
+        ),
+    )
+    _insert_search_index_row(
+        gallery_db,
+        image_id=2,
+        description_text="A sunset landscape over ocean water.",
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({
+        "query": "striped cardigan bathtub sunset",
+        "mode": "text",
+        "limit": 10,
+        "offset": 0,
+    })
+
+    assert result["total"] == 2
+    assert [item["image_id"] for item in result["results"]][:1] == [1]

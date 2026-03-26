@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -49,6 +49,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         23: _migrate_v23,
         24: _migrate_v24,
         25: _migrate_v25,
+        26: _migrate_v26,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -804,3 +805,45 @@ def _migrate_v25(conn: sqlite3.Connection) -> None:
         )
     """)
 
+
+def _migrate_v26(conn: sqlite3.Connection) -> None:
+    """Add denormalized search_features table for modular search/reranking."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS search_features (
+            image_id             INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+            desc_lex             TEXT,
+            desc_summary         TEXT,
+            desc_quality         REAL,
+            keywords_text        TEXT,
+            objects_text         TEXT,
+            ocr_text             TEXT,
+            faces_text           TEXT,
+            camera_make          TEXT,
+            camera_model         TEXT,
+            lens_model           TEXT,
+            date_time_original   TEXT,
+            location_city        TEXT,
+            location_state       TEXT,
+            location_country     TEXT,
+            sharpness_score      REAL,
+            noise_level          REAL,
+            snr_db               REAL,
+            dynamic_range_stops  REAL,
+            perception_iaa       REAL,
+            perception_iqa       REAL,
+            perception_ista      REAL,
+            aesthetic_score      REAL,
+            face_count           INTEGER,
+            has_people           INTEGER,
+            updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_search_features_date
+            ON search_features(date_time_original);
+        CREATE INDEX IF NOT EXISTS idx_search_features_country
+            ON search_features(location_country);
+        CREATE INDEX IF NOT EXISTS idx_search_features_face_count
+            ON search_features(face_count);
+        CREATE INDEX IF NOT EXISTS idx_search_features_quality
+            ON search_features(perception_iaa, sharpness_score, noise_level);
+    """)

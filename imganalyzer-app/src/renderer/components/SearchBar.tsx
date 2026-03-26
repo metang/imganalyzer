@@ -2,7 +2,14 @@
  * SearchBar.tsx — compact search controls for the left search sidebar.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SearchFaceMatch, SearchFilters, SearchIntent, SearchSortBy, SearchTimeOfDay } from '../global'
+import type {
+  SearchFaceMatch,
+  SearchFilters,
+  SearchIntent,
+  SearchSemanticProfile,
+  SearchSortBy,
+  SearchTimeOfDay,
+} from '../global'
 
 interface SearchBarProps {
   onSearch: (filters: SearchFilters, contextLabel: string | null) => void
@@ -28,6 +35,7 @@ interface SearchDraft {
   sortBy: SearchSortBy
   mode: 'text' | 'semantic' | 'hybrid'
   semanticWeight: string
+  semanticProfile: SearchSemanticProfile
   camera: string
   lens: string
   dateFrom: string
@@ -44,6 +52,8 @@ interface SearchDraft {
   hasPeople: 'any' | 'yes' | 'no'
   includeRelatedSpecies: boolean
   expandedTerms: string[]
+  mustTerms: string[]
+  shouldTerms: string[]
 }
 
 interface ChipDescriptor {
@@ -66,6 +76,24 @@ const TIME_LABELS: Record<SearchTimeOfDay, string> = {
   afternoon: 'Afternoon',
   evening: 'Evening',
   night: 'Night',
+}
+
+const SEMANTIC_PROFILE_LABELS: Record<SearchSemanticProfile, string> = {
+  image_dominant: 'Image CLIP dominant',
+  balanced: 'Balanced',
+  description_dominant: 'Description CLIP dominant',
+}
+
+const SEMANTIC_PROFILE_VALUE_TO_KEY: Record<'0' | '1' | '2', SearchSemanticProfile> = {
+  '0': 'image_dominant',
+  '1': 'balanced',
+  '2': 'description_dominant',
+}
+
+const SEMANTIC_PROFILE_KEY_TO_VALUE: Record<SearchSemanticProfile, '0' | '1' | '2'> = {
+  image_dominant: '0',
+  balanced: '1',
+  description_dominant: '2',
 }
 
 const INTENT_COPY: Record<SearchIntent, { title: string; placeholder: string }> = {
@@ -120,6 +148,14 @@ function splitFaceInput(value: string): string[] {
   )
 }
 
+function splitTermInput(value: string): string[] {
+  return dedupeStrings(
+    value
+      .replace(/\r/g, '\n')
+      .split(/\s*(?:,|;|\n)\s*/i)
+  )
+}
+
 function parseQuery(raw: string): ParsedQuery {
   const patches: Partial<SearchFilters> = {}
   let text = raw
@@ -141,6 +177,24 @@ function parseQuery(raw: string): ParsedQuery {
       if (faces.length > 1) patches.faceMatch = 'all'
     }
     text = text.replace(/\bface:(?:"[^"]+"|'[^']+'|[^\s,]+)/gi, '').trim()
+  }
+
+  const explicitMustMatches = [...text.matchAll(/\bmust:(?:"([^"]+)"|'([^']+)'|([^\s,]+))/gi)]
+  if (explicitMustMatches.length > 0) {
+    const mustTerms = dedupeStrings(
+      explicitMustMatches.map((match) => match[1] || match[2] || match[3] || '')
+    )
+    if (mustTerms.length > 0) patches.mustTerms = mustTerms
+    text = text.replace(/\bmust:(?:"[^"]+"|'[^']+'|[^\s,]+)/gi, '').trim()
+  }
+
+  const explicitShouldMatches = [...text.matchAll(/\bshould:(?:"([^"]+)"|'([^']+)'|([^\s,]+))/gi)]
+  if (explicitShouldMatches.length > 0) {
+    const shouldTerms = dedupeStrings(
+      explicitShouldMatches.map((match) => match[1] || match[2] || match[3] || '')
+    )
+    if (shouldTerms.length > 0) patches.shouldTerms = shouldTerms
+    text = text.replace(/\bshould:(?:"[^"]+"|'[^']+'|[^\s,]+)/gi, '').trim()
   }
 
   const aestheticRankingPhrase = strip(
@@ -311,6 +365,7 @@ function defaultDraft(): SearchDraft {
     sortBy: 'relevance',
     mode: 'hybrid',
     semanticWeight: '0.5',
+    semanticProfile: 'balanced',
     camera: '',
     lens: '',
     dateFrom: '',
@@ -327,6 +382,8 @@ function defaultDraft(): SearchDraft {
     hasPeople: 'any',
     includeRelatedSpecies: true,
     expandedTerms: [],
+    mustTerms: [],
+    shouldTerms: [],
   }
 }
 
@@ -341,6 +398,8 @@ function buildFilters(draft: SearchDraft): SearchFilters {
     draft.intent === 'people' ? draft.activity : undefined,
     draft.intent === 'wildlife' ? draft.species : undefined,
   ])
+  const mustTerms = dedupeStrings([...(patches.mustTerms ?? []), ...draft.mustTerms])
+  const shouldTerms = dedupeStrings([...(patches.shouldTerms ?? []), ...draft.shouldTerms])
 
   const filters: SearchFilters = {
     ...patches,
@@ -348,6 +407,7 @@ function buildFilters(draft: SearchDraft): SearchFilters {
     query,
     mode: draft.mode,
     semanticWeight: parseFloat(draft.semanticWeight) || 0.5,
+    semanticProfile: draft.semanticProfile,
   }
 
   if (faces.length > 0) {
@@ -399,6 +459,8 @@ function buildFilters(draft: SearchDraft): SearchFilters {
     return true
   })
   if (mergedExpanded.length > 0) filters.expandedTerms = mergedExpanded
+  if (mustTerms.length > 0) filters.mustTerms = mustTerms
+  if (shouldTerms.length > 0) filters.shouldTerms = shouldTerms
 
   const hasMeaningfulFilter = Boolean(
     filters.query ||
@@ -422,6 +484,8 @@ function buildFilters(draft: SearchDraft): SearchFilters {
     filters.facesMax !== undefined ||
     filters.hasPeople !== undefined ||
     filters.expandedTerms?.length ||
+    filters.mustTerms?.length ||
+    filters.shouldTerms?.length ||
     filters.sortBy
   )
 
@@ -605,6 +669,9 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
     if (draft.recurringDate) items.push({ id: 'recurringDate', label: `Every ${formatRecurringLabel(draft.recurringDate)}` })
     if (draft.timeOfDay !== 'any') items.push({ id: 'timeOfDay', label: TIME_LABELS[draft.timeOfDay] })
     if (derivedFilters.sortBy && derivedFilters.sortBy !== 'relevance') items.push({ id: 'sortBy', label: `Sort: ${SORT_LABELS[derivedFilters.sortBy]}` })
+    if (draft.mode !== 'text') {
+      items.push({ id: 'semanticProfile', label: `Semantic profile: ${SEMANTIC_PROFILE_LABELS[draft.semanticProfile]}` })
+    }
     if (draft.includeRelatedSpecies && derivedFilters.expandedTerms && derivedFilters.expandedTerms.length > 0) {
       const preview = derivedFilters.expandedTerms.slice(0, 4).join(', ')
       const suffix = derivedFilters.expandedTerms.length > 4 ? '…' : ''
@@ -622,6 +689,12 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
     }
     if (draft.noiseMax !== '') items.push({ id: 'noiseMax', label: `Noise ≤ ${draft.noiseMax}` })
     if (draft.hasPeople !== 'any') items.push({ id: 'hasPeople', label: draft.hasPeople === 'yes' ? 'People only' : 'No people' })
+    ;(derivedFilters.mustTerms ?? []).forEach((term, index) => {
+      items.push({ id: `mustTerm:${index}`, label: `Must: ${term}` })
+    })
+    ;(derivedFilters.shouldTerms ?? []).forEach((term, index) => {
+      items.push({ id: `shouldTerm:${index}`, label: `Should: ${term}` })
+    })
     return items
   }, [draft, derivedFilters])
 
@@ -699,6 +772,8 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
           return { ...prev, timeOfDay: 'any' }
         case 'sortBy':
           return { ...prev, sortBy: 'relevance' }
+        case 'semanticProfile':
+          return { ...prev, semanticProfile: 'balanced' }
         case 'expandedTerms':
           return { ...prev, includeRelatedSpecies: false, expandedTerms: [] }
         case 'camera':
@@ -718,6 +793,18 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
         case 'hasPeople':
           return { ...prev, hasPeople: 'any' }
         default:
+          if (chipId.startsWith('mustTerm:')) {
+            const termIndex = parseInt(chipId.split(':')[1] ?? '', 10)
+            if (Number.isNaN(termIndex)) return prev
+            const nextMust = prev.mustTerms.filter((_, index) => index !== termIndex)
+            return { ...prev, mustTerms: nextMust }
+          }
+          if (chipId.startsWith('shouldTerm:')) {
+            const termIndex = parseInt(chipId.split(':')[1] ?? '', 10)
+            if (Number.isNaN(termIndex)) return prev
+            const nextShould = prev.shouldTerms.filter((_, index) => index !== termIndex)
+            return { ...prev, shouldTerms: nextShould }
+          }
           if (chipId.startsWith('face:')) {
             const faceIndex = parseInt(chipId.split(':')[1] ?? '', 10)
             if (Number.isNaN(faceIndex)) return prev
@@ -970,6 +1057,28 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                       />
                     </div>
                   )}
+                  {draft.mode !== 'text' && (
+                    <div className="mt-3 rounded-xl border border-neutral-800 bg-neutral-900 p-3">
+                      <FieldLabel>Image vs description semantic balance</FieldLabel>
+                      <input
+                        type="range"
+                        min="0"
+                        max="2"
+                        step="1"
+                        value={SEMANTIC_PROFILE_KEY_TO_VALUE[draft.semanticProfile]}
+                        onChange={(event) => {
+                          const value = event.target.value as '0' | '1' | '2'
+                          setDraftValue('semanticProfile', SEMANTIC_PROFILE_VALUE_TO_KEY[value] ?? 'balanced')
+                        }}
+                        className="w-full accent-blue-500"
+                      />
+                      <div className="mt-2 flex justify-between text-xs text-neutral-400">
+                        <span>{SEMANTIC_PROFILE_LABELS.image_dominant}</span>
+                        <span>{SEMANTIC_PROFILE_LABELS.balanced}</span>
+                        <span>{SEMANTIC_PROFILE_LABELS.description_dominant}</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <TextField label="Camera" value={draft.camera} placeholder="Sony, Canon R5…" onChange={(value) => setDraftValue('camera', value)} />
@@ -1053,6 +1162,19 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                     ))}
                   </div>
                 </div>
+
+                <TextField
+                  label="Must include terms"
+                  value={draft.mustTerms.join(', ')}
+                  placeholder="basketball, sunset..."
+                  onChange={(value) => setDraftValue('mustTerms', splitTermInput(value))}
+                />
+                <TextField
+                  label="Should include terms"
+                  value={draft.shouldTerms.join(', ')}
+                  placeholder="court, hoop..."
+                  onChange={(value) => setDraftValue('shouldTerms', splitTermInput(value))}
+                />
               </div>
             )}
           </section>

@@ -16,18 +16,26 @@ export type SearchIntent = 'people' | 'wildlife' | 'best-shot' | 'general'
 export type SearchTimeOfDay = 'morning' | 'afternoon' | 'evening' | 'night'
 export type SearchSortBy = 'relevance' | 'best' | 'aesthetic' | 'sharpness' | 'cleanest' | 'newest'
 export type SearchFaceMatch = 'any' | 'all'
+export type SearchRankPreference = 'relevance' | 'quality' | 'recency' | 'aesthetic' | 'cleanest' | 'sharpest'
+export type SearchSemanticProfile = 'image_dominant' | 'balanced' | 'description_dominant'
 
 export interface SearchFilters {
   query?: string
   mode?: 'text' | 'semantic' | 'hybrid' | 'browse'
   semanticWeight?: number
+  semanticProfile?: SearchSemanticProfile
   intent?: SearchIntent
   similarToImageId?: number
   country?: string
   recurringMonthDay?: string
   timeOfDay?: SearchTimeOfDay
   sortBy?: SearchSortBy
+  rankPreference?: SearchRankPreference
   expandedTerms?: string[]
+  mustTerms?: string[]
+  shouldTerms?: string[]
+  debugSearch?: boolean
+  facetRequest?: boolean
   // text filters
   face?: string
   faces?: string[]
@@ -147,13 +155,19 @@ export function registerSearchHandlers(): void {
         query: filters.query?.trim() || '',
         mode: filters.mode,
         semanticWeight: filters.semanticWeight,
+        semanticProfile: filters.semanticProfile,
         intent: filters.intent,
         similarToImageId: filters.similarToImageId,
         country: filters.country,
         recurringMonthDay: filters.recurringMonthDay,
         timeOfDay: filters.timeOfDay,
         sortBy: filters.sortBy,
+        rankPreference: filters.rankPreference,
         expandedTerms: filters.expandedTerms,
+        mustTerms: filters.mustTerms,
+        shouldTerms: filters.shouldTerms,
+        debugSearch: filters.debugSearch,
+        facetRequest: filters.facetRequest,
         face: filters.face,
         faces: filters.faces,
         faceMatch: filters.faceMatch,

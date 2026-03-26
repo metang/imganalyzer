@@ -286,8 +286,12 @@ contextBridge.exposeInMainWorld('api', {
   getPersonLinkSuggestions: (personId: number, limit?: number): Promise<{ suggestions: Array<{ cluster_id: number; label: string; score: number; representative_id: number | null; face_count: number; image_count: number; reason: string }>; error?: string }> =>
     ipcRenderer.invoke('faces:personLinkSuggestions', personId, limit),
 
-  getPersonSimilarImages: (personId: number, limit?: number): Promise<{ images: Array<{ image_id: number; file_path: string; similarity: number; best_occurrence_id: number }>; error?: string }> =>
-    ipcRenderer.invoke('faces:personSimilarImages', personId, limit),
+  getPersonSimilarImages: (
+    personId: number,
+    limit?: number,
+    minSimilarity?: number,
+  ): Promise<{ images: Array<{ image_id: number; file_path: string; similarity: number; best_occurrence_id: number }>; error?: string }> =>
+    ipcRenderer.invoke('faces:personSimilarImages', personId, limit, minSimilarity),
 
   linkOccurrencesToPerson: (personId: number, occurrenceIds: number[]): Promise<{ ok: boolean; updated: number; error?: string }> =>
     ipcRenderer.invoke('faces:personLinkOccurrences', personId, occurrenceIds),

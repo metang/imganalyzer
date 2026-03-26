@@ -7,6 +7,8 @@ import type {
   SearchIntent,
   SearchPlanRequest,
   SearchPlanResponse,
+  SearchRankPreference,
+  SearchSemanticProfile,
   SearchSortBy,
   SearchTimeOfDay,
 } from './search'
@@ -22,7 +24,20 @@ const VALID_SORT_BY = new Set<SearchSortBy>([
   'cleanest',
   'newest',
 ])
+const VALID_RANK_PREFERENCE = new Set<SearchRankPreference>([
+  'relevance',
+  'quality',
+  'recency',
+  'aesthetic',
+  'cleanest',
+  'sharpest',
+])
 const VALID_MODES = new Set<NonNullable<SearchFilters['mode']>>(['text', 'semantic', 'hybrid', 'browse'])
+const VALID_SEMANTIC_PROFILE = new Set<SearchSemanticProfile>([
+  'image_dominant',
+  'balanced',
+  'description_dominant',
+])
 
 function findSystemNode(): string {
   try {
@@ -54,8 +69,14 @@ Convert the user's natural-language request into a JSON object with this exact s
       "recurringMonthDay": "MM-DD" | null,
       "timeOfDay": "morning" | "afternoon" | "evening" | "night" | null,
       "mode": "text" | "semantic" | "hybrid" | "browse" | null,
+      "semanticProfile": "image_dominant" | "balanced" | "description_dominant" | null,
       "sortBy": "relevance" | "best" | "aesthetic" | "sharpness" | "cleanest" | "newest" | null,
+      "rankPreference": "relevance" | "quality" | "recency" | "aesthetic" | "cleanest" | "sharpest" | null,
       "expandedTerms": string[] | null,
+      "mustTerms": string[] | null,
+      "shouldTerms": string[] | null,
+      "debugSearch": boolean | null,
+      "facetRequest": boolean | null,
       "hasPeople": boolean | null,
       "facesMin": number | null,
       "facesMax": number | null
@@ -181,11 +202,45 @@ function sanitizeFilters(rawFilters: unknown): SearchFilters {
   if (typeof mode === 'string' && VALID_MODES.has(mode as NonNullable<SearchFilters['mode']>)) {
     filters.mode = mode as NonNullable<SearchFilters['mode']>
   }
+  const semanticProfile = source.semanticProfile
+  if (typeof semanticProfile === 'string' && VALID_SEMANTIC_PROFILE.has(semanticProfile as SearchSemanticProfile)) {
+    filters.semanticProfile = semanticProfile as SearchSemanticProfile
+  }
 
   const sortBy = source.sortBy
   if (typeof sortBy === 'string' && VALID_SORT_BY.has(sortBy as SearchSortBy)) {
     filters.sortBy = sortBy as SearchSortBy
   }
+  const rankPreference = source.rankPreference
+  if (typeof rankPreference === 'string' && VALID_RANK_PREFERENCE.has(rankPreference as SearchRankPreference)) {
+    filters.rankPreference = rankPreference as SearchRankPreference
+  }
+
+  if (typeof source.debugSearch === 'boolean') {
+    filters.debugSearch = source.debugSearch
+  }
+  if (typeof source.facetRequest === 'boolean') {
+    filters.facetRequest = source.facetRequest
+  }
+
+  const toTerms = (value: unknown): string[] | undefined => {
+    if (!Array.isArray(value)) return undefined
+    const seen = new Set<string>()
+    const terms = value
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter((entry) => {
+        const lowered = entry.toLowerCase()
+        if (!entry || seen.has(lowered)) return false
+        seen.add(lowered)
+        return true
+      })
+    return terms.length > 0 ? terms : undefined
+  }
+  const mustTerms = toTerms(source.mustTerms)
+  if (mustTerms) filters.mustTerms = mustTerms
+  const shouldTerms = toTerms(source.shouldTerms)
+  if (shouldTerms) filters.shouldTerms = shouldTerms
 
   if (typeof source.hasPeople === 'boolean') {
     filters.hasPeople = source.hasPeople

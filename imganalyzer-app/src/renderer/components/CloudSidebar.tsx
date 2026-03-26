@@ -14,7 +14,7 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex gap-2 py-1 border-b border-neutral-800 last:border-0">
       <span className="text-neutral-500 text-xs w-32 shrink-0">{label}</span>
-      <span className="text-neutral-200 text-xs break-words min-w-0">{value}</span>
+      <span className="text-neutral-200 text-xs break-words min-w-0 select-text cursor-text whitespace-pre-wrap">{value}</span>
     </div>
   )
 }

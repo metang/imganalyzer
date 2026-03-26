@@ -24,6 +24,23 @@ let batchTimer: ReturnType<typeof setTimeout> | null = null
 
 const CLUSTER_PAGE_SIZE = 200
 const UNLINKED_CLUSTER_TARGET = 60
+const DEFAULT_SIMILARITY_THRESHOLD = 0.35
+
+function normalizeImageSrc(value: string | null | undefined): string | null {
+  if (!value) return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (
+    trimmed.startsWith('data:image/')
+    || trimmed.startsWith('blob:')
+    || trimmed.startsWith('http://')
+    || trimmed.startsWith('https://')
+    || trimmed.startsWith('file://')
+  ) {
+    return trimmed
+  }
+  return `data:image/jpeg;base64,${trimmed}`
+}
 
 function countUnlinkedClusters(clusters: FaceCluster[]): number {
   return clusters.reduce(
@@ -230,11 +247,16 @@ function ImageThumbnail({ filePath }: { filePath: string }) {
   const requested = useRef(false)
 
   useEffect(() => {
+    requested.current = false
+    setSrc(null)
+  }, [filePath])
+
+  useEffect(() => {
     if (requested.current) return
     requested.current = true
     window.api
       .getThumbnail(filePath)
-      .then((data) => setSrc(`data:image/jpeg;base64,${data}`))
+      .then((data) => setSrc(normalizeImageSrc(data)))
       .catch(() => setSrc(null))
   }, [filePath])
 
@@ -272,10 +294,16 @@ const SimilarImageCard = memo(function SimilarImageCard({
   const requested = useRef(false)
 
   useEffect(() => {
+    requested.current = false
+    setThumb(null)
+    setFaceCrop(null)
+  }, [image.image_id, image.file_path, image.best_occurrence_id])
+
+  useEffect(() => {
     if (requested.current) return
     requested.current = true
     window.api.getThumbnail(image.file_path)
-      .then((t) => { if (t) setThumb(t) })
+      .then((t) => setThumb(normalizeImageSrc(t)))
       .catch(() => { /* ignore */ })
   }, [image.file_path])
 
@@ -285,7 +313,7 @@ const SimilarImageCard = memo(function SimilarImageCard({
     window.api.getFaceCropBatch([image.best_occurrence_id]).then((res) => {
       if (!cancelled) {
         const crop = res.thumbnails?.[image.best_occurrence_id]
-        if (crop) setFaceCrop(crop)
+        setFaceCrop(normalizeImageSrc(crop))
       }
     }).catch(() => { /* ignore */ })
     return () => { cancelled = true }
@@ -321,12 +349,12 @@ const SimilarImageCard = memo(function SimilarImageCard({
       )}
       {faceCrop && !onToggleSelect && (
         <div className="absolute right-2 top-2 z-10 h-8 w-8 rounded-full border-2 border-amber-600/70 overflow-hidden bg-neutral-800">
-          <img src={`data:image/jpeg;base64,${faceCrop}`} alt="" className="h-full w-full object-cover" />
+          <img src={faceCrop} alt="" className="h-full w-full object-cover" />
         </div>
       )}
       {faceCrop && onToggleSelect && (
         <div className="absolute right-10 top-2 z-10 h-6 w-6 rounded-full border border-amber-600/70 overflow-hidden bg-neutral-800">
-          <img src={`data:image/jpeg;base64,${faceCrop}`} alt="" className="h-full w-full object-cover" />
+          <img src={faceCrop} alt="" className="h-full w-full object-cover" />
         </div>
       )}
       <div className="aspect-[4/3] w-full overflow-hidden rounded-t-xl bg-neutral-800">
@@ -364,10 +392,15 @@ const DirectLinkCard = memo(function DirectLinkCard({
   const requested = useRef(false)
 
   useEffect(() => {
+    requested.current = false
+    setThumb(null)
+  }, [link.occurrence_id, link.file_path])
+
+  useEffect(() => {
     if (requested.current) return
     requested.current = true
     window.api.getThumbnail(link.file_path)
-      .then((t) => { if (t) setThumb(t) })
+      .then((t) => setThumb(normalizeImageSrc(t)))
       .catch(() => { /* ignore */ })
   }, [link.file_path])
 
@@ -619,6 +652,7 @@ export function FacesView() {
   const [suggestedInnerTab, setSuggestedInnerTab] = useState<'clusters' | 'images'>('clusters')
   const [selectedSimilarImageIds, setSelectedSimilarImageIds] = useState<number[]>([]) // best_occurrence_id[]
   const [confirmingSimilarLinks, setConfirmingSimilarLinks] = useState(false)
+  const [similarityThreshold, setSimilarityThreshold] = useState<number>(DEFAULT_SIMILARITY_THRESHOLD)
 
   // Direct links (Linked tab — images linked to person without cluster)
   const [personDirectLinks, setPersonDirectLinks] = useState<Record<number, PersonDirectLink[]>>({})
@@ -1097,7 +1131,7 @@ export function FacesView() {
       const startedAt = performance.now()
       setLoadingPersonSimilarImagesId(personId)
       try {
-        const result = await window.api.getPersonSimilarImages(personId, 100)
+        const result = await window.api.getPersonSimilarImages(personId, 100, similarityThreshold)
         if (result.error) {
           setPersonSimilarImages((prev) => ({ ...prev, [personId]: [] }))
           return
@@ -1113,7 +1147,7 @@ export function FacesView() {
         setLoadingPersonSimilarImagesId((current) => (current === personId ? null : current))
       }
     },
-    [personSimilarImages]
+    [personSimilarImages, similarityThreshold]
   )
 
   const loadPersonDirectLinks = useCallback(
@@ -1137,53 +1171,6 @@ export function FacesView() {
     },
     [personDirectLinks]
   )
-
-  const handleConfirmSimilarLinks = useCallback(async () => {
-    if (expandedPersonId == null || selectedSimilarImageIds.length === 0) return
-
-    setConfirmingSimilarLinks(true)
-    try {
-      const result = await window.api.linkOccurrencesToPerson(expandedPersonId, selectedSimilarImageIds)
-      if (result.error || !result.ok) {
-        throw new Error(result.error ?? 'Failed to link occurrences')
-      }
-      // Remove linked images from the similar images list
-      const linkedSet = new Set(selectedSimilarImageIds)
-      setPersonSimilarImages((prev) => ({
-        ...prev,
-        [expandedPersonId]: (prev[expandedPersonId] ?? []).filter(
-          (img) => !linkedSet.has(img.best_occurrence_id)
-        ),
-      }))
-      setSelectedSimilarImageIds([])
-      // Refresh direct links for this person
-      await loadPersonDirectLinks(expandedPersonId, true)
-      setError(null)
-    } catch (err) {
-      setError(String(err))
-    } finally {
-      setConfirmingSimilarLinks(false)
-    }
-  }, [expandedPersonId, selectedSimilarImageIds, loadPersonDirectLinks])
-
-  const handleUnlinkDirectOccurrence = useCallback(async (occurrenceId: number) => {
-    if (expandedPersonId == null) return
-    try {
-      const result = await window.api.unlinkOccurrenceFromPerson(occurrenceId)
-      if (result.error || !result.ok) {
-        throw new Error(result.error ?? 'Failed to unlink occurrence')
-      }
-      setPersonDirectLinks((prev) => ({
-        ...prev,
-        [expandedPersonId]: (prev[expandedPersonId] ?? []).filter(
-          (link) => link.occurrence_id !== occurrenceId
-        ),
-      }))
-      setError(null)
-    } catch (err) {
-      setError(String(err))
-    }
-  }, [expandedPersonId])
 
   const loadPersonClusters = useCallback(
     async (personId: number, force = false) => {
@@ -1227,6 +1214,56 @@ export function FacesView() {
     [personClusters]
   )
 
+  const handleConfirmSimilarLinks = useCallback(async () => {
+    if (expandedPersonId == null || selectedSimilarImageIds.length === 0) return
+
+    setConfirmingSimilarLinks(true)
+    try {
+      const result = await window.api.linkOccurrencesToPerson(expandedPersonId, selectedSimilarImageIds)
+      if (result.error || !result.ok) {
+        throw new Error(result.error ?? 'Failed to link occurrences')
+      }
+      // Remove linked images from the similar images list
+      const linkedSet = new Set(selectedSimilarImageIds)
+      setPersonSimilarImages((prev) => ({
+        ...prev,
+        [expandedPersonId]: (prev[expandedPersonId] ?? []).filter(
+          (img) => !linkedSet.has(img.best_occurrence_id)
+        ),
+      }))
+      setSelectedSimilarImageIds([])
+      // Refresh linked views for this person
+      await Promise.all([
+        loadPersonDirectLinks(expandedPersonId, true),
+        loadPersonClusters(expandedPersonId, true),
+      ])
+      setError(null)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setConfirmingSimilarLinks(false)
+    }
+  }, [expandedPersonId, selectedSimilarImageIds, loadPersonDirectLinks, loadPersonClusters])
+
+  const handleUnlinkDirectOccurrence = useCallback(async (occurrenceId: number) => {
+    if (expandedPersonId == null) return
+    try {
+      const result = await window.api.unlinkOccurrenceFromPerson(occurrenceId)
+      if (result.error || !result.ok) {
+        throw new Error(result.error ?? 'Failed to unlink occurrence')
+      }
+      setPersonDirectLinks((prev) => ({
+        ...prev,
+        [expandedPersonId]: (prev[expandedPersonId] ?? []).filter(
+          (link) => link.occurrence_id !== occurrenceId
+        ),
+      }))
+      setError(null)
+    } catch (err) {
+      setError(String(err))
+    }
+  }, [expandedPersonId])
+
   const togglePersonExpand = useCallback(
     async (personId: number) => {
       if (expandedPersonId === personId) {
@@ -1242,13 +1279,15 @@ export function FacesView() {
       setPeopleStage('linked')
       setInspectorReturnStage('linked')
 
-      // Load clusters for this person if not cached
-      if (personClusters[personId] === undefined) {
-        await loadPersonClusters(personId)
-      }
+      // Always refresh linked views when opening a person so newly linked
+      // images/clusters are visible immediately after reopen.
+      await Promise.all([
+        loadPersonClusters(personId, true),
+        loadPersonDirectLinks(personId, true),
+      ])
 
     },
-    [expandedPersonId, loadPersonClusters, personClusters]
+    [expandedPersonId, loadPersonClusters, loadPersonDirectLinks]
   )
 
   useEffect(() => {
@@ -1289,6 +1328,28 @@ export function FacesView() {
     loadPersonSimilarImages,
     loadingPersonSimilarImagesId,
     personSimilarImages,
+  ])
+
+  useEffect(() => {
+    if (
+      expandedPersonId == null
+      || peopleStage !== 'suggested'
+      || suggestedInnerTab !== 'images'
+    ) {
+      return
+    }
+    setPersonSimilarImages((prev) => {
+      if (prev[expandedPersonId] === undefined) return prev
+      const next = { ...prev }
+      delete next[expandedPersonId]
+      return next
+    })
+    setSelectedSimilarImageIds([])
+  }, [
+    expandedPersonId,
+    peopleStage,
+    suggestedInnerTab,
+    similarityThreshold,
   ])
 
   // Load direct links when a person is expanded
@@ -3130,11 +3191,26 @@ export function FacesView() {
                         {suggestedInnerTab === 'images' && (
                           <>
                             <div className="flex flex-wrap items-center justify-between gap-3">
-                              <div>
+                              <div className="min-w-[260px] flex-1">
                                 <p className="text-[11px] uppercase tracking-wide text-amber-300/90">Similar images</p>
                                 <p className="mt-1 text-xs text-neutral-500">
                                   Top images containing faces similar to {activePerson.name}. Select images to link.
                                 </p>
+                                <div className="mt-3 max-w-sm">
+                                  <div className="mb-1 flex items-center justify-between text-[11px] text-neutral-400">
+                                    <span>Similarity threshold</span>
+                                    <span className="font-mono text-neutral-300">{similarityThreshold.toFixed(2)}</span>
+                                  </div>
+                                  <input
+                                    type="range"
+                                    min={0.1}
+                                    max={0.95}
+                                    step={0.01}
+                                    value={similarityThreshold}
+                                    onChange={(e) => setSimilarityThreshold(Number(e.target.value))}
+                                    className="w-full accent-amber-500"
+                                  />
+                                </div>
                               </div>
                               {(personSimilarImages[expandedPersonId!] ?? []).length > 0 && (
                                 <div className="flex flex-wrap items-center gap-2">

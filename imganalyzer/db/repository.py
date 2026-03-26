@@ -822,13 +822,13 @@ class Repository:
         # Find cluster IDs that are fully linked to this person
         linked_cluster_rows = self.conn.execute(
             """
-            SELECT DISTINCT cluster_id
+            SELECT cluster_id
             FROM face_occurrences
-            WHERE person_id = ? AND cluster_id IS NOT NULL
+            WHERE cluster_id IS NOT NULL
             GROUP BY cluster_id
-            HAVING COUNT(*) = SUM(CASE WHEN person_id = ? THEN 1 ELSE 0 END)
+            HAVING SUM(CASE WHEN person_id = ? THEN 1 ELSE 0 END) = COUNT(*)
             """,
-            [person_id, person_id],
+            [person_id],
         ).fetchall()
         linked_cluster_ids = {r["cluster_id"] for r in linked_cluster_rows}
 
@@ -2301,6 +2301,7 @@ class Repository:
         self,
         person_id: int,
         limit: int = 100,
+        min_similarity: float = 0.35,
     ) -> list[dict[str, Any]]:
         """Find images containing faces most similar to a person's identity.
 
@@ -2352,6 +2353,8 @@ class Repository:
         # 4. Vectorised scoring: single BLAS call.
         scores = matrix @ centroid  # (N,)
 
+        min_similarity = max(0.0, min(float(min_similarity), 1.0))
+
         # 5. Group by image_id, take max similarity per image.
         #    Exclude images already linked to this person.
         best_per_image: dict[int, tuple[float, int]] = {}  # image_id → (score, occ_id)
@@ -2360,7 +2363,7 @@ class Repository:
             if iid in exclude_image_ids:
                 continue
             s = float(scores[i])
-            if s < 0.3:
+            if s < min_similarity:
                 continue
             cur = best_per_image.get(iid)
             if cur is None or s > cur[0]:
@@ -2422,7 +2425,11 @@ class Repository:
     # ── Search index ───────────────────────────────────────────────────────
 
     def update_search_index(self, image_id: int) -> None:
-        """Rebuild FTS5 entry for a single image by aggregating all analysis data."""
+        """Rebuild search artifacts for a single image.
+
+        Always refreshes FTS `search_index`. If `search_features` exists (schema
+        v26+), it is refreshed as part of the same call.
+        """
         # Gather text from all sources
         desc_parts: list[str] = []
         subjects_parts: list[str] = []
@@ -2563,13 +2570,14 @@ class Repository:
 
         # Delete old entry then insert
         self.conn.execute(
-            "DELETE FROM search_index WHERE image_id = ?", [str(image_id)]
+            "DELETE FROM search_index WHERE rowid = ?", [image_id]
         )
         self.conn.execute(
             """INSERT INTO search_index
-               (image_id, description_text, subjects_text, keywords_text, faces_text, exif_text)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (rowid, image_id, description_text, subjects_text, keywords_text, faces_text, exif_text)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             [
+                image_id,
                 str(image_id),
                 " ".join(desc_parts),
                 " ".join(subjects_parts),
@@ -2578,6 +2586,179 @@ class Repository:
                 " ".join(exif_parts),
             ],
         )
+        if self._table_exists("search_features"):
+            self.update_search_features(image_id)
+
+    def update_search_features(self, image_id: int) -> None:
+        """Refresh denormalized search_features row for an image.
+
+        This is additive to existing search_index updates and is safe to call
+        repeatedly; the row is upserted with the latest derived values.
+        """
+        caption = self.conn.execute(
+            """SELECT description, keywords, detected_objects, ocr_text,
+                      face_identities, face_count, has_people
+               FROM analysis_caption WHERE image_id = ?""",
+            [image_id],
+        ).fetchone()
+        objects = self.conn.execute(
+            "SELECT detected_objects, has_person FROM analysis_objects WHERE image_id = ?",
+            [image_id],
+        ).fetchone()
+        ocr = self.conn.execute(
+            "SELECT ocr_text FROM analysis_ocr WHERE image_id = ?",
+            [image_id],
+        ).fetchone()
+        faces = self.conn.execute(
+            "SELECT face_identities, face_count FROM analysis_faces WHERE image_id = ?",
+            [image_id],
+        ).fetchone()
+        meta = self.conn.execute(
+            """SELECT camera_make, camera_model, lens_model, date_time_original,
+                      location_city, location_state, location_country
+               FROM analysis_metadata WHERE image_id = ?""",
+            [image_id],
+        ).fetchone()
+        tech = self.conn.execute(
+            "SELECT sharpness_score, noise_level, snr_db, dynamic_range_stops FROM analysis_technical WHERE image_id = ?",
+            [image_id],
+        ).fetchone()
+        perception = self.conn.execute(
+            "SELECT perception_iaa, perception_iqa, perception_ista FROM analysis_perception WHERE image_id = ?",
+            [image_id],
+        ).fetchone()
+        aesthetic = self.conn.execute(
+            "SELECT aesthetic_score FROM analysis_aesthetic WHERE image_id = ?",
+            [image_id],
+        ).fetchone()
+        cloud = self.conn.execute(
+            "SELECT description FROM analysis_cloud_ai WHERE image_id = ? ORDER BY analyzed_at DESC, id DESC LIMIT 1",
+            [image_id],
+        ).fetchone()
+
+        def _safe_json_text(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, list):
+                        return " ".join(str(item) for item in parsed if item is not None)
+                except (json.JSONDecodeError, TypeError):
+                    return value
+            return str(value)
+
+        desc_local = str(caption["description"]) if caption and caption["description"] else ""
+        desc_cloud = str(cloud["description"]) if cloud and cloud["description"] else ""
+        desc_lex = " ".join(part for part in (desc_local, desc_cloud) if part).strip()
+        desc_summary = desc_lex[:500]
+
+        desc_len = len(desc_lex)
+        if desc_len <= 0:
+            desc_quality = 0.0
+        elif desc_len < 32:
+            desc_quality = 0.25
+        elif desc_len < 96:
+            desc_quality = 0.55
+        elif desc_len < 800:
+            desc_quality = 0.85
+        else:
+            desc_quality = 0.7
+
+        keywords_text = _safe_json_text(caption["keywords"]) if caption else ""
+        objects_text = (
+            _safe_json_text(caption["detected_objects"]) if caption and caption["detected_objects"] else ""
+        )
+        if not objects_text and objects and objects["detected_objects"]:
+            objects_text = _safe_json_text(objects["detected_objects"])
+
+        ocr_text = str(caption["ocr_text"]) if caption and caption["ocr_text"] else ""
+        if not ocr_text and ocr and ocr["ocr_text"]:
+            ocr_text = str(ocr["ocr_text"])
+
+        faces_text = _safe_json_text(caption["face_identities"]) if caption else ""
+        if not faces_text and faces and faces["face_identities"]:
+            faces_text = _safe_json_text(faces["face_identities"])
+
+        face_count = None
+        has_people = None
+        if caption and caption["face_count"] is not None:
+            face_count = int(caption["face_count"])
+        elif faces and faces["face_count"] is not None:
+            face_count = int(faces["face_count"])
+        if caption and caption["has_people"] is not None:
+            has_people = int(caption["has_people"])
+        elif objects and objects["has_person"] is not None:
+            has_people = int(objects["has_person"])
+
+        self.conn.execute(
+            """
+            INSERT INTO search_features (
+                image_id, desc_lex, desc_summary, desc_quality, keywords_text, objects_text, ocr_text, faces_text,
+                camera_make, camera_model, lens_model, date_time_original, location_city, location_state, location_country,
+                sharpness_score, noise_level, snr_db, dynamic_range_stops,
+                perception_iaa, perception_iqa, perception_ista, aesthetic_score,
+                face_count, has_people, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(image_id) DO UPDATE SET
+                desc_lex=excluded.desc_lex,
+                desc_summary=excluded.desc_summary,
+                desc_quality=excluded.desc_quality,
+                keywords_text=excluded.keywords_text,
+                objects_text=excluded.objects_text,
+                ocr_text=excluded.ocr_text,
+                faces_text=excluded.faces_text,
+                camera_make=excluded.camera_make,
+                camera_model=excluded.camera_model,
+                lens_model=excluded.lens_model,
+                date_time_original=excluded.date_time_original,
+                location_city=excluded.location_city,
+                location_state=excluded.location_state,
+                location_country=excluded.location_country,
+                sharpness_score=excluded.sharpness_score,
+                noise_level=excluded.noise_level,
+                snr_db=excluded.snr_db,
+                dynamic_range_stops=excluded.dynamic_range_stops,
+                perception_iaa=excluded.perception_iaa,
+                perception_iqa=excluded.perception_iqa,
+                perception_ista=excluded.perception_ista,
+                aesthetic_score=excluded.aesthetic_score,
+                face_count=excluded.face_count,
+                has_people=excluded.has_people,
+                updated_at=datetime('now')
+            """,
+            [
+                image_id,
+                desc_lex,
+                desc_summary,
+                desc_quality,
+                keywords_text,
+                objects_text,
+                ocr_text,
+                faces_text,
+                meta["camera_make"] if meta else None,
+                meta["camera_model"] if meta else None,
+                meta["lens_model"] if meta else None,
+                meta["date_time_original"] if meta else None,
+                meta["location_city"] if meta else None,
+                meta["location_state"] if meta else None,
+                meta["location_country"] if meta else None,
+                tech["sharpness_score"] if tech else None,
+                tech["noise_level"] if tech else None,
+                tech["snr_db"] if tech else None,
+                tech["dynamic_range_stops"] if tech else None,
+                perception["perception_iaa"] if perception else None,
+                perception["perception_iqa"] if perception else None,
+                perception["perception_ista"] if perception else None,
+                aesthetic["aesthetic_score"] if aesthetic else None,
+                face_count,
+                has_people,
+            ],
+        )
+
+    def update_search_artifacts(self, image_id: int) -> None:
+        """Refresh search index and denormalized search features together."""
+        self.update_search_index(image_id)
 
     def _table_exists(self, table: str) -> bool:
         """Return True if a table exists in the database (cached via column cache)."""

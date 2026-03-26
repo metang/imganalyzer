@@ -99,6 +99,12 @@ _DESC_WEIGHT = 0.25
 # deviations above the population mean, to suppress noisy low-signal results.
 _DESC_ONLY_ZSCORE_MIN = 1.5
 _FTS_TOKEN_RE = re.compile(r"\w+", flags=re.UNICODE)
+_FTS_QUOTED_PHRASE_RE = re.compile(r'"([^"]+)"|\'([^\']+)\'')
+_SEMANTIC_PROFILE_WEIGHTS: dict[str, tuple[float, float]] = {
+    "image_dominant": (1.0, 0.10),
+    "balanced": (1.0, _DESC_WEIGHT),
+    "description_dominant": (0.60, 1.0),
+}
 
 
 def _rrf_score(rank: int, k: int = _RRF_K) -> float:
@@ -119,6 +125,93 @@ def _build_fts_match_query(query: str) -> str:
     tokens = [token.strip("_") for token in _FTS_TOKEN_RE.findall(query)]
     quoted_tokens = [f'"{token.replace("\"", "\"\"")}"' for token in tokens if token]
     return " AND ".join(quoted_tokens)
+
+
+def _extract_quoted_phrases(query: str) -> list[str]:
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for match in _FTS_QUOTED_PHRASE_RE.finditer(query):
+        phrase = (match.group(1) or match.group(2) or "").strip()
+        if not phrase:
+            continue
+        normalized = " ".join(phrase.split())
+        lowered = normalized.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        phrases.append(normalized)
+    return phrases
+
+
+def _build_fts_phrase_match_query(query: str) -> str:
+    """Build OR query of explicitly quoted phrases from user input."""
+    phrases = _extract_quoted_phrases(query)
+    if not phrases:
+        return ""
+    safe = [f'"{phrase.replace("\"", "\"\"")}"' for phrase in phrases]
+    return " OR ".join(safe)
+
+
+def _build_fts_subphrase_match_query(query: str, window: int = 3, max_clauses: int = 8) -> str:
+    """Build OR query of sliding token windows to support partial text overlap."""
+    tokens = [token.strip("_") for token in _FTS_TOKEN_RE.findall(query) if token.strip("_")]
+    if len(tokens) < window:
+        return ""
+    clauses: list[str] = []
+    seen: set[str] = set()
+    for idx in range(0, len(tokens) - window + 1):
+        phrase = " ".join(tokens[idx: idx + window])
+        lowered = phrase.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        clauses.append(f'"{phrase.replace("\"", "\"\"")}"')
+        if len(clauses) >= max_clauses:
+            break
+    return " OR ".join(clauses)
+
+
+def _build_fts_soft_match_query(query: str, max_tokens: int = 16) -> str:
+    """Build OR token query for partial/paraphrased lexical recall."""
+    raw_tokens = [token.strip("_") for token in _FTS_TOKEN_RE.findall(query)]
+    tokens: list[str] = []
+    seen: set[str] = set()
+    # Prefer informative tokens; fallback to all tokens when none qualify.
+    preferred = [token for token in raw_tokens if len(token) >= 4]
+    source = preferred if preferred else raw_tokens
+    for token in source:
+        if not token:
+            continue
+        lowered = token.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        tokens.append(token)
+        if len(tokens) >= max_tokens:
+            break
+    quoted_tokens = [f'"{token.replace("\"", "\"\"")}"' for token in tokens]
+    return " OR ".join(quoted_tokens)
+
+
+def _semantic_profile_weights(profile: str | None) -> tuple[float, float]:
+    normalized = (profile or "balanced").strip().lower().replace("-", "_")
+    return _SEMANTIC_PROFILE_WEIGHTS.get(normalized, _SEMANTIC_PROFILE_WEIGHTS["balanced"])
+
+
+def _fuse_semantic_tier1_scores(
+    image_ranks: dict[int, int],
+    desc_ranks: dict[int, int],
+    image_weight: float,
+    desc_weight: float,
+) -> list[tuple[int, float]]:
+    fused: list[tuple[int, float]] = []
+    for image_id, rank in image_ranks.items():
+        score = image_weight * _rrf_score(rank)
+        if image_id in desc_ranks:
+            score += desc_weight * _rrf_score(desc_ranks[image_id])
+        fused.append((image_id, score))
+    fused.sort(key=lambda x: (-x[1], x[0]))
+    return fused
 
 
 class _EmbeddingMatrix:
@@ -189,6 +282,7 @@ class SearchEngine:
         limit: int = 20,
         semantic_weight: float = 0.5,
         mode: str = "hybrid",
+        semantic_profile: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search images by text query.
 
@@ -202,9 +296,9 @@ class SearchEngine:
         if mode == "text":
             return self._fts_search(query, limit)
         elif mode == "semantic":
-            return self._semantic_search(query, limit)
+            return self._semantic_search(query, limit, semantic_profile)
         else:
-            return self._hybrid_search(query, limit, semantic_weight)
+            return self._hybrid_search(query, limit, semantic_weight, semantic_profile)
 
     def _resolve_face_rows(self, name: str, limit: int | None = 50) -> list[dict[str, Any]]:
         """Resolve one face/person query into image rows without text fallback."""
@@ -514,32 +608,77 @@ class SearchEngine:
     # ── Internal search methods ────────────────────────────────────────────
 
     def _fts_search(self, query: str, limit: int) -> list[dict[str, Any]]:
-        """Full-text search via FTS5 with BM25 ranking."""
-        match_query = _build_fts_match_query(query)
-        if not match_query:
-            return []
-        rows = self.conn.execute(
-            """SELECT si.image_id,
-                      i.file_path,
-                      rank AS score,
-                      snippet(search_index, 1, '<b>', '</b>', '...', 32) as snippet
-               FROM search_index si
-               JOIN images i ON i.id = CAST(si.image_id AS INTEGER)
-               WHERE search_index MATCH ?
-               ORDER BY rank
-               LIMIT ?""",
-            [match_query, limit],
-        ).fetchall()
+        """Full-text search via blended lexical channels + weighted BM25.
 
+        Channels:
+        - strict all-token match (precision)
+        - explicit quoted phrase match (boost)
+        - sliding subphrase windows (partial overlap recall)
+        - soft OR-token match (broad partial recall)
+        """
+        strict_query = _build_fts_match_query(query)
+        phrase_query = _build_fts_phrase_match_query(query)
+        subphrase_query = _build_fts_subphrase_match_query(query)
+        soft_query = _build_fts_soft_match_query(query)
+
+        channels: list[tuple[str, str, float, int]] = []
+        if strict_query:
+            channels.append(("text_strict", strict_query, 1.0, 1))
+        if phrase_query and phrase_query != strict_query:
+            channels.append(("text_phrase", phrase_query, 1.2, 1))
+        if subphrase_query and subphrase_query != strict_query and subphrase_query != phrase_query:
+            channels.append(("text_subphrase", subphrase_query, 0.8, 2))
+        if (
+            soft_query
+            and soft_query != strict_query
+            and soft_query != phrase_query
+            and soft_query != subphrase_query
+        ):
+            channels.append(("text_soft", soft_query, 0.45, 2))
+
+        if not channels:
+            return []
+
+        channel_limit_base = max(limit, 40)
+        fused_scores: dict[int, float] = {}
+        path_by_id: dict[int, str] = {}
+        snippet_by_id: dict[int, str] = {}
+        match_type_by_id: dict[int, str] = {}
+        channel_priority = {"text_strict": 0, "text_phrase": 1, "text_subphrase": 2, "text_soft": 3}
+
+        for match_type, match_query, weight, multiplier in channels:
+            channel_limit = channel_limit_base * multiplier
+            rows = self.conn.execute(
+                """SELECT si.rowid AS image_id,
+                          i.file_path,
+                          bm25(search_index, 0.0, 3.8, 3.2, 2.2, 2.6, 0.6) AS bm25_score,
+                          snippet(search_index, 1, '<b>', '</b>', '...', 32) AS snippet
+                   FROM search_index si
+                   JOIN images i ON i.id = si.rowid
+                   WHERE search_index MATCH ?
+                   ORDER BY bm25_score
+                   LIMIT ?""",
+                [match_query, channel_limit],
+            ).fetchall()
+            for rank, row in enumerate(rows):
+                image_id = int(row["image_id"])
+                fused_scores[image_id] = fused_scores.get(image_id, 0.0) + (weight * _rrf_score(rank))
+                path_by_id.setdefault(image_id, row["file_path"])
+                snippet_by_id.setdefault(image_id, row["snippet"])
+                existing = match_type_by_id.get(image_id)
+                if existing is None or channel_priority[match_type] < channel_priority[existing]:
+                    match_type_by_id[image_id] = match_type
+
+        ranked_ids = sorted(fused_scores.items(), key=lambda item: -item[1])[:limit]
         return [
             {
-                "image_id": int(r["image_id"]),
-                "file_path": r["file_path"],
-                "score": -r["score"],  # FTS5 rank is negative (lower=better)
-                "match_type": "text",
-                "snippet": r["snippet"],
+                "image_id": image_id,
+                "file_path": path_by_id.get(image_id, "?"),
+                "score": score,
+                "match_type": match_type_by_id.get(image_id, "text"),
+                "snippet": snippet_by_id.get(image_id, ""),
             }
-            for r in rows
+            for image_id, score in ranked_ids
         ]
 
     def _get_rich_desc_image_ids(self) -> frozenset[int]:
@@ -581,7 +720,7 @@ class SearchEngine:
         ).fetchall()
         return frozenset(r[0] for r in rows)
 
-    def _semantic_search(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def _semantic_search(self, query: str, limit: int, semantic_profile: str | None = None) -> list[dict[str, Any]]:
         """CLIP embedding semantic search — two-tier strategy (vectorized).
 
         **Tier 1 — images with ``image_clip``** (primary visual signal):
@@ -603,6 +742,7 @@ class SearchEngine:
         from imganalyzer.embeddings.clip_embedder import CLIPEmbedder, vector_from_bytes
 
         embedder = CLIPEmbedder()
+        image_weight, desc_weight = _semantic_profile_weights(semantic_profile)
 
         # Fetch a larger pool so RRF has more candidates to re-rank.
         pool = max(limit * _POOL_FACTOR, 100)
@@ -660,14 +800,12 @@ class SearchEngine:
         tier1_desc_pool = tier1_desc[:pool]
         desc_ranks_t1 = {iid: rank for rank, (iid, _) in enumerate(tier1_desc_pool)}
 
-        tier1_fused: list[tuple[int, float]] = []
-        for image_id, rank in image_ranks.items():
-            score = _rrf_score(rank)  # primary: image_clip weight = 1.0
-            if image_id in desc_ranks_t1:
-                score += _DESC_WEIGHT * _rrf_score(desc_ranks_t1[image_id])
-            tier1_fused.append((image_id, score))
-
-        tier1_fused.sort(key=lambda x: -x[1])
+        tier1_fused = _fuse_semantic_tier1_scores(
+            image_ranks=image_ranks,
+            desc_ranks=desc_ranks_t1,
+            image_weight=image_weight,
+            desc_weight=desc_weight,
+        )
         tier1_top = tier1_fused[:limit]
 
         # ── Tier 2: description_clip-only fallback ────────────────────────
@@ -725,7 +863,7 @@ class SearchEngine:
         return results
 
     def _hybrid_search(
-        self, query: str, limit: int, semantic_weight: float
+        self, query: str, limit: int, semantic_weight: float, semantic_profile: str | None = None
     ) -> list[dict[str, Any]]:
         """Combine FTS5 and CLIP scores with weighted RRF fusion.
 
@@ -747,7 +885,7 @@ class SearchEngine:
         """
         pool = limit * _POOL_FACTOR
         text_results     = self._fts_search(query, pool)
-        semantic_results = self._semantic_search(query, pool)
+        semantic_results = self._semantic_search(query, pool, semantic_profile)
 
         # Convert each result list to RRF scores (already sorted best-first)
         text_rrf: dict[int, float] = {
@@ -759,13 +897,17 @@ class SearchEngine:
             for rank, r in enumerate(semantic_results)
         }
 
-        # Candidate set: when CLIP is primary (semantic_weight >= 0.5), only
-        # keep candidates that CLIP found.  FTS results that aren't in the
-        # CLIP pool are silently dropped so they can't introduce false
-        # positives.  When text is primary (semantic_weight < 0.5), use the
-        # full union so FTS-only results are still reachable.
+        # Candidate set policy:
+        # - text-primary (semantic_weight < 0.5): full union.
+        # - semantic-primary (semantic_weight >= 0.5): keep CLIP pool, but
+        #   always include a lexical guarantee bucket so strong description
+        #   matches are not dropped.
         if semantic_weight >= 0.5:
-            all_ids = set(sem_rrf.keys())
+            lexical_floor = max(limit, min(pool // 3, 200))
+            lexical_guarantee_ids = {
+                int(r["image_id"]) for r in text_results[:lexical_floor]
+            }
+            all_ids = set(sem_rrf.keys()) | lexical_guarantee_ids
         else:
             all_ids = set(text_rrf.keys()) | set(sem_rrf.keys())
 

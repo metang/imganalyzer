@@ -70,6 +70,7 @@ import argparse
 import base64
 from collections import defaultdict
 import io
+import inspect
 import json
 import os
 import re
@@ -1770,6 +1771,7 @@ def _handle_search(params: dict) -> dict:
     query = params.get("query", "")
     mode = params.get("mode", "hybrid")
     semantic_weight = params.get("semanticWeight", 0.5)
+    semantic_profile = params.get("semanticProfile", "balanced")
     face = params.get("face")
     faces_raw = params.get("faces")
     face_match = params.get("faceMatch", "all")
@@ -1793,7 +1795,12 @@ def _handle_search(params: dict) -> dict:
     time_of_day = params.get("timeOfDay")
     has_people = params.get("hasPeople")
     sort_by = params.get("sortBy", "relevance")
+    rank_preference = params.get("rankPreference")
     expanded_terms_raw = params.get("expandedTerms", [])
+    must_terms_raw = params.get("mustTerms", [])
+    should_terms_raw = params.get("shouldTerms", [])
+    debug_search = params.get("debugSearch", False)
+    facet_request = params.get("facetRequest", False)
     try:
         limit = int(params.get("limit", 200))
     except (TypeError, ValueError):
@@ -1815,6 +1822,30 @@ def _handle_search(params: dict) -> dict:
     valid_sort_by = {"relevance", "best", "aesthetic", "sharpness", "cleanest", "newest"}
     if sort_by not in valid_sort_by:
         raise ValueError("sortBy must be one of relevance, best, aesthetic, sharpness, cleanest or newest")
+    valid_rank_preference = {"relevance", "quality", "recency", "aesthetic", "cleanest", "sharpest"}
+    valid_semantic_profile = {"image_dominant", "balanced", "description_dominant"}
+    if rank_preference is not None and rank_preference not in valid_rank_preference:
+        raise ValueError("rankPreference must be one of relevance, quality, recency, aesthetic, cleanest or sharpest")
+    if semantic_profile is None:
+        semantic_profile = "balanced"
+    if not isinstance(semantic_profile, str):
+        raise ValueError("semanticProfile must be one of image_dominant, balanced or description_dominant")
+    semantic_profile = semantic_profile.strip().lower()
+    if semantic_profile not in valid_semantic_profile:
+        raise ValueError("semanticProfile must be one of image_dominant, balanced or description_dominant")
+    if sort_by == "relevance" and rank_preference:
+        sort_by = {
+            "relevance": "relevance",
+            "quality": "best",
+            "recency": "newest",
+            "aesthetic": "aesthetic",
+            "cleanest": "cleanest",
+            "sharpest": "sharpness",
+        }[rank_preference]
+    if not isinstance(debug_search, bool):
+        raise ValueError("debugSearch must be a boolean")
+    if not isinstance(facet_request, bool):
+        raise ValueError("facetRequest must be a boolean")
     if expanded_terms_raw is None:
         expanded_terms_raw = []
     if not isinstance(expanded_terms_raw, list):
@@ -1829,6 +1860,34 @@ def _handle_search(params: dict) -> dict:
         if clean and lowered not in seen_terms:
             seen_terms.add(lowered)
             expanded_terms.append(clean)
+    if must_terms_raw is None:
+        must_terms_raw = []
+    if should_terms_raw is None:
+        should_terms_raw = []
+    if not isinstance(must_terms_raw, list):
+        raise ValueError("mustTerms must be an array")
+    if not isinstance(should_terms_raw, list):
+        raise ValueError("shouldTerms must be an array")
+    must_terms: list[str] = []
+    should_terms: list[str] = []
+    seen_must: set[str] = set()
+    seen_should: set[str] = set()
+    for term in must_terms_raw:
+        if not isinstance(term, str):
+            raise ValueError("mustTerms entries must be strings")
+        clean = term.strip()
+        lowered = clean.casefold()
+        if clean and lowered not in seen_must:
+            seen_must.add(lowered)
+            must_terms.append(clean)
+    for term in should_terms_raw:
+        if not isinstance(term, str):
+            raise ValueError("shouldTerms entries must be strings")
+        clean = term.strip()
+        lowered = clean.casefold()
+        if clean and lowered not in seen_should:
+            seen_should.add(lowered)
+            should_terms.append(clean)
 
     if faces_raw is None:
         faces_raw = []
@@ -1869,6 +1928,38 @@ def _handle_search(params: dict) -> dict:
                     faces = [resolved_face]
                     face = resolved_face
                     query = remaining_query
+
+    if not faces:
+        resolve_face_queries = getattr(engine, "resolve_face_queries", None)
+        if callable(resolve_face_queries):
+            normalized_faces: list[str] = []
+            seen_resolved_faces: set[str] = set()
+
+            def _consume_face_terms(terms: list[str]) -> list[str]:
+                remaining_terms: list[str] = []
+                for raw_term in terms:
+                    resolved_from_term, remaining_term, resolved_match = resolve_face_queries(raw_term)
+                    if resolved_from_term:
+                        for resolved_face in resolved_from_term:
+                            lowered = resolved_face.casefold()
+                            if lowered in seen_resolved_faces:
+                                continue
+                            seen_resolved_faces.add(lowered)
+                            normalized_faces.append(resolved_face)
+                        if len(normalized_faces) > 1:
+                            face_match = resolved_match if resolved_match in {"any", "all"} else "all"
+                    cleaned_remaining = remaining_term.strip()
+                    if cleaned_remaining:
+                        remaining_terms.append(cleaned_remaining)
+                return remaining_terms
+
+            must_terms = _consume_face_terms(must_terms)
+            should_terms = _consume_face_terms(should_terms)
+            if normalized_faces:
+                faces = normalized_faces
+                face = faces[0]
+                if len(faces) > 1 and face_match not in {"any", "all"}:
+                    face_match = "all"
 
     has_text_query = bool(query and query.strip())
     base_conditions: list[str] = []
@@ -2175,9 +2266,23 @@ def _handle_search(params: dict) -> dict:
         return ""
 
     def _search_text_terms(candidate_limit: int) -> list[dict[str, Any]]:
+        search_supports_profile = "semantic_profile" in inspect.signature(engine.search).parameters
+
+        def _run_search(term: str) -> list[dict[str, Any]]:
+            kwargs: dict[str, Any] = {
+                "limit": candidate_limit,
+                "semantic_weight": semantic_weight,
+                "mode": mode,
+            }
+            if search_supports_profile:
+                kwargs["semantic_profile"] = semantic_profile
+            return engine.search(term, **kwargs)
+
         terms: list[str] = []
+        terms.extend(must_terms)
         if has_text_query:
             terms.append(query.strip())
+        terms.extend(should_terms)
         seen_local = {term.casefold() for term in terms}
         for term in expanded_terms:
             lowered = term.casefold()
@@ -2187,22 +2292,12 @@ def _handle_search(params: dict) -> dict:
         if not terms:
             return []
         if len(terms) == 1:
-            return engine.search(
-                terms[0],
-                limit=candidate_limit,
-                semantic_weight=semantic_weight,
-                mode=mode,
-            )
+            return _run_search(terms[0])
 
         fused_scores: dict[int, float] = {}
         file_paths: dict[int, str] = {}
         for term in terms:
-            term_results = engine.search(
-                term,
-                limit=candidate_limit,
-                semantic_weight=semantic_weight,
-                mode=mode,
-            )
+            term_results = _run_search(term)
             for rank, result in enumerate(term_results):
                 image_id = int(result["image_id"])
                 fused_scores[image_id] = fused_scores.get(image_id, 0.0) + (1.0 / (61 + rank))
@@ -3195,10 +3290,20 @@ def _handle_faces_person_similar_images(params: dict) -> dict:
     person_id = int(params["person_id"])
     limit = int(params.get("limit", 100))
     limit = max(1, min(limit, 500))
+    min_similarity_raw = params.get("min_similarity", 0.35)
+    try:
+        min_similarity = float(min_similarity_raw)
+    except (TypeError, ValueError):
+        min_similarity = 0.35
+    min_similarity = max(0.0, min(min_similarity, 1.0))
 
     conn = _get_db()
     repo = Repository(conn)
-    images = repo.find_similar_images_for_person(person_id, limit=limit)
+    images = repo.find_similar_images_for_person(
+        person_id,
+        limit=limit,
+        min_similarity=min_similarity,
+    )
     return {"images": images}
 
 

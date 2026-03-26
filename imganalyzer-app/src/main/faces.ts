@@ -645,12 +645,18 @@ export function registerFaceHandlers(): void {
 
   ipcMain.handle(
     'faces:personSimilarImages',
-    async (_evt, personId: number, limit?: number): Promise<{ images: PersonSimilarImage[]; error?: string }> => {
+    async (
+      _evt,
+      personId: number,
+      limit?: number,
+      minSimilarity?: number,
+    ): Promise<{ images: PersonSimilarImage[]; error?: string }> => {
       try {
         await ensureServerRunning()
         const result = await rpc.call('faces/person-similar-images', {
           person_id: personId,
           limit: limit ?? 100,
+          min_similarity: minSimilarity,
         }) as { images: PersonSimilarImage[] }
         return { images: result.images }
       } catch (err) {
