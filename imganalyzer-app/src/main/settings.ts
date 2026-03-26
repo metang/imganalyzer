@@ -35,6 +35,7 @@ export interface WorkerPathMapping {
 
 export interface ProcessingSettings {
   chunkSize: number
+  unlinkedClusterTarget: number
 }
 
 export interface AppSettings {
@@ -85,6 +86,7 @@ const DEFAULT_THUMB_CACHE_DIR = resolve(join(homedir(), '.cache', 'imganalyzer',
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 const DEFAULT_COORDINATOR_PORT = 8765
 const DEFAULT_CHUNK_SIZE = 500
+const DEFAULT_UNLINKED_CLUSTER_TARGET = 100
 
 let cachedBundle: AppSettingsBundle | null = null
 
@@ -324,6 +326,7 @@ async function resolveBundle(force = false): Promise<AppSettingsBundle> {
     distributed: normalizeDistributedSettings(stored.distributed),
     processing: {
       chunkSize: stored.processing?.chunkSize ?? DEFAULT_CHUNK_SIZE,
+      unlinkedClusterTarget: stored.processing?.unlinkedClusterTarget ?? DEFAULT_UNLINKED_CLUSTER_TARGET,
     },
   }
 
@@ -407,6 +410,13 @@ export async function updateAppSettings(input: AppSettingsInput): Promise<AppSet
         throw new Error('Chunk size must be an integer between 0 and 10000')
       }
       next.processing!.chunkSize = cs
+    }
+    if (input.processing.unlinkedClusterTarget !== undefined) {
+      const target = Number(input.processing.unlinkedClusterTarget)
+      if (!Number.isInteger(target) || target < 1 || target > 1000) {
+        throw new Error('Unlinked cluster target must be an integer between 1 and 1000')
+      }
+      next.processing!.unlinkedClusterTarget = target
     }
   }
 

@@ -23,7 +23,7 @@ const pendingCallbacks = new Map<number, Array<(src: string | null) => void>>()
 let batchTimer: ReturnType<typeof setTimeout> | null = null
 
 const CLUSTER_PAGE_SIZE = 200
-const UNLINKED_CLUSTER_TARGET = 100
+const DEFAULT_UNLINKED_CLUSTER_TARGET = 100
 const DEFAULT_SIMILARITY_THRESHOLD = 0.35
 
 function normalizeImageSrc(value: string | null | undefined): string | null {
@@ -666,6 +666,7 @@ export function FacesView() {
   // Direct links (Linked tab — images linked to person without cluster)
   const [personDirectLinks, setPersonDirectLinks] = useState<Record<number, PersonDirectLink[]>>({})
   const [loadingDirectLinksId, setLoadingDirectLinksId] = useState<number | null>(null)
+  const [unlinkedClusterTarget, setUnlinkedClusterTarget] = useState<number>(DEFAULT_UNLINKED_CLUSTER_TARGET)
 
   // ── Load data ─────────────────────────────────────────────────────────────
 
@@ -695,7 +696,7 @@ export function FacesView() {
           let offset = loadedClusters.length
           let unlinkedCount = countActiveUnlinkedClusters(loadedClusters, deferredIds)
 
-          while (unlinkedCount < UNLINKED_CLUSTER_TARGET && offset < loadedTotalCount) {
+          while (unlinkedCount < unlinkedClusterTarget && offset < loadedTotalCount) {
             const nextPage = await window.api.listFaceClusters(CLUSTER_PAGE_SIZE, offset)
             if (nextPage.error) {
               setError(nextPage.error)
@@ -746,6 +747,21 @@ export function FacesView() {
     } finally {
       setLoading(false)
     }
+  }, [unlinkedClusterTarget])
+
+  useEffect(() => {
+    window.api.getAppSettings()
+      .then((bundle) => {
+        const configured = Number(bundle.settings.processing?.unlinkedClusterTarget)
+        if (Number.isInteger(configured) && configured >= 1 && configured <= 1000) {
+          setUnlinkedClusterTarget(configured)
+        } else {
+          setUnlinkedClusterTarget(DEFAULT_UNLINKED_CLUSTER_TARGET)
+        }
+      })
+      .catch(() => {
+        setUnlinkedClusterTarget(DEFAULT_UNLINKED_CLUSTER_TARGET)
+      })
   }, [])
 
   const loadMoreClusters = useCallback(async () => {
@@ -1604,8 +1620,8 @@ export function FacesView() {
   const visibleUnlinkedClusters = useMemo(
     () => (unlinkedSubFilter === 'deferred'
       ? deferredUnlinkedClusters
-      : activeUnlinkedClusters.slice(0, UNLINKED_CLUSTER_TARGET)),
-    [unlinkedSubFilter, activeUnlinkedClusters, deferredUnlinkedClusters],
+      : activeUnlinkedClusters.slice(0, unlinkedClusterTarget)),
+    [unlinkedSubFilter, activeUnlinkedClusters, deferredUnlinkedClusters, unlinkedClusterTarget],
   )
   const activePerson = useMemo(
     () => persons.find((person) => person.id === expandedPersonId) ?? null,
@@ -2839,7 +2855,7 @@ export function FacesView() {
                       {([
                         ['linked', 'Linked', `${activeLinkedCount}`],
                         ['suggested', 'Suggested', `${activeSuggestedClusters.length}`],
-                        ['unlinked', 'Unlinked', `${activeUnlinkedClusters.length > UNLINKED_CLUSTER_TARGET ? UNLINKED_CLUSTER_TARGET + '+' : activeUnlinkedClusters.length}`],
+                        ['unlinked', 'Unlinked', `${activeUnlinkedClusters.length > unlinkedClusterTarget ? unlinkedClusterTarget + '+' : activeUnlinkedClusters.length}`],
                         ['inspector', 'Inspector', inspectorCluster ? '1' : '0'],
                       ] as Array<[PeopleStage, string, string]>).map(([stage, label, count]) => {
                         const isDisabled = stage === 'inspector' && !inspectorCluster
@@ -3296,7 +3312,7 @@ export function FacesView() {
                               {unlinkedSubFilter === 'deferred'
                                 ? `${deferredUnlinkedClusters.length} deferred cluster${deferredUnlinkedClusters.length !== 1 ? 's' : ''} parked for later.`
                                 : <>Hunt for missed matches for {activePerson?.name ?? '…'}. Showing {visibleUnlinkedClusters.length}
-                                  {activeUnlinkedClusters.length > UNLINKED_CLUSTER_TARGET ? ` of ${activeUnlinkedClusters.length}` : ''} active clusters.</>
+                                  {activeUnlinkedClusters.length > unlinkedClusterTarget ? ` of ${activeUnlinkedClusters.length}` : ''} active clusters.</>
                               }
                             </p>
                           </div>
@@ -3309,7 +3325,7 @@ export function FacesView() {
                                 unlinkedSubFilter === 'active' ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-400 hover:text-neutral-200'
                               }`}
                             >
-                              Active <span className="text-neutral-500">{activeUnlinkedClusters.length > UNLINKED_CLUSTER_TARGET ? `${UNLINKED_CLUSTER_TARGET}+` : activeUnlinkedClusters.length}</span>
+                              Active <span className="text-neutral-500">{activeUnlinkedClusters.length > unlinkedClusterTarget ? `${unlinkedClusterTarget}+` : activeUnlinkedClusters.length}</span>
                             </button>
                             <button
                               type="button"
