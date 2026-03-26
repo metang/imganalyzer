@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 import threading
 
+import pytest
+
 from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository
 from imganalyzer.db.schema import ensure_schema
@@ -244,3 +246,94 @@ def test_server_master_pause_blocks_new_runs_until_resumed(tmp_path, monkeypatch
     assert resumed["ok"] is True
     assert resumed["desiredState"] == "active"
     assert resumed["worker"]["desiredState"] == "active"
+
+
+def test_server_sync_handler_retries_transient_lock_for_face_link(monkeypatch):
+    import imganalyzer.server as server
+
+    attempts = 0
+
+    def _flaky_handler(_params: dict[str, object]) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return {"ok": True, "updated": 12}
+
+    sleep_calls: list[float] = []
+    monkeypatch.setitem(server._SYNC_METHODS, "faces/person-link-cluster", _flaky_handler)
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    result = server._call_sync_handler("faces/person-link-cluster", {})
+
+    assert result == {"ok": True, "updated": 12}
+    assert attempts == 3
+    assert sleep_calls == [
+        server._LOCK_RETRY_INITIAL_DELAY_S,
+        server._LOCK_RETRY_INITIAL_DELAY_S * 2,
+    ]
+
+
+def test_server_sync_handler_lock_retry_budget_is_bounded(monkeypatch):
+    import imganalyzer.server as server
+
+    attempts = 0
+
+    def _always_locked(_params: dict[str, object]) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    sleep_calls: list[float] = []
+    monkeypatch.setitem(server._SYNC_METHODS, "faces/cluster-relink", _always_locked)
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        server._call_sync_handler("faces/cluster-relink", {})
+
+    assert attempts == server._LOCK_RETRY_ATTEMPTS
+    assert len(sleep_calls) == server._LOCK_RETRY_ATTEMPTS - 1
+
+
+def test_server_sync_handler_does_not_retry_non_retryable_method(monkeypatch):
+    import imganalyzer.server as server
+
+    attempts = 0
+
+    def _locked_status(_params: dict[str, object]) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    sleep_calls: list[float] = []
+    monkeypatch.setitem(server._SYNC_METHODS, "search", _locked_status)
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        server._call_sync_handler("search", {})
+
+    assert attempts == 1
+    assert sleep_calls == []
+
+
+def test_server_sync_handler_retries_transient_lock_for_status(monkeypatch):
+    import imganalyzer.server as server
+
+    attempts = 0
+
+    def _flaky_status(_params: dict[str, object]) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return {"ok": True}
+
+    sleep_calls: list[float] = []
+    monkeypatch.setitem(server._SYNC_METHODS, "status", _flaky_status)
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    result = server._call_sync_handler("status", {})
+
+    assert result == {"ok": True}
+    assert attempts == 2
+    assert sleep_calls == [server._LOCK_RETRY_INITIAL_DELAY_S]

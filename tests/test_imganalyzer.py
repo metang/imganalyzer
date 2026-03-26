@@ -3448,3 +3448,49 @@ class TestFaceCropBatchCaching:
         ).fetchall()
         assert len(persisted) == 2
         assert all(row["thumbnail"] is not None for row in persisted)
+
+    def test_crop_batch_returns_thumbnail_even_when_thumbnail_update_is_temporarily_locked(
+        self, tmp_path, monkeypatch
+    ):
+        from PIL import Image
+
+        from imganalyzer import server
+        from imganalyzer.db.repository import Repository
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+
+        image_path = tmp_path / "source-locked.jpg"
+        Image.new("RGB", (120, 120), color=(120, 180, 90)).save(image_path, format="JPEG")
+        image_id = repo.register_image(file_path=str(image_path), width=120, height=120, fmt="JPEG")
+
+        occ = conn.execute(
+            """
+            INSERT INTO face_occurrences
+                (image_id, face_idx, bbox_x1, bbox_y1, bbox_x2, bbox_y2, identity_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [image_id, 0, 12.0, 14.0, 64.0, 66.0, "Unknown"],
+        ).lastrowid
+        assert occ is not None
+
+        original_set = Repository.set_face_occurrence_thumbnail
+        call_count = 0
+
+        def flaky_set(self, occurrence_id, thumbnail):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return original_set(self, occurrence_id, thumbnail)
+
+        sleep_calls: list[float] = []
+        monkeypatch.setattr(Repository, "set_face_occurrence_thumbnail", flaky_set)
+        monkeypatch.setattr(server, "_get_db", lambda: conn)
+        monkeypatch.setattr(server.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+        result = server._handle_faces_crop_batch({"ids": [occ]})
+
+        assert str(occ) in result["thumbnails"]
+        assert call_count >= 2
+        assert sleep_calls == [server._LOCK_RETRY_INITIAL_DELAY_S]

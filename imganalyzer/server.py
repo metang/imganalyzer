@@ -155,7 +155,7 @@ def _open_server_db() -> sqlite3.Connection:
                 bootstrap.execute("PRAGMA journal_mode=WAL")
                 bootstrap.execute("PRAGMA synchronous=NORMAL")
                 bootstrap.execute("PRAGMA foreign_keys=ON")
-                bootstrap.execute("PRAGMA busy_timeout=5000")
+                bootstrap.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
                 ensure_schema(bootstrap)
                 bootstrap.close()
                 _schema_ready_paths.add(db_key)
@@ -168,7 +168,7 @@ def _open_server_db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
     return conn
 
 
@@ -181,6 +181,13 @@ def _get_db() -> sqlite3.Connection:
     return conn
 
 
+def _is_transient_db_lock_error(exc: Exception) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_DB_LOCK_MARKERS)
+
+
 # ── State for cancellable operations ─────────────────────────────────────────
 
 _run_cancel = threading.Event()
@@ -191,6 +198,7 @@ _analyze_cancel: dict[str, threading.Event] = {}  # imagePath -> cancel event
 
 _MASTER_WORKER_ID = "master"
 _MASTER_WORKER_LABEL = "Master device"
+_DB_BUSY_TIMEOUT_MS = 30000
 _LEGACY_QUEUE_MODULE_MAP: dict[str, str] = {
     "blip2": "caption",
     "cloud_ai": "caption",
@@ -199,6 +207,21 @@ _LEGACY_QUEUE_MODULE_MAP: dict[str, str] = {
 }
 _PERSON_LINK_SUGGESTION_CACHE_TTL_SECONDS = 30.0
 _person_link_suggestion_cache: dict[tuple[int, int], tuple[float, list[dict[str, Any]]]] = {}
+_TRANSIENT_DB_LOCK_MARKERS = (
+    "database is locked",
+    "database table is locked",
+    "database schema is locked",
+)
+_LOCK_RETRYABLE_METHODS = {
+    "status",
+    "workers/list",
+    "faces/crop-batch",
+    "faces/person-link-cluster",
+    "faces/person-unlink-cluster",
+    "faces/cluster-relink",
+}
+_LOCK_RETRY_ATTEMPTS = 4
+_LOCK_RETRY_INITIAL_DELAY_S = 0.15
 
 # ── Decoded image cache (coordinator-mediated distribution) ──────────────────
 
@@ -380,6 +403,16 @@ def _sync_master_worker_node(conn: sqlite3.Connection) -> None:
     _upsert_master_worker_node(conn, status=_master_worker_runtime_status())
 
 
+def _ensure_master_worker_node(conn: sqlite3.Connection) -> None:
+    """Ensure the master worker row exists without refreshing heartbeat every poll."""
+    row = conn.execute(
+        "SELECT 1 FROM worker_nodes WHERE id = ?",
+        [_MASTER_WORKER_ID],
+    ).fetchone()
+    if row is None:
+        _upsert_master_worker_node(conn, status=_master_worker_runtime_status())
+
+
 def _mark_stale_worker_nodes_offline(
     conn: sqlite3.Connection,
     *,
@@ -466,7 +499,7 @@ def _handle_status(params: dict) -> dict:
     from imganalyzer.db.repository import Repository
 
     conn = _get_db()
-    _sync_master_worker_node(conn)
+    _ensure_master_worker_node(conn)
     queue = JobQueue(conn)
     repo = Repository(conn)
 
@@ -593,7 +626,7 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
     processor = BatchProcessor(conn)
 
     folders = [Path(f) for f in params.get("folders", [])]
@@ -719,7 +752,7 @@ def _handle_run(req_id: int | str, params: dict) -> None:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
             _upsert_master_worker_node(conn, status="online")
             worker_kwargs = dict(
                 conn=conn,
@@ -947,6 +980,7 @@ def _build_master_item(
     *,
     running_modules: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
+    runtime_status = _master_worker_runtime_status()
     row = conn.execute(
         """SELECT id, display_name, platform, capabilities, status, last_heartbeat,
                   created_at, updated_at, desired_state, state_reason
@@ -966,7 +1000,7 @@ def _build_master_item(
             "displayName": _MASTER_WORKER_LABEL,
             "platform": sys.platform,
             "capabilities": {},
-            "status": _master_worker_runtime_status(),
+            "status": runtime_status,
             "lastHeartbeat": None,
             "createdAt": None,
             "updatedAt": None,
@@ -982,7 +1016,7 @@ def _build_master_item(
         "displayName": row["display_name"] or _MASTER_WORKER_LABEL,
         "platform": row["platform"] or sys.platform,
         "capabilities": _decode_worker_capabilities(row["capabilities"]),
-        "status": row["status"] or _master_worker_runtime_status(),
+        "status": runtime_status if runtime_status == "online" else (row["status"] or runtime_status),
         "lastHeartbeat": row["last_heartbeat"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -1092,7 +1126,7 @@ def _recent_queue_results(conn: sqlite3.Connection, limit: int = 200) -> list[di
 def _handle_workers_list(_params: dict) -> dict:
     """List registered workers and include the coordinator master node."""
     conn = _get_db()
-    _sync_master_worker_node(conn)
+    _ensure_master_worker_node(conn)
     running_modules = _get_running_modules_by_node(conn)
     return {
         "master": _build_master_item(conn, running_modules=running_modules),
@@ -3575,9 +3609,20 @@ def _handle_faces_crop_batch(params: dict) -> dict:
                     thumbnail = _generate_face_occurrence_thumbnail(
                         row_d, img=img, exif_orientation=orientation,
                     )
-                    repo.set_face_occurrence_thumbnail(row_d["id"], thumbnail)
                     thumbnails[str(row_d["id"])] = base64.b64encode(thumbnail).decode("ascii")
-                    updated = True
+                    # Persist thumbnail cache opportunistically; if DB is briefly
+                    # locked we still return thumbnail to caller and retry shortly.
+                    delay_s = _LOCK_RETRY_INITIAL_DELAY_S
+                    for attempt in range(1, _LOCK_RETRY_ATTEMPTS + 1):
+                        try:
+                            repo.set_face_occurrence_thumbnail(row_d["id"], thumbnail)
+                            updated = True
+                            break
+                        except Exception as exc:
+                            if not _is_transient_db_lock_error(exc) or attempt >= _LOCK_RETRY_ATTEMPTS:
+                                raise
+                            time.sleep(delay_s)
+                            delay_s = min(delay_s * 2, 1.0)
                 except Exception:
                     sys.stderr.write(
                         f"[faces/crop-batch] crop failed for occ {row_d['id']}\n"
@@ -3815,6 +3860,23 @@ _ASYNC_METHODS: dict[str, Any] = {
 }
 
 
+def _call_sync_handler(method: str, params: dict[str, Any]) -> Any:
+    """Invoke a sync JSON-RPC handler with transient DB lock retries when needed."""
+    handler = _SYNC_METHODS[method]
+    if method not in _LOCK_RETRYABLE_METHODS:
+        return handler(params)
+
+    delay_s = _LOCK_RETRY_INITIAL_DELAY_S
+    for attempt in range(1, _LOCK_RETRY_ATTEMPTS + 1):
+        try:
+            return handler(params)
+        except Exception as exc:
+            if not _is_transient_db_lock_error(exc) or attempt >= _LOCK_RETRY_ATTEMPTS:
+                raise
+            time.sleep(delay_s)
+            delay_s = min(delay_s * 2, 1.0)
+
+
 def _graceful_shutdown() -> None:
     """Signal running workers to stop and wait briefly for shutdown."""
     _run_cancel.set()
@@ -3854,7 +3916,7 @@ def _dispatch_http_request(msg: Any) -> tuple[dict[str, Any], bool]:
 
     if method in _SYNC_METHODS:
         try:
-            result = _SYNC_METHODS[method](params)
+            result = _call_sync_handler(method, params)
             return {"jsonrpc": "2.0", "id": req_id, "result": result}, False
         except Exception as exc:
             return {
@@ -4103,7 +4165,7 @@ def _dispatch(msg: dict) -> None:
 
     if method in _SYNC_METHODS:
         try:
-            result = _SYNC_METHODS[method](params)
+            result = _call_sync_handler(method, params)
             _send_result(req_id, result)
         except Exception as exc:
             _send_error(req_id, -1, str(exc))
