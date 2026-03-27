@@ -237,6 +237,7 @@ let currentRunId = 0
 let idleTimer: ReturnType<typeof setTimeout> | null = null
 let monitorOnly = false
 let pollInFlight = false
+let statusPollCount = 0
 // Consecutive polls where remainingPasses was 0 while monitorOnly is active.
 // We require several zero readings before concluding the run is truly done,
 // to avoid stopping polling on transient zero snapshots.
@@ -282,6 +283,7 @@ function resetSessionCounters(): void {
   completionWindow.length = 0
   processedStatusResultKeys.clear()
   nodeCounters.clear()
+  statusPollCount = 0
   lastChunkPassesPerSec = 0
   chunkCompletionWindowMs.length = 0
   currentChunkKey = null
@@ -612,7 +614,16 @@ async function doPoll(): Promise<void> {
   if (pollInFlight) return
   pollInFlight = true
   try {
-    const data = await rpc.call('status', {}) as ServerStatusPayload
+    statusPollCount += 1
+    const includeRecentResults =
+      monitorOnly || (statusPollCount % 5 === 0) || batchStatus === 'done' || batchStatus === 'error'
+    const data = await rpc.call(
+      'status',
+      {
+        include_recent_results: includeRecentResults,
+        include_module_avg_ms: true,
+      }
+    ) as ServerStatusPayload
 
     const workers = sessionConfig?.workers ?? 1
     const pending = data.totals.pending ?? 0
@@ -867,7 +878,16 @@ function setupNotificationListener(): void {
         if (batchStatus !== 'running') break
         isRunActive = false
         const wasPaused = !!(p as any)?.paused
-        void rpc.call('status', {}).then((data: any) => {
+        void rpc.call(
+          'status',
+          {
+            lite: true,
+            cache: true,
+            cache_ttl_ms: 1000,
+            include_recent_results: false,
+            include_module_avg_ms: false,
+          }
+        ).then((data: any) => {
           if (currentRunId !== runId) return
           const masterRunning = data?.nodes?.master?.runningJobs ?? 0
           const pending = data?.totals?.pending ?? 0
@@ -914,7 +934,16 @@ function setupNotificationListener(): void {
         const runId = currentRunId
         if (batchStatus !== 'running') break
         isRunActive = false
-        void rpc.call('status', {}).then((data: any) => {
+        void rpc.call(
+          'status',
+          {
+            lite: true,
+            cache: true,
+            cache_ttl_ms: 1000,
+            include_recent_results: false,
+            include_module_avg_ms: false,
+          }
+        ).then((data: any) => {
           if (currentRunId !== runId) return
           const masterRunning = data?.nodes?.master?.runningJobs ?? 0
           const pending = data?.totals?.pending ?? 0
@@ -1225,7 +1254,16 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   ipcMain.handle('batch:check-pending', async (): Promise<{ pending: number; running: number }> => {
     try {
         await ensureServerRunning()
-        const data = await rpc.call('status', {}) as {
+        const data = await rpc.call(
+          'status',
+          {
+            lite: true,
+            cache: true,
+            cache_ttl_ms: 1000,
+            include_recent_results: false,
+            include_module_avg_ms: false,
+          }
+        ) as {
           totals: Record<string, number>
       }
       return {
@@ -1298,7 +1336,16 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     try {
       if (isRunActive) return false
       await ensureServerRunning()
-      const data = await rpc.call('status', {}) as {
+      const data = await rpc.call(
+        'status',
+        {
+          lite: true,
+          cache: true,
+          cache_ttl_ms: 1000,
+          include_recent_results: false,
+          include_module_avg_ms: false,
+        }
+      ) as {
         totals: Record<string, number>
       }
       const running = data.totals.running ?? 0

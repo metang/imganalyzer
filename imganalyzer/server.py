@@ -305,6 +305,10 @@ _LOCK_RETRYABLE_METHODS = {
 }
 _LOCK_RETRY_ATTEMPTS = 4
 _LOCK_RETRY_INITIAL_DELAY_S = 0.15
+_STATUS_CACHE_DEFAULT_TTL_MS = 800
+_STATUS_CACHE_MAX_TTL_MS = 5000
+_status_cache_lock = threading.Lock()
+_status_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 # ── Decoded image cache (coordinator-mediated distribution) ──────────────────
 
@@ -474,6 +478,19 @@ def _invalidate_person_link_suggestion_cache() -> None:
     _person_link_suggestion_cache.clear()
 
 
+def _as_bool_param(value: Any, default: bool) -> bool:
+    """Coerce a request parameter into bool."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
 def _master_worker_runtime_status() -> str:
     if _active_worker is not None:
         return "online"
@@ -581,6 +598,37 @@ def _handle_status(params: dict) -> dict:
     from imganalyzer.db.queue import JobQueue
     from imganalyzer.db.repository import Repository
 
+    lite = _as_bool_param(params.get("lite"), False)
+    include_recent_results = _as_bool_param(
+        params.get("include_recent_results"),
+        default=not lite,
+    )
+    include_module_avg_ms = _as_bool_param(
+        params.get("include_module_avg_ms"),
+        default=not lite,
+    )
+    cache_enabled = lite and _as_bool_param(params.get("cache"), False)
+    cache_ttl_ms_raw = params.get("cache_ttl_ms", _STATUS_CACHE_DEFAULT_TTL_MS)
+    try:
+        cache_ttl_ms = int(cache_ttl_ms_raw)
+    except (TypeError, ValueError):
+        cache_ttl_ms = _STATUS_CACHE_DEFAULT_TTL_MS
+    cache_ttl_ms = max(100, min(cache_ttl_ms, _STATUS_CACHE_MAX_TTL_MS))
+    cache_key = (
+        "status:"
+        f"lite={int(lite)}:"
+        f"recent={int(include_recent_results)}:"
+        f"module_avg={int(include_module_avg_ms)}"
+    )
+
+    if cache_enabled:
+        with _status_cache_lock:
+            cached = _status_cache.get(cache_key)
+        if cached is not None:
+            cached_at, payload = cached
+            if (time.monotonic() - cached_at) * 1000.0 <= cache_ttl_ms:
+                return payload
+
     conn = _get_db()
     _ensure_master_worker_node(conn)
     queue = JobQueue(conn)
@@ -590,7 +638,9 @@ def _handle_status(params: dict) -> dict:
     module_stats = queue.stats()
     totals = queue.total_stats()
     remaining_images = queue.remaining_image_count()
-    module_avg_ms = queue.module_avg_processing_ms(last_n=100)
+    module_avg_ms: dict[str, float] = {}
+    if include_module_avg_ms:
+        module_avg_ms = queue.module_avg_processing_ms(last_n=100)
 
     from imganalyzer.db.repository import ALL_MODULES
     queue_modules = list(module_stats.keys())
@@ -635,7 +685,6 @@ def _handle_status(params: dict) -> dict:
     result = {
         "total_images": total_images,
         "modules": modules_out,
-        "module_avg_ms": module_avg_ms,
         "chunk": chunk_info,
         "totals": {
             "pending": totals.get("pending", 0),
@@ -649,8 +698,11 @@ def _handle_status(params: dict) -> dict:
             "master": master_item,
             "workers": worker_items,
         },
-        "recent_results": _recent_queue_results(conn),
     }
+    if include_module_avg_ms:
+        result["module_avg_ms"] = module_avg_ms
+    if include_recent_results:
+        result["recent_results"] = _recent_queue_results(conn)
 
     # Pre-decode / image cache progress.  Always report the overall cache
     # fill state (cached vs total images in DB) so the dashboard progress
@@ -687,6 +739,10 @@ def _handle_status(params: dict) -> dict:
         _replenish_decode_buffer()
     except Exception:
         pass
+
+    if cache_enabled:
+        with _status_cache_lock:
+            _status_cache[cache_key] = (time.monotonic(), result)
 
     return result
 

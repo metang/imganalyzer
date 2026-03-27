@@ -440,6 +440,8 @@ class DistributedWorker:
         self.running_log_interval_seconds = max(0.0, running_log_interval_seconds)
         self._db_lock_retry_attempts = 4
         self._db_lock_retry_base_seconds = 0.25
+        self._coordinator_timeout_retry_attempts = 3
+        self._coordinator_timeout_retry_base_seconds = 0.75
 
         # Probe which modules this worker can actually execute.
         # When a single --module filter is set, trust the user; otherwise
@@ -838,23 +840,40 @@ class DistributedWorker:
         method: str,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Retry coordinator calls when SQLite lock conflicts are transient."""
-        attempts = max(1, self._db_lock_retry_attempts)
-        base_delay = max(0.0, self._db_lock_retry_base_seconds)
-        for attempt in range(1, attempts + 1):
+        """Retry coordinator calls for transient SQLite lock conflicts/timeouts."""
+        lock_attempts = max(1, self._db_lock_retry_attempts)
+        lock_base_delay = max(0.0, self._db_lock_retry_base_seconds)
+        timeout_attempts = max(1, self._coordinator_timeout_retry_attempts)
+        timeout_base_delay = max(0.0, self._coordinator_timeout_retry_base_seconds)
+        total_attempts = max(lock_attempts, timeout_attempts)
+        for attempt in range(1, total_attempts + 1):
             try:
                 return self._coordinator_call(method, params)
             except Exception as exc:
-                if not _is_transient_db_lock_error(exc) or attempt >= attempts:
-                    raise
-                delay = min(2.0, base_delay * (2 ** (attempt - 1)))
-                if self.verbose:
-                    console.print(
-                        "[yellow]Coordinator database is locked; retrying "
-                        f"{method} ({attempt}/{attempts - 1}) in {delay:.2f}s[/yellow]"
-                    )
-                if delay > 0:
-                    self._shutdown.wait(delay)
+                message = str(exc).lower()
+                is_lock = _is_transient_db_lock_error(exc)
+                is_timeout = "timed out" in message or "timeout" in message
+                if is_lock and attempt < lock_attempts:
+                    delay = min(2.0, lock_base_delay * (2 ** (attempt - 1)))
+                    if self.verbose:
+                        console.print(
+                            "[yellow]Coordinator database is locked; retrying "
+                            f"{method} ({attempt}/{lock_attempts - 1}) in {delay:.2f}s[/yellow]"
+                        )
+                    if delay > 0:
+                        self._shutdown.wait(delay)
+                    continue
+                if is_timeout and attempt < timeout_attempts:
+                    delay = min(4.0, timeout_base_delay * (2 ** (attempt - 1)))
+                    if self.verbose:
+                        console.print(
+                            "[yellow]Coordinator request timed out; retrying "
+                            f"{method} ({attempt}/{timeout_attempts - 1}) in {delay:.2f}s[/yellow]"
+                        )
+                    if delay > 0:
+                        self._shutdown.wait(delay)
+                    continue
+                raise
         raise RuntimeError(f"Coordinator call failed unexpectedly for {method}")
 
     def _is_method_missing_error(self, exc: Exception) -> bool:
@@ -1130,7 +1149,16 @@ class DistributedWorker:
     def _coordinator_queue_summary(self) -> str | None:
         """Return a short queue snapshot for empty-poll diagnostics."""
         try:
-            status = self._coordinator_call_with_lock_retry("status", {})
+            status = self._coordinator_call_with_lock_retry(
+                "status",
+                {
+                    "lite": True,
+                    "cache": True,
+                    "cache_ttl_ms": 1000,
+                    "include_recent_results": False,
+                    "include_module_avg_ms": False,
+                },
+            )
         except Exception:
             return None
 

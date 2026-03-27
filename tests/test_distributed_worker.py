@@ -154,6 +154,60 @@ def test_claim_jobs_retries_transient_db_lock(monkeypatch):
     assert jobs == [{"id": 1, "leaseToken": "lease-1"}]
 
 
+def test_claim_jobs_retries_timeout_error(monkeypatch):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None
+    worker._coordinator_timeout_retry_attempts = 3
+    worker._coordinator_timeout_retry_base_seconds = 0.0
+
+    calls = 0
+
+    def _fake_call(method: str, _params: dict[str, object]) -> dict[str, object]:
+        nonlocal calls
+        assert method == "jobs/claim"
+        calls += 1
+        if calls < 3:
+            raise RuntimeError("Coordinator request timed out for jobs/claim")
+        return {"jobs": [{"id": 2, "leaseToken": "lease-2"}]}
+
+    monkeypatch.setattr(worker, "_coordinator_call", _fake_call)
+
+    jobs = worker._claim_jobs()
+
+    assert calls == 3
+    assert jobs == [{"id": 2, "leaseToken": "lease-2"}]
+
+
+def test_queue_summary_uses_status_lite_cache(monkeypatch):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None
+
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    def _fake_call(method: str, params: dict[str, object]) -> dict[str, object]:
+        captured.append((method, dict(params)))
+        assert method == "status"
+        return {"totals": {"pending": 0, "running": 0}, "modules": {}}
+
+    monkeypatch.setattr(worker, "_coordinator_call", _fake_call)
+
+    summary = worker._coordinator_queue_summary()
+
+    assert summary == "queue empty"
+    assert captured == [
+        (
+            "status",
+            {
+                "lite": True,
+                "cache": True,
+                "cache_ttl_ms": 1000,
+                "include_recent_results": False,
+                "include_module_avg_ms": False,
+            },
+        )
+    ]
+
+
 def test_process_claimed_job_does_not_crash_when_fail_update_raises(tmp_path):
     conn = _make_test_db(tmp_path)
     repo = Repository(conn)
@@ -1147,6 +1201,74 @@ def test_server_status_reports_node_progress_and_recent_results(tmp_path, monkey
     listed_worker = next(item for item in workers_list["workers"] if item["id"] == "worker-1")
     assert listed_worker["runningJobs"] == 1
     assert listed_worker["activeModules"] == [{"module": "objects", "count": 1}]
+
+
+def test_server_status_lite_omits_expensive_fields(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-status-lite.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/photos/lite.jpg")
+    job_id = queue.enqueue(image_id, "metadata")
+    assert job_id is not None
+    queue.claim(batch_size=1, module="metadata")
+    queue.mark_done(job_id)
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    server._decoded_store = None
+
+    status = server._handle_status({"lite": True})
+
+    assert "module_avg_ms" not in status
+    assert "recent_results" not in status
+    assert status["totals"]["done"] == 1
+
+
+def test_server_status_lite_cache_returns_same_snapshot(tmp_path, monkeypatch):
+    db_path = tmp_path / "server-status-cache.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/photos/cache.jpg")
+    job_id = queue.enqueue(image_id, "metadata")
+    assert job_id is not None
+    queue.claim(batch_size=1, module="metadata")
+    queue.mark_done(job_id)
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    server._decoded_store = None
+    server._status_cache = {}
+
+    first = server._handle_status({"lite": True, "cache": True, "cache_ttl_ms": 2000})
+
+    conn2 = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn2.row_factory = sqlite3.Row
+    repo2 = Repository(conn2)
+    queue2 = JobQueue(conn2)
+    new_image = repo2.register_image(file_path="/photos/cache2.jpg")
+    new_job = queue2.enqueue(new_image, "metadata")
+    assert new_job is not None
+    queue2.claim(batch_size=1, module="metadata")
+    queue2.mark_done(new_job)
+    conn2.close()
+
+    second = server._handle_status({"lite": True, "cache": True, "cache_ttl_ms": 2000})
+
+    assert second == first
 
 
 def test_heartbeat_loop_keeps_leases_alive_during_shutdown(monkeypatch):

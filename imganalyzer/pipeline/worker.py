@@ -92,6 +92,20 @@ _DEPENDENTS: dict[str, list[str]] = {}
 for _mod, _prereq in _PREREQUISITES.items():
     _DEPENDENTS.setdefault(_prereq, []).append(_mod)
 
+_LOCK_RETRY_ATTEMPTS = 4
+_LOCK_RETRY_INITIAL_DELAY_S = 0.15
+
+
+def _is_transient_db_lock_error(exc: Exception) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return (
+        "database is locked" in text
+        or "database table is locked" in text
+        or "database schema is locked" in text
+    )
+
 
 # ── Result notification callback ──────────────────────────────────────────────
 # When running under the JSON-RPC server, this is set to a function that
@@ -1196,104 +1210,131 @@ class Worker:
 
         start_ms = int(time.time() * 1000)
 
-        try:
+        attempts = _LOCK_RETRY_ATTEMPTS
+        delay_s = _LOCK_RETRY_INITIAL_DELAY_S
+        for attempt in range(1, attempts + 1):
+            try:
             # ── Cache check ──────────────────────────────────────────────────
-            if not runner.should_run(image_id, module):
-                queue.mark_skipped(job_id, "already_analyzed")
-                _emit_result(path, module, "skipped", 0, "already_analyzed")
-                return "skipped"
+                if not runner.should_run(image_id, module):
+                    queue.mark_skipped(job_id, "already_analyzed")
+                    _emit_result(path, module, "skipped", 0, "already_analyzed")
+                    return "skipped"
 
             # ── Prerequisite check (DB-driven) ───────────────────────────────
             # Defer back to pending so the job retries after prereq completes.
             # Use queue.defer() (not mark_pending) to bump queued_at — this
             # prevents the same ineligible job from starving eligible ones
             # that are further back in the queue.
-            prereq = _PREREQUISITES.get(module)
-            if prereq and not repo.is_analyzed(image_id, prereq):
-                prereq_status = queue.get_image_module_job_status(image_id, prereq)
-                if prereq_status in ("failed", "skipped"):
-                    queue.mark_skipped(job_id, f"prerequisite_{prereq}_{prereq_status}")
-                else:
-                    queue.defer(job_id)
-                return "skipped"
+                prereq = _PREREQUISITES.get(module)
+                if prereq and not repo.is_analyzed(image_id, prereq):
+                    prereq_status = queue.get_image_module_job_status(image_id, prereq)
+                    if prereq_status in ("failed", "skipped"):
+                        queue.mark_skipped(job_id, f"prerequisite_{prereq}_{prereq_status}")
+                    else:
+                        queue.defer(job_id)
+                    return "skipped"
 
             # ── Prime image cache from prefetch (IO/GPU overlap) ────────────
-            prefetched = self._prefetch_cache.pop(image_id, None)
-            if prefetched is not None:
-                runner.prime_image_cache(Path(path), prefetched)
+                prefetched = self._prefetch_cache.pop(image_id, None)
+                if prefetched is not None:
+                    runner.prime_image_cache(Path(path), prefetched)
 
             # ── Run the module ───────────────────────────────────────────────
-            result = runner.run(image_id, module)
-            elapsed = int(time.time() * 1000) - start_ms
-            queue.mark_done(job_id, processing_ms=elapsed)
-            kw = result.get("keywords") if module == "caption" and result else None
-            _emit_result(path, module, "done", elapsed, keywords=kw)
+                result = runner.run(image_id, module)
+                elapsed = int(time.time() * 1000) - start_ms
+                queue.mark_done(job_id, processing_ms=elapsed)
+                kw = result.get("keywords") if module == "caption" and result else None
+                _emit_result(path, module, "done", elapsed, keywords=kw)
 
             # Track image for XMP generation after all jobs finish
-            if self.write_xmp:
-                with self._xmp_lock:
-                    self._xmp_candidates.add(image_id)
+                if self.write_xmp:
+                    with self._xmp_lock:
+                        self._xmp_candidates.add(image_id)
 
             # Mark image as needing FTS5 search index rebuild (deferred).
             # Only modules that produce searchable text need this.
-            if module in _FTS_MODULES:
-                with self._fts_lock:
-                    self._fts_dirty.add(image_id)
+                if module in _FTS_MODULES:
+                    with self._fts_lock:
+                        self._fts_dirty.add(image_id)
 
-            return "done"
+                return "done"
 
-        except ImportError as exc:
-            elapsed = int(time.time() * 1000) - start_ms
-            queue.mark_skipped(job_id, "missing_dependency")
-            dependent_modules = _DEPENDENTS.get(module, [])
-            if dependent_modules:
-                queue.mark_image_pending_modules_skipped(
-                    image_id,
-                    dependent_modules,
-                    f"prerequisite_{module}_missing_dependency",
-                )
-            _emit_result(path, module, "skipped", elapsed, f"missing dependency: {exc}")
-            if self.verbose:
-                console.print(
-                    f"  [yellow]Skipped:[/yellow] {path} module={module}: "
-                    f"missing dependency ({exc})"
-                )
-            return "skipped"
-
-        except ValueError as exc:
-            err_lower = str(exc).lower()
-            if (
-                "libraw cannot decode" in err_lower
-                or "libraw postprocess failed" in err_lower
-                or "pillow cannot decode" in err_lower
-            ):
+            except ImportError as exc:
                 elapsed = int(time.time() * 1000) - start_ms
-                queue.mark_skipped(job_id, "corrupt_file")
-                queue.mark_image_pending_jobs_skipped(image_id, "corrupt_file")
-                _emit_result(path, module, "skipped", elapsed, f"corrupt file: {exc}")
-                # Persist corrupt file path for later handling
-                conn, _, _, _ = self._get_thread_db()
-                conn.execute(
-                    "INSERT OR IGNORE INTO corrupt_files (image_id, file_path, error_msg)"
-                    " VALUES (?, ?, ?)",
-                    [image_id, path, str(exc)],
-                )
-                conn.commit()
+                queue.mark_skipped(job_id, "missing_dependency")
+                dependent_modules = _DEPENDENTS.get(module, [])
+                if dependent_modules:
+                    queue.mark_image_pending_modules_skipped(
+                        image_id,
+                        dependent_modules,
+                        f"prerequisite_{module}_missing_dependency",
+                    )
+                _emit_result(path, module, "skipped", elapsed, f"missing dependency: {exc}")
                 if self.verbose:
                     console.print(
-                        f"  [yellow]Skipped:[/yellow] {path} module={module}: corrupt file"
+                        f"  [yellow]Skipped:[/yellow] {path} module={module}: "
+                        f"missing dependency ({exc})"
                     )
                 return "skipped"
-            raise
 
-        except Exception as exc:
-            elapsed = int(time.time() * 1000) - start_ms
-            error_msg = f"{type(exc).__name__}: {exc}"
+            except ValueError as exc:
+                err_lower = str(exc).lower()
+                if (
+                    "libraw cannot decode" in err_lower
+                    or "libraw postprocess failed" in err_lower
+                    or "pillow cannot decode" in err_lower
+                ):
+                    elapsed = int(time.time() * 1000) - start_ms
+                    queue.mark_skipped(job_id, "corrupt_file")
+                    queue.mark_image_pending_jobs_skipped(image_id, "corrupt_file")
+                    _emit_result(path, module, "skipped", elapsed, f"corrupt file: {exc}")
+                    # Persist corrupt file path for later handling
+                    conn, _, _, _ = self._get_thread_db()
+                    conn.execute(
+                        "INSERT OR IGNORE INTO corrupt_files (image_id, file_path, error_msg)"
+                        " VALUES (?, ?, ?)",
+                        [image_id, path, str(exc)],
+                    )
+                    conn.commit()
+                    if self.verbose:
+                        console.print(
+                            f"  [yellow]Skipped:[/yellow] {path} module={module}: corrupt file"
+                        )
+                    return "skipped"
+                raise
+
+            except Exception as exc:
+                if _is_transient_db_lock_error(exc) and attempt < attempts:
+                    if self.verbose:
+                        console.print(
+                            "[yellow]Transient DB lock while processing "
+                            f"{path} module={module}; retrying ({attempt}/{attempts - 1}) "
+                            f"in {delay_s:.2f}s[/yellow]"
+                        )
+                    self._shutdown.wait(delay_s)
+                    delay_s = min(delay_s * 2, 1.0)
+                    continue
+                elapsed = int(time.time() * 1000) - start_ms
+                error_msg = f"{type(exc).__name__}: {exc}"
+                try:
+                    queue.mark_failed(job_id, error_msg)
+                except Exception:
+                    pass
+                _emit_result(path, module, "failed", elapsed, error_msg)
+                if self.verbose:
+                    console.print(f"  [red]Failed:[/red] {path} module={module}: {error_msg}")
+                return "failed"
+
+        elapsed = int(time.time() * 1000) - start_ms
+        error_msg = "OperationalError: database is locked"
+        try:
             queue.mark_failed(job_id, error_msg)
-            _emit_result(path, module, "failed", elapsed, error_msg)
-            if self.verbose:
-                console.print(f"  [red]Failed:[/red] {path} module={module}: {error_msg}")
-            return "failed"
+        except Exception:
+            pass
+        _emit_result(path, module, "failed", elapsed, error_msg)
+        if self.verbose:
+            console.print(f"  [red]Failed:[/red] {path} module={module}: {error_msg}")
+        return "failed"
 
     def _maybe_periodic_flush(self) -> None:
         """Flush FTS5 + XMP if at least ``_flush_interval_s`` seconds elapsed.
