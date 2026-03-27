@@ -181,6 +181,79 @@ def _get_db() -> sqlite3.Connection:
     return conn
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        [table_name],
+    ).fetchone()
+    return row is not None
+
+
+def _get_face_clusters_for_images(
+    conn: sqlite3.Connection,
+    image_ids: list[int],
+) -> dict[int, list[dict[str, Any]]]:
+    """Return face cluster memberships keyed by image_id."""
+    if not image_ids or not _table_exists(conn, "face_occurrences"):
+        return {}
+
+    unique_image_ids: list[int] = list(dict.fromkeys(image_ids))
+    placeholders = ",".join("?" * len(unique_image_ids))
+
+    has_cluster_labels = _table_exists(conn, "face_cluster_labels")
+    has_persons = _table_exists(conn, "face_persons")
+    cluster_name_expr = (
+        "COALESCE(fcl.display_name, 'Cluster ' || fo.cluster_id)"
+        if has_cluster_labels
+        else "'Cluster ' || fo.cluster_id"
+    )
+    person_name_expr = "fp.name" if has_persons else "NULL"
+    cluster_label_join = (
+        "LEFT JOIN face_cluster_labels fcl ON fcl.cluster_id = fo.cluster_id"
+        if has_cluster_labels
+        else ""
+    )
+    person_join = (
+        "LEFT JOIN face_persons fp ON fp.id = fo.person_id"
+        if has_persons
+        else ""
+    )
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            fo.image_id AS image_id,
+            fo.cluster_id AS cluster_id,
+            MAX({cluster_name_expr}) AS cluster_label,
+            MAX(fo.person_id) AS person_id,
+            MAX({person_name_expr}) AS person_name,
+            COUNT(*) AS face_count
+        FROM face_occurrences fo
+        {cluster_label_join}
+        {person_join}
+        WHERE fo.image_id IN ({placeholders})
+          AND fo.cluster_id IS NOT NULL
+        GROUP BY fo.image_id, fo.cluster_id
+        ORDER BY fo.image_id, face_count DESC, fo.cluster_id
+        """,
+        unique_image_ids,
+    ).fetchall()
+
+    clusters_by_image: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        image_id = int(row["image_id"])
+        clusters_by_image.setdefault(image_id, []).append(
+            {
+                "cluster_id": int(row["cluster_id"]),
+                "cluster_label": row["cluster_label"],
+                "person_id": int(row["person_id"]) if row["person_id"] is not None else None,
+                "person_name": row["person_name"],
+                "face_count": int(row["face_count"]),
+            }
+        )
+    return clusters_by_image
+
+
 def _is_transient_db_lock_error(exc: Exception) -> bool:
     if not isinstance(exc, sqlite3.OperationalError):
         return False
@@ -2182,6 +2255,13 @@ def _handle_search(params: dict) -> dict:
         rows: list[sqlite3.Row],
         score_lookup: dict[int, float] | None,
     ) -> list[dict[str, Any]]:
+        has_face_occurrences = _table_exists(conn, "face_occurrences")
+        image_ids = [int(row["image_id"]) for row in rows]
+        face_clusters_by_image = (
+            _get_face_clusters_for_images(conn, image_ids)
+            if has_face_occurrences
+            else {}
+        )
         records = []
         for row in rows:
             image_id = int(row["image_id"])
@@ -2238,6 +2318,11 @@ def _handle_search(params: dict) -> dict:
                 "perception_iqa_label": row["perception_iqa_label"],
                 "perception_ista": row["perception_ista"],
                 "perception_ista_label": row["perception_ista_label"],
+                "face_clusters": (
+                    face_clusters_by_image.get(image_id, [])
+                    if has_face_occurrences
+                    else None
+                ),
             })
         if score_lookup is not None and sort_by == "relevance":
             records.sort(key=lambda record: -(record["score"] or 0.0))
@@ -2768,10 +2853,18 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
         except (TypeError, ValueError):
             return val
 
+    has_face_occurrences = _table_exists(conn, "face_occurrences")
+    face_clusters_by_image = (
+        _get_face_clusters_for_images(conn, [int(row["image_id"]) for row in rows])
+        if has_face_occurrences
+        else {}
+    )
+
     items = []
     for row in rows:
+        image_id = int(row["image_id"])
         items.append({
-            "image_id": row["image_id"],
+            "image_id": image_id,
             "file_path": row["file_path"],
             "score": None,
             "width": row["width"],
@@ -2823,6 +2916,11 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
             "perception_iqa_label": row["perception_iqa_label"],
             "perception_ista": row["perception_ista"],
             "perception_ista_label": row["perception_ista_label"],
+            "face_clusters": (
+                face_clusters_by_image.get(image_id, [])
+                if has_face_occurrences
+                else None
+            ),
             "_normalized_path": row["normalized_path"],
         })
 
@@ -3765,8 +3863,16 @@ def _handle_image_details(params: dict) -> dict:
                 return [val]
         return val
 
+    image_id_value = int(row["image_id"])
+    has_face_occurrences = _table_exists(conn, "face_occurrences")
+    face_clusters = (
+        _get_face_clusters_for_images(conn, [image_id_value]).get(image_id_value, [])
+        if has_face_occurrences
+        else None
+    )
+
     record = {
-        "image_id": int(row["image_id"]),
+        "image_id": image_id_value,
         "file_path": row["file_path"],
         "score": None,
         "width": row["width"],
@@ -3818,6 +3924,7 @@ def _handle_image_details(params: dict) -> dict:
         "perception_iqa_label": row["perception_iqa_label"],
         "perception_ista": row["perception_ista"],
         "perception_ista_label": row["perception_ista_label"],
+        "face_clusters": face_clusters,
     }
     return {"result": record}
 

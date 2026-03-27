@@ -58,6 +58,21 @@ function countActiveUnlinkedClusters(
   )
 }
 
+function clusterKey(cluster: FaceCluster): string {
+  return cluster.cluster_id !== null
+    ? `cluster:${cluster.cluster_id}`
+    : `name:${cluster.identity_name}`
+}
+
+function appendUniqueClusters(
+  existing: FaceCluster[],
+  incoming: FaceCluster[],
+): FaceCluster[] {
+  const seen = new Set(existing.map(clusterKey))
+  const appended = incoming.filter((cluster) => !seen.has(clusterKey(cluster)))
+  return [...existing, ...appended]
+}
+
 function requestThumbnail(
   occurrenceId: number,
   callback: (src: string | null) => void
@@ -557,10 +572,20 @@ function coerceText(value: unknown): string {
 }
 
 type PeopleStage = 'linked' | 'suggested' | 'unlinked' | 'inspector'
+type FacesDeepLinkRequest = {
+  clusterId: number
+  sourceImageId: number
+  requestId: number
+}
+
+type FacesViewProps = {
+  deepLinkRequest?: FacesDeepLinkRequest | null
+  onDeepLinkHandled?: (requestId: number) => void
+}
 
 // ── Main FacesView component ──────────────────────────────────────────────────
 
-export function FacesView() {
+export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesViewProps) {
   // Cluster mode (Phase 2 — face_occurrences exist)
   const [clusters, setClusters] = useState<FaceCluster[]>([])
   const [hasOccurrences, setHasOccurrences] = useState(false)
@@ -667,6 +692,7 @@ export function FacesView() {
   const [personDirectLinks, setPersonDirectLinks] = useState<Record<number, PersonDirectLink[]>>({})
   const [loadingDirectLinksId, setLoadingDirectLinksId] = useState<number | null>(null)
   const [unlinkedClusterTarget, setUnlinkedClusterTarget] = useState<number>(DEFAULT_UNLINKED_CLUSTER_TARGET)
+  const handledDeepLinkRequestIdRef = useRef(0)
 
   // ── Load data ─────────────────────────────────────────────────────────────
 
@@ -779,6 +805,46 @@ export function FacesView() {
   }, [clusters.length])
 
   const hasMoreClusters = clusters.length < totalClusterCount
+
+  const ensureClusterAvailable = useCallback(async (clusterId: number): Promise<FaceCluster | null> => {
+    const existing = clusters.find((cluster) => cluster.cluster_id === clusterId)
+    if (existing) {
+      return existing
+    }
+
+    let offset = clusters.length
+    let total = totalClusterCount
+    const fetched: FaceCluster[] = []
+
+    while (offset < total) {
+      const result = await window.api.listFaceClusters(CLUSTER_PAGE_SIZE, offset)
+      if (result.error) {
+        setError(result.error)
+        return null
+      }
+      if (result.clusters.length === 0) {
+        break
+      }
+      fetched.push(...result.clusters)
+      total = result.total_count
+      offset += result.clusters.length
+      if (result.deferred_cluster_ids) {
+        setDeferredClusterIds(new Set(result.deferred_cluster_ids))
+      }
+      const found = result.clusters.find((cluster) => cluster.cluster_id === clusterId)
+      if (found) {
+        setClusters((prev) => appendUniqueClusters(prev, fetched))
+        setTotalClusterCount(total)
+        return found
+      }
+    }
+
+    if (fetched.length > 0) {
+      setClusters((prev) => appendUniqueClusters(prev, fetched))
+      setTotalClusterCount(total)
+    }
+    return null
+  }, [clusters, totalClusterCount])
 
   useEffect(() => {
     loadData()
@@ -1525,6 +1591,54 @@ export function FacesView() {
     },
     [ensureExpandedDetailLoaded]
   )
+
+  useEffect(() => {
+    if (!deepLinkRequest || loading || !hasOccurrences) {
+      return
+    }
+    if (deepLinkRequest.requestId <= handledDeepLinkRequestIdRef.current) {
+      return
+    }
+
+    let cancelled = false
+    void (async () => {
+      const targetCluster = await ensureClusterAvailable(deepLinkRequest.clusterId)
+      if (cancelled) return
+
+      handledDeepLinkRequestIdRef.current = deepLinkRequest.requestId
+      if (!targetCluster) {
+        setViewMode('clusters')
+        setError(
+          `Cluster #${deepLinkRequest.clusterId} (from image ${deepLinkRequest.sourceImageId}) was not found.`
+        )
+        onDeepLinkHandled?.(deepLinkRequest.requestId)
+        return
+      }
+
+      const key = clusterKey(targetCluster)
+      setViewMode('clusters')
+      setExpandedPersonId(null)
+      setPeopleStage('linked')
+      setInspectorCluster(null)
+      setExpandedKey(key)
+      await ensureExpandedDetailLoaded(key, targetCluster, null)
+      if (cancelled) return
+      void openRelinkDialog(targetCluster)
+      onDeepLinkHandled?.(deepLinkRequest.requestId)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    deepLinkRequest,
+    ensureClusterAvailable,
+    ensureExpandedDetailLoaded,
+    hasOccurrences,
+    loading,
+    onDeepLinkHandled,
+    openRelinkDialog,
+  ])
 
   // ── Inline alias editing ──────────────────────────────────────────────────
 

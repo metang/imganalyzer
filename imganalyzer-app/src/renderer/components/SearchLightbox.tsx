@@ -17,6 +17,7 @@ interface SearchLightboxProps {
   onClose: () => void
   onFindSimilar?: (item: SearchResult) => void
   onNavigate: (item: SearchResult) => void
+  onOpenFaceCluster?: (clusterId: number, sourceImageId: number) => void
 }
 
 const MIN_ZOOM = 0.1
@@ -77,11 +78,20 @@ export function TagList({ items }: { items: string[] }) {
 export function AnalysisSidebar({
   item,
   onFindSimilar,
+  onOpenFaceCluster,
 }: {
   item: SearchResult
   onFindSimilar?: () => void
+  onOpenFaceCluster?: (clusterId: number) => void
 }) {
   const filename = item.file_path.split(/[/\\]/).pop() ?? ''
+  const faceClusterTags = (item.face_clusters ?? []).map((cluster) => {
+    const label = cluster.cluster_label?.trim() || 'Cluster'
+    const person = cluster.person_name?.trim()
+    const base = `${label} (#${cluster.cluster_id})`
+    if (person && person !== label) return `${base} · ${person}`
+    return base
+  })
 
   return (
     <div className="w-80 shrink-0 flex flex-col bg-neutral-900 border-l border-neutral-800 overflow-hidden h-full">
@@ -169,13 +179,39 @@ export function AnalysisSidebar({
         )}
 
         {/* Faces */}
-        {(item.face_count != null || (item.face_identities && item.face_identities.length > 0)) && (
+        {(item.face_count != null
+          || (item.face_identities && item.face_identities.length > 0)
+          || faceClusterTags.length > 0) && (
           <Section title="Faces">
             {item.face_count != null && <Row label="Count" value={item.face_count} />}
             {item.face_identities && item.face_identities.length > 0 && (
               <div className="py-1 border-b border-neutral-800">
                 <span className="text-neutral-500 text-xs block mb-1">Identities</span>
                 <TagList items={item.face_identities} />
+              </div>
+            )}
+            {faceClusterTags.length > 0 && (
+              <div className="py-1 border-b border-neutral-800">
+                <span className="text-neutral-500 text-xs block mb-1">Clusters</span>
+                <div className="flex flex-wrap gap-1">
+                  {(item.face_clusters ?? []).map((cluster) => {
+                    const label = cluster.cluster_label?.trim() || 'Cluster'
+                    const person = cluster.person_name?.trim()
+                    const base = `${label} (#${cluster.cluster_id})`
+                    const text = person && person !== label ? `${base} · ${person}` : base
+                    return (
+                      <button
+                        key={`cluster:${cluster.cluster_id}`}
+                        type="button"
+                        onClick={() => onOpenFaceCluster?.(cluster.cluster_id)}
+                        className="px-1.5 py-0.5 bg-neutral-800 rounded text-[11px] text-cyan-300 hover:bg-neutral-700 hover:text-cyan-200 transition-colors"
+                        title="Open this cluster in Faces"
+                      >
+                        {text}
+                      </button>
+                    )
+                  })}
+                </div>
               </div>
             )}
           </Section>
@@ -279,7 +315,14 @@ export function AnalysisSidebar({
 
 // ── Main lightbox ─────────────────────────────────────────────────────────────
 
-export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate }: SearchLightboxProps) {
+export function SearchLightbox({
+  item,
+  items,
+  onClose,
+  onFindSimilar,
+  onNavigate,
+  onOpenFaceCluster,
+}: SearchLightboxProps) {
   const [thumb, setThumb] = useState<string>('')
   const [cached, setCached] = useState<string>('')   // Tier 2: 1024px decoded cache
   const [src, setSrc] = useState<string>('')
@@ -578,7 +621,11 @@ export function SearchLightbox({ item, items, onClose, onFindSimilar, onNavigate
       </div>
 
       {/* ── Analysis sidebar (right) ────────────────────────────────────────── */}
-      <AnalysisSidebar item={item} onFindSimilar={onFindSimilar ? () => onFindSimilar(item) : undefined} />
+      <AnalysisSidebar
+        item={item}
+        onFindSimilar={onFindSimilar ? () => onFindSimilar(item) : undefined}
+        onOpenFaceCluster={onOpenFaceCluster ? (clusterId) => onOpenFaceCluster(clusterId, item.image_id) : undefined}
+      />
     </div>
   )
 }

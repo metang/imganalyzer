@@ -105,6 +105,13 @@ export interface SearchResult {
   detected_objects: string[] | null
   face_count: number | null
   face_identities: string[] | null
+  face_clusters: {
+    cluster_id: number
+    cluster_label: string | null
+    person_id: number | null
+    person_name: string | null
+    face_count: number
+  }[] | null
   has_people: boolean | null
   ocr_text: string | null
   cloud_description: string | null

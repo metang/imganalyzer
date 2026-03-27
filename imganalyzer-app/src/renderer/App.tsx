@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, Component } from 'react'
+import { useState, useEffect, useRef, useCallback, Component } from 'react'
 import type { ErrorInfo, ReactNode } from 'react'
 import { DbGalleryView } from './components/DbGalleryView'
 import { BatchConfigView, BatchRunView } from './components/BatchView'
@@ -8,6 +8,11 @@ import { SettingsView } from './components/SettingsView'
 import { useBatchProcess } from './hooks/useBatchProcess'
 
 type Tab = 'gallery' | 'batch' | 'running' | 'search' | 'faces' | 'settings'
+type FaceClusterDeepLink = {
+  clusterId: number
+  sourceImageId: number
+  requestId: number
+}
 
 // ── Error Boundary ────────────────────────────────────────────────────────────
 
@@ -49,6 +54,8 @@ class ErrorBoundary extends Component<
 export default function App() {
   const [tab, setTab] = useState<Tab>('gallery')
   const [galleryFolderContext, setGalleryFolderContext] = useState('')
+  const [facesDeepLink, setFacesDeepLink] = useState<FaceClusterDeepLink | null>(null)
+  const facesDeepLinkRequestId = useRef(0)
 
   // Batch state — lifted here so it stays mounted across tab switches
   const batch = useBatchProcess()
@@ -110,6 +117,24 @@ export default function App() {
     batch.stats.status === 'paused' ||
     batch.stats.status === 'ingesting' ||
     batch.stats.status === 'error'
+
+  const handleOpenFaceCluster = useCallback((clusterId: number, sourceImageId: number) => {
+    facesDeepLinkRequestId.current += 1
+    setFacesDeepLink({
+      clusterId,
+      sourceImageId,
+      requestId: facesDeepLinkRequestId.current,
+    })
+    setTab('faces')
+  }, [])
+
+  const handleFacesDeepLinkHandled = useCallback((requestId: number) => {
+    setFacesDeepLink((current) => (
+      current && current.requestId === requestId
+        ? null
+        : current
+    ))
+  }, [])
 
   return (
     <ErrorBoundary>
@@ -199,13 +224,16 @@ export default function App() {
 
       {/* ── Search tab — always mounted so search state survives tab switches ── */}
       <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'search' ? '' : ' hidden'}`}>
-        <SearchView />
+        <SearchView onOpenFaceCluster={handleOpenFaceCluster} />
       </div>
 
       {/* ── Faces tab ────────────────────────────────────────────────────────── */}
       {tab === 'faces' && (
         <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-          <FacesView />
+          <FacesView
+            deepLinkRequest={facesDeepLink}
+            onDeepLinkHandled={handleFacesDeepLinkHandled}
+          />
         </div>
       )}
 

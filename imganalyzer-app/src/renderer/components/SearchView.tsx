@@ -9,6 +9,10 @@ import { SearchLightbox } from './SearchLightbox'
 
 const SEARCH_PAGE_SIZE = 200
 
+type SearchViewProps = {
+  onOpenFaceCluster?: (clusterId: number, sourceImageId: number) => void
+}
+
 function appendUniqueResults(
   existing: SearchResult[],
   incoming: SearchResult[],
@@ -18,7 +22,7 @@ function appendUniqueResults(
   return [...existing, ...appended]
 }
 
-export function SearchView() {
+export function SearchView({ onOpenFaceCluster }: SearchViewProps) {
   const [results, setResults] = useState<SearchResult[]>([])
   const [total, setTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
@@ -239,6 +243,7 @@ export function SearchView() {
           onClose={() => setSelectedItem(null)}
           onFindSimilar={handleFindSimilar}
           onNavigate={setSelectedItem}
+          onOpenFaceCluster={onOpenFaceCluster}
         />
       )}
     </div>

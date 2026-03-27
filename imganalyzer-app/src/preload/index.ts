@@ -9,7 +9,7 @@ import type {
   BatchResult,
   BatchStats,
 } from '../main/batch'
-import type { SearchFilters, SearchPlanRequest, SearchPlanResponse, SearchResponse } from '../main/search'
+import type { SearchFilters, SearchPlanRequest, SearchPlanResponse, SearchResponse, SearchResult } from '../main/search'
 import type { GalleryChunkParams, GalleryChunkResponse, GalleryFoldersResponse } from '../main/gallery'
 import type {
   AppSettingsBundle,

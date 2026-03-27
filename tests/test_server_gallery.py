@@ -1124,6 +1124,106 @@ def test_search_best_sort_uses_quality_ranking(
     assert [item["image_id"] for item in result["results"]] == [1, 3, 2]
 
 
+def test_search_results_include_face_clusters_when_occurrences_exist(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\clustered.jpg")
+    gallery_db.execute("INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)", (7, "Chen XC", None))
+    gallery_db.execute(
+        "INSERT INTO face_cluster_labels (cluster_id, display_name) VALUES (?, ?)",
+        (10, "Chen XC"),
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=1,
+        image_id=1,
+        identity_name="chen_xc_child",
+        cluster_id=10,
+        person_id=7,
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=2,
+        image_id=1,
+        identity_name="chen_xc_child",
+        cluster_id=10,
+        person_id=7,
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({"mode": "browse", "limit": 10, "offset": 0})
+
+    assert result["total"] == 1
+    assert len(result["results"]) == 1
+    item = result["results"][0]
+    assert item["face_clusters"] == [
+        {
+            "cluster_id": 10,
+            "cluster_label": "Chen XC",
+            "person_id": 7,
+            "person_name": "Chen XC",
+            "face_count": 2,
+        }
+    ]
+
+
+def test_image_details_include_face_clusters_when_occurrences_exist(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\clustered-detail.jpg")
+    gallery_db.execute("INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)", (3, "Alice", None))
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=11,
+        image_id=1,
+        identity_name="alice_child",
+        cluster_id=22,
+        person_id=3,
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_image_details({"image_id": 1})
+
+    assert result["result"] is not None
+    clusters = result["result"]["face_clusters"]
+    assert clusters == [
+        {
+            "cluster_id": 22,
+            "cluster_label": "Cluster 22",
+            "person_id": 3,
+            "person_name": "Alice",
+            "face_count": 1,
+        }
+    ]
+
+
+def test_image_details_face_clusters_null_without_occurrence_table(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gallery_db.execute("DROP TABLE face_occurrences")
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\legacy\no-occurrences.jpg")
+    try:
+        monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+        result = server._handle_image_details({"image_id": 1})
+        assert result["result"] is not None
+        assert result["result"]["face_clusters"] is None
+    finally:
+        gallery_db.execute(
+            """
+            CREATE TABLE face_occurrences (
+                id INTEGER PRIMARY KEY,
+                image_id INTEGER NOT NULL,
+                identity_name TEXT,
+                cluster_id INTEGER,
+                person_id INTEGER
+            )
+            """
+        )
+
+
 def test_search_expanded_terms_merge_ranked_results(
     gallery_db: sqlite3.Connection,
     monkeypatch: pytest.MonkeyPatch,
