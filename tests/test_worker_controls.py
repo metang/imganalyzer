@@ -337,3 +337,29 @@ def test_server_sync_handler_retries_transient_lock_for_status(monkeypatch):
     assert result == {"ok": True}
     assert attempts == 2
     assert sleep_calls == [server._LOCK_RETRY_INITIAL_DELAY_S]
+
+
+def test_server_sync_handler_retries_transient_lock_for_jobs_complete(monkeypatch):
+    import imganalyzer.server as server
+
+    attempts = 0
+
+    def _flaky_complete(_params: dict[str, object]) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return {"ok": True}
+
+    sleep_calls: list[float] = []
+    monkeypatch.setitem(server._SYNC_METHODS, "jobs/complete", _flaky_complete)
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    result = server._call_sync_handler("jobs/complete", {})
+
+    assert result == {"ok": True}
+    assert attempts == 3
+    assert sleep_calls == [
+        server._LOCK_RETRY_INITIAL_DELAY_S,
+        server._LOCK_RETRY_INITIAL_DELAY_S * 2,
+    ]

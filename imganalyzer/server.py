@@ -215,10 +215,20 @@ _TRANSIENT_DB_LOCK_MARKERS = (
 _LOCK_RETRYABLE_METHODS = {
     "status",
     "workers/list",
+    "workers/register",
+    "workers/heartbeat",
     "faces/crop-batch",
     "faces/person-link-cluster",
     "faces/person-unlink-cluster",
     "faces/cluster-relink",
+    "jobs/claim",
+    "jobs/release-expired",
+    "jobs/heartbeat",
+    "jobs/release",
+    "jobs/complete",
+    "jobs/fail",
+    "jobs/skip",
+    "jobs/release-worker",
 }
 _LOCK_RETRY_ATTEMPTS = 4
 _LOCK_RETRY_INITIAL_DELAY_S = 0.15
@@ -1596,6 +1606,8 @@ def _handle_jobs_complete(params: dict) -> dict:
     conn = _get_db()
     repo = Repository(conn)
     worker_id_for_timing = ""
+    image_id = 0
+    module_name = ""
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -1604,7 +1616,15 @@ def _handle_jobs_complete(params: dict) -> dict:
             [job_id, lease_token],
         ).fetchone()
         if lease is None:
+            existing_job = conn.execute(
+                "SELECT status FROM job_queue WHERE id = ?",
+                [job_id],
+            ).fetchone()
             conn.rollback()
+            if existing_job is not None and str(existing_job["status"] or "").lower() == "done":
+                # Idempotent completion path: previous attempt may have committed
+                # successfully but response delivery timed out to the worker.
+                return {"ok": True}
             return {"ok": False}
         worker_id_for_timing = str(lease["worker_id"] or "")
 
@@ -1625,8 +1645,6 @@ def _handle_jobs_complete(params: dict) -> dict:
             module=module_name,
             payload=payload,
         )
-        if module_name in _DISTRIBUTED_SEARCH_MODULES:
-            repo.update_search_artifacts(image_id)
 
         conn.execute(
             """UPDATE job_queue
@@ -1648,6 +1666,23 @@ def _handle_jobs_complete(params: dict) -> dict:
     except Exception:
         conn.rollback()
         raise
+
+    if module_name in _DISTRIBUTED_SEARCH_MODULES:
+        delay_s = _LOCK_RETRY_INITIAL_DELAY_S
+        for attempt in range(1, _LOCK_RETRY_ATTEMPTS + 1):
+            try:
+                repo.update_search_artifacts(image_id)
+                conn.commit()
+                break
+            except Exception as exc:
+                conn.rollback()
+                if not _is_transient_db_lock_error(exc) or attempt >= _LOCK_RETRY_ATTEMPTS:
+                    sys.stderr.write(
+                        f"[server] jobs/complete search update failed for image {image_id}: {exc}\n"
+                    )
+                    break
+                time.sleep(delay_s)
+                delay_s = min(delay_s * 2, 1.0)
 
     if worker_id_for_timing and processing_ms > 0:
         try:

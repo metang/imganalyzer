@@ -1022,7 +1022,7 @@ class DistributedWorker:
             capabilities["mps"] = False
         if self.supported_modules is not None:
             capabilities["supportedModules"] = self.supported_modules
-        self._coordinator_call(
+        self._coordinator_call_with_lock_retry(
             "workers/register",
             {
                 "workerId": self.worker_id,
@@ -1071,7 +1071,10 @@ class DistributedWorker:
             if self._shutdown.is_set() and not active_leases:
                 break
             try:
-                heartbeat = self._coordinator_call("workers/heartbeat", {"workerId": self.worker_id})
+                heartbeat = self._coordinator_call_with_lock_retry(
+                    "workers/heartbeat",
+                    {"workerId": self.worker_id},
+                )
                 released = self._apply_worker_heartbeat(heartbeat)
                 if released and self.verbose:
                     console.print(
@@ -1082,7 +1085,7 @@ class DistributedWorker:
 
             for job_id, lease_token in active_leases:
                 try:
-                    result = self._coordinator_call(
+                    result = self._coordinator_call_with_lock_retry(
                         "jobs/heartbeat",
                         {
                             "jobId": job_id,
@@ -1120,14 +1123,14 @@ class DistributedWorker:
             params["module"] = self.module_filter
         elif self.supported_modules is not None:
             params["modules"] = self.supported_modules
-        result = self._coordinator_call("jobs/claim", params)
+        result = self._coordinator_call_with_lock_retry("jobs/claim", params)
         jobs = result.get("jobs", [])
         return jobs if isinstance(jobs, list) else []
 
     def _coordinator_queue_summary(self) -> str | None:
         """Return a short queue snapshot for empty-poll diagnostics."""
         try:
-            status = self._coordinator_call("status", {})
+            status = self._coordinator_call_with_lock_retry("status", {})
         except Exception:
             return None
 
@@ -1310,7 +1313,7 @@ class DistributedWorker:
             # image is cached, instead of marking it as permanently failed.
             elapsed = int((time.monotonic() - started_monotonic) * 1000)
             try:
-                self._coordinator_call(
+                self._coordinator_call_with_lock_retry(
                     "jobs/release",
                     {"jobId": job_id, "leaseToken": lease_token},
                 )
@@ -1412,7 +1415,7 @@ class DistributedWorker:
         """Return any still-active leases to pending on shutdown."""
         for job_id, lease_token in self._snapshot_active():
             try:
-                self._coordinator_call(
+                self._coordinator_call_with_lock_retry(
                     "jobs/release",
                     {"jobId": job_id, "leaseToken": lease_token},
                 )
@@ -1501,7 +1504,7 @@ class DistributedWorker:
         self._shutdown.set()
         self._release_all_active_leases()
         try:
-            self._coordinator_call("jobs/release-worker", {"workerId": self.worker_id})
+            self._coordinator_call_with_lock_retry("jobs/release-worker", {"workerId": self.worker_id})
         except Exception as exc:
             if self.verbose:
                 console.print(

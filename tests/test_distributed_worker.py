@@ -130,6 +130,30 @@ def test_process_claimed_job_retries_transient_db_lock_on_complete(tmp_path):
     assert call_counts["complete"] == 3
 
 
+def test_claim_jobs_retries_transient_db_lock(monkeypatch):
+    worker = DistributedWorker(coordinator_url="http://127.0.0.1:8765/", worker_id="worker-1")
+    worker.supported_modules = None
+    worker._db_lock_retry_attempts = 4
+    worker._db_lock_retry_base_seconds = 0.0
+
+    calls = 0
+
+    def _fake_call(method: str, _params: dict[str, object]) -> dict[str, object]:
+        nonlocal calls
+        assert method == "jobs/claim"
+        calls += 1
+        if calls < 3:
+            raise RuntimeError("database is locked")
+        return {"jobs": [{"id": 1, "leaseToken": "lease-1"}]}
+
+    monkeypatch.setattr(worker, "_coordinator_call", _fake_call)
+
+    jobs = worker._claim_jobs()
+
+    assert calls == 3
+    assert jobs == [{"id": 1, "leaseToken": "lease-1"}]
+
+
 def test_process_claimed_job_does_not_crash_when_fail_update_raises(tmp_path):
     conn = _make_test_db(tmp_path)
     repo = Repository(conn)
