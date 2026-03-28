@@ -195,32 +195,28 @@ export default function App() {
       </div>
 
       {/* ── Gallery tab ───────────────────────────────────────────────────────── */}
-      {tab === 'gallery' && (
+      <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'gallery' ? '' : ' hidden'}`}>
         <DbGalleryView onFolderContextChange={setGalleryFolderContext} />
-      )}
+      </div>
 
       {/* ── Batch tab (config + ingest phases) ───────────────────────────────── */}
-      {tab === 'batch' && (
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-          <BatchConfigView
-            batch={batch}
-            initialFolder={galleryFolderContext}
-            onBatchStarted={() => setTab('running')}
-          />
-        </div>
-      )}
+      <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'batch' ? '' : ' hidden'}`}>
+        <BatchConfigView
+          batch={batch}
+          initialFolder={galleryFolderContext}
+          onBatchStarted={() => setTab('running')}
+        />
+      </div>
 
       {/* ── Running tab (active/paused/done/error phases) ─────────────────────── */}
-      {tab === 'running' && (
-        <div className="flex-1 min-h-0 overflow-hidden">
-          <BatchRunView
-            batch={batch}
-            initialFolder={galleryFolderContext}
-            resumeBanner={resumeBanner}
-            onDismissBanner={() => setResumeBanner(null)}
-          />
-        </div>
-      )}
+      <div className={`flex-1 min-h-0 overflow-hidden${tab === 'running' ? '' : ' hidden'}`}>
+        <BatchRunView
+          batch={batch}
+          initialFolder={galleryFolderContext}
+          resumeBanner={resumeBanner}
+          onDismissBanner={() => setResumeBanner(null)}
+        />
+      </div>
 
       {/* ── Search tab — always mounted so search state survives tab switches ── */}
       <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'search' ? '' : ' hidden'}`}>
@@ -228,20 +224,17 @@ export default function App() {
       </div>
 
       {/* ── Faces tab ────────────────────────────────────────────────────────── */}
-      {tab === 'faces' && (
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-          <FacesView
-            deepLinkRequest={facesDeepLink}
-            onDeepLinkHandled={handleFacesDeepLinkHandled}
-          />
-        </div>
-      )}
+      <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'faces' ? '' : ' hidden'}`}>
+        <FacesView
+          deepLinkRequest={facesDeepLink}
+          onDeepLinkHandled={handleFacesDeepLinkHandled}
+        />
+      </div>
 
-      {tab === 'settings' && (
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-          <SettingsView />
-        </div>
-      )}
+      {/* ── Settings tab ─────────────────────────────────────────────────────── */}
+      <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'settings' ? '' : ' hidden'}`}>
+        <SettingsView />
+      </div>
     </div>
     </ErrorBoundary>
   )
