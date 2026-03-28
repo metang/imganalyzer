@@ -30,6 +30,19 @@ def _caption_suggests_person(repo: Repository, image_id: int) -> bool:
         return True
     if caption.get("face_count") and int(caption["face_count"]) > 0:
         return True
+    # Check keywords for person-related words
+    kw_raw = caption.get("keywords")
+    if kw_raw:
+        import json
+        try:
+            keywords = json.loads(kw_raw) if isinstance(kw_raw, str) else kw_raw
+        except (json.JSONDecodeError, TypeError):
+            keywords = []
+        if isinstance(keywords, list):
+            person_words = {"woman", "man", "girl", "boy", "baby", "child", "person", "people"}
+            for kw in keywords:
+                if isinstance(kw, str) and kw.lower() in person_words:
+                    return True
     return False
 
 
