@@ -1296,21 +1296,19 @@ class Repository:
                 rep_matrix = rep_matrix[indices]
 
         # ── Phase 2: build candidate pool ─────────────────────────────────
+        # Single query: discover unlinked clusters, fetch their representative
+        # IDs AND embeddings in one pass using window functions — avoids the old
+        # pattern of 600 correlated subqueries + a second round-trip for BLOBs.
         candidate_pool = max(limit * _CANDIDATE_POOL_MULTIPLIER, 500)
+
+        # Step 2a: find unlinked cluster IDs with stats (no correlated subquery)
         candidate_rows = self.conn.execute(
             """
             SELECT
                 fo.cluster_id AS cluster_id,
                 COUNT(fo.id) AS face_count,
                 COUNT(DISTINCT fo.image_id) AS image_count,
-                COALESCE(fcl.display_name, 'Unknown') AS label,
-                (
-                    SELECT fo2.id
-                    FROM face_occurrences fo2
-                    WHERE fo2.cluster_id = fo.cluster_id
-                    ORDER BY (fo2.bbox_x2 - fo2.bbox_x1) * (fo2.bbox_y2 - fo2.bbox_y1) DESC
-                    LIMIT 1
-                ) AS representative_id
+                COALESCE(fcl.display_name, 'Unknown') AS label
             FROM face_occurrences fo
             LEFT JOIN face_cluster_labels fcl ON fcl.cluster_id = fo.cluster_id
             WHERE fo.cluster_id IS NOT NULL
@@ -1322,6 +1320,10 @@ class Repository:
             [candidate_pool],
         ).fetchall()
 
+        if not candidate_rows:
+            return []
+
+        candidate_cluster_ids = [int(r["cluster_id"]) for r in candidate_rows]
         candidate_meta: dict[int, dict[str, Any]] = {}
         for row in candidate_rows:
             cluster_id = int(row["cluster_id"])
@@ -1330,42 +1332,46 @@ class Repository:
                 "display_name": row["label"],
                 "face_count": int(row["face_count"] or 0),
                 "image_count": int(row["image_count"] or 0),
-                "representative_id": (
-                    int(row["representative_id"])
-                    if row["representative_id"] is not None
-                    else None
-                ),
+                "representative_id": None,
             }
-        if not candidate_meta:
-            return []
 
-        candidate_cluster_ids = sorted(candidate_meta.keys())
+        # Step 2b: fetch representative IDs + embeddings in ONE query via
+        # window function (replaces both the correlated subquery and the
+        # separate embedding round-trip).
         placeholders = ",".join("?" for _ in candidate_cluster_ids)
-        candidate_embeddings_rows = self.conn.execute(
+        combined_rows = self.conn.execute(
             f"""
-            SELECT cluster_id, embedding
+            SELECT cluster_id, id, embedding, bbox_area, rn_area, rn_id
             FROM (
                 SELECT
                     cluster_id,
+                    id,
                     embedding,
+                    (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) AS bbox_area,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY cluster_id
+                        ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
+                    ) AS rn_area,
                     ROW_NUMBER() OVER (
                         PARTITION BY cluster_id ORDER BY id DESC
-                    ) AS rn
+                    ) AS rn_id
                 FROM face_occurrences
                 WHERE cluster_id IN ({placeholders})
                   AND person_id IS NULL
-                  AND embedding IS NOT NULL
             )
-            WHERE rn <= ?
+            WHERE rn_area = 1 OR (rn_id <= ? AND embedding IS NOT NULL)
             """,
             [*candidate_cluster_ids, _EMBEDDINGS_PER_CLUSTER_CANDIDATE],
         ).fetchall()
 
-        # Compute per-candidate centroids
+        # Parse: extract representative IDs and embeddings from the combined result
         cand_blobs: dict[int, list[bytes]] = {}
-        for row in candidate_embeddings_rows:
+        for row in combined_rows:
             cid = int(row["cluster_id"])
-            cand_blobs.setdefault(cid, []).append(row["embedding"])
+            if int(row["rn_area"]) == 1 and cid in candidate_meta:
+                candidate_meta[cid]["representative_id"] = int(row["id"])
+            if row["embedding"] is not None and int(row["rn_id"]) <= _EMBEDDINGS_PER_CLUSTER_CANDIDATE:
+                cand_blobs.setdefault(cid, []).append(row["embedding"])
 
         cand_ids: list[int] = []
         cand_centroids: list[_np.ndarray] = []
