@@ -218,13 +218,14 @@ class Repository:
         ).fetchone()
         return dict(row) if row else None
 
-    def update_image(self, image_id: int, **fields: Any) -> None:
+    def update_image(self, image_id: int, *, commit: bool = True, **fields: Any) -> None:
         if not fields:
             return
         sets = ", ".join(f"{k} = ?" for k in fields)
         vals = list(fields.values()) + [image_id]
         self.conn.execute(f"UPDATE images SET {sets} WHERE id = ?", vals)
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def count_images(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) as cnt FROM images").fetchone()
@@ -640,36 +641,43 @@ class Repository:
         update_person: bool = False,
     ) -> int:
         """Update a cluster label and optionally its linked person in one transaction."""
-        if display_name:
-            self.conn.execute(
-                "INSERT INTO face_cluster_labels (cluster_id, display_name) VALUES (?, ?)"
-                " ON CONFLICT(cluster_id) DO UPDATE SET display_name = excluded.display_name",
-                [cluster_id, display_name],
-            )
-        else:
-            self.conn.execute(
-                "DELETE FROM face_cluster_labels WHERE cluster_id = ?",
-                [cluster_id],
-            )
+        # Validation reads before acquiring the write lock
+        if update_person and person_id is not None:
+            if not self._table_exists("face_persons"):
+                raise ValueError("face_persons table does not exist")
+            person_row = self.conn.execute(
+                "SELECT 1 FROM face_persons WHERE id = ?",
+                [person_id],
+            ).fetchone()
+            if person_row is None:
+                raise ValueError(f"Person {person_id} not found")
 
-        updated = 0
-        if update_person:
-            if person_id is not None:
-                if not self._table_exists("face_persons"):
-                    raise ValueError("face_persons table does not exist")
-                person_row = self.conn.execute(
-                    "SELECT 1 FROM face_persons WHERE id = ?",
-                    [person_id],
-                ).fetchone()
-                if person_row is None:
-                    raise ValueError(f"Person {person_id} not found")
-            cur = self.conn.execute(
-                "UPDATE face_occurrences SET person_id = ? WHERE cluster_id = ?",
-                [person_id, cluster_id],
-            )
-            updated = cur.rowcount
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if display_name:
+                self.conn.execute(
+                    "INSERT INTO face_cluster_labels (cluster_id, display_name) VALUES (?, ?)"
+                    " ON CONFLICT(cluster_id) DO UPDATE SET display_name = excluded.display_name",
+                    [cluster_id, display_name],
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM face_cluster_labels WHERE cluster_id = ?",
+                    [cluster_id],
+                )
 
-        self.conn.commit()
+            updated = 0
+            if update_person:
+                cur = self.conn.execute(
+                    "UPDATE face_occurrences SET person_id = ? WHERE cluster_id = ?",
+                    [person_id, cluster_id],
+                )
+                updated = cur.rowcount
+
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return updated
 
     # ── Person (cross-age identity grouping) ─────────────────────────────
@@ -1071,26 +1079,31 @@ class Repository:
         # Sort sub-clusters by size descending; largest keeps original cluster_id
         order = sorted(range(n_sub), key=lambda j: sub_counts[j], reverse=True)
 
-        # Get next available cluster_id
-        max_existing = self.conn.execute(
-            "SELECT COALESCE(MAX(cluster_id), 0) FROM face_occurrences"
-        ).fetchone()[0]
+        # Write phase: acquire lock, assign new cluster IDs atomically
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            max_existing = self.conn.execute(
+                "SELECT COALESCE(MAX(cluster_id), 0) FROM face_occurrences"
+            ).fetchone()[0]
 
-        new_cluster_ids: list[int] = []
-        for rank, idx in enumerate(order):
-            if rank == 0:
-                # Largest sub-cluster keeps original cluster_id + person_id
-                continue
-            new_id = max_existing + rank
-            new_cluster_ids.append(new_id)
-            placeholders = ",".join("?" for _ in sub_ids[idx])
-            self.conn.execute(
-                f"UPDATE face_occurrences SET cluster_id = ?, person_id = NULL "
-                f"WHERE id IN ({placeholders})",
-                [new_id, *sub_ids[idx]],
-            )
+            new_cluster_ids: list[int] = []
+            for rank, idx in enumerate(order):
+                if rank == 0:
+                    # Largest sub-cluster keeps original cluster_id + person_id
+                    continue
+                new_id = max_existing + rank
+                new_cluster_ids.append(new_id)
+                placeholders = ",".join("?" for _ in sub_ids[idx])
+                self.conn.execute(
+                    f"UPDATE face_occurrences SET cluster_id = ?, person_id = NULL "
+                    f"WHERE id IN ({placeholders})",
+                    [new_id, *sub_ids[idx]],
+                )
 
-        self.conn.commit()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return {
             "split_count": n_sub,
             "new_cluster_ids": new_cluster_ids,
@@ -1591,6 +1604,7 @@ class Repository:
 
     def merge_faces(self, keep_name: str, merge_name: str) -> None:
         """Merge *merge_name* into *keep_name* — moves all embeddings."""
+        # Validation reads (outside transaction)
         keep = self.conn.execute(
             "SELECT id, aliases FROM face_identities WHERE canonical_name = ?",
             [keep_name],
@@ -1604,45 +1618,51 @@ class Repository:
         if merge is None:
             raise ValueError(f"Face identity '{merge_name}' not found")
 
-        # Move embeddings
-        self.conn.execute(
-            "UPDATE face_embeddings SET identity_id = ? WHERE identity_id = ?",
-            [keep["id"], merge["id"]],
-        )
-        # Merge aliases (JSON column — backward compat)
+        # Pre-compute alias list outside transaction
         keep_aliases = json.loads(keep["aliases"] or "[]")
         merge_aliases = json.loads(merge["aliases"] or "[]")
         all_aliases = list(set(keep_aliases + merge_aliases + [merge_name]))
         if keep_name in all_aliases:
             all_aliases.remove(keep_name)
-        self.conn.execute(
-            "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
-            [json.dumps(all_aliases), _now(), keep["id"]],
-        )
-        # Sync face_aliases table: move merge's aliases to keep, add merge_name
-        if self._table_exists("face_aliases"):
+
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Move embeddings
             self.conn.execute(
-                "UPDATE face_aliases SET identity_id = ? WHERE identity_id = ?",
+                "UPDATE face_embeddings SET identity_id = ? WHERE identity_id = ?",
                 [keep["id"], merge["id"]],
             )
-            # Add merge_name as alias of keep (if not already present)
-            existing = self.conn.execute(
-                "SELECT 1 FROM face_aliases WHERE identity_id = ? AND alias = ?",
-                [keep["id"], merge_name],
-            ).fetchone()
-            if not existing:
-                self.conn.execute(
-                    "INSERT INTO face_aliases (identity_id, alias) VALUES (?, ?)",
-                    [keep["id"], merge_name],
-                )
-            # Remove keep_name from aliases (it's the canonical, not an alias)
+            # Merge aliases (JSON column — backward compat)
             self.conn.execute(
-                "DELETE FROM face_aliases WHERE identity_id = ? AND alias = ?",
-                [keep["id"], keep_name],
+                "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
+                [json.dumps(all_aliases), _now(), keep["id"]],
             )
-        # Delete merged identity (CASCADE deletes its face_aliases rows too)
-        self.conn.execute("DELETE FROM face_identities WHERE id = ?", [merge["id"]])
-        self.conn.commit()
+            # Sync face_aliases table: move merge's aliases to keep, add merge_name
+            if self._table_exists("face_aliases"):
+                self.conn.execute(
+                    "UPDATE face_aliases SET identity_id = ? WHERE identity_id = ?",
+                    [keep["id"], merge["id"]],
+                )
+                existing = self.conn.execute(
+                    "SELECT 1 FROM face_aliases WHERE identity_id = ? AND alias = ?",
+                    [keep["id"], merge_name],
+                ).fetchone()
+                if not existing:
+                    self.conn.execute(
+                        "INSERT INTO face_aliases (identity_id, alias) VALUES (?, ?)",
+                        [keep["id"], merge_name],
+                    )
+                # Remove keep_name from aliases (it's the canonical, not an alias)
+                self.conn.execute(
+                    "DELETE FROM face_aliases WHERE identity_id = ? AND alias = ?",
+                    [keep["id"], keep_name],
+                )
+            # Delete merged identity (CASCADE deletes its face_aliases rows too)
+            self.conn.execute("DELETE FROM face_identities WHERE id = ?", [merge["id"]])
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def list_face_identities(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(

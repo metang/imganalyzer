@@ -188,7 +188,7 @@ CREATE VIRTUAL TABLE search_index USING fts5(
 
 @pytest.fixture
 def gallery_db() -> Generator[sqlite3.Connection]:
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA_SQL)
     try:

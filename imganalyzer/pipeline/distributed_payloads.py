@@ -171,6 +171,7 @@ def persist_result_payload(
             width=image_info.get("width"),
             height=image_info.get("height"),
             format=image_info.get("format"),
+            commit=False,
         )
 
     if module == "metadata":
