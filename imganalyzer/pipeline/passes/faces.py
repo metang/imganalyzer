@@ -1,8 +1,14 @@
 """InsightFace face-analysis pass — runs independently as the ``faces`` module key.
 
 Prerequisites: ``objects`` module must have run first (provides ``has_person``
-from ``analysis_objects``).  If the prerequisite row is missing or
-``has_person`` is falsy, the pass returns an empty dict without writing.
+from ``analysis_objects``).  If neither the objects pass nor the caption pass
+indicates a person is present, the pass returns an empty dict without running
+the model.
+
+Fallback: when ``objects.has_person`` is falsy the pass also checks
+``analysis_caption`` for person-indicating signals (``scene_type='portrait'``,
+``has_people=1``, or ``face_count > 0``).  This catches cases where
+GroundingDINO misses a person that the LLM correctly identifies.
 """
 from __future__ import annotations
 
@@ -10,6 +16,21 @@ import sqlite3
 from typing import Any
 
 from imganalyzer.db.repository import Repository
+
+
+def _caption_suggests_person(repo: Repository, image_id: int) -> bool:
+    """Return True if caption analysis suggests a person is present."""
+    caption = repo.get_analysis(image_id, "caption")
+    if not caption:
+        return False
+    scene = (caption.get("scene_type") or "").lower()
+    if "portrait" in scene:
+        return True
+    if caption.get("has_people"):
+        return True
+    if caption.get("face_count") and int(caption["face_count"]) > 0:
+        return True
+    return False
 
 
 def run_faces(
@@ -23,7 +44,8 @@ def run_faces(
 ) -> dict[str, Any]:
     """Run InsightFace on *image_data* using the person flag from ``analysis_objects``.
 
-    Returns the result dict, or ``{}`` if no person was detected by the objects pass.
+    Returns the result dict, or ``{}`` if no person was detected by either
+    the objects pass or the caption fallback.
     """
     # Read prerequisite output from DB
     objects_row = repo.get_analysis(image_id, "objects")
@@ -31,7 +53,7 @@ def run_faces(
         return {}
 
     has_person = bool(objects_row.get("has_person"))
-    if not has_person:
+    if not has_person and not _caption_suggests_person(repo, image_id):
         return {}
 
     from imganalyzer.analysis.ai.faces import FaceAnalyzer
