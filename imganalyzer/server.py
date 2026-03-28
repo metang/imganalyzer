@@ -136,39 +136,21 @@ _runtime_reconciled = False
 
 def _open_server_db() -> sqlite3.Connection:
     """Open a fresh SQLite connection for the current server thread."""
-    from imganalyzer.db.connection import get_db_path
+    from imganalyzer.db.connection import create_connection, get_db_path
     from imganalyzer.db.schema import ensure_schema
 
     db_path = get_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
     db_key = str(db_path.resolve())
     if db_key not in _schema_ready_paths:
         with _schema_init_lock:
             if db_key not in _schema_ready_paths:
-                bootstrap = sqlite3.connect(
-                    str(db_path),
-                    timeout=30,
-                    isolation_level=None,
-                    check_same_thread=False,
+                bootstrap = create_connection(
+                    busy_timeout_ms=_DB_BUSY_TIMEOUT_MS,
                 )
-                bootstrap.row_factory = sqlite3.Row
-                bootstrap.execute("PRAGMA journal_mode=WAL")
-                bootstrap.execute("PRAGMA synchronous=NORMAL")
-                bootstrap.execute("PRAGMA foreign_keys=ON")
-                bootstrap.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
                 ensure_schema(bootstrap)
                 bootstrap.close()
                 _schema_ready_paths.add(db_key)
-    conn = sqlite3.connect(
-        str(db_path),
-        timeout=30,
-        isolation_level=None,
-        check_same_thread=False,
-    )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
+    conn = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
     return conn
 
 
@@ -426,10 +408,8 @@ def _replenish_decode_buffer() -> None:
         store = _get_decoded_store()
         cached_ids = store.cached_image_ids()
 
-        from imganalyzer.db.connection import get_db_path as _gdp
-        conn2 = sqlite3.connect(str(_gdp()), timeout=10, check_same_thread=False)
-        conn2.row_factory = sqlite3.Row
-        conn2.execute("PRAGMA journal_mode=WAL")
+        from imganalyzer.db.connection import create_connection
+        conn2 = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
 
         # Get image IDs with pending jobs, ordered by number of pending
         # modules descending (images needing more work are more valuable
@@ -750,22 +730,12 @@ def _handle_status(params: dict) -> dict:
 def _handle_ingest(req_id: int | str, params: dict) -> None:
     """Ingest folders — streaming progress notifications, then final result."""
     from imganalyzer.pipeline.batch import BatchProcessor
-    from imganalyzer.db.connection import get_db_path
+    from imganalyzer.db.connection import create_connection
 
     # Open a FRESH connection for this thread — _handle_ingest runs in a
     # daemon thread (async RPC method) and cannot reuse the main-thread
     # singleton returned by _get_db().
-    db_path = get_db_path()
-    conn = sqlite3.connect(
-        str(db_path),
-        timeout=30,
-        check_same_thread=False,
-    )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
+    conn = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
     processor = BatchProcessor(conn)
 
     folders = [Path(f) for f in params.get("folders", [])]
@@ -876,22 +846,11 @@ def _handle_run(req_id: int | str, params: dict) -> None:
         global _active_worker
         try:
             from imganalyzer.pipeline.worker import Worker
-            from imganalyzer.db.connection import get_db_path
+            from imganalyzer.db.connection import create_connection
 
             # Open a FRESH connection for this thread — SQLite connections
             # cannot be shared across threads (check_same_thread=True by default).
-            db_path = get_db_path()
-            conn = sqlite3.connect(
-                str(db_path),
-                timeout=30,
-                isolation_level=None,
-                check_same_thread=False,
-            )
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
+            conn = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
             _upsert_master_worker_node(conn, status="online")
             worker_kwargs = dict(
                 conn=conn,
@@ -1529,10 +1488,12 @@ def _handle_jobs_claim(params: dict) -> dict:
         scanned_candidates += len(claimed)
 
         batch_valid_modules: set[str] = set()
+        pending_skips: list[tuple[int, str, str]] = []
+        pending_releases: list[tuple[int, str]] = []
 
         for job in claimed:
             if len(jobs) >= requested:
-                queue.release_leased(job["id"], job["lease_token"])
+                pending_releases.append((job["id"], job["lease_token"]))
                 continue
 
             image = repo.get_image(job["image_id"])
@@ -1547,20 +1508,20 @@ def _handle_jobs_claim(params: dict) -> dict:
 
             already_analyzed = repo.is_analyzed(image_id, module_name)
             if not job_force and already_analyzed:
-                queue.mark_skipped_leased(job["id"], job["lease_token"], "already_analyzed")
+                pending_skips.append((job["id"], job["lease_token"], "already_analyzed"))
                 continue
 
             prereq = _PREREQUISITES.get(module_name)
             if prereq and not repo.is_analyzed(image_id, prereq):
                 prereq_status = queue.get_image_module_job_status(image_id, prereq)
                 if prereq_status in ("failed", "skipped"):
-                    queue.mark_skipped_leased(
+                    pending_skips.append((
                         job["id"],
                         job["lease_token"],
                         f"prerequisite_{prereq}_{prereq_status}",
-                    )
+                    ))
                 else:
-                    queue.release_leased(job["id"], job["lease_token"])
+                    pending_releases.append((job["id"], job["lease_token"]))
                 continue
 
             batch_valid_modules.add(module_name)
@@ -1582,6 +1543,10 @@ def _handle_jobs_claim(params: dict) -> dict:
             if cache_gate_ids is not None:
                 job_entry["hasDecodedCache"] = True
             jobs.append(job_entry)
+
+        # Batch all skip/release ops into a single transaction to reduce
+        # write contention when multiple workers poll simultaneously.
+        queue.batch_skip_release_leased(pending_skips, pending_releases)
 
         # Track per-module miss streaks to detect exhausted modules.
         # Only in multi-module mode — single-module filter is explicit.
@@ -1800,8 +1765,13 @@ def _handle_jobs_complete(params: dict) -> dict:
         delay_s = _LOCK_RETRY_INITIAL_DELAY_S
         for attempt in range(1, _LOCK_RETRY_ATTEMPTS + 1):
             try:
-                repo.update_search_artifacts(image_id)
-                conn.commit()
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    repo.update_search_artifacts(image_id)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
                 break
             except Exception as exc:
                 conn.rollback()
@@ -3725,8 +3695,7 @@ def _generate_face_occurrence_thumbnail(
 
 def _handle_faces_run_clustering(req_id: int | str, params: dict) -> None:
     """Run face clustering in a background thread to avoid blocking the RPC loop."""
-    import sqlite3
-    from imganalyzer.db.connection import get_db_path
+    from imganalyzer.db.connection import create_connection
     from imganalyzer.db.repository import Repository
 
     threshold = params.get("threshold", 0.55)
@@ -3735,13 +3704,9 @@ def _handle_faces_run_clustering(req_id: int | str, params: dict) -> None:
 
     def _run_clustering() -> None:
         try:
-            db_path = get_db_path()
-            conn = sqlite3.connect(str(db_path), check_same_thread=False)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.row_factory = sqlite3.Row
+            conn = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
             repo = Repository(conn)
             num_clusters = repo.cluster_faces(threshold=threshold)
-            conn.commit()
             conn.close()
             _send_notification("faces/clustering-done", {"num_clusters": num_clusters})
         except Exception as exc:

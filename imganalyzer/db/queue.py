@@ -496,6 +496,53 @@ class JobQueue:
             self.conn.rollback()
             raise
 
+    def batch_skip_release_leased(
+        self,
+        skips: list[tuple[int, str, str]],
+        releases: list[tuple[int, str]],
+    ) -> None:
+        """Batch skip and release multiple leased jobs in a single transaction.
+
+        *skips* is a list of ``(job_id, lease_token, reason)`` tuples.
+        *releases* is a list of ``(job_id, lease_token)`` tuples.
+        """
+        if not skips and not releases:
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            now = _now()
+            for job_id, lease_token, reason in skips:
+                row = self.conn.execute(
+                    "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                    [job_id, lease_token],
+                ).fetchone()
+                if row is None:
+                    continue
+                self.conn.execute(
+                    "UPDATE job_queue SET status = 'skipped', skip_reason = ?, completed_at = ? "
+                    "WHERE id = ?",
+                    [reason, now, job_id],
+                )
+                self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
+            for job_id, lease_token in releases:
+                row = self.conn.execute(
+                    "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                    [job_id, lease_token],
+                ).fetchone()
+                if row is None:
+                    continue
+                self.conn.execute(
+                    "UPDATE job_queue SET status = 'pending', started_at = NULL, queued_at = ?, "
+                    "attempts = attempts + 1, last_node_id = NULL, last_node_role = NULL "
+                    "WHERE id = ?",
+                    [now, job_id],
+                )
+                self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
     # ── Complete / Fail / Skip ─────────────────────────────────────────────
 
     def mark_done(self, job_id: int, processing_ms: int | None = None) -> None:

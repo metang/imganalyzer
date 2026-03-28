@@ -243,18 +243,8 @@ class Worker:
         """
         local = self._local
         if not hasattr(local, "conn") or local.conn is None:
-            db_path = get_db_path()
-            conn = sqlite3.connect(
-                str(db_path),
-                timeout=30,
-                isolation_level=None,
-                check_same_thread=False,
-            )
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=30000")
+            from imganalyzer.db.connection import create_connection
+            conn = create_connection(busy_timeout_ms=30000)
             repo = Repository(conn)
             queue = JobQueue(conn)
             runner = ModuleRunner(
@@ -1360,30 +1350,26 @@ class Worker:
             xmp_snapshot = set(self._xmp_candidates)
             self._xmp_candidates.clear()
 
-        # Flush FTS5 — use small batches (50 rows) with short transactions
-        # so we don't hold the write lock long enough to cause
-        # ``OperationalError: database is locked`` in concurrent cloud
-        # worker threads (which have a 30s busy_timeout).
+        # Flush FTS5 — per-image micro-transactions to minimize lock hold time.
+        # Each image update holds the write lock for ~5-50ms instead of
+        # 250ms-2.5s for a batch of 50.
         if fts_snapshot:
             failed_ids: list[int] = []
-            BATCH = 50
-            for start in range(0, len(fts_snapshot), BATCH):
-                chunk = fts_snapshot[start:start + BATCH]
-                self.conn.execute("BEGIN IMMEDIATE")
+            for image_id in fts_snapshot:
                 try:
-                    for image_id in chunk:
-                        try:
-                            self.repo.update_search_artifacts(image_id)
-                        except Exception as exc:
-                            failed_ids.append(image_id)
-                            if self.verbose:
-                                console.print(
-                                    f"  [yellow]FTS refresh failed for image {image_id}: {exc}[/yellow]"
-                                )
-                    self.conn.commit()
-                except Exception:
-                    self.conn.rollback()
-                    failed_ids.extend(chunk)
+                    self.conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        self.repo.update_search_artifacts(image_id)
+                        self.conn.commit()
+                    except Exception:
+                        self.conn.rollback()
+                        raise
+                except Exception as exc:
+                    failed_ids.append(image_id)
+                    if self.verbose:
+                        console.print(
+                            f"  [yellow]FTS update failed for image {image_id}: {exc}[/yellow]"
+                        )
             # Re-add failed IDs so they'll be retried on next flush
             if failed_ids:
                 with self._fts_lock:
@@ -1441,37 +1427,33 @@ class Worker:
     def _flush_fts_dirty(self) -> int:
         """Rebuild FTS5 search index for all images marked dirty.
 
-        Processes in batches of 50 inside a single transaction to keep
-        write-lock hold time short (consistent with _maybe_periodic_flush).
-        Uses the main-thread connection (``self.conn``) since this runs
-        after all worker threads have joined.
+        Uses per-image micro-transactions (~5-50ms lock each) consistent
+        with _maybe_periodic_flush.  Runs on the main-thread connection
+        (``self.conn``) after all worker threads have joined.
         """
         dirty = list(self._fts_dirty)
         self._fts_dirty.clear()
         if not dirty:
             return 0
 
-        BATCH = 50
         rebuilt = 0
         failed_ids: list[int] = []
-        for start in range(0, len(dirty), BATCH):
-            chunk = dirty[start:start + BATCH]
-            self.conn.execute("BEGIN IMMEDIATE")
+        for image_id in dirty:
             try:
-                for image_id in chunk:
-                    try:
-                        self.repo.update_search_artifacts(image_id)
-                        rebuilt += 1
-                    except Exception as exc:
-                        failed_ids.append(image_id)
-                        if self.verbose:
-                            console.print(
-                                f"  [yellow]FTS refresh failed for image {image_id}: {exc}[/yellow]"
-                            )
-                self.conn.commit()
-            except Exception:
-                self.conn.rollback()
-                failed_ids.extend(chunk)
+                self.conn.execute("BEGIN IMMEDIATE")
+                try:
+                    self.repo.update_search_artifacts(image_id)
+                    self.conn.commit()
+                    rebuilt += 1
+                except Exception:
+                    self.conn.rollback()
+                    raise
+            except Exception as exc:
+                failed_ids.append(image_id)
+                if self.verbose:
+                    console.print(
+                        f"  [yellow]FTS update failed for image {image_id}: {exc}[/yellow]"
+                    )
         if failed_ids:
             self._fts_dirty.update(failed_ids)
         return rebuilt

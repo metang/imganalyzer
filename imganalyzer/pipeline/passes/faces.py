@@ -52,6 +52,5 @@ def run_faces(
         occurrences = result.get("face_occurrences", [])
         if occurrences:
             repo.upsert_face_occurrences(image_id, occurrences)
-        repo.update_search_artifacts(image_id)
 
     return result

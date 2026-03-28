@@ -569,22 +569,27 @@ class Repository:
         aliases = json.loads(row["aliases"] or "[]")
         if alias not in aliases:
             aliases.append(alias)
-        self.conn.execute(
-            "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
-            [json.dumps(aliases), _now(), row["id"]],
-        )
-        # Also insert into indexed face_aliases table (idempotent)
-        if self._table_exists("face_aliases"):
-            existing = self.conn.execute(
-                "SELECT 1 FROM face_aliases WHERE identity_id = ? AND alias = ?",
-                [row["id"], alias],
-            ).fetchone()
-            if not existing:
-                self.conn.execute(
-                    "INSERT INTO face_aliases (identity_id, alias) VALUES (?, ?)",
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute(
+                "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
+                [json.dumps(aliases), _now(), row["id"]],
+            )
+            # Also insert into indexed face_aliases table (idempotent)
+            if self._table_exists("face_aliases"):
+                existing = self.conn.execute(
+                    "SELECT 1 FROM face_aliases WHERE identity_id = ? AND alias = ?",
                     [row["id"], alias],
-                )
-        self.conn.commit()
+                ).fetchone()
+                if not existing:
+                    self.conn.execute(
+                        "INSERT INTO face_aliases (identity_id, alias) VALUES (?, ?)",
+                        [row["id"], alias],
+                    )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def remove_face_alias(self, canonical_name: str, alias: str) -> bool:
         row = self.conn.execute(
@@ -597,17 +602,22 @@ class Repository:
         if alias not in aliases:
             return False
         aliases.remove(alias)
-        self.conn.execute(
-            "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
-            [json.dumps(aliases), _now(), row["id"]],
-        )
-        # Also remove from indexed face_aliases table
-        if self._table_exists("face_aliases"):
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
             self.conn.execute(
-                "DELETE FROM face_aliases WHERE identity_id = ? AND alias = ?",
-                [row["id"], alias],
+                "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
+                [json.dumps(aliases), _now(), row["id"]],
             )
-        self.conn.commit()
+            # Also remove from indexed face_aliases table
+            if self._table_exists("face_aliases"):
+                self.conn.execute(
+                    "DELETE FROM face_aliases WHERE identity_id = ? AND alias = ?",
+                    [row["id"], alias],
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return True
 
     def rename_face(self, canonical_name: str, display_name: str) -> None:
@@ -701,12 +711,17 @@ class Repository:
 
     def delete_person(self, person_id: int) -> None:
         """Delete a person and clear person_id on all their occurrences."""
-        self.conn.execute(
-            "UPDATE face_occurrences SET person_id = NULL WHERE person_id = ?",
-            [person_id],
-        )
-        self.conn.execute("DELETE FROM face_persons WHERE id = ?", [person_id])
-        self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute(
+                "UPDATE face_occurrences SET person_id = NULL WHERE person_id = ?",
+                [person_id],
+            )
+            self.conn.execute("DELETE FROM face_persons WHERE id = ?", [person_id])
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def list_persons(self) -> list[dict]:
         """Return persons with cluster count, face count, and a representative thumbnail.
@@ -1598,8 +1613,6 @@ class Repository:
                 )
                 updated += cur.rowcount
 
-        if updated:
-            self.conn.commit()
         return updated
 
     def merge_faces(self, keep_name: str, merge_name: str) -> None:
@@ -1895,6 +1908,7 @@ class Repository:
         """Write per-face occurrence rows (bbox, embedding, age, gender).
 
         Replaces any existing occurrences for this image.
+        Callers must wrap this in an explicit transaction (BEGIN IMMEDIATE).
         """
         self.conn.execute(
             "DELETE FROM face_occurrences WHERE image_id = ?", [image_id]
@@ -2300,15 +2314,21 @@ class Repository:
                 assignments[i] = cid
                 n_clusters += 1
 
-        # Write cluster assignments back to DB
-        self.conn.execute("UPDATE face_occurrences SET cluster_id = NULL")
-        self.conn.executemany(
-            "UPDATE face_occurrences SET cluster_id = ? WHERE id = ?",
-            [(int(assignments[i]), occ_ids[i]) for i in range(n_items)],
-        )
+        # Write cluster assignments back to DB (atomic transaction)
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute("UPDATE face_occurrences SET cluster_id = NULL")
+            self.conn.executemany(
+                "UPDATE face_occurrences SET cluster_id = ? WHERE id = ?",
+                [(int(assignments[i]), occ_ids[i]) for i in range(n_items)],
+            )
 
-        # Auto-recover person links from previous clustering
-        self.auto_assign_persons_after_recluster()
+            # Auto-recover person links from previous clustering
+            self.auto_assign_persons_after_recluster()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
         return n_clusters
 

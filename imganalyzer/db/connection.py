@@ -18,6 +18,32 @@ def get_db_path() -> Path:
     return _DEFAULT_DB_PATH
 
 
+def create_connection(
+    path: Path | None = None,
+    busy_timeout_ms: int = 30000,
+) -> sqlite3.Connection:
+    """Create a properly configured SQLite connection for worker/server use.
+
+    All connections get WAL mode, NORMAL sync, foreign keys, and the
+    specified busy_timeout.  Uses ``isolation_level=None`` for explicit
+    transaction control.
+    """
+    db_path = path or get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(
+        str(db_path),
+        timeout=30,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+    return conn
+
+
 def get_db(path: Path | None = None) -> sqlite3.Connection:
     """Return a singleton SQLite connection (creates DB + schema on first call).
 
@@ -27,17 +53,8 @@ def get_db(path: Path | None = None) -> sqlite3.Connection:
     if _connection is not None:
         return _connection
 
-    db_path = path or get_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # isolation_level=None disables Python's implicit transaction management
-    # so we can use explicit BEGIN IMMEDIATE / COMMIT in our _transaction ctx mgr.
-    conn = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    # CLI connections use shorter busy timeout
+    conn = create_connection(path=path, busy_timeout_ms=5000)
 
     # Run schema migrations
     from imganalyzer.db.schema import ensure_schema
