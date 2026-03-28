@@ -272,7 +272,6 @@ _LOCK_RETRYABLE_METHODS = {
     "workers/list",
     "workers/register",
     "workers/heartbeat",
-    "faces/crop-batch",
     "faces/person-link-cluster",
     "faces/person-unlink-cluster",
     "faces/cluster-relink",
@@ -3717,6 +3716,20 @@ def _handle_faces_run_clustering(req_id: int | str, params: dict) -> None:
     t.start()
 
 
+def _handle_faces_crop_batch_async(req_id: int | str, params: dict) -> None:
+    """Async wrapper — runs crop-batch in a thread to avoid blocking the main loop.
+
+    Opening original images from NAS/network paths can take seconds per file.
+    With many missing thumbnails this would block the stdin loop for 60+ seconds,
+    causing status-poll timeouts.
+    """
+    try:
+        result = _handle_faces_crop_batch(params)
+        _send_result(req_id, result)
+    except Exception as exc:
+        _send_error(req_id, -1, str(exc))
+
+
 def _handle_faces_crop_batch(params: dict) -> dict:
     """Return thumbnails for multiple face occurrences in one round-trip.
 
@@ -3998,7 +4011,6 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/cluster-link-suggestions": _handle_faces_cluster_link_suggestions,
     "faces/cluster-images": _handle_faces_cluster_images,
     "faces/crop": _handle_faces_crop,
-    "faces/crop-batch": _handle_faces_crop_batch,
     "faces/persons": _handle_faces_persons,
     "faces/person-create": _handle_faces_person_create,
     "faces/person-rename": _handle_faces_person_rename,
@@ -4021,6 +4033,7 @@ _ASYNC_METHODS: dict[str, Any] = {
     "run": _handle_run,
     "analyze": _handle_analyze,
     "faces/run-clustering": _handle_faces_run_clustering,
+    "faces/crop-batch": _handle_faces_crop_batch_async,
 }
 
 
