@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -51,6 +51,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         25: _migrate_v25,
         26: _migrate_v26,
         27: _migrate_v27,
+        28: _migrate_v28,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -898,4 +899,271 @@ def _migrate_v27(conn: sqlite3.Connection) -> None:
                 tokenize='porter unicode61'
             )
             """
+        )
+
+
+# ── Migration v28: Force-rebuild FTS with contentless_delete=1 ─────────────────
+
+def _migrate_v28(conn: sqlite3.Connection) -> None:
+    """Rebuild search_index FTS table with ``contentless_delete=1``.
+
+    Migration v27 only upgraded empty tables.  Databases with existing rows
+    kept the legacy contentless FTS layout where every DELETE requires a full
+    ``fts5vocab`` scan (~3.4 s per image on a 1M-row index).  This migration
+    drops the table unconditionally, recreates it with ``contentless_delete=1``
+    (SQLite ≥ 3.43.0), and repopulates from analysis data.
+
+    If the SQLite version is too old for ``contentless_delete=1`` the table is
+    recreated without it — the same as before, so no regression.
+    """
+    import sys
+
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='search_index'"
+    ).fetchone()
+
+    # Check if the table already has contentless_delete=1
+    if exists:
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='search_index'"
+        ).fetchone()
+        if ddl and ddl[0] and "contentless_delete=1" in ddl[0]:
+            return  # already upgraded, nothing to do
+
+    # Drop old table and helper vocab table
+    conn.execute("DROP TABLE IF EXISTS search_index_vocab")
+    conn.execute("DROP TABLE IF EXISTS search_index")
+
+    # Recreate with contentless_delete=1 if supported
+    try:
+        conn.execute("""
+            CREATE VIRTUAL TABLE search_index USING fts5(
+                image_id,
+                description_text,
+                subjects_text,
+                keywords_text,
+                faces_text,
+                exif_text,
+                content='',
+                contentless_delete=1,
+                tokenize='porter unicode61'
+            )
+        """)
+    except sqlite3.OperationalError:
+        # SQLite too old for contentless_delete — fall back to plain contentless
+        conn.execute("""
+            CREATE VIRTUAL TABLE search_index USING fts5(
+                image_id,
+                description_text,
+                subjects_text,
+                keywords_text,
+                faces_text,
+                exif_text,
+                content='',
+                tokenize='porter unicode61'
+            )
+        """)
+
+    # Repopulate from existing analysis data.
+    # We do a lightweight direct-insert here rather than going through
+    # Repository.update_search_index to avoid importing the full module
+    # and to keep the migration self-contained.
+    _repopulate_fts_v28(conn)
+
+
+def _repopulate_fts_v28(conn: sqlite3.Connection) -> None:
+    """Bulk-insert FTS rows from analysis tables (migration helper)."""
+    import sys
+
+    image_ids = [
+        r[0] for r in conn.execute("SELECT id FROM images ORDER BY id").fetchall()
+    ]
+    total = len(image_ids)
+    if total == 0:
+        return
+
+    batch_size = 500
+    inserted = 0
+
+    def _table_exists(name: str) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [name]
+        ).fetchone() is not None
+
+    has_blip2 = _table_exists("analysis_blip2")
+    has_faces = _table_exists("analysis_faces")
+    has_face_occ = _table_exists("face_occurrences")
+    has_face_persons = _table_exists("face_persons")
+    has_face_labels = _table_exists("face_cluster_labels")
+
+    for start in range(0, total, batch_size):
+        batch = image_ids[start : start + batch_size]
+        placeholders = ",".join("?" for _ in batch)
+
+        # Pre-fetch all analysis rows for this batch keyed by image_id
+        caption_map: dict[int, sqlite3.Row] = {}
+        for r in conn.execute(
+            f"SELECT * FROM analysis_caption WHERE image_id IN ({placeholders})", batch
+        ).fetchall():
+            caption_map[r["image_id"]] = r
+
+        blip2_map: dict[int, sqlite3.Row] = {}
+        if has_blip2:
+            for r in conn.execute(
+                f"SELECT * FROM analysis_blip2 WHERE image_id IN ({placeholders})", batch
+            ).fetchall():
+                blip2_map[r["image_id"]] = r
+
+        cloud_map: dict[int, list[sqlite3.Row]] = {}
+        for r in conn.execute(
+            f"SELECT * FROM analysis_cloud_ai WHERE image_id IN ({placeholders})", batch
+        ).fetchall():
+            cloud_map.setdefault(r["image_id"], []).append(r)
+
+        meta_map: dict[int, sqlite3.Row] = {}
+        for r in conn.execute(
+            f"SELECT * FROM analysis_metadata WHERE image_id IN ({placeholders})", batch
+        ).fetchall():
+            meta_map[r["image_id"]] = r
+
+        faces_map: dict[int, sqlite3.Row] = {}
+        if has_faces:
+            for r in conn.execute(
+                f"SELECT * FROM analysis_faces WHERE image_id IN ({placeholders})", batch
+            ).fetchall():
+                faces_map[r["image_id"]] = r
+
+        occ_map: dict[int, list[tuple[str | None, str | None]]] = {}
+        if has_face_occ:
+            person_sel = "fp.name" if has_face_persons else "NULL"
+            person_join = "LEFT JOIN face_persons fp ON fp.id = fo.person_id" if has_face_persons else ""
+            label_sel = "fcl.display_name" if has_face_labels else "NULL"
+            label_join = (
+                "LEFT JOIN face_cluster_labels fcl ON fcl.cluster_id = fo.cluster_id"
+                if has_face_labels else ""
+            )
+            for r in conn.execute(
+                f"""SELECT DISTINCT fo.image_id, {person_sel} AS pname, {label_sel} AS lbl
+                    FROM face_occurrences fo {person_join} {label_join}
+                    WHERE fo.image_id IN ({placeholders})""",
+                batch,
+            ).fetchall():
+                occ_map.setdefault(r["image_id"], []).append((r["pname"], r["lbl"]))
+
+        rows_to_insert: list[tuple] = []
+        for image_id in batch:
+            desc_parts: list[str] = []
+            subjects_parts: list[str] = []
+            kw_parts: list[str] = []
+            faces_parts: list[str] = []
+            exif_parts: list[str] = []
+
+            local = caption_map.get(image_id)
+            if local:
+                if local["description"]:
+                    desc_parts.append(local["description"])
+                if local["main_subject"]:
+                    subjects_parts.append(local["main_subject"])
+                if local["scene_type"]:
+                    subjects_parts.append(local["scene_type"])
+                if local["keywords"]:
+                    try:
+                        kw_parts.extend(json.loads(local["keywords"]))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if local["face_identities"]:
+                    try:
+                        faces_parts.extend(json.loads(local["face_identities"]))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if local["mood"]:
+                    kw_parts.append(local["mood"])
+                if local["lighting"]:
+                    kw_parts.append(local["lighting"])
+
+            blip2 = blip2_map.get(image_id)
+            if blip2:
+                if blip2["description"] and blip2["description"] not in desc_parts:
+                    desc_parts.append(blip2["description"])
+                if blip2["main_subject"] and blip2["main_subject"] not in subjects_parts:
+                    subjects_parts.append(blip2["main_subject"])
+                if blip2["scene_type"] and blip2["scene_type"] not in subjects_parts:
+                    subjects_parts.append(blip2["scene_type"])
+                if blip2["keywords"]:
+                    try:
+                        for kw in json.loads(blip2["keywords"]):
+                            if kw not in kw_parts:
+                                kw_parts.append(kw)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if blip2["mood"] and blip2["mood"] not in kw_parts:
+                    kw_parts.append(blip2["mood"])
+                if blip2["lighting"] and blip2["lighting"] not in kw_parts:
+                    kw_parts.append(blip2["lighting"])
+
+            faces_row = faces_map.get(image_id)
+            if faces_row and faces_row["face_identities"]:
+                try:
+                    for name in json.loads(faces_row["face_identities"]):
+                        if name not in faces_parts:
+                            faces_parts.append(name)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            for pname, lbl in occ_map.get(image_id, []):
+                if pname and pname not in faces_parts:
+                    faces_parts.append(pname)
+                if lbl and lbl not in faces_parts:
+                    faces_parts.append(lbl)
+
+            for cloud in cloud_map.get(image_id, []):
+                if cloud["description"]:
+                    desc_parts.append(cloud["description"])
+                if cloud["main_subject"]:
+                    subjects_parts.append(cloud["main_subject"])
+                if cloud["scene_type"]:
+                    subjects_parts.append(cloud["scene_type"])
+                if cloud["keywords"]:
+                    try:
+                        kw_parts.extend(json.loads(cloud["keywords"]))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+            meta = meta_map.get(image_id)
+            if meta:
+                for field in (
+                    "camera_make", "camera_model", "lens_model",
+                    "location_city", "location_state", "location_country",
+                ):
+                    if meta[field]:
+                        exif_parts.append(meta[field])
+
+            kw_parts = list(dict.fromkeys(kw_parts))
+            faces_parts = list(dict.fromkeys(faces_parts))
+
+            rows_to_insert.append((
+                image_id,
+                str(image_id),
+                " ".join(desc_parts),
+                " ".join(subjects_parts),
+                " ".join(kw_parts),
+                " ".join(faces_parts),
+                " ".join(exif_parts),
+            ))
+
+        conn.executemany(
+            """INSERT INTO search_index
+               (rowid, image_id, description_text, subjects_text,
+                keywords_text, faces_text, exif_text)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            rows_to_insert,
+        )
+        inserted += len(rows_to_insert)
+        sys.stderr.write(
+            f"\r  FTS rebuild: {inserted}/{total} images indexed"
+        )
+
+    if total:
+        sys.stderr.write(
+            f"\r  FTS rebuild: {inserted}/{total} images indexed — done\n"
         )
