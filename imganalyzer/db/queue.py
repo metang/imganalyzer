@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+from imganalyzer.db.connection import begin_immediate as _begin_immediate
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -158,7 +160,7 @@ class JobQueue:
 
         # Use BEGIN IMMEDIATE to prevent concurrent claims from selecting
         # the same jobs (atomic SELECT + UPDATE).
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             rows = self.conn.execute(
                 f"""SELECT id, image_id, module, attempts
@@ -250,7 +252,7 @@ class JobQueue:
         order = ", ".join(order_parts)
         params.append(batch_size)
 
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             rows = self.conn.execute(
                 f"""SELECT id, image_id, module, attempts, last_node_role
@@ -304,7 +306,7 @@ class JobQueue:
 
     def release_expired_leases(self) -> int:
         """Return expired leased jobs to pending state."""
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             rows = self.conn.execute(
                 """SELECT job_id FROM job_leases
@@ -335,7 +337,7 @@ class JobQueue:
 
     def release_worker_leases(self, worker_id: str) -> int:
         """Return all leases held by a worker to pending state."""
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             rows = self.conn.execute(
                 "SELECT job_id FROM job_leases WHERE worker_id = ?",
@@ -370,7 +372,7 @@ class JobQueue:
         extend_ttl_seconds: int = 120,
     ) -> bool:
         """Refresh a lease heartbeat and extend its expiry if the token matches."""
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             row = self.conn.execute(
                 "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
@@ -395,7 +397,7 @@ class JobQueue:
 
     def release_leased(self, job_id: int, lease_token: str) -> bool:
         """Return a claimed leased job to pending if the token matches."""
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             row = self.conn.execute(
                 "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
@@ -424,7 +426,7 @@ class JobQueue:
 
     def mark_done_leased(self, job_id: int, lease_token: str, processing_ms: int | None = None) -> bool:
         """Mark a leased job done if the lease token matches."""
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             row = self.conn.execute(
                 "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
@@ -449,7 +451,7 @@ class JobQueue:
 
     def mark_failed_leased(self, job_id: int, lease_token: str, error: str) -> bool:
         """Mark a leased job failed if the lease token matches."""
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             row = self.conn.execute(
                 "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
@@ -474,7 +476,7 @@ class JobQueue:
 
     def mark_skipped_leased(self, job_id: int, lease_token: str, reason: str) -> bool:
         """Mark a leased job skipped if the lease token matches."""
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             row = self.conn.execute(
                 "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
@@ -508,7 +510,7 @@ class JobQueue:
         """
         if not skips and not releases:
             return
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             now = _now()
             for job_id, lease_token, reason in skips:
@@ -689,7 +691,7 @@ class JobQueue:
         updated = 0
         deleted = 0
 
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             for source, target in normalized.items():
                 deleted_cur = self.conn.execute(
@@ -736,7 +738,7 @@ class JobQueue:
         3) Optionally re-queue ``running`` master jobs with no lease
            (used on coordinator startup when no local run is active).
         """
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             dangling_cur = self.conn.execute(
                 """DELETE FROM job_leases

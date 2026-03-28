@@ -11,6 +11,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from imganalyzer.db.connection import begin_immediate as _begin_immediate
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -569,7 +571,7 @@ class Repository:
         aliases = json.loads(row["aliases"] or "[]")
         if alias not in aliases:
             aliases.append(alias)
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             self.conn.execute(
                 "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
@@ -602,7 +604,7 @@ class Repository:
         if alias not in aliases:
             return False
         aliases.remove(alias)
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             self.conn.execute(
                 "UPDATE face_identities SET aliases = ?, updated_at = ? WHERE id = ?",
@@ -662,7 +664,7 @@ class Repository:
             if person_row is None:
                 raise ValueError(f"Person {person_id} not found")
 
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             if display_name:
                 self.conn.execute(
@@ -711,7 +713,7 @@ class Repository:
 
     def delete_person(self, person_id: int) -> None:
         """Delete a person and clear person_id on all their occurrences."""
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             self.conn.execute(
                 "UPDATE face_occurrences SET person_id = NULL WHERE person_id = ?",
@@ -1095,7 +1097,7 @@ class Repository:
         order = sorted(range(n_sub), key=lambda j: sub_counts[j], reverse=True)
 
         # Write phase: acquire lock, assign new cluster IDs atomically
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             max_existing = self.conn.execute(
                 "SELECT COALESCE(MAX(cluster_id), 0) FROM face_occurrences"
@@ -1638,7 +1640,7 @@ class Repository:
         if keep_name in all_aliases:
             all_aliases.remove(keep_name)
 
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             # Move embeddings
             self.conn.execute(
@@ -2315,7 +2317,7 @@ class Repository:
                 n_clusters += 1
 
         # Write cluster assignments back to DB (atomic transaction)
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn)
         try:
             self.conn.execute("UPDATE face_occurrences SET cluster_id = NULL")
             self.conn.executemany(

@@ -1357,7 +1357,8 @@ class Worker:
             failed_ids: list[int] = []
             for image_id in fts_snapshot:
                 try:
-                    self.conn.execute("BEGIN IMMEDIATE")
+                    from imganalyzer.db.connection import begin_immediate
+                    begin_immediate(self.conn)
                     try:
                         self.repo.update_search_artifacts(image_id)
                         self.conn.commit()
@@ -1440,7 +1441,8 @@ class Worker:
         failed_ids: list[int] = []
         for image_id in dirty:
             try:
-                self.conn.execute("BEGIN IMMEDIATE")
+                from imganalyzer.db.connection import begin_immediate
+                begin_immediate(self.conn)
                 try:
                     self.repo.update_search_artifacts(image_id)
                     self.conn.commit()

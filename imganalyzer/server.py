@@ -1703,7 +1703,8 @@ def _handle_jobs_complete(params: dict) -> dict:
     image_id = 0
     module_name = ""
 
-    conn.execute("BEGIN IMMEDIATE")
+    from imganalyzer.db.connection import begin_immediate
+    begin_immediate(conn)
     try:
         lease = conn.execute(
             "SELECT worker_id FROM job_leases WHERE job_id = ? AND lease_token = ?",
@@ -1765,7 +1766,7 @@ def _handle_jobs_complete(params: dict) -> dict:
         delay_s = _LOCK_RETRY_INITIAL_DELAY_S
         for attempt in range(1, _LOCK_RETRY_ATTEMPTS + 1):
             try:
-                conn.execute("BEGIN IMMEDIATE")
+                begin_immediate(conn)
                 try:
                     repo.update_search_artifacts(image_id)
                     conn.commit()

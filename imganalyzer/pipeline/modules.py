@@ -615,13 +615,18 @@ class ModuleRunner:
 
 
 class _transaction:
-    """Context manager for SQLite transactions (BEGIN IMMEDIATE ... COMMIT)."""
+    """Context manager for SQLite transactions (BEGIN IMMEDIATE ... COMMIT).
+
+    Uses :func:`begin_immediate` to retry around checkpoint-triggered
+    ``SQLITE_BUSY`` errors that bypass ``busy_timeout``.
+    """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
     def __enter__(self) -> None:
-        self.conn.execute("BEGIN IMMEDIATE")
+        from imganalyzer.db.connection import begin_immediate
+        begin_immediate(self.conn)
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if exc_type is None:
