@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -52,6 +52,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         26: _migrate_v26,
         27: _migrate_v27,
         28: _migrate_v28,
+        29: _migrate_v29,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -1167,3 +1168,25 @@ def _repopulate_fts_v28(conn: sqlite3.Connection) -> None:
         sys.stderr.write(
             f"\r  FTS rebuild: {inserted}/{total} images indexed — done\n"
         )
+
+
+# ── Migration v29: Covering index for face_occurrences cluster stats ───────────
+
+def _migrate_v29(conn: sqlite3.Connection) -> None:
+    """Add covering indexes for fast face cluster/person aggregation.
+
+    ``list_face_clusters`` uses ``GROUP BY cluster_id`` with
+    ``COUNT(DISTINCT image_id)`` — the covering index lets SQLite answer
+    from the index alone.
+
+    ``list_persons`` uses ``GROUP BY person_id`` with ``COUNT(DISTINCT
+    cluster_id)`` and ``COUNT(DISTINCT image_id)`` — same principle.
+    """
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_face_occ_cluster_image "
+        "ON face_occurrences(cluster_id, image_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_face_occ_person_cluster_image "
+        "ON face_occurrences(person_id, cluster_id, image_id)"
+    )

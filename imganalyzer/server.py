@@ -3248,7 +3248,7 @@ def _handle_faces_clusters(params: dict) -> dict:
     limit = params.get("limit", 0)
     offset = params.get("offset", 0)
     clusters, total_count = repo.list_face_clusters(limit=limit, offset=offset)
-    has_occurrences = repo.get_face_occurrences_count() > 0
+    has_occurrences = repo.has_face_occurrences()
     deferred_ids = sorted(repo.get_deferred_cluster_ids())
     return {
         "clusters": clusters,

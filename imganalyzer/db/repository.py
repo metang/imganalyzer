@@ -1953,6 +1953,11 @@ class Repository:
         If clustering hasn't been run yet (all cluster_id are NULL),
         falls back to grouping by identity_name.
 
+        Uses a two-phase approach for efficiency:
+          Phase 1 — paginated GROUP BY to get cluster_ids + counts.
+          Phase 2 — enrich only the page's clusters with representative,
+                    identity, person, and label data.
+
         Args:
             limit: Max rows to return. 0 means all (no limit).
             offset: Number of rows to skip.
@@ -1961,202 +1966,279 @@ class Repository:
             (clusters, total_count) — list of cluster dicts and the total
             number of clusters (for pagination).
         """
-        # Check if any clustering has been done
         has_clusters = self.conn.execute(
             "SELECT 1 FROM face_occurrences WHERE cluster_id IS NOT NULL LIMIT 1"
         ).fetchone()
 
+        if has_clusters:
+            return self._list_face_clusters_clustered(limit, offset)
+        return self._list_face_clusters_unclustered(limit, offset)
+
+    def _list_face_clusters_clustered(
+        self,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Two-phase paginated cluster listing (clustered + unclustered)."""
+        # ── Total counts (cheap with index) ──────────────────────────────
+        clustered_cnt = self.conn.execute(
+            "SELECT COUNT(DISTINCT cluster_id) FROM face_occurrences "
+            "WHERE cluster_id IS NOT NULL"
+        ).fetchone()[0] or 0
+        unclustered_cnt = self.conn.execute(
+            "SELECT COUNT(DISTINCT COALESCE(identity_name, 'Unknown')) "
+            "FROM face_occurrences WHERE cluster_id IS NULL"
+        ).fetchone()[0] or 0
+        total_count = clustered_cnt + unclustered_cnt
+
+        # ── Phase 1: paginated cluster_ids with counts ───────────────────
+        # This is a simple GROUP BY that SQLite resolves with the
+        # idx_face_occ_cluster index — no window functions needed.
         pagination = ""
         params: list[int] = []
         if limit > 0:
             pagination = " LIMIT ? OFFSET ?"
             params = [limit, offset]
 
-        if has_clusters:
-            clustered_row = self.conn.execute(
-                "SELECT COUNT(DISTINCT cluster_id) AS cnt FROM face_occurrences WHERE cluster_id IS NOT NULL"
-            ).fetchone()
-            unclustered_row = self.conn.execute(
-                """
-                SELECT COUNT(DISTINCT COALESCE(identity_name, 'Unknown')) AS cnt
+        page_rows = self.conn.execute(
+            f"""
+            SELECT cluster_id,
+                   COUNT(DISTINCT image_id) AS image_count,
+                   COUNT(id)                AS face_count
+            FROM face_occurrences
+            WHERE cluster_id IS NOT NULL
+            GROUP BY cluster_id
+            ORDER BY face_count DESC
+            {pagination}
+            """,
+            params,
+        ).fetchall()
+
+        # Check if we've exhausted clustered rows and need unclustered
+        clustered_on_page = len(page_rows)
+        unclustered_rows: list[dict[str, Any]] = []
+
+        if limit > 0:
+            clustered_before_page = min(offset, clustered_cnt)
+            remaining_after_clustered = limit - clustered_on_page
+            if remaining_after_clustered > 0 and offset + clustered_on_page >= clustered_cnt:
+                # Need unclustered rows to fill the page
+                unc_offset = max(0, offset - clustered_cnt)
+                unclustered_rows = self._list_unclustered_clusters(
+                    remaining_after_clustered, unc_offset
+                )
+        else:
+            # No limit — include all unclustered
+            unclustered_rows = self._list_unclustered_clusters(0, 0)
+
+        if not page_rows and not unclustered_rows:
+            return [], total_count
+
+        # ── Phase 2: enrich only this page's clusters ────────────────────
+        cluster_ids = [r["cluster_id"] for r in page_rows]
+        enriched = self._enrich_clusters(cluster_ids, page_rows)
+
+        return enriched + unclustered_rows, total_count
+
+    def _enrich_clusters(
+        self,
+        cluster_ids: list[int],
+        page_rows: list[Any],
+    ) -> list[dict[str, Any]]:
+        """Enrich a small set of cluster_ids with identity, person, label, representative."""
+        if not cluster_ids:
+            return []
+
+        ph = ",".join("?" for _ in cluster_ids)
+
+        # Representative: largest face bbox per cluster (only for this page)
+        rep_rows = self.conn.execute(
+            f"""
+            SELECT cluster_id, id AS representative_id
+            FROM (
+                SELECT cluster_id, id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cluster_id
+                           ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
+                       ) AS rn
+                FROM face_occurrences
+                WHERE cluster_id IN ({ph})
+            )
+            WHERE rn = 1
+            """,
+            cluster_ids,
+        ).fetchall()
+        rep_map = {r["cluster_id"]: r["representative_id"] for r in rep_rows}
+
+        # Most common identity per cluster
+        ident_rows = self.conn.execute(
+            f"""
+            SELECT cluster_id, identity_name
+            FROM (
+                SELECT cluster_id, identity_name,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cluster_id ORDER BY COUNT(*) DESC
+                       ) AS rn
+                FROM face_occurrences
+                WHERE cluster_id IN ({ph})
+                GROUP BY cluster_id, identity_name
+            )
+            WHERE rn = 1
+            """,
+            cluster_ids,
+        ).fetchall()
+        ident_map = {r["cluster_id"]: r["identity_name"] for r in ident_rows}
+
+        # Most common person per cluster
+        person_rows = self.conn.execute(
+            f"""
+            SELECT cluster_id, person_id
+            FROM (
+                SELECT cluster_id, person_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cluster_id ORDER BY COUNT(*) DESC
+                       ) AS rn
+                FROM face_occurrences
+                WHERE cluster_id IN ({ph}) AND person_id IS NOT NULL
+                GROUP BY cluster_id, person_id
+            )
+            WHERE rn = 1
+            """,
+            cluster_ids,
+        ).fetchall()
+        person_map = {r["cluster_id"]: r["person_id"] for r in person_rows}
+
+        # Batch-fetch display names: labels, persons, identities
+        label_map: dict[int, str] = {}
+        if self._table_exists("face_cluster_labels"):
+            label_rows = self.conn.execute(
+                f"SELECT cluster_id, display_name FROM face_cluster_labels "
+                f"WHERE cluster_id IN ({ph})",
+                cluster_ids,
+            ).fetchall()
+            label_map = {r["cluster_id"]: r["display_name"] for r in label_rows}
+
+        person_name_map: dict[int, str] = {}
+        if self._table_exists("face_persons") and person_map:
+            pids = list(set(person_map.values()))
+            ph2 = ",".join("?" for _ in pids)
+            pname_rows = self.conn.execute(
+                f"SELECT id, name FROM face_persons WHERE id IN ({ph2})", pids
+            ).fetchall()
+            person_name_map = {r["id"]: r["name"] for r in pname_rows}
+
+        ident_names = [n for n in ident_map.values() if n]
+        identity_display_map: dict[str, tuple[int | None, str | None]] = {}
+        if ident_names:
+            ph3 = ",".join("?" for _ in ident_names)
+            fi_rows = self.conn.execute(
+                f"SELECT id, canonical_name, display_name FROM face_identities "
+                f"WHERE canonical_name IN ({ph3})",
+                ident_names,
+            ).fetchall()
+            identity_display_map = {
+                r["canonical_name"]: (r["id"], r["display_name"]) for r in fi_rows
+            }
+
+        # Assemble results
+        results: list[dict[str, Any]] = []
+        for row in page_rows:
+            cid = row["cluster_id"]
+            identity_name = ident_map.get(cid)
+            person_id = person_map.get(cid)
+
+            fi_id, fi_display = identity_display_map.get(identity_name or "", (None, None))
+            person_name = person_name_map.get(person_id) if person_id else None
+            label_name = label_map.get(cid)
+            display_name = label_name or person_name or fi_display
+
+            results.append({
+                "cluster_id": cid,
+                "identity_name": identity_name,
+                "display_name": display_name,
+                "identity_id": fi_id,
+                "image_count": row["image_count"],
+                "face_count": row["face_count"],
+                "representative_id": rep_map.get(cid),
+                "person_id": person_id,
+            })
+        return results
+
+    def _list_unclustered_clusters(
+        self,
+        limit: int,
+        offset: int,
+    ) -> list[dict[str, Any]]:
+        """Return unclustered face groups (by identity_name), paginated."""
+        pagination = ""
+        params: list[int] = []
+        if limit > 0:
+            pagination = " LIMIT ? OFFSET ?"
+            params = [limit, offset]
+
+        agg_rows = self.conn.execute(
+            f"""
+            SELECT
+                COALESCE(identity_name, 'Unknown') AS identity_name,
+                COUNT(DISTINCT image_id) AS image_count,
+                COUNT(id) AS face_count
+            FROM face_occurrences
+            WHERE cluster_id IS NULL
+            GROUP BY COALESCE(identity_name, 'Unknown')
+            ORDER BY face_count DESC
+            {pagination}
+            """,
+            params,
+        ).fetchall()
+
+        if not agg_rows:
+            return []
+
+        # Enrich with representative and identity display name
+        names = [r["identity_name"] for r in agg_rows]
+        ph = ",".join("?" for _ in names)
+
+        rep_rows = self.conn.execute(
+            f"""
+            SELECT identity_name, id AS representative_id
+            FROM (
+                SELECT COALESCE(identity_name, 'Unknown') AS identity_name, id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY COALESCE(identity_name, 'Unknown')
+                           ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
+                       ) AS rn
                 FROM face_occurrences
                 WHERE cluster_id IS NULL
-                """
-            ).fetchone()
-            total_count = (
-                (clustered_row["cnt"] if clustered_row else 0)
-                + (unclustered_row["cnt"] if unclustered_row else 0)
+                  AND COALESCE(identity_name, 'Unknown') IN ({ph})
             )
+            WHERE rn = 1
+            """,
+            names,
+        ).fetchall()
+        rep_map = {r["identity_name"]: r["representative_id"] for r in rep_rows}
 
-            rows = self.conn.execute(
-                f"""
-                WITH cluster_agg AS (
-                    SELECT
-                        cluster_id,
-                        COUNT(DISTINCT image_id) AS image_count,
-                        COUNT(id)                AS face_count
-                    FROM face_occurrences
-                    WHERE cluster_id IS NOT NULL
-                    GROUP BY cluster_id
-                ),
-                cluster_identity AS (
-                    SELECT cluster_id, identity_name,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY cluster_id
-                               ORDER BY COUNT(*) DESC
-                           ) AS rn
-                    FROM face_occurrences
-                    WHERE cluster_id IS NOT NULL
-                    GROUP BY cluster_id, identity_name
-                ),
-                cluster_person AS (
-                    SELECT cluster_id, person_id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY cluster_id
-                               ORDER BY COUNT(*) DESC
-                           ) AS rn
-                    FROM face_occurrences
-                    WHERE cluster_id IS NOT NULL AND person_id IS NOT NULL
-                    GROUP BY cluster_id, person_id
-                ),
-                cluster_rep AS (
-                    SELECT cluster_id, id AS representative_id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY cluster_id
-                               ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
-                           ) AS rn
-                    FROM face_occurrences
-                    WHERE cluster_id IS NOT NULL
-                ),
-                cluster_rows AS (
-                    SELECT
-                        ca.cluster_id,
-                        ci.identity_name,
-                        COALESCE(fcl.display_name, fp.name, fi.display_name) AS display_name,
-                        fi.id AS identity_id,
-                        ca.image_count,
-                        ca.face_count,
-                        cr.representative_id,
-                        cp.person_id
-                    FROM cluster_agg ca
-                    LEFT JOIN cluster_identity ci
-                        ON ci.cluster_id = ca.cluster_id AND ci.rn = 1
-                    LEFT JOIN cluster_person cp
-                        ON cp.cluster_id = ca.cluster_id AND cp.rn = 1
-                    LEFT JOIN cluster_rep cr
-                        ON cr.cluster_id = ca.cluster_id AND cr.rn = 1
-                    LEFT JOIN face_identities fi
-                        ON fi.canonical_name = ci.identity_name
-                    LEFT JOIN face_cluster_labels fcl
-                        ON fcl.cluster_id = ca.cluster_id
-                    LEFT JOIN face_persons fp
-                        ON fp.id = cp.person_id
-                ),
-                unclustered_agg AS (
-                    SELECT
-                        COALESCE(identity_name, 'Unknown') AS identity_name,
-                        COUNT(DISTINCT image_id) AS image_count,
-                        COUNT(id)                AS face_count
-                    FROM face_occurrences
-                    WHERE cluster_id IS NULL
-                    GROUP BY COALESCE(identity_name, 'Unknown')
-                ),
-                unclustered_rep AS (
-                    SELECT
-                        COALESCE(identity_name, 'Unknown') AS identity_name,
-                        id AS representative_id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY COALESCE(identity_name, 'Unknown')
-                            ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
-                        ) AS rn
-                    FROM face_occurrences
-                    WHERE cluster_id IS NULL
-                ),
-                unclustered_rows AS (
-                    SELECT
-                        NULL AS cluster_id,
-                        ua.identity_name,
-                        fi.display_name,
-                        fi.id AS identity_id,
-                        ua.image_count,
-                        ua.face_count,
-                        ur.representative_id,
-                        NULL AS person_id
-                    FROM unclustered_agg ua
-                    LEFT JOIN unclustered_rep ur
-                        ON ur.identity_name = ua.identity_name AND ur.rn = 1
-                    LEFT JOIN face_identities fi
-                        ON fi.canonical_name = ua.identity_name
-                ),
-                combined AS (
-                    SELECT * FROM cluster_rows
-                    UNION ALL
-                    SELECT * FROM unclustered_rows
-                )
-                SELECT
-                    cluster_id,
-                    identity_name,
-                    display_name,
-                    identity_id,
-                    image_count,
-                    face_count,
-                    representative_id,
-                    person_id
-                FROM combined
-                ORDER BY face_count DESC
-                {pagination}
-                """,
-                params,
-            ).fetchall()
-        else:
-            total_row = self.conn.execute(
-                """
-                SELECT COUNT(DISTINCT COALESCE(identity_name, 'Unknown')) AS cnt
-                FROM face_occurrences
-                """
-            ).fetchone()
-            total_count = total_row["cnt"] if total_row else 0
+        fi_rows = self.conn.execute(
+            f"SELECT id, canonical_name, display_name FROM face_identities "
+            f"WHERE canonical_name IN ({ph})",
+            names,
+        ).fetchall()
+        fi_map = {r["canonical_name"]: (r["id"], r["display_name"]) for r in fi_rows}
 
-            rows = self.conn.execute(
-                f"""
-                WITH name_agg AS (
-                    SELECT
-                        COALESCE(identity_name, 'Unknown') AS identity_name,
-                        COUNT(DISTINCT image_id) AS image_count,
-                        COUNT(id)                AS face_count
-                    FROM face_occurrences
-                    GROUP BY COALESCE(identity_name, 'Unknown')
-                ),
-                name_rep AS (
-                    SELECT COALESCE(identity_name, 'Unknown') AS identity_name,
-                           id AS representative_id,
-                           ROW_NUMBER() OVER (
-                                PARTITION BY COALESCE(identity_name, 'Unknown')
-                                ORDER BY (bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1) DESC
-                            ) AS rn
-                    FROM face_occurrences
-                )
-                SELECT
-                    NULL AS cluster_id,
-                    na.identity_name,
-                    fi.display_name,
-                    fi.id AS identity_id,
-                    na.image_count,
-                    na.face_count,
-                    nr.representative_id,
-                    NULL AS person_id
-                FROM name_agg na
-                LEFT JOIN name_rep nr
-                    ON nr.identity_name = na.identity_name AND nr.rn = 1
-                LEFT JOIN face_identities fi
-                    ON fi.canonical_name = na.identity_name
-                ORDER BY na.face_count DESC
-                {pagination}
-                """,
-                params,
-            ).fetchall()
-
-        return [dict(r) for r in rows], total_count
+        results: list[dict[str, Any]] = []
+        for row in agg_rows:
+            iname = row["identity_name"]
+            fi_id, fi_display = fi_map.get(iname, (None, None))
+            results.append({
+                "cluster_id": None,
+                "identity_name": iname,
+                "display_name": fi_display,
+                "identity_id": fi_id,
+                "image_count": row["image_count"],
+                "face_count": row["face_count"],
+                "representative_id": rep_map.get(iname),
+                "person_id": None,
+            })
+        return results
 
     def get_cluster_occurrences(
         self, cluster_id: int | None = None, identity_name: str | None = None,
@@ -2344,6 +2426,14 @@ class Repository:
         """Return total number of face occurrences stored."""
         row = self.conn.execute("SELECT COUNT(*) AS cnt FROM face_occurrences").fetchone()
         return row["cnt"] if row else 0
+
+    def has_face_occurrences(self) -> bool:
+        """Return True if any face occurrences exist (fast EXISTS check)."""
+        return bool(
+            self.conn.execute(
+                "SELECT 1 FROM face_occurrences LIMIT 1"
+            ).fetchone()
+        )
 
     def find_similar_images_for_person(
         self,
