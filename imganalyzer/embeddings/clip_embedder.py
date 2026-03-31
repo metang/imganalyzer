@@ -67,8 +67,10 @@ class CLIPEmbedder:
         Supports all formats handled by Pillow *and* RAW camera files
         (any extension in ``analyzer.RAW_EXTENSIONS``) by routing them
         through rawpy before handing the decoded RGB array to CLIP.
+
+        Includes one automatic retry on transient CUDA errors.
         """
-        self._load_model()
+        import sys
         import torch
         from PIL import Image
 
@@ -77,19 +79,33 @@ class CLIPEmbedder:
         from imganalyzer.readers import open_as_pil
         img = open_as_pil(path)
 
-        # Downsize to EMBED_MAX_LONG_EDGE on the long edge before CLIP pre-processing.
-        # CLIP rescales to 224 px internally, so there is no quality loss.
-        # thumbnail() only ever shrinks — it never upscales a small image.
         img.thumbnail((EMBED_MAX_LONG_EDGE, EMBED_MAX_LONG_EDGE), Image.LANCZOS)
 
-        image_input = CLIPEmbedder._preprocess(img).unsqueeze(0).to(CLIPEmbedder._device)
+        for attempt in range(2):
+            self._load_model()
+            try:
+                image_input = CLIPEmbedder._preprocess(img).unsqueeze(0).to(CLIPEmbedder._device)
 
-        with torch.no_grad(), torch.autocast(CLIPEmbedder._device, enabled=(CLIPEmbedder._device != "cpu")):
-            features = CLIPEmbedder._model.encode_image(image_input)
-            features = features / features.norm(dim=-1, keepdim=True)
+                with torch.no_grad(), torch.autocast(
+                    CLIPEmbedder._device,
+                    enabled=(CLIPEmbedder._device != "cpu"),
+                ):
+                    features = CLIPEmbedder._model.encode_image(image_input)
+                    features = features / features.norm(dim=-1, keepdim=True)
 
-        vec = features.cpu().numpy().flatten().astype(np.float32)
-        return vec.tobytes()
+                vec = features.cpu().numpy().flatten().astype(np.float32)
+                return vec.tobytes()
+            except RuntimeError as exc:
+                if attempt == 0 and "CUDA" in str(exc):
+                    print(
+                        f"[CLIPEmbedder] CUDA error in embed_image, "
+                        f"resetting GPU state and retrying: {exc}",
+                        file=sys.stderr,
+                    )
+                    self._unload()
+                    torch.cuda.synchronize()
+                    continue
+                raise
 
     def embed_image_pil(self, img: "Image.Image") -> bytes:
         """Encode a pre-loaded PIL Image → float32 bytes (768-d).
@@ -98,22 +114,41 @@ class CLIPEmbedder:
         RAW/HEIC decode — used by the per-image decode cache in
         :class:`ModuleRunner` to avoid redundant disk I/O when the image
         has already been decoded for a prior module.
+
+        Includes one automatic retry on transient CUDA errors.
         """
-        self._load_model()
+        import sys
         import torch
         from PIL import Image
 
         img = img.convert("RGB")
         img.thumbnail((EMBED_MAX_LONG_EDGE, EMBED_MAX_LONG_EDGE), Image.LANCZOS)
 
-        image_input = CLIPEmbedder._preprocess(img).unsqueeze(0).to(CLIPEmbedder._device)
+        for attempt in range(2):
+            self._load_model()
+            try:
+                image_input = CLIPEmbedder._preprocess(img).unsqueeze(0).to(CLIPEmbedder._device)
 
-        with torch.no_grad(), torch.autocast(CLIPEmbedder._device, enabled=(CLIPEmbedder._device != "cpu")):
-            features = CLIPEmbedder._model.encode_image(image_input)
-            features = features / features.norm(dim=-1, keepdim=True)
+                with torch.no_grad(), torch.autocast(
+                    CLIPEmbedder._device,
+                    enabled=(CLIPEmbedder._device != "cpu"),
+                ):
+                    features = CLIPEmbedder._model.encode_image(image_input)
+                    features = features / features.norm(dim=-1, keepdim=True)
 
-        vec = features.cpu().numpy().flatten().astype(np.float32)
-        return vec.tobytes()
+                vec = features.cpu().numpy().flatten().astype(np.float32)
+                return vec.tobytes()
+            except RuntimeError as exc:
+                if attempt == 0 and "CUDA" in str(exc):
+                    print(
+                        f"[CLIPEmbedder] CUDA error in embed_image_pil, "
+                        f"resetting GPU state and retrying: {exc}",
+                        file=sys.stderr,
+                    )
+                    self._unload()
+                    torch.cuda.synchronize()
+                    continue
+                raise
 
     def embed_images_batch(self, images: "list[Image.Image]") -> list[bytes]:
         """Encode a batch of pre-loaded PIL Images → list of float32 bytes (768-d each).
@@ -151,18 +186,41 @@ class CLIPEmbedder:
         return [vecs[i].tobytes() for i in range(vecs.shape[0])]
 
     def embed_text(self, text: str) -> bytes:
-        """Encode a text query → float32 bytes (768-d)."""
-        self._load_model()
+        """Encode a text query → float32 bytes (768-d).
+
+        Includes one automatic retry on transient CUDA errors: the model is
+        unloaded, the GPU cache is cleared, and inference is retried on a
+        freshly loaded model.  If the retry also fails the exception
+        propagates to the caller.
+        """
+        import sys
         import torch
 
-        tokens = CLIPEmbedder._tokenizer([text]).to(CLIPEmbedder._device)
+        for attempt in range(2):
+            self._load_model()
+            try:
+                tokens = CLIPEmbedder._tokenizer([text]).to(CLIPEmbedder._device)
 
-        with torch.no_grad(), torch.autocast(CLIPEmbedder._device, enabled=(CLIPEmbedder._device != "cpu")):
-            features = CLIPEmbedder._model.encode_text(tokens)
-            features = features / features.norm(dim=-1, keepdim=True)
+                with torch.no_grad(), torch.autocast(
+                    CLIPEmbedder._device,
+                    enabled=(CLIPEmbedder._device != "cpu"),
+                ):
+                    features = CLIPEmbedder._model.encode_text(tokens)
+                    features = features / features.norm(dim=-1, keepdim=True)
 
-        vec = features.cpu().numpy().flatten().astype(np.float32)
-        return vec.tobytes()
+                vec = features.cpu().numpy().flatten().astype(np.float32)
+                return vec.tobytes()
+            except RuntimeError as exc:
+                if attempt == 0 and "CUDA" in str(exc):
+                    print(
+                        f"[CLIPEmbedder] CUDA error in embed_text, "
+                        f"resetting GPU state and retrying: {exc}",
+                        file=sys.stderr,
+                    )
+                    self._unload()
+                    torch.cuda.synchronize()
+                    continue
+                raise
 
     @classmethod
     def _load_model(cls) -> None:

@@ -1206,7 +1206,18 @@ class SearchEngine:
         """
         pool = limit * _POOL_FACTOR
         text_results     = self._fts_search(query, pool)
-        semantic_results = self._semantic_search(query, pool, semantic_profile)
+        try:
+            semantic_results = self._semantic_search(query, pool, semantic_profile)
+        except RuntimeError as exc:
+            if "CUDA" in str(exc):
+                import sys
+                print(
+                    f"[SearchEngine] Semantic search failed due to CUDA error, "
+                    f"falling back to text-only: {exc}",
+                    file=sys.stderr,
+                )
+                return text_results[:limit]
+            raise
 
         # Convert each result list to RRF scores (already sorted best-first)
         text_rrf: dict[int, float] = {
