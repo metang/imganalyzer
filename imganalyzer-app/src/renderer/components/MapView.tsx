@@ -125,6 +125,7 @@ export function MapView() {
   const [stats, setStats] = useState<GeoStats | null>(null)
   const [loading, setLoading] = useState(false)
   const [totalInView, setTotalInView] = useState(0)
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark')
 
   // Load stats once on mount
   useEffect(() => {
@@ -181,7 +182,7 @@ export function MapView() {
             )}
           </>
         )}
-        <span className="ml-auto">
+        <span className="ml-auto flex items-center gap-3">
           {loading ? (
             <span className="text-amber-400">Loading…</span>
           ) : (
@@ -190,6 +191,13 @@ export function MapView() {
               {' '}· {clusters.length} clusters
             </span>
           )}
+          <button
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            className="px-2 py-0.5 rounded border border-neutral-700 hover:border-neutral-500 text-neutral-300 hover:text-neutral-100 transition-colors"
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} map`}
+          >
+            {theme === 'dark' ? '☀️ Light' : '🌙 Dark'}
+          </button>
         </span>
       </div>
 
@@ -199,13 +207,16 @@ export function MapView() {
           center={[20, 0]}
           zoom={2}
           className="h-full w-full"
-          style={{ background: '#1a1a1a' }}
+          style={{ background: theme === 'dark' ? '#1a1a1a' : '#e8e8e8' }}
           zoomControl={true}
           attributionControl={true}
         >
           <TileLayer
+            key={theme}
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>'
-            url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png"
+            url={theme === 'dark'
+              ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png'
+              : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png'}
             maxZoom={20}
             tileSize={256}
             zoomOffset={0}
