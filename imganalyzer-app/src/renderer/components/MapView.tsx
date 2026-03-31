@@ -1,15 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import type { GeoCluster } from '../global'
-
-// Fix Leaflet default marker icon paths in bundled Electron apps
-delete (L.Icon.Default.prototype as Record<string, unknown>)._getIconUrl
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-})
 
 interface GeoStats {
   total_images: number
@@ -18,7 +10,14 @@ interface GeoStats {
   top_cities: Array<{ city: string; state: string; country: string; count: number }>
 }
 
+// Icon cache to avoid recreating DOM elements on every render
+const _iconCache = new Map<string, L.DivIcon>()
+
 function clusterIcon(count: number): L.DivIcon {
+  const key = String(count)
+  let icon = _iconCache.get(key)
+  if (icon) return icon
+
   const size = count < 100 ? 36 : count < 1000 ? 44 : count < 10000 ? 52 : 60
   const bg =
     count < 100
@@ -34,23 +33,23 @@ function clusterIcon(count: number): L.DivIcon {
       ? `${(count / 1000).toFixed(1)}k`
       : String(count)
 
-  return L.divIcon({
+  icon = L.divIcon({
     className: '',
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
     html: `<div class="flex items-center justify-center rounded-full ${bg} text-white font-semibold shadow-lg border-2 border-white/40"
                 style="width:${size}px;height:${size}px;font-size:${size < 44 ? 11 : 13}px">${label}</div>`,
   })
+  _iconCache.set(key, icon)
+  return icon
 }
 
-function singleIcon(): L.DivIcon {
-  return L.divIcon({
-    className: '',
-    iconSize: [14, 14],
-    iconAnchor: [7, 7],
-    html: '<div class="w-3.5 h-3.5 rounded-full bg-blue-400 border-2 border-white shadow"></div>',
-  })
-}
+const _singleIcon = L.divIcon({
+  className: '',
+  iconSize: [14, 14],
+  iconAnchor: [7, 7],
+  html: '<div class="w-3.5 h-3.5 rounded-full bg-blue-400 border-2 border-white shadow"></div>',
+})
 
 /** Listens to map move/zoom events and fires a debounced callback. */
 function MapEventHandler({
@@ -59,25 +58,15 @@ function MapEventHandler({
   onBoundsChange: (bounds: { north: number; south: number; east: number; west: number; zoom: number }) => void
 }) {
   const timerRef = useRef<ReturnType<typeof setTimeout>>()
+  const cbRef = useRef(onBoundsChange)
+  cbRef.current = onBoundsChange
+
   const map = useMapEvents({
     moveend: () => {
       clearTimeout(timerRef.current)
       timerRef.current = setTimeout(() => {
         const b = map.getBounds()
-        onBoundsChange({
-          north: b.getNorth(),
-          south: b.getSouth(),
-          east: b.getEast(),
-          west: b.getWest(),
-          zoom: map.getZoom(),
-        })
-      }, 300)
-    },
-    zoomend: () => {
-      clearTimeout(timerRef.current)
-      timerRef.current = setTimeout(() => {
-        const b = map.getBounds()
-        onBoundsChange({
+        cbRef.current({
           north: b.getNorth(),
           south: b.getSouth(),
           east: b.getEast(),
@@ -116,12 +105,15 @@ function FitBounds({ clusters }: { clusters: GeoCluster[] }) {
   const fitted = useRef(false)
   useEffect(() => {
     if (fitted.current || clusters.length === 0) return
-    const lats = clusters.map((c) => c.center_lat)
-    const lngs = clusters.map((c) => c.center_lng)
-    const bounds = L.latLngBounds(
-      [Math.min(...lats), Math.min(...lngs)],
-      [Math.max(...lats), Math.max(...lngs)],
-    )
+    let minLat = Infinity, maxLat = -Infinity
+    let minLng = Infinity, maxLng = -Infinity
+    for (const c of clusters) {
+      if (c.center_lat < minLat) minLat = c.center_lat
+      if (c.center_lat > maxLat) maxLat = c.center_lat
+      if (c.center_lng < minLng) minLng = c.center_lng
+      if (c.center_lng > maxLng) maxLng = c.center_lng
+    }
+    const bounds = L.latLngBounds([minLat, minLng], [maxLat, maxLng])
     map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 })
     fitted.current = true
   }, [clusters, map])
@@ -226,7 +218,7 @@ export function MapView() {
             <Marker
               key={cluster.cell}
               position={[cluster.center_lat, cluster.center_lng]}
-              icon={cluster.count === 1 ? singleIcon() : clusterIcon(cluster.count)}
+              icon={cluster.count === 1 ? _singleIcon : clusterIcon(cluster.count)}
             >
               <Popup>
                 <div className="text-neutral-900 text-sm min-w-[120px]">

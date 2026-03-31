@@ -1223,14 +1223,15 @@ def _migrate_v30(conn: sqlite3.Connection) -> None:
         "ON analysis_metadata(geohash)"
     )
 
-    # 3. Backfill R*tree and geohash from existing GPS data
-    rows = conn.execute(
+    # 3. Backfill R*tree and geohash from existing GPS data (cursor-based
+    #    iteration to avoid loading all rows into memory at once).
+    cursor = conn.execute(
         "SELECT image_id, gps_latitude, gps_longitude "
         "FROM analysis_metadata "
         "WHERE gps_latitude IS NOT NULL AND gps_longitude IS NOT NULL"
-    ).fetchall()
-
-    for row in rows:
+    )
+    batch: list[tuple] = []
+    for row in cursor:
         image_id, lat, lng = row[0], row[1], row[2]
         gh = geohash_encode(lat, lng, precision=8)
         conn.execute(
@@ -1238,7 +1239,15 @@ def _migrate_v30(conn: sqlite3.Connection) -> None:
             "VALUES (?, ?, ?, ?, ?)",
             [image_id, lat, lat, lng, lng],
         )
-        conn.execute(
+        batch.append((gh, image_id))
+        if len(batch) >= 5000:
+            conn.executemany(
+                "UPDATE analysis_metadata SET geohash = ? WHERE image_id = ?",
+                batch,
+            )
+            batch.clear()
+    if batch:
+        conn.executemany(
             "UPDATE analysis_metadata SET geohash = ? WHERE image_id = ?",
-            [gh, image_id],
+            batch,
         )

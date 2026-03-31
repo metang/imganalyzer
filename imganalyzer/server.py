@@ -2155,7 +2155,7 @@ def _handle_search(params: dict) -> dict:
             "(m.location_city LIKE ? OR m.location_state LIKE ? OR m.location_country LIKE ?)"
         )
         base_params.extend([f"%{location}%", f"%{location}%", f"%{location}%"])
-    if map_bounds and isinstance(map_bounds, dict):
+    if map_bounds and isinstance(map_bounds, dict) and _table_exists(conn, "geo_rtree"):
         mb_south = float(map_bounds.get("south", -90))
         mb_north = float(map_bounds.get("north", 90))
         mb_west = float(map_bounds.get("west", -180))
@@ -4026,7 +4026,7 @@ def _handle_geo_clusters(params: dict) -> dict:
                    AVG(m.gps_latitude) AS center_lat,
                    AVG(m.gps_longitude) AS center_lng,
                    COUNT(*) AS count,
-                   GROUP_CONCAT(m.image_id) AS all_ids
+                   MIN(m.image_id) AS sample1
             FROM geo_rtree r
             JOIN analysis_metadata m ON m.image_id = r.id
             WHERE r.min_lat >= ? AND r.max_lat <= ?
@@ -4047,16 +4047,12 @@ def _handle_geo_clusters(params: dict) -> dict:
     for row in rows:
         count = row["count"]
         total += count
-        all_ids_str = row["all_ids"] or ""
-        # Take up to 4 sample image IDs for thumbnail preview
-        id_list = all_ids_str.split(",")[:4]
-        sample_ids = [int(x) for x in id_list if x]
         clusters.append({
             "cell": row["cell"],
             "center_lat": round(row["center_lat"], 6),
             "center_lng": round(row["center_lng"], 6),
             "count": count,
-            "sample_ids": sample_ids,
+            "sample_ids": [row["sample1"]],
         })
 
     return {"clusters": clusters, "total": total}
@@ -4083,8 +4079,11 @@ def _handle_geo_nearby(params: dict) -> dict:
     exclude_id = params.get("excludeId")
 
     # Approximate bounding box from radius (1 degree ≈ 111 km)
+    import math
+
     dlat = radius_km / 111.0
-    dlng = radius_km / (111.0 * max(abs(__import__("math").cos(__import__("math").radians(lat))), 0.01))
+    cos_lat = max(abs(math.cos(math.radians(lat))), 0.01)
+    dlng = radius_km / (111.0 * cos_lat)
 
     north = lat + dlat
     south = lat - dlat
