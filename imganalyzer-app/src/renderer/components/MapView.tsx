@@ -204,11 +204,12 @@ export function MapView() {
           attributionControl={true}
         >
           <TileLayer
-            attribution='&copy; <a href="https://stadiamaps.com/" target="_blank">Stadia</a> &copy; <a href="https://openmaptiles.org/" target="_blank">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OSM</a>'
-            url="https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png"
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>'
+            url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png"
             maxZoom={20}
             tileSize={256}
-            detectRetina={true}
+            zoomOffset={0}
+            detectRetina={false}
           />
           <MapEventHandler onBoundsChange={handleBoundsChange} />
           <InvalidateSize />
