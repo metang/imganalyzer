@@ -90,6 +90,26 @@ function MapEventHandler({
   return null
 }
 
+/** Fixes Leaflet tile rendering when the map is inside a hidden tab.
+ *  Calls invalidateSize() whenever the container becomes visible. */
+function InvalidateSize() {
+  const map = useMap()
+  useEffect(() => {
+    const container = map.getContainer()
+    const observer = new ResizeObserver(() => {
+      map.invalidateSize()
+    })
+    observer.observe(container)
+    // Also invalidateSize after a short delay for initial tab switch
+    const timer = setTimeout(() => map.invalidateSize(), 100)
+    return () => {
+      observer.disconnect()
+      clearTimeout(timer)
+    }
+  }, [map])
+  return null
+}
+
 /** Fits the map to show all clusters on initial load. */
 function FitBounds({ clusters }: { clusters: GeoCluster[] }) {
   const map = useMap()
@@ -199,6 +219,7 @@ export function MapView() {
             detectRetina={true}
           />
           <MapEventHandler onBoundsChange={handleBoundsChange} />
+          <InvalidateSize />
           <FitBounds clusters={clusters} />
 
           {clusters.map((cluster) => (
