@@ -301,4 +301,20 @@ contextBridge.exposeInMainWorld('api', {
 
   getPersonDirectLinks: (personId: number): Promise<{ links: Array<{ occurrence_id: number; image_id: number; file_path: string }>; error?: string }> =>
     ipcRenderer.invoke('faces:personDirectLinks', personId),
+
+  // ── Geo / Map ──────────────────────────────────────────────────────────────
+
+  geoClusters: (params: {
+    north: number; south: number; east: number; west: number; zoom: number; limit?: number
+  }) => ipcRenderer.invoke('geo:clusters', params),
+
+  geoNearby: (params: {
+    lat: number; lng: number; radiusKm?: number; limit?: number; excludeId?: number
+  }) => ipcRenderer.invoke('geo:nearby', params),
+
+  geoStats: () => ipcRenderer.invoke('geo:stats'),
+
+  geoHeatmap: (params: {
+    north: number; south: number; east: number; west: number; zoom: number
+  }) => ipcRenderer.invoke('geo:heatmap', params),
 })

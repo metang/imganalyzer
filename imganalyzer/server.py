@@ -1962,6 +1962,7 @@ def _handle_search(params: dict) -> dict:
     recurring_month_day = params.get("recurringMonthDay")
     time_of_day = params.get("timeOfDay")
     has_people = params.get("hasPeople")
+    map_bounds = params.get("mapBounds")  # {north, south, east, west}
     sort_by = params.get("sortBy", "relevance")
     rank_preference = params.get("rankPreference")
     expanded_terms_raw = params.get("expandedTerms", [])
@@ -2154,6 +2155,18 @@ def _handle_search(params: dict) -> dict:
             "(m.location_city LIKE ? OR m.location_state LIKE ? OR m.location_country LIKE ?)"
         )
         base_params.extend([f"%{location}%", f"%{location}%", f"%{location}%"])
+    if map_bounds and isinstance(map_bounds, dict):
+        mb_south = float(map_bounds.get("south", -90))
+        mb_north = float(map_bounds.get("north", 90))
+        mb_west = float(map_bounds.get("west", -180))
+        mb_east = float(map_bounds.get("east", 180))
+        base_conditions.append(
+            "m.image_id IN ("
+            "  SELECT r.id FROM geo_rtree r"
+            "  WHERE r.min_lat >= ? AND r.max_lat <= ?"
+            "  AND r.min_lng >= ? AND r.max_lng <= ?)"
+        )
+        base_params.extend([mb_south, mb_north, mb_west, mb_east])
     if date_from:
         base_conditions.append("m.date_time_original >= ?")
         base_params.append(date_from)
@@ -3964,6 +3977,255 @@ def _handle_image_details(params: dict) -> dict:
     return {"result": record}
 
 
+# ── Geo/map handlers ────────────────────────────────────────────────────────
+
+
+def _zoom_to_geohash_precision(zoom: int) -> int:
+    """Map a Leaflet zoom level to a geohash prefix length for clustering."""
+    if zoom <= 2:
+        return 1
+    if zoom <= 5:
+        return 2
+    if zoom <= 9:
+        return 3
+    if zoom <= 13:
+        return 4
+    if zoom <= 16:
+        return 5
+    if zoom <= 18:
+        return 6
+    return 7
+
+
+def _handle_geo_clusters(params: dict) -> dict:
+    """Return server-side clustered image markers for a map viewport.
+
+    Params:
+        north, south, east, west (float): bounding box
+        zoom (int): Leaflet zoom level (1-20)
+        limit (int): max clusters to return (default 500)
+    Returns:
+        clusters: [{cell, center_lat, center_lng, count, sample_ids}]
+        total: total geotagged images in bounds
+    """
+    conn = _get_db()
+    north = float(params.get("north", 90))
+    south = float(params.get("south", -90))
+    east = float(params.get("east", 180))
+    west = float(params.get("west", -180))
+    zoom = int(params.get("zoom", 2))
+    limit = min(int(params.get("limit", 500)), 2000)
+
+    precision = _zoom_to_geohash_precision(zoom)
+
+    # Use R*tree for fast bounding-box lookup, then cluster by geohash prefix
+    try:
+        rows = conn.execute(
+            """
+            SELECT substr(m.geohash, 1, ?) AS cell,
+                   AVG(m.gps_latitude) AS center_lat,
+                   AVG(m.gps_longitude) AS center_lng,
+                   COUNT(*) AS count,
+                   GROUP_CONCAT(m.image_id) AS all_ids
+            FROM geo_rtree r
+            JOIN analysis_metadata m ON m.image_id = r.id
+            WHERE r.min_lat >= ? AND r.max_lat <= ?
+              AND r.min_lng >= ? AND r.max_lng <= ?
+              AND m.geohash IS NOT NULL
+            GROUP BY cell
+            ORDER BY count DESC
+            LIMIT ?
+            """,
+            [precision, south, north, west, east, limit],
+        ).fetchall()
+    except Exception:
+        # geo_rtree may not exist (pre-v30)
+        return {"clusters": [], "total": 0}
+
+    clusters = []
+    total = 0
+    for row in rows:
+        count = row["count"]
+        total += count
+        all_ids_str = row["all_ids"] or ""
+        # Take up to 4 sample image IDs for thumbnail preview
+        id_list = all_ids_str.split(",")[:4]
+        sample_ids = [int(x) for x in id_list if x]
+        clusters.append({
+            "cell": row["cell"],
+            "center_lat": round(row["center_lat"], 6),
+            "center_lng": round(row["center_lng"], 6),
+            "count": count,
+            "sample_ids": sample_ids,
+        })
+
+    return {"clusters": clusters, "total": total}
+
+
+def _handle_geo_nearby(params: dict) -> dict:
+    """Return images near a given coordinate.
+
+    Params:
+        lat (float): center latitude
+        lng (float): center longitude
+        radiusKm (float): search radius in km (default 1.0)
+        limit (int): max results (default 50)
+        excludeId (int|None): image_id to exclude (the current photo)
+    Returns:
+        images: [{image_id, gps_latitude, gps_longitude, file_path}]
+        total: count of all images in radius
+    """
+    conn = _get_db()
+    lat = float(params["lat"])
+    lng = float(params["lng"])
+    radius_km = float(params.get("radiusKm", 1.0))
+    limit = min(int(params.get("limit", 50)), 200)
+    exclude_id = params.get("excludeId")
+
+    # Approximate bounding box from radius (1 degree ≈ 111 km)
+    dlat = radius_km / 111.0
+    dlng = radius_km / (111.0 * max(abs(__import__("math").cos(__import__("math").radians(lat))), 0.01))
+
+    north = lat + dlat
+    south = lat - dlat
+    east = lng + dlng
+    west = lng - dlng
+
+    try:
+        query = """
+            SELECT m.image_id, m.gps_latitude, m.gps_longitude, i.file_path
+            FROM geo_rtree r
+            JOIN analysis_metadata m ON m.image_id = r.id
+            JOIN images i ON i.id = m.image_id
+            WHERE r.min_lat >= ? AND r.max_lat <= ?
+              AND r.min_lng >= ? AND r.max_lng <= ?
+        """
+        query_params: list[Any] = [south, north, west, east]
+
+        if exclude_id is not None:
+            query += " AND m.image_id != ?"
+            query_params.append(int(exclude_id))
+
+        count_row = conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM ({query})", query_params
+        ).fetchone()
+        total = int(count_row["cnt"]) if count_row else 0
+
+        query += " LIMIT ?"
+        query_params.append(limit)
+        rows = conn.execute(query, query_params).fetchall()
+    except Exception:
+        return {"images": [], "total": 0}
+
+    images = [
+        {
+            "image_id": row["image_id"],
+            "gps_latitude": round(row["gps_latitude"], 6),
+            "gps_longitude": round(row["gps_longitude"], 6),
+            "file_path": row["file_path"],
+        }
+        for row in rows
+    ]
+
+    return {"images": images, "total": total}
+
+
+def _handle_geo_stats(params: dict) -> dict:
+    """Return aggregate GPS/location statistics.
+
+    Returns:
+        total_images: total image count
+        geotagged: count with GPS data
+        countries: [{country, count}]
+        top_cities: [{city, state, country, count}]
+    """
+    conn = _get_db()
+    try:
+        total_row = conn.execute("SELECT COUNT(*) AS cnt FROM images").fetchone()
+        total_images = int(total_row["cnt"]) if total_row else 0
+
+        geo_row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM analysis_metadata "
+            "WHERE gps_latitude IS NOT NULL AND gps_longitude IS NOT NULL"
+        ).fetchone()
+        geotagged = int(geo_row["cnt"]) if geo_row else 0
+
+        country_rows = conn.execute(
+            "SELECT location_country AS country, COUNT(*) AS count "
+            "FROM analysis_metadata "
+            "WHERE location_country IS NOT NULL AND location_country != '' "
+            "GROUP BY location_country ORDER BY count DESC LIMIT 50"
+        ).fetchall()
+        countries = [{"country": r["country"], "count": r["count"]} for r in country_rows]
+
+        city_rows = conn.execute(
+            "SELECT location_city AS city, location_state AS state, "
+            "       location_country AS country, COUNT(*) AS count "
+            "FROM analysis_metadata "
+            "WHERE location_city IS NOT NULL AND location_city != '' "
+            "GROUP BY location_city, location_state, location_country "
+            "ORDER BY count DESC LIMIT 20"
+        ).fetchall()
+        top_cities = [
+            {"city": r["city"], "state": r["state"], "country": r["country"], "count": r["count"]}
+            for r in city_rows
+        ]
+    except Exception:
+        return {"total_images": 0, "geotagged": 0, "countries": [], "top_cities": []}
+
+    return {
+        "total_images": total_images,
+        "geotagged": geotagged,
+        "countries": countries,
+        "top_cities": top_cities,
+    }
+
+
+def _handle_geo_heatmap(params: dict) -> dict:
+    """Return density grid for heatmap visualization.
+
+    Params:
+        north, south, east, west (float): bounding box
+        zoom (int): Leaflet zoom level
+    Returns:
+        points: [{lat, lng, weight}] — grid cells with aggregated counts
+    """
+    conn = _get_db()
+    north = float(params.get("north", 90))
+    south = float(params.get("south", -90))
+    east = float(params.get("east", 180))
+    west = float(params.get("west", -180))
+    zoom = int(params.get("zoom", 2))
+
+    precision = _zoom_to_geohash_precision(zoom)
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT substr(m.geohash, 1, ?) AS cell,
+                   AVG(m.gps_latitude) AS lat,
+                   AVG(m.gps_longitude) AS lng,
+                   COUNT(*) AS weight
+            FROM geo_rtree r
+            JOIN analysis_metadata m ON m.image_id = r.id
+            WHERE r.min_lat >= ? AND r.max_lat <= ?
+              AND r.min_lng >= ? AND r.max_lng <= ?
+              AND m.geohash IS NOT NULL
+            GROUP BY cell
+            LIMIT 2000
+            """,
+            [precision, south, north, west, east],
+        ).fetchall()
+    except Exception:
+        return {"points": []}
+
+    points = [
+        {"lat": round(r["lat"], 6), "lng": round(r["lng"], 6), "weight": r["weight"]}
+        for r in rows
+    ]
+    return {"points": points}
+
+
 # ── Method dispatch ──────────────────────────────────────────────────────────
 
 # Methods that return a result synchronously (the response is sent
@@ -4023,6 +4285,10 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/person-link-occurrences": _handle_faces_person_link_occurrences,
     "faces/person-unlink-occurrence": _handle_faces_person_unlink_occurrence,
     "faces/person-direct-links": _handle_faces_person_direct_links,
+    "geo/clusters": _handle_geo_clusters,
+    "geo/nearby": _handle_geo_nearby,
+    "geo/stats": _handle_geo_stats,
+    "geo/heatmap": _handle_geo_heatmap,
 }
 
 # Methods that send their own result/error asynchronously (streaming).

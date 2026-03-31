@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -53,6 +53,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         27: _migrate_v27,
         28: _migrate_v28,
         29: _migrate_v29,
+        30: _migrate_v30,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -1190,3 +1191,54 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_face_occ_person_cluster_image "
         "ON face_occurrences(person_id, cluster_id, image_id)"
     )
+
+
+def _migrate_v30(conn: sqlite3.Connection) -> None:
+    """Add R*tree spatial index and geohash column for map feature.
+
+    1. ``geo_rtree`` — R*tree virtual table for O(log N) bounding-box queries.
+    2. ``geohash`` column on ``analysis_metadata`` — precomputed 8-char geohash
+       for fast ``GROUP BY`` clustering at various zoom levels.
+    3. Backfill both from existing GPS data.
+    """
+    from imganalyzer.db.geohash import encode as geohash_encode
+
+    # 1. R*tree spatial index
+    conn.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS geo_rtree USING rtree(
+            id,
+            min_lat, max_lat,
+            min_lng, max_lng
+        )
+    """)
+
+    # 2. Geohash column
+    try:
+        conn.execute("ALTER TABLE analysis_metadata ADD COLUMN geohash TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metadata_geohash "
+        "ON analysis_metadata(geohash)"
+    )
+
+    # 3. Backfill R*tree and geohash from existing GPS data
+    rows = conn.execute(
+        "SELECT image_id, gps_latitude, gps_longitude "
+        "FROM analysis_metadata "
+        "WHERE gps_latitude IS NOT NULL AND gps_longitude IS NOT NULL"
+    ).fetchall()
+
+    for row in rows:
+        image_id, lat, lng = row[0], row[1], row[2]
+        gh = geohash_encode(lat, lng, precision=8)
+        conn.execute(
+            "INSERT OR REPLACE INTO geo_rtree (id, min_lat, max_lat, min_lng, max_lng) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [image_id, lat, lat, lng, lng],
+        )
+        conn.execute(
+            "UPDATE analysis_metadata SET geohash = ? WHERE image_id = ?",
+            [gh, image_id],
+        )

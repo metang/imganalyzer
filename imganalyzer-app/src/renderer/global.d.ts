@@ -478,6 +478,21 @@ export interface PersonDirectLink {
   file_path: string
 }
 
+export interface GeoCluster {
+  cell: string
+  center_lat: number
+  center_lng: number
+  count: number
+  sample_ids: number[]
+}
+
+export interface GeoNearbyImage {
+  image_id: number
+  gps_latitude: number
+  gps_longitude: number
+  file_path: string
+}
+
 declare global {
   interface Window {
     api: {
@@ -541,6 +556,23 @@ declare global {
       linkOccurrencesToPerson(personId: number, occurrenceIds: number[]): Promise<{ ok: boolean; updated: number; error?: string }>
       unlinkOccurrenceFromPerson(occurrenceId: number): Promise<{ ok: boolean; updated: number; error?: string }>
       getPersonDirectLinks(personId: number): Promise<{ links: PersonDirectLink[]; error?: string }>
+
+      // Geo / Map
+      geoClusters(params: {
+        north: number; south: number; east: number; west: number; zoom: number; limit?: number
+      }): Promise<{ clusters: GeoCluster[]; total: number; error?: string }>
+      geoNearby(params: {
+        lat: number; lng: number; radiusKm?: number; limit?: number; excludeId?: number
+      }): Promise<{ images: GeoNearbyImage[]; total: number; error?: string }>
+      geoStats(): Promise<{
+        total_images: number; geotagged: number
+        countries: Array<{ country: string; count: number }>
+        top_cities: Array<{ city: string; state: string; country: string; count: number }>
+        error?: string
+      }>
+      geoHeatmap(params: {
+        north: number; south: number; east: number; west: number; zoom: number
+      }): Promise<{ points: Array<{ lat: number; lng: number; weight: number }>; error?: string }>
 
       // Batch processing
       batchIngest(

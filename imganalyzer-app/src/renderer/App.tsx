@@ -5,9 +5,10 @@ import { BatchConfigView, BatchRunView } from './components/BatchView'
 import { SearchView } from './components/SearchView'
 import { FacesView } from './components/FacesView'
 import { SettingsView } from './components/SettingsView'
+import { MapView } from './components/MapView'
 import { useBatchProcess } from './hooks/useBatchProcess'
 
-type Tab = 'gallery' | 'batch' | 'running' | 'search' | 'faces' | 'settings'
+type Tab = 'gallery' | 'batch' | 'running' | 'search' | 'faces' | 'map' | 'settings'
 type FaceClusterDeepLink = {
   clusterId: number
   sourceImageId: number
@@ -180,6 +181,11 @@ export default function App() {
           Faces
         </TabButton>
 
+        {/* Map */}
+        <TabButton active={tab === 'map'} onClick={() => setTab('map')}>
+          Map
+        </TabButton>
+
         <div className="ml-auto flex items-center">
           <IconButton
             active={tab === 'settings'}
@@ -229,6 +235,11 @@ export default function App() {
           deepLinkRequest={facesDeepLink}
           onDeepLinkHandled={handleFacesDeepLinkHandled}
         />
+      </div>
+
+      {/* ── Map tab ──────────────────────────────────────────────────────────── */}
+      <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'map' ? '' : ' hidden'}`}>
+        <MapView />
       </div>
 
       {/* ── Settings tab ─────────────────────────────────────────────────────── */}

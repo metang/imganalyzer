@@ -10,6 +10,7 @@ import { registerBatchHandlers, killAllBatchProcesses } from './batch'
 import { registerSearchHandlers } from './search'
 import { registerFaceHandlers } from './faces'
 import { registerGalleryHandlers } from './gallery'
+import { registerGeoHandlers } from './geo'
 import { applyCoordinatorSettings, getCoordinatorStatus, startCoordinator, startCoordinatorOnLaunch, stopCoordinator } from './coordinator'
 import type { AppSettingsInput } from './settings'
 import { getAppSettings, getAppSettingsBundle, updateAppSettings } from './settings'
@@ -55,6 +56,7 @@ app.whenReady().then(async () => {
   registerBatchHandlers(win)
   registerSearchHandlers()
   registerGalleryHandlers()
+  registerGeoHandlers()
   registerFaceHandlers()
   try {
     const settings = await getAppSettings()
