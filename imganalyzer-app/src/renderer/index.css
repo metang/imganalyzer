@@ -29,3 +29,17 @@
     @apply bg-neutral-500;
   }
 }
+
+/* Cluster preview tooltip — override Leaflet default tooltip styling */
+.cluster-preview-tooltip {
+  background: white !important;
+  border: none !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25) !important;
+  padding: 10px !important;
+  max-width: 420px !important;
+  pointer-events: auto !important;
+}
+.cluster-preview-tooltip::before {
+  display: none !important;
+}

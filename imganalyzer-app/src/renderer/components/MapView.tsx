@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap } from 'react-leaflet'
+import { MapContainer, TileLayer, Marker, Tooltip, useMapEvents, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import type { GeoCluster } from '../global'
 
@@ -310,9 +310,14 @@ export function MapView() {
               position={[cluster.center_lat, cluster.center_lng]}
               icon={cluster.count === 1 ? _singleIcon : clusterIcon(cluster.count)}
             >
-              <Popup maxWidth={420} minWidth={200}>
+              <Tooltip
+                direction="top"
+                offset={[0, -10]}
+                opacity={1}
+                className="cluster-preview-tooltip"
+              >
                 <ClusterPopupContent cluster={cluster} />
-              </Popup>
+              </Tooltip>
             </Marker>
           ))}
         </MapContainer>
