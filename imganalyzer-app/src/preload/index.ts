@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('api', {
 
   getThumbnail: (imagePath: string): Promise<string> =>
     ipcRenderer.invoke('fs:getThumbnail', imagePath),
+  getThumbnailsBatch: (imagePaths: string[]): Promise<Record<string, string>> =>
+    ipcRenderer.invoke('fs:getThumbnailsBatch', imagePaths),
 
   getFullImage: (imagePath: string): Promise<string> =>
     ipcRenderer.invoke('fs:getFullImage', imagePath),

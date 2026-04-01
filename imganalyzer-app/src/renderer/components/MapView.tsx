@@ -127,44 +127,34 @@ function FitBounds({ clusters }: { clusters: GeoCluster[] }) {
   return null
 }
 
-/** Single lazy-loaded thumbnail tile inside the cluster popup. */
-function PopupThumb({ filePath }: { filePath: string }) {
-  const [src, setSrc] = useState<string | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    window.api.getThumbnail(filePath).then((url) => {
-      if (!cancelled) setSrc(url)
-    })
-    return () => { cancelled = true }
-  }, [filePath])
-
-  return (
-    <div className="w-[72px] h-[72px] rounded overflow-hidden bg-neutral-200 flex-shrink-0">
-      {src ? (
-        <img src={src} className="w-full h-full object-cover" />
-      ) : (
-        <div className="w-full h-full animate-pulse bg-neutral-300" />
-      )}
-    </div>
-  )
-}
-
-/** Popup content that loads preview thumbnails on mount. */
+/** Popup content that batch-loads preview thumbnails on mount. */
 function ClusterPopupContent({ cluster }: { cluster: GeoCluster }) {
   const [images, setImages] = useState<ClusterPreviewImage[]>([])
+  const [thumbs, setThumbs] = useState<Record<string, string>>({})
   const [total, setTotal] = useState(cluster.count)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    window.api.geoClusterPreview({ cell: cluster.cell, limit: 10 }).then((res) => {
+    setThumbs({})
+
+    window.api.geoClusterPreview({ cell: cluster.cell, limit: 10 }).then(async (res) => {
       if (cancelled) return
-      if (!res.error) {
-        setImages(res.images)
-        setTotal(res.total)
+      if (res.error || !res.images.length) {
+        setLoading(false)
+        return
       }
-      setLoading(false)
+      setImages(res.images)
+      setTotal(res.total)
+
+      // Batch-load all thumbnails in a single RPC call
+      const paths = res.images.map((img) => img.file_path)
+      const thumbMap = await window.api.getThumbnailsBatch(paths)
+      if (!cancelled) {
+        setThumbs(thumbMap)
+        setLoading(false)
+      }
     })
     return () => { cancelled = true }
   }, [cluster.cell])
@@ -183,9 +173,20 @@ function ClusterPopupContent({ cluster }: { cluster: GeoCluster }) {
         </div>
       ) : images.length > 0 ? (
         <div className="flex flex-wrap gap-1">
-          {images.map((img) => (
-            <PopupThumb key={img.image_id} filePath={img.file_path} />
-          ))}
+          {images.map((img) => {
+            const src = thumbs[img.file_path]
+            return (
+              <div key={img.image_id}
+                className="w-[72px] h-[72px] rounded overflow-hidden bg-neutral-200 flex-shrink-0"
+              >
+                {src ? (
+                  <img src={src} className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-full h-full bg-neutral-300" />
+                )}
+              </div>
+            )
+          })}
         </div>
       ) : (
         <div className="text-xs text-neutral-400">No previews available</div>

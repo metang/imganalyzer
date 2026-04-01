@@ -283,6 +283,54 @@ export async function getThumbnail(imagePath: string): Promise<string> {
   return promise
 }
 
+/**
+ * Batch-load thumbnails for multiple paths in a single RPC call.
+ * Returns a map of { filePath: dataUrl }.  Uses memory/disk cache for
+ * already-cached paths, then fetches the rest in one batch RPC call.
+ */
+export async function getThumbnailsBatch(
+  imagePaths: string[],
+): Promise<Record<string, string>> {
+  const result: Record<string, string> = {}
+  const uncachedPaths: string[] = []
+
+  // Resolve from memory and disk cache first
+  for (const p of imagePaths) {
+    const memCached = thumbCacheGet(p)
+    if (memCached !== undefined) {
+      result[p] = memCached
+      continue
+    }
+    const diskCached = await readThumbnailFromDisk(p)
+    if (diskCached) {
+      thumbCacheSet(p, diskCached)
+      result[p] = diskCached
+      continue
+    }
+    uncachedPaths.push(p)
+  }
+
+  if (uncachedPaths.length === 0) return result
+
+  try {
+    const resp = (await rpc.call('thumbnails/batch', {
+      paths: uncachedPaths,
+    })) as { thumbnails: Record<string, string>; errors: Record<string, string> }
+
+    for (const [path, dataUrl] of Object.entries(resp.thumbnails)) {
+      thumbCacheSet(path, dataUrl)
+      // Write to disk cache (extract base64 from data URL)
+      const b64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '')
+      void writeThumbnailToDisk(path, b64)
+      result[path] = dataUrl
+    }
+  } catch (err) {
+    console.error('Batch thumbnail error', err)
+  }
+
+  return result
+}
+
 // ── Full-resolution image for lightbox ───────────────────────────────────────
 
 // MIME types that the renderer's <img> tag can display natively

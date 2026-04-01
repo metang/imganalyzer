@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } from 'elect
 import { join } from 'path'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
-import { listImages, getThumbnail, getFullImage, getCachedImage, getThumbnailCacheConfig, setThumbnailCacheConfig } from './images'
+import { listImages, getThumbnail, getThumbnailsBatch, getFullImage, getCachedImage, getThumbnailCacheConfig, setThumbnailCacheConfig } from './images'
 import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
@@ -108,6 +108,10 @@ ipcMain.handle('fs:listImages', async (_evt, folderPath: string) => {
 // ─── IPC: Get thumbnail ───────────────────────────────────────────────────────
 ipcMain.handle('fs:getThumbnail', async (_evt, imagePath: string) => {
   return getThumbnail(imagePath)
+})
+
+ipcMain.handle('fs:getThumbnailsBatch', async (_evt, imagePaths: string[]) => {
+  return getThumbnailsBatch(imagePaths)
 })
 
 // ─── IPC: Thumbnail cache config ─────────────────────────────────────────────

@@ -3095,6 +3095,35 @@ def _handle_thumbnail(params: dict) -> dict:
     return {"data": base64.b64encode(jpeg_bytes).decode("ascii")}
 
 
+def _handle_thumbnails_batch(params: dict) -> dict:
+    """Generate thumbnails for multiple images in a single RPC call.
+
+    This avoids N separate JSON-RPC round-trips when the caller already
+    knows all paths it needs (e.g. cluster preview).
+
+    Params:
+        paths (list[str]): list of image file paths
+    Returns:
+        thumbnails: {file_path: base64_data_url, ...}
+        errors: {file_path: error_message, ...}
+    """
+    paths: list = params.get("paths", [])
+    if not paths:
+        return {"thumbnails": {}, "errors": {}}
+
+    thumbnails: dict[str, str] = {}
+    errors: dict[str, str] = {}
+
+    for image_path in paths[:50]:  # cap at 50
+        try:
+            result = _handle_thumbnail({"imagePath": image_path})
+            thumbnails[image_path] = f"data:image/jpeg;base64,{result['data']}"
+        except Exception as exc:
+            errors[image_path] = str(exc)
+
+    return {"thumbnails": thumbnails, "errors": errors}
+
+
 def _handle_fullimage(params: dict) -> dict:
     """Generate a full-res JPEG for RAW/HEIC and return as base64.
 
@@ -4067,6 +4096,9 @@ def _handle_geo_cluster_preview(params: dict) -> dict:
       2. From candidates, pick up to 10 spread evenly across the date range.
          For ties on the same date, pick randomly.
 
+    Performance: uses index-friendly LIKE prefix and lightweight ID+date query
+    to avoid fetching all rows (e.g. 10K) with full JOINs.
+
     Params:
         cell (str): geohash cell prefix (from geo/clusters response)
         limit (int): max images to return (default 10)
@@ -4081,21 +4113,21 @@ def _handle_geo_cluster_preview(params: dict) -> dict:
     if not cell:
         return {"images": [], "total": 0, "error": "cell is required"}
     limit = min(int(params.get("limit", 10)), 50)
+    like_prefix = cell + "%"
 
     try:
+        # Lightweight query: only image_id, date, aesthetic score (no file_path JOIN)
         rows = conn.execute(
             """
-            SELECT m.image_id, i.file_path,
+            SELECT m.image_id,
                    m.date_time_original AS date,
-                   COALESCE(ap.perception_iaa, ae.aesthetic_score) AS aesthetic_score
+                   COALESCE(ap.perception_iaa, ae.aesthetic_score) AS score
             FROM analysis_metadata m
-            JOIN images i ON i.id = m.image_id
             LEFT JOIN analysis_perception ap ON ap.image_id = m.image_id
             LEFT JOIN analysis_aesthetic ae ON ae.image_id = m.image_id
-            WHERE m.geohash IS NOT NULL
-              AND substr(m.geohash, 1, ?) = ?
+            WHERE m.geohash LIKE ?
             """,
-            [len(cell), cell],
+            [like_prefix],
         ).fetchall()
     except Exception as exc:
         return {"images": [], "total": 0, "error": str(exc)}
@@ -4105,49 +4137,52 @@ def _handle_geo_cluster_preview(params: dict) -> dict:
         return {"images": [], "total": 0}
 
     # Step 1: filter by aesthetic score > 7.5 if any qualify
-    high_quality = [
-        r for r in rows
-        if r["aesthetic_score"] is not None and r["aesthetic_score"] > 7.5
-    ]
+    high_quality = [r for r in rows if r["score"] is not None and r["score"] > 7.5]
     candidates = high_quality if high_quality else list(rows)
 
     if len(candidates) <= limit:
-        selected = candidates
+        picked = candidates
     else:
         # Step 2: spread evenly across the date range
-        # Sort by date (nulls last), then pick evenly spaced indices
         dated = [c for c in candidates if c["date"]]
         undated = [c for c in candidates if not c["date"]]
         random.shuffle(undated)
 
         if not dated:
-            # No dates at all — just random sample
-            selected = random.sample(candidates, limit)
+            picked = random.sample(candidates, limit)
         else:
-            # Sort by date, then for same date shuffle randomly
             random.shuffle(dated)  # randomize within-date ties
             dated.sort(key=lambda r: r["date"])
 
             if len(dated) <= limit:
-                selected = dated
-                remaining = limit - len(selected)
+                picked = dated
+                remaining = limit - len(picked)
                 if remaining > 0 and undated:
-                    selected.extend(undated[:remaining])
+                    picked.extend(undated[:remaining])
             else:
-                # Pick evenly spaced indices across the sorted list
                 step = len(dated) / limit
-                selected = [dated[int(i * step)] for i in range(limit)]
+                picked = [dated[int(i * step)] for i in range(limit)]
+
+    # Fetch full details (file_path) only for the selected IDs
+    selected_ids = [r["image_id"] for r in picked]
+    score_map = {r["image_id"]: r["score"] for r in picked}
+    date_map = {r["image_id"]: r["date"] for r in picked}
+    placeholders = ",".join("?" * len(selected_ids))
+    full_rows = conn.execute(
+        f"SELECT id, file_path FROM images WHERE id IN ({placeholders})",
+        selected_ids,
+    ).fetchall()
 
     images = [
         {
-            "image_id": r["image_id"],
+            "image_id": r["id"],
             "file_path": r["file_path"],
-            "date": r["date"],
-            "aesthetic_score": round(r["aesthetic_score"], 2)
-            if r["aesthetic_score"] is not None
+            "date": date_map.get(r["id"]),
+            "aesthetic_score": round(score_map[r["id"]], 2)
+            if score_map.get(r["id"]) is not None
             else None,
         }
-        for r in selected
+        for r in full_rows
     ]
 
     return {"images": images, "total": total}
@@ -4348,6 +4383,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "gallery/listFolders": _handle_gallery_list_folders,
     "gallery/listImagesChunk": _handle_gallery_list_images_chunk,
     "thumbnail": _handle_thumbnail,
+    "thumbnails/batch": _handle_thumbnails_batch,
     "fullimage": _handle_fullimage,
     "cachedimage": _handle_cachedimage,
     "decode/status": _handle_decode_status,
