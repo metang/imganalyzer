@@ -1,7 +1,14 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import type { GeoCluster } from '../global'
+
+interface ClusterPreviewImage {
+  image_id: number
+  file_path: string
+  date: string | null
+  aesthetic_score: number | null
+}
 
 interface GeoStats {
   total_images: number
@@ -120,6 +127,73 @@ function FitBounds({ clusters }: { clusters: GeoCluster[] }) {
   return null
 }
 
+/** Single lazy-loaded thumbnail tile inside the cluster popup. */
+function PopupThumb({ filePath }: { filePath: string }) {
+  const [src, setSrc] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    window.api.getThumbnail(filePath).then((url) => {
+      if (!cancelled) setSrc(url)
+    })
+    return () => { cancelled = true }
+  }, [filePath])
+
+  return (
+    <div className="w-[72px] h-[72px] rounded overflow-hidden bg-neutral-200 flex-shrink-0">
+      {src ? (
+        <img src={src} className="w-full h-full object-cover" />
+      ) : (
+        <div className="w-full h-full animate-pulse bg-neutral-300" />
+      )}
+    </div>
+  )
+}
+
+/** Popup content that loads preview thumbnails on mount. */
+function ClusterPopupContent({ cluster }: { cluster: GeoCluster }) {
+  const [images, setImages] = useState<ClusterPreviewImage[]>([])
+  const [total, setTotal] = useState(cluster.count)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    window.api.geoClusterPreview({ cell: cluster.cell, limit: 10 }).then((res) => {
+      if (cancelled) return
+      if (!res.error) {
+        setImages(res.images)
+        setTotal(res.total)
+      }
+      setLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [cluster.cell])
+
+  return (
+    <div className="min-w-[200px] max-w-[400px]">
+      <div className="font-semibold text-neutral-900 text-sm mb-1">
+        {total.toLocaleString()} photos
+      </div>
+      <div className="text-xs text-neutral-500 mb-2">
+        {cluster.center_lat.toFixed(4)}, {cluster.center_lng.toFixed(4)}
+      </div>
+      {loading ? (
+        <div className="flex items-center justify-center h-[72px] text-xs text-neutral-400">
+          Loading previews…
+        </div>
+      ) : images.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {images.map((img) => (
+            <PopupThumb key={img.image_id} filePath={img.file_path} />
+          ))}
+        </div>
+      ) : (
+        <div className="text-xs text-neutral-400">No previews available</div>
+      )}
+    </div>
+  )
+}
+
 export function MapView() {
   const [clusters, setClusters] = useState<GeoCluster[]>([])
   const [stats, setStats] = useState<GeoStats | null>(null)
@@ -204,8 +278,8 @@ export function MapView() {
       {/* Map */}
       <div className="flex-1 min-h-0 relative">
         <MapContainer
-          center={[20, 0]}
-          zoom={2}
+          center={[39.9, 116.4]}
+          zoom={6}
           className="h-full w-full"
           style={{ background: theme === 'dark' ? '#1a1a1a' : '#e8e8e8' }}
           zoomControl={true}
@@ -232,13 +306,8 @@ export function MapView() {
               position={[cluster.center_lat, cluster.center_lng]}
               icon={cluster.count === 1 ? _singleIcon : clusterIcon(cluster.count)}
             >
-              <Popup>
-                <div className="text-neutral-900 text-sm min-w-[120px]">
-                  <div className="font-semibold">{cluster.count.toLocaleString()} photos</div>
-                  <div className="text-xs text-neutral-500 mt-0.5">
-                    {cluster.center_lat.toFixed(4)}, {cluster.center_lng.toFixed(4)}
-                  </div>
-                </div>
+              <Popup maxWidth={420} minWidth={200}>
+                <ClusterPopupContent cluster={cluster} />
               </Popup>
             </Marker>
           ))}

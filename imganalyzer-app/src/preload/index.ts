@@ -317,4 +317,7 @@ contextBridge.exposeInMainWorld('api', {
   geoHeatmap: (params: {
     north: number; south: number; east: number; west: number; zoom: number
   }) => ipcRenderer.invoke('geo:heatmap', params),
+
+  geoClusterPreview: (params: { cell: string; limit?: number }) =>
+    ipcRenderer.invoke('geo:cluster-preview', params),
 })

@@ -4058,6 +4058,101 @@ def _handle_geo_clusters(params: dict) -> dict:
     return {"clusters": clusters, "total": total}
 
 
+def _handle_geo_cluster_preview(params: dict) -> dict:
+    """Return representative preview images for a geohash cluster cell.
+
+    Selection algorithm:
+      1. If any images have aesthetic_score > 7.5, use only those as candidates;
+         otherwise all images in the cell are candidates.
+      2. From candidates, pick up to 10 spread evenly across the date range.
+         For ties on the same date, pick randomly.
+
+    Params:
+        cell (str): geohash cell prefix (from geo/clusters response)
+        limit (int): max images to return (default 10)
+    Returns:
+        images: [{image_id, file_path, date, aesthetic_score}]
+        total: total images in the cell
+    """
+    import random
+
+    conn = _get_db()
+    cell = str(params.get("cell", "")).strip()
+    if not cell:
+        return {"images": [], "total": 0, "error": "cell is required"}
+    limit = min(int(params.get("limit", 10)), 50)
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT m.image_id, i.file_path,
+                   m.date_time_original AS date,
+                   COALESCE(ap.perception_iaa, ae.aesthetic_score) AS aesthetic_score
+            FROM analysis_metadata m
+            JOIN images i ON i.id = m.image_id
+            LEFT JOIN analysis_perception ap ON ap.image_id = m.image_id
+            LEFT JOIN analysis_aesthetic ae ON ae.image_id = m.image_id
+            WHERE m.geohash IS NOT NULL
+              AND substr(m.geohash, 1, ?) = ?
+            """,
+            [len(cell), cell],
+        ).fetchall()
+    except Exception as exc:
+        return {"images": [], "total": 0, "error": str(exc)}
+
+    total = len(rows)
+    if total == 0:
+        return {"images": [], "total": 0}
+
+    # Step 1: filter by aesthetic score > 7.5 if any qualify
+    high_quality = [
+        r for r in rows
+        if r["aesthetic_score"] is not None and r["aesthetic_score"] > 7.5
+    ]
+    candidates = high_quality if high_quality else list(rows)
+
+    if len(candidates) <= limit:
+        selected = candidates
+    else:
+        # Step 2: spread evenly across the date range
+        # Sort by date (nulls last), then pick evenly spaced indices
+        dated = [c for c in candidates if c["date"]]
+        undated = [c for c in candidates if not c["date"]]
+        random.shuffle(undated)
+
+        if not dated:
+            # No dates at all — just random sample
+            selected = random.sample(candidates, limit)
+        else:
+            # Sort by date, then for same date shuffle randomly
+            random.shuffle(dated)  # randomize within-date ties
+            dated.sort(key=lambda r: r["date"])
+
+            if len(dated) <= limit:
+                selected = dated
+                remaining = limit - len(selected)
+                if remaining > 0 and undated:
+                    selected.extend(undated[:remaining])
+            else:
+                # Pick evenly spaced indices across the sorted list
+                step = len(dated) / limit
+                selected = [dated[int(i * step)] for i in range(limit)]
+
+    images = [
+        {
+            "image_id": r["image_id"],
+            "file_path": r["file_path"],
+            "date": r["date"],
+            "aesthetic_score": round(r["aesthetic_score"], 2)
+            if r["aesthetic_score"] is not None
+            else None,
+        }
+        for r in selected
+    ]
+
+    return {"images": images, "total": total}
+
+
 def _handle_geo_nearby(params: dict) -> dict:
     """Return images near a given coordinate.
 
@@ -4285,6 +4380,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "faces/person-unlink-occurrence": _handle_faces_person_unlink_occurrence,
     "faces/person-direct-links": _handle_faces_person_direct_links,
     "geo/clusters": _handle_geo_clusters,
+    "geo/cluster-preview": _handle_geo_cluster_preview,
     "geo/nearby": _handle_geo_nearby,
     "geo/stats": _handle_geo_stats,
     "geo/heatmap": _handle_geo_heatmap,

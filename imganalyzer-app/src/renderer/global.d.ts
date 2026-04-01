@@ -573,6 +573,13 @@ declare global {
       geoHeatmap(params: {
         north: number; south: number; east: number; west: number; zoom: number
       }): Promise<{ points: Array<{ lat: number; lng: number; weight: number }>; error?: string }>
+      geoClusterPreview(params: {
+        cell: string; limit?: number
+      }): Promise<{
+        images: Array<{ image_id: number; file_path: string; date: string | null; aesthetic_score: number | null }>
+        total: number
+        error?: string
+      }>
 
       // Batch processing
       batchIngest(

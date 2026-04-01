@@ -47,6 +47,19 @@ export interface GeoHeatmapResponse {
   error?: string
 }
 
+export interface GeoClusterPreviewImage {
+  image_id: number
+  file_path: string
+  date: string | null
+  aesthetic_score: number | null
+}
+
+export interface GeoClusterPreviewResponse {
+  images: GeoClusterPreviewImage[]
+  total: number
+  error?: string
+}
+
 export function registerGeoHandlers(): void {
   ipcMain.handle(
     'geo:clusters',
@@ -102,6 +115,22 @@ export function registerGeoHandlers(): void {
         return result
       } catch (err) {
         return { points: [], error: String(err) }
+      }
+    },
+  )
+
+  ipcMain.handle(
+    'geo:cluster-preview',
+    async (
+      _evt,
+      params: { cell: string; limit?: number },
+    ): Promise<GeoClusterPreviewResponse> => {
+      try {
+        await ensureServerRunning()
+        const result = (await rpc.call('geo/cluster-preview', params)) as GeoClusterPreviewResponse
+        return result
+      } catch (err) {
+        return { images: [], total: 0, error: String(err) }
       }
     },
   )
