@@ -127,12 +127,35 @@ function FitBounds({ clusters }: { clusters: GeoCluster[] }) {
   return null
 }
 
-/** Popup content that batch-loads preview thumbnails on mount. */
-function ClusterPopupContent({ cluster }: { cluster: GeoCluster }) {
+// ── Hover tooltip (lightweight, no thumbnails) ──────────────────────────────
+
+function ClusterTooltipContent({ cluster }: { cluster: GeoCluster }) {
+  return (
+    <div className="text-neutral-900 text-sm min-w-[100px]">
+      <div className="font-semibold">{cluster.count.toLocaleString()} photos</div>
+      <div className="text-xs text-neutral-500 mt-0.5">Click to preview</div>
+    </div>
+  )
+}
+
+// ── Pinned preview panel (loads thumbnails on mount) ────────────────────────
+
+function PinnedPreviewPanel({
+  cluster,
+  position,
+  onClose,
+  onImageClick,
+}: {
+  cluster: GeoCluster
+  position: { x: number; y: number }
+  onClose: () => void
+  onImageClick: (filePath: string) => void
+}) {
   const [images, setImages] = useState<ClusterPreviewImage[]>([])
   const [thumbs, setThumbs] = useState<Record<string, string>>({})
   const [total, setTotal] = useState(cluster.count)
   const [loading, setLoading] = useState(true)
+  const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -148,7 +171,6 @@ function ClusterPopupContent({ cluster }: { cluster: GeoCluster }) {
       setImages(res.images)
       setTotal(res.total)
 
-      // Batch-load thumbnails — pass image_id so backend can use decoded store
       const items = res.images.map((img) => ({
         file_path: img.file_path,
         image_id: img.image_id,
@@ -162,37 +184,118 @@ function ClusterPopupContent({ cluster }: { cluster: GeoCluster }) {
     return () => { cancelled = true }
   }, [cluster.cell])
 
+  // Dismiss on right-click anywhere
+  useEffect(() => {
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault()
+      onClose()
+    }
+    document.addEventListener('contextmenu', handleContextMenu)
+    return () => document.removeEventListener('contextmenu', handleContextMenu)
+  }, [onClose])
+
+  // Clamp position so panel stays within viewport
+  const style: React.CSSProperties = {
+    position: 'absolute',
+    left: Math.min(position.x, window.innerWidth - 430),
+    top: Math.max(position.y - 220, 10),
+    zIndex: 10000,
+  }
+
   return (
-    <div className="min-w-[200px] max-w-[400px]">
-      <div className="font-semibold text-neutral-900 text-sm mb-1">
-        {total.toLocaleString()} photos
-      </div>
-      <div className="text-xs text-neutral-500 mb-2">
-        {cluster.center_lat.toFixed(4)}, {cluster.center_lng.toFixed(4)}
-      </div>
-      {loading ? (
-        <div className="flex items-center justify-center h-[72px] text-xs text-neutral-400">
-          Loading previews…
+    <div ref={panelRef} style={style} className="cluster-pinned-panel">
+      <div className="min-w-[200px] max-w-[400px] bg-white rounded-lg shadow-2xl p-3">
+        <div className="flex items-center justify-between mb-1">
+          <div className="font-semibold text-neutral-900 text-sm">
+            {total.toLocaleString()} photos
+          </div>
+          <button
+            onClick={onClose}
+            className="text-neutral-400 hover:text-neutral-700 text-lg leading-none px-1"
+          >
+            ×
+          </button>
         </div>
-      ) : images.length > 0 ? (
-        <div className="flex flex-wrap gap-1">
-          {images.map((img) => {
-            const src = thumbs[img.file_path]
-            return (
-              <div key={img.image_id}
-                className="w-[72px] h-[72px] rounded overflow-hidden bg-neutral-200 flex-shrink-0"
-              >
-                {src ? (
-                  <img src={src} className="w-full h-full object-cover" />
-                ) : (
-                  <div className="w-full h-full bg-neutral-300" />
-                )}
-              </div>
-            )
-          })}
+        <div className="text-xs text-neutral-500 mb-2">
+          {cluster.center_lat.toFixed(4)}, {cluster.center_lng.toFixed(4)}
         </div>
+        {loading ? (
+          <div className="flex items-center justify-center h-[72px] text-xs text-neutral-400">
+            Loading previews…
+          </div>
+        ) : images.length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {images.map((img) => {
+              const src = thumbs[img.file_path]
+              return (
+                <div
+                  key={img.image_id}
+                  className="w-[72px] h-[72px] rounded overflow-hidden bg-neutral-200 flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-blue-400 transition-shadow"
+                  onClick={() => onImageClick(img.file_path)}
+                >
+                  {src ? (
+                    <img src={src} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full bg-neutral-300" />
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="text-xs text-neutral-400">No previews available</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Minimal lightbox for viewing a single image ─────────────────────────────
+
+function MapLightbox({
+  filePath,
+  onClose,
+}: {
+  filePath: string
+  onClose: () => void
+}) {
+  const [src, setSrc] = useState<string>('')
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.getFullImage(filePath).then((url) => {
+      if (!cancelled) setSrc(url)
+    })
+    return () => { cancelled = true }
+  }, [filePath])
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose])
+
+  return (
+    <div
+      className="fixed inset-0 z-[20000] flex items-center justify-center bg-black/85"
+      onClick={onClose}
+    >
+      <button
+        className="absolute top-4 right-4 text-white/70 hover:text-white text-3xl z-10"
+        onClick={onClose}
+      >
+        ×
+      </button>
+      {src ? (
+        <img
+          src={src}
+          className="max-h-[90vh] max-w-[90vw] object-contain"
+          onClick={(e) => e.stopPropagation()}
+        />
       ) : (
-        <div className="text-xs text-neutral-400">No previews available</div>
+        <div className="text-white/60 text-sm">Loading…</div>
       )}
     </div>
   )
@@ -204,6 +307,13 @@ export function MapView() {
   const [loading, setLoading] = useState(false)
   const [totalInView, setTotalInView] = useState(0)
   const [theme, setTheme] = useState<'dark' | 'light'>('dark')
+
+  // Pinned preview state
+  const [pinnedCluster, setPinnedCluster] = useState<GeoCluster | null>(null)
+  const [pinnedPos, setPinnedPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+
+  // Lightbox state
+  const [lightboxPath, setLightboxPath] = useState<string | null>(null)
 
   // Load stats once on mount
   useEffect(() => {
@@ -241,6 +351,17 @@ export function MapView() {
     },
     [],
   )
+
+  const handleClusterClick = useCallback((cluster: GeoCluster, e: L.LeafletMouseEvent) => {
+    setPinnedCluster(cluster)
+    setPinnedPos({ x: e.originalEvent.clientX, y: e.originalEvent.clientY })
+  }, [])
+
+  const closePinned = useCallback(() => setPinnedCluster(null), [])
+
+  const handleImageClick = useCallback((filePath: string) => {
+    setLightboxPath(filePath)
+  }, [])
 
   return (
     <div className="flex flex-col h-full">
@@ -309,6 +430,9 @@ export function MapView() {
               key={cluster.cell}
               position={[cluster.center_lat, cluster.center_lng]}
               icon={cluster.count === 1 ? _singleIcon : clusterIcon(cluster.count)}
+              eventHandlers={{
+                click: (e) => handleClusterClick(cluster, e),
+              }}
             >
               <Tooltip
                 direction="top"
@@ -316,12 +440,27 @@ export function MapView() {
                 opacity={1}
                 className="cluster-preview-tooltip"
               >
-                <ClusterPopupContent cluster={cluster} />
+                <ClusterTooltipContent cluster={cluster} />
               </Tooltip>
             </Marker>
           ))}
         </MapContainer>
+
+        {/* Pinned preview panel (positioned over the map) */}
+        {pinnedCluster && (
+          <PinnedPreviewPanel
+            cluster={pinnedCluster}
+            position={pinnedPos}
+            onClose={closePinned}
+            onImageClick={handleImageClick}
+          />
+        )}
       </div>
+
+      {/* Lightbox overlay */}
+      {lightboxPath && (
+        <MapLightbox filePath={lightboxPath} onClose={() => setLightboxPath(null)} />
+      )}
     </div>
   )
 }
