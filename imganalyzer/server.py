@@ -3098,28 +3098,52 @@ def _handle_thumbnail(params: dict) -> dict:
 def _handle_thumbnails_batch(params: dict) -> dict:
     """Generate thumbnails for multiple images in a single RPC call.
 
-    This avoids N separate JSON-RPC round-trips when the caller already
-    knows all paths it needs (e.g. cluster preview).
+    Checks the pre-decoded image store (1024px WebP cache) first and only
+    falls back to full source decode for uncached images.  This makes
+    cluster preview nearly instant for already-analysed images.
 
     Params:
-        paths (list[str]): list of image file paths
+        items (list[{image_id, file_path}]): images to thumbnail
+              OR paths (list[str]): legacy file-path-only form
     Returns:
         thumbnails: {file_path: base64_data_url, ...}
         errors: {file_path: error_message, ...}
     """
-    paths: list = params.get("paths", [])
-    if not paths:
+    from PIL import Image as PILImage
+
+    # Accept either [{image_id, file_path}, ...] or [path, ...]
+    raw_items: list = params.get("items", [])
+    if not raw_items:
+        raw_paths = params.get("paths", [])
+        raw_items = [{"file_path": p} for p in raw_paths]
+    if not raw_items:
         return {"thumbnails": {}, "errors": {}}
 
     thumbnails: dict[str, str] = {}
     errors: dict[str, str] = {}
+    store = _get_decoded_store()
 
-    for image_path in paths[:50]:  # cap at 50
+    for item in raw_items[:50]:
+        file_path = item.get("file_path", "") if isinstance(item, dict) else str(item)
+        image_id = item.get("image_id") if isinstance(item, dict) else None
         try:
-            result = _handle_thumbnail({"imagePath": image_path})
-            thumbnails[image_path] = f"data:image/jpeg;base64,{result['data']}"
+            # Fast path: resize from pre-decoded 1024px cache (~5ms vs ~200-500ms)
+            if image_id is not None and store.has(image_id):
+                img_bytes = store.get_image_bytes(image_id)
+                if img_bytes:
+                    img = PILImage.open(io.BytesIO(img_bytes))
+                    img.thumbnail((400, 300), PILImage.LANCZOS)
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=80)
+                    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                    thumbnails[file_path] = f"data:image/jpeg;base64,{b64}"
+                    continue
+
+            # Slow path: full decode from source file
+            result = _handle_thumbnail({"imagePath": file_path})
+            thumbnails[file_path] = f"data:image/jpeg;base64,{result['data']}"
         except Exception as exc:
-            errors[image_path] = str(exc)
+            errors[file_path] = str(exc)
 
     return {"thumbnails": thumbnails, "errors": errors}
 

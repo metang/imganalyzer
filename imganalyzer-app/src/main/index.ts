@@ -3,6 +3,7 @@ import { join } from 'path'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { listImages, getThumbnail, getThumbnailsBatch, getFullImage, getCachedImage, getThumbnailCacheConfig, setThumbnailCacheConfig } from './images'
+import type { ThumbnailBatchItem } from './images'
 import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
@@ -110,8 +111,8 @@ ipcMain.handle('fs:getThumbnail', async (_evt, imagePath: string) => {
   return getThumbnail(imagePath)
 })
 
-ipcMain.handle('fs:getThumbnailsBatch', async (_evt, imagePaths: string[]) => {
-  return getThumbnailsBatch(imagePaths)
+ipcMain.handle('fs:getThumbnailsBatch', async (_evt, items: ThumbnailBatchItem[]) => {
+  return getThumbnailsBatch(items)
 })
 
 // ─── IPC: Thumbnail cache config ─────────────────────────────────────────────

@@ -499,7 +499,7 @@ declare global {
       openFolder(): Promise<string | null>
       listImages(folderPath: string): Promise<ImageFile[]>
       getThumbnail(imagePath: string): Promise<string>
-      getThumbnailsBatch(imagePaths: string[]): Promise<Record<string, string>>
+      getThumbnailsBatch(items: Array<{ file_path: string; image_id?: number }>): Promise<Record<string, string>>
       getFullImage(imagePath: string): Promise<string>
       getCachedImage(imagePath: string): Promise<string>
       openPath(filePath: string): Promise<string>

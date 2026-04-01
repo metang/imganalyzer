@@ -283,43 +283,48 @@ export async function getThumbnail(imagePath: string): Promise<string> {
   return promise
 }
 
+export interface ThumbnailBatchItem {
+  file_path: string
+  image_id?: number
+}
+
 /**
- * Batch-load thumbnails for multiple paths in a single RPC call.
- * Returns a map of { filePath: dataUrl }.  Uses memory/disk cache for
- * already-cached paths, then fetches the rest in one batch RPC call.
+ * Batch-load thumbnails for multiple images in a single RPC call.
+ * When image_id is provided, the backend can use the pre-decoded 1024px
+ * cache (~5ms) instead of full source decode (~200-500ms).
+ * Returns a map of { filePath: dataUrl }.
  */
 export async function getThumbnailsBatch(
-  imagePaths: string[],
+  items: ThumbnailBatchItem[],
 ): Promise<Record<string, string>> {
   const result: Record<string, string> = {}
-  const uncachedPaths: string[] = []
+  const uncached: ThumbnailBatchItem[] = []
 
   // Resolve from memory and disk cache first
-  for (const p of imagePaths) {
-    const memCached = thumbCacheGet(p)
+  for (const item of items) {
+    const memCached = thumbCacheGet(item.file_path)
     if (memCached !== undefined) {
-      result[p] = memCached
+      result[item.file_path] = memCached
       continue
     }
-    const diskCached = await readThumbnailFromDisk(p)
+    const diskCached = await readThumbnailFromDisk(item.file_path)
     if (diskCached) {
-      thumbCacheSet(p, diskCached)
-      result[p] = diskCached
+      thumbCacheSet(item.file_path, diskCached)
+      result[item.file_path] = diskCached
       continue
     }
-    uncachedPaths.push(p)
+    uncached.push(item)
   }
 
-  if (uncachedPaths.length === 0) return result
+  if (uncached.length === 0) return result
 
   try {
     const resp = (await rpc.call('thumbnails/batch', {
-      paths: uncachedPaths,
+      items: uncached.map((i) => ({ file_path: i.file_path, image_id: i.image_id })),
     })) as { thumbnails: Record<string, string>; errors: Record<string, string> }
 
     for (const [path, dataUrl] of Object.entries(resp.thumbnails)) {
       thumbCacheSet(path, dataUrl)
-      // Write to disk cache (extract base64 from data URL)
       const b64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '')
       void writeThumbnailToDisk(path, b64)
       result[path] = dataUrl

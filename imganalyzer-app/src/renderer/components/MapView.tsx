@@ -148,9 +148,12 @@ function ClusterPopupContent({ cluster }: { cluster: GeoCluster }) {
       setImages(res.images)
       setTotal(res.total)
 
-      // Batch-load all thumbnails in a single RPC call
-      const paths = res.images.map((img) => img.file_path)
-      const thumbMap = await window.api.getThumbnailsBatch(paths)
+      // Batch-load thumbnails — pass image_id so backend can use decoded store
+      const items = res.images.map((img) => ({
+        file_path: img.file_path,
+        image_id: img.image_id,
+      }))
+      const thumbMap = await window.api.getThumbnailsBatch(items)
       if (!cancelled) {
         setThumbs(thumbMap)
         setLoading(false)
