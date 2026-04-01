@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { MapContainer, TileLayer, Marker, Tooltip, useMapEvents, useMap } from 'react-leaflet'
 import L from 'leaflet'
-import type { GeoCluster } from '../global'
+import type { GeoCluster, SearchResult } from '../global'
+import { SearchLightbox } from './SearchLightbox'
 
 interface ClusterPreviewImage {
   image_id: number
@@ -149,7 +150,7 @@ function PinnedPreviewPanel({
   cluster: GeoCluster
   position: { x: number; y: number }
   onClose: () => void
-  onImageClick: (filePath: string) => void
+  onImageClick: (imageId: number) => void
 }) {
   const [images, setImages] = useState<ClusterPreviewImage[]>([])
   const [thumbs, setThumbs] = useState<Record<string, string>>({})
@@ -231,7 +232,7 @@ function PinnedPreviewPanel({
                 <div
                   key={img.image_id}
                   className="w-[72px] h-[72px] rounded overflow-hidden bg-neutral-200 flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-blue-400 transition-shadow"
-                  onClick={() => onImageClick(img.file_path)}
+                  onClick={() => onImageClick(img.image_id)}
                 >
                   {src ? (
                     <img src={src} className="w-full h-full object-cover" />
@@ -250,57 +251,6 @@ function PinnedPreviewPanel({
   )
 }
 
-// ── Minimal lightbox for viewing a single image ─────────────────────────────
-
-function MapLightbox({
-  filePath,
-  onClose,
-}: {
-  filePath: string
-  onClose: () => void
-}) {
-  const [src, setSrc] = useState<string>('')
-
-  useEffect(() => {
-    let cancelled = false
-    window.api.getFullImage(filePath).then((url) => {
-      if (!cancelled) setSrc(url)
-    })
-    return () => { cancelled = true }
-  }, [filePath])
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', handleKey)
-    return () => window.removeEventListener('keydown', handleKey)
-  }, [onClose])
-
-  return (
-    <div
-      className="fixed inset-0 z-[20000] flex items-center justify-center bg-black/85"
-      onClick={onClose}
-    >
-      <button
-        className="absolute top-4 right-4 text-white/70 hover:text-white text-3xl z-10"
-        onClick={onClose}
-      >
-        ×
-      </button>
-      {src ? (
-        <img
-          src={src}
-          className="max-h-[90vh] max-w-[90vw] object-contain"
-          onClick={(e) => e.stopPropagation()}
-        />
-      ) : (
-        <div className="text-white/60 text-sm">Loading…</div>
-      )}
-    </div>
-  )
-}
-
 export function MapView() {
   const [clusters, setClusters] = useState<GeoCluster[]>([])
   const [stats, setStats] = useState<GeoStats | null>(null)
@@ -312,8 +262,9 @@ export function MapView() {
   const [pinnedCluster, setPinnedCluster] = useState<GeoCluster | null>(null)
   const [pinnedPos, setPinnedPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
 
-  // Lightbox state
-  const [lightboxPath, setLightboxPath] = useState<string | null>(null)
+  // Lightbox state — holds full analysis data for the selected image
+  const [lightboxItem, setLightboxItem] = useState<SearchResult | null>(null)
+  const [lightboxItems, setLightboxItems] = useState<SearchResult[]>([])
 
   // Load stats once on mount
   useEffect(() => {
@@ -359,8 +310,13 @@ export function MapView() {
 
   const closePinned = useCallback(() => setPinnedCluster(null), [])
 
-  const handleImageClick = useCallback((filePath: string) => {
-    setLightboxPath(filePath)
+  const handleImageClick = useCallback((imageId: number) => {
+    window.api.getImageDetails({ image_id: imageId }).then((res) => {
+      if (res.result) {
+        setLightboxItem(res.result)
+        setLightboxItems([res.result])
+      }
+    })
   }, [])
 
   return (
@@ -457,9 +413,14 @@ export function MapView() {
         )}
       </div>
 
-      {/* Lightbox overlay */}
-      {lightboxPath && (
-        <MapLightbox filePath={lightboxPath} onClose={() => setLightboxPath(null)} />
+      {/* Lightbox with analysis sidebar */}
+      {lightboxItem && (
+        <SearchLightbox
+          item={lightboxItem}
+          items={lightboxItems}
+          onClose={() => { setLightboxItem(null); setLightboxItems([]) }}
+          onNavigate={(item) => setLightboxItem(item)}
+        />
       )}
     </div>
   )
