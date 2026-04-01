@@ -1481,6 +1481,7 @@ def _handle_jobs_claim(params: dict) -> dict:
             prefer_module=prefer_module,
             prefer_image_ids=prefer_image_ids,
             restrict_image_ids=cache_gate_ids,
+            master_reserve=policy.master_reserve,
         )
         if not claimed:
             break
@@ -4143,11 +4144,17 @@ def _serve_http_jsonrpc(
 
         def _write_json(self, status_code: int, payload: dict[str, Any]) -> None:
             data = json.dumps(payload, default=str, separators=(",", ":")).encode("utf-8")
-            self.send_response(status_code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
+                # Worker closed its connection before we finished writing
+                # the response — harmless; the worker will retry on its
+                # next poll cycle.
+                pass
 
         def _check_auth(self) -> bool:
             if not auth_token:
@@ -4283,9 +4290,14 @@ def _serve_http_jsonrpc(
         _last_cleanup = 0.0
 
         def handle_error(self, request: Any, client_address: Any) -> None:
+            # Suppress noisy connection-abort errors from workers that
+            # close the socket before we finish writing the response.
+            exc_text = traceback.format_exc()
+            if "ConnectionAbortedError" in exc_text or "ConnectionResetError" in exc_text:
+                return
             sys.stderr.write(
                 f"[server.http] handler error for {client_address}: "
-                f"{traceback.format_exc()}\n"
+                f"{exc_text}\n"
             )
 
         def service_actions(self) -> None:

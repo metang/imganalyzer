@@ -201,6 +201,7 @@ class JobQueue:
         prefer_module: str | None = None,
         prefer_image_ids: set[int] | None = None,
         restrict_image_ids: set[int] | None = None,
+        master_reserve: int = 0,
     ) -> list[dict[str, Any]]:
         """Atomically claim jobs and create leases for distributed workers.
 
@@ -213,6 +214,10 @@ class JobQueue:
 
         If *restrict_image_ids* is given, ONLY jobs for those image IDs are
         eligible (cache-gated dispatch).
+
+        If *master_reserve* > 0, the claim leaves at least that many pending
+        jobs unclaimed so the master device can process them.  This check
+        is performed inside the BEGIN IMMEDIATE transaction for atomicity.
         """
         where = "WHERE status = 'pending'"
         params: list[Any] = []
@@ -250,10 +255,39 @@ class JobQueue:
 
         order_parts.extend(["priority DESC", "queued_at ASC"])
         order = ", ".join(order_parts)
-        params.append(batch_size)
+        # Effective limit: respect master_reserve within the transaction
+        # so the reservation cannot be bypassed by concurrent worker claims.
+        effective_limit = batch_size
+        params.append(effective_limit)
 
         _begin_immediate(self.conn)
         try:
+            if master_reserve > 0:
+                # Re-count pending inside the exclusive transaction to enforce
+                # the reservation atomically.  Without this, multiple workers
+                # checking concurrently can each think there are enough pending
+                # jobs and collectively drain past the reservation.
+                count_where = "WHERE status = 'pending'"
+                count_params: list[Any] = []
+                if module:
+                    count_where += " AND module = ?"
+                    count_params.append(module)
+                elif modules:
+                    m_ph = ",".join("?" * len(modules))
+                    count_where += f" AND module IN ({m_ph})"
+                    count_params.extend(modules)
+                pending_now = self.conn.execute(
+                    f"SELECT COUNT(*) AS cnt FROM job_queue {count_where}",
+                    count_params,
+                ).fetchone()["cnt"]
+                claimable = max(0, pending_now - master_reserve)
+                if claimable <= 0:
+                    self.conn.rollback()
+                    return []
+                effective_limit = min(batch_size, claimable)
+                # Replace the last param (LIMIT value) with the clamped limit
+                params[-1] = effective_limit
+
             rows = self.conn.execute(
                 f"""SELECT id, image_id, module, attempts, last_node_role
                     FROM job_queue
@@ -920,6 +954,30 @@ class JobQueue:
             params.extend(image_ids)
         row = self.conn.execute(
             f"SELECT COUNT(*) as cnt FROM job_queue {where}", params
+        ).fetchone()
+        return row["cnt"]
+
+    def leased_running_count(
+        self,
+        module: str | None = None,
+        image_ids: set[int] | None = None,
+    ) -> int:
+        """Count running jobs held by distributed workers (with active leases)."""
+        where = "WHERE jq.status = 'running' AND jl.job_id IS NOT NULL"
+        params: list[Any] = []
+        if module:
+            where += " AND jq.module = ?"
+            params.append(module)
+        if image_ids is not None:
+            id_ph = ",".join("?" * len(image_ids))
+            where += f" AND jq.image_id IN ({id_ph})"
+            params.extend(image_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(*) AS cnt
+                FROM job_queue jq
+                INNER JOIN job_leases jl ON jl.job_id = jq.id
+                {where}""",
+            params,
         ).fetchone()
         return row["cnt"]
 

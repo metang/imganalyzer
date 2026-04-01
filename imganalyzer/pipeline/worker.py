@@ -492,9 +492,34 @@ class Worker:
                         futures.pop(fut, None)
 
             # ── Helper: claim jobs from queue ─────────────────────────────────
+            # Maximum seconds the master waits for distributed workers to
+            # release work before giving up on a phase.
+            _DISTRIBUTED_WAIT_S = 5.0
+            _DISTRIBUTED_POLL_S = 1.0
+
             def _claim_fn(batch_sz: int, module: str) -> list[dict[str, Any]]:
                 _, _, tl_queue, _ = self._get_thread_db()
-                return tl_queue.claim(batch_size=batch_sz, module=module)
+                jobs = tl_queue.claim(batch_size=batch_sz, module=module)
+                if jobs or self._shutdown.is_set():
+                    return jobs
+                # No pending jobs — check if distributed workers hold leased
+                # jobs for this module.  If so, wait briefly for them to
+                # complete (releasing dependent work) or expire.
+                leased = tl_queue.leased_running_count(module=module)
+                if leased <= 0:
+                    return []
+                waited = 0.0
+                while waited < _DISTRIBUTED_WAIT_S and not self._shutdown.is_set():
+                    self._shutdown.wait(_DISTRIBUTED_POLL_S)
+                    waited += _DISTRIBUTED_POLL_S
+                    try:
+                        tl_queue.release_expired_leases()
+                    except Exception:
+                        pass
+                    jobs = tl_queue.claim(batch_size=batch_sz, module=module)
+                    if jobs:
+                        return jobs
+                return []
 
             # ── Helper: advance progress bar ──────────────────────────────────
             def _advance_fn(count: int) -> None:
@@ -536,10 +561,29 @@ class Worker:
             sweep = 0
             chunk_offset = 0          # cumulative chunk count across sweeps
             overall_total_chunks = 0  # total chunks across all sweeps
+            _consecutive_empty_sweeps = 0
+            _MAX_EMPTY_SWEEPS = 3
             while not self._shutdown.is_set():
                 all_image_ids = self._pending_image_ids_with_running_wait(poll_interval_s=1.0)
                 if not all_image_ids:
+                    # Safety: re-check globally before exiting.  The previous
+                    # call may have missed newly pending work due to timing.
+                    _consecutive_empty_sweeps += 1
+                    if _consecutive_empty_sweeps < _MAX_EMPTY_SWEEPS:
+                        global_pending = self.queue.pending_count()
+                        if global_pending > 0:
+                            console.print(
+                                f"[yellow]Sweep returned empty but {global_pending} "
+                                f"pending globally — retrying "
+                                f"({_consecutive_empty_sweeps}/{_MAX_EMPTY_SWEEPS})[/yellow]"
+                            )
+                            self._shutdown.wait(2.0)
+                            continue
+                    console.print(
+                        "[dim]Sweep loop: no more pending/running work, exiting.[/dim]"
+                    )
                     break  # truly nothing left
+                _consecutive_empty_sweeps = 0
 
                 sweep += 1
                 if sweep > 1:
@@ -671,9 +715,30 @@ class Worker:
                                 _ids: set[int] = mini_ids,
                             ) -> list[dict[str, Any]]:
                                 _, _, tl_queue, _ = self._get_thread_db()
-                                return tl_queue.claim(
+                                jobs = tl_queue.claim(
                                     batch_size=batch_sz, module=module, image_ids=_ids,
                                 )
+                                if jobs or self._shutdown.is_set():
+                                    return jobs
+                                leased = tl_queue.leased_running_count(
+                                    module=module, image_ids=_ids,
+                                )
+                                if leased <= 0:
+                                    return []
+                                waited = 0.0
+                                while waited < _DISTRIBUTED_WAIT_S and not self._shutdown.is_set():
+                                    self._shutdown.wait(_DISTRIBUTED_POLL_S)
+                                    waited += _DISTRIBUTED_POLL_S
+                                    try:
+                                        tl_queue.release_expired_leases()
+                                    except Exception:
+                                        pass
+                                    jobs = tl_queue.claim(
+                                        batch_size=batch_sz, module=module, image_ids=_ids,
+                                    )
+                                    if jobs:
+                                        return jobs
+                                return []
                             active_claim_fn = _mini_claim_fn
                         else:
                             active_claim_fn = _claim_fn
@@ -813,9 +878,30 @@ class Worker:
                             _ids: set[int] = chunk_ids,
                         ) -> list[dict[str, Any]]:
                             _, _, tl_queue, _ = self._get_thread_db()
-                            return tl_queue.claim(
+                            jobs = tl_queue.claim(
                                 batch_size=batch_sz, module=module, image_ids=_ids,
                             )
+                            if jobs or self._shutdown.is_set():
+                                return jobs
+                            leased = tl_queue.leased_running_count(
+                                module=module, image_ids=_ids,
+                            )
+                            if leased <= 0:
+                                return []
+                            waited = 0.0
+                            while waited < _DISTRIBUTED_WAIT_S and not self._shutdown.is_set():
+                                self._shutdown.wait(_DISTRIBUTED_POLL_S)
+                                waited += _DISTRIBUTED_POLL_S
+                                try:
+                                    tl_queue.release_expired_leases()
+                                except Exception:
+                                    pass
+                                jobs = tl_queue.claim(
+                                    batch_size=batch_sz, module=module, image_ids=_ids,
+                                )
+                                if jobs:
+                                    return jobs
+                            return []
 
                         # ── IO drain first (metadata / technical) ────────────
                         # IO modules are not part of any GPU phase, so they

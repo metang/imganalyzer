@@ -46,6 +46,7 @@ class ClaimPolicy:
     prefer_module: str | None
     prefer_image_ids: set[int] | None
     reason: str | None = None
+    master_reserve: int = 0
 
 
 def _normalize_control_state(desired_state: Any) -> tuple[str, bool]:
@@ -237,6 +238,20 @@ def _master_running_count(conn: sqlite3.Connection) -> int:
     return int(row["cnt"]) if row else 0
 
 
+def _count_online_workers(conn: sqlite3.Connection) -> int:
+    """Count distributed workers that are online (excludes the master node)."""
+    try:
+        row = conn.execute(
+            """SELECT COUNT(*) AS cnt FROM worker_nodes
+               WHERE id != 'master'
+                 AND status IN ('online', 'active')
+                 AND last_heartbeat > datetime('now', '-5 minutes')"""
+        ).fetchone()
+        return int(row["cnt"]) if row else 0
+    except Exception:
+        return 0
+
+
 def choose_preferred_module(
     conn: sqlite3.Connection,
     worker_id: str,
@@ -343,17 +358,28 @@ def compute_claim_policy(
     if pending_eligible <= 0:
         return ClaimPolicy(False, 0, 0, module_filter, modules_filter, None, None, "no_pending")
 
-    # Reserve at least one eligible pending job for the master when the run is
-    # active and the master currently has no running local job.
+    # Reserve a proportional fair share of pending jobs for the master when
+    # the run is active and the master currently has no running local jobs.
+    # Without this, concurrent distributed workers drain the pending queue
+    # before the master can claim, leaving its GPU idle.
+    master_reserve = 0
     if coordinator_run_active:
         master_running = _master_running_count(conn)
         if master_running <= 0:
-            reserve_for_master = max(1, min(requested, pending_eligible))
-            worker_budget = pending_eligible - reserve_for_master
-            if worker_budget <= 0:
-                return ClaimPolicy(False, 0, 0, module_filter, modules_filter, None, None, "reserved_for_master")
-            requested = min(requested, worker_budget)
-            scan_size = min(max(requested * 4, requested), 32)
+            num_workers = _count_online_workers(conn)
+            if num_workers > 0:
+                # Master gets 1/(N+1) of pending, at least one worker batch_size.
+                master_share = max(requested, pending_eligible // (num_workers + 1))
+                master_reserve = master_share
+                worker_budget = pending_eligible - master_share
+                if worker_budget <= 0:
+                    return ClaimPolicy(
+                        False, 0, 0, module_filter, modules_filter,
+                        None, None, "reserved_for_master",
+                    )
+                per_worker = max(1, worker_budget // num_workers)
+                requested = min(requested, per_worker)
+                scan_size = min(max(requested * 4, requested), 32)
 
     prefer_image_ids = active_chunk_ids if active_chunk_ids else None
     prefer_module = choose_preferred_module(
@@ -373,6 +399,7 @@ def compute_claim_policy(
         prefer_module=prefer_module,
         prefer_image_ids=prefer_image_ids,
         reason=None,
+        master_reserve=master_reserve,
     )
 
 

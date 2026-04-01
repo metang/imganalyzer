@@ -243,6 +243,12 @@ let statusPollCount = 0
 // to avoid stopping polling on transient zero snapshots.
 let monitorZeroStreak = 0
 const MONITOR_ZERO_THRESHOLD = 5
+// Auto-restart: when the master's Worker exits (run/done) but pending jobs
+// remain, re-call 'run' so the master's GPU stays utilized.
+let autoRestartTimer: ReturnType<typeof setTimeout> | null = null
+let autoRestartCount = 0
+const MAX_AUTO_RESTARTS = 20
+const AUTO_RESTART_DELAY_MS = 5000
 
 const MASTER_NODE_ID = 'master'
 const MASTER_NODE_LABEL = 'Master device'
@@ -785,6 +791,10 @@ function stopPolling(): void {
     clearInterval(pollTimer)
     pollTimer = null
   }
+  if (autoRestartTimer !== null) {
+    clearTimeout(autoRestartTimer)
+    autoRestartTimer = null
+  }
 }
 
 /** Set up the notification listener for streaming run/ingest results. */
@@ -905,6 +915,33 @@ function setupNotificationListener(): void {
               // have active jobs — keep polling so the UI stays live.
               monitorOnly = true
               monitorZeroStreak = 0
+
+              // Auto-restart: if there are pending jobs the master could
+              // process, re-issue 'run' so its GPU doesn't sit idle while
+              // workers slowly drain the queue.
+              if (pending > 0 && autoRestartCount < MAX_AUTO_RESTARTS && sessionConfig) {
+                const cfg = sessionConfig
+                autoRestartTimer = setTimeout(() => {
+                  autoRestartTimer = null
+                  if (currentRunId !== runId) return
+                  if (batchStatus !== 'running') return
+                  void rpc.call('run', {
+                    workers: cfg.workers,
+                    noXmp: true,
+                    verbose: true,
+                    staleTimeout: 0,
+                    force: false,
+                    profile: cfg.profile ?? false,
+                    chunkSize: 500,
+                  }).then(() => {
+                    autoRestartCount++
+                    monitorOnly = false
+                    isRunActive = true
+                  }).catch(() => {
+                    // Run failed to restart — stay in monitor mode
+                  })
+                }, AUTO_RESTART_DELAY_MS)
+              }
             }
           } else {
             batchStatus = 'done'
@@ -1066,6 +1103,8 @@ export function registerBatchHandlers(win: BrowserWindow): void {
       sessionStartMs = Date.now()
       resetSessionCounters()
       currentRunId++
+      autoRestartCount = 0
+      if (autoRestartTimer) { clearTimeout(autoRestartTimer); autoRestartTimer = null }
       if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
       batchStatus = 'running'
       monitorOnly = false
