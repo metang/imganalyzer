@@ -4111,14 +4111,42 @@ def _handle_geo_clusters(params: dict) -> dict:
     return {"clusters": clusters, "total": total}
 
 
+def _spread_by_date(items: list, limit: int, random_mod) -> list:
+    """Pick up to *limit* items spread evenly across date_time_original."""
+    if not items or limit <= 0:
+        return []
+    if len(items) <= limit:
+        return list(items)
+
+    dated = [c for c in items if c["date"]]
+    undated = [c for c in items if not c["date"]]
+    random_mod.shuffle(undated)
+
+    if not dated:
+        return random_mod.sample(items, limit)
+
+    random_mod.shuffle(dated)  # randomize within-date ties
+    dated.sort(key=lambda r: r["date"])
+
+    if len(dated) <= limit:
+        picked = dated
+        remaining = limit - len(picked)
+        if remaining > 0 and undated:
+            picked.extend(undated[:remaining])
+        return picked
+
+    step = len(dated) / limit
+    return [dated[int(i * step)] for i in range(limit)]
+
+
 def _handle_geo_cluster_preview(params: dict) -> dict:
     """Return representative preview images for a geohash cluster cell.
 
     Selection algorithm:
-      1. If any images have aesthetic_score > 7.5, use only those as candidates;
-         otherwise all images in the cell are candidates.
-      2. From candidates, pick up to 10 spread evenly across the date range.
-         For ties on the same date, pick randomly.
+      1. High-aesthetic images (score > 7.5) are prioritised.
+      2. If fewer than `limit` high-quality images exist, remaining slots
+         are filled from other images, spread evenly across the date range.
+      3. Always returns min(total, limit) images.
 
     Performance: uses index-friendly LIKE prefix and lightweight ID+date query
     to avoid fetching all rows (e.g. 10K) with full JOINs.
@@ -4160,32 +4188,21 @@ def _handle_geo_cluster_preview(params: dict) -> dict:
     if total == 0:
         return {"images": [], "total": 0}
 
-    # Step 1: filter by aesthetic score > 7.5 if any qualify
+    # Step 1: prioritise high-aesthetic images, but always fill to `limit`
     high_quality = [r for r in rows if r["score"] is not None and r["score"] > 7.5]
-    candidates = high_quality if high_quality else list(rows)
+    hq_set = set(id(r) for r in high_quality)
+    others = [r for r in rows if id(r) not in hq_set]
 
-    if len(candidates) <= limit:
-        picked = candidates
+    if len(high_quality) >= limit:
+        # Enough high-quality — spread those evenly across dates
+        candidates = high_quality
     else:
-        # Step 2: spread evenly across the date range
-        dated = [c for c in candidates if c["date"]]
-        undated = [c for c in candidates if not c["date"]]
-        random.shuffle(undated)
-
-        if not dated:
-            picked = random.sample(candidates, limit)
-        else:
-            random.shuffle(dated)  # randomize within-date ties
-            dated.sort(key=lambda r: r["date"])
-
-            if len(dated) <= limit:
-                picked = dated
-                remaining = limit - len(picked)
-                if remaining > 0 and undated:
-                    picked.extend(undated[:remaining])
-            else:
-                step = len(dated) / limit
-                picked = [dated[int(i * step)] for i in range(limit)]
+        # Take all high-quality, fill remaining from others
+        candidates = list(high_quality)
+        needed = limit - len(candidates)
+        candidates.extend(_spread_by_date(others, needed, random))
+    # Now pick `limit` from candidates, spread by date
+    picked = _spread_by_date(candidates, limit, random)
 
     # Fetch full details (file_path) only for the selected IDs
     selected_ids = [r["image_id"] for r in picked]
