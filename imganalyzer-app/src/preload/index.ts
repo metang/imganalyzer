@@ -337,4 +337,7 @@ contextBridge.exposeInMainWorld('api', {
 
   geoTripTimeline: (params: { start_date: string; end_date: string; simplify?: boolean }) =>
     ipcRenderer.invoke('geo:trip-timeline', params),
+
+  geoGeocode: (params: { location: string }) =>
+    ipcRenderer.invoke('geo:geocode', params),
 })

@@ -456,7 +456,101 @@ class TestGeoStatsExtended:
 from imganalyzer.server import (
     _handle_geo_gap_filler_apply,
     _handle_geo_gap_filler_preview,
+    _handle_geo_geocode,
     _handle_geo_stats_extended,
     _handle_geo_trip_detect,
     _handle_geo_trip_timeline,
 )
+
+
+# ── Geocode ──────────────────────────────────────────────────────────────────
+
+class TestGeoGeocode:
+    def test_geocode_by_city(self, tmp_path):
+        conn = _make_test_db(tmp_path)
+
+        _insert_image(conn, "/a.jpg", lat=39.9, lng=116.4, city="Beijing", country="China")
+        _insert_image(conn, "/b.jpg", lat=40.0, lng=116.5, city="Beijing", country="China")
+        _insert_image(conn, "/c.jpg", lat=48.8, lng=2.3, city="Paris", country="France")
+
+        import imganalyzer.server as srv
+        orig = srv._get_db
+        srv._get_db = lambda: conn
+        try:
+            result = _handle_geo_geocode({"location": "Beijing"})
+        finally:
+            srv._get_db = orig
+
+        assert result["count"] == 2
+        assert 39.5 < result["lat"] < 40.5
+        assert 116.0 < result["lng"] < 117.0
+
+    def test_geocode_by_country(self, tmp_path):
+        conn = _make_test_db(tmp_path)
+
+        _insert_image(conn, "/a.jpg", lat=40.0, lng=-74.0, city="NYC", state="NY", country="USA")
+        _insert_image(conn, "/b.jpg", lat=34.0, lng=-118.0, city="LA", state="CA", country="USA")
+        _insert_image(conn, "/c.jpg", lat=48.8, lng=2.3, city="Paris", country="France")
+
+        import imganalyzer.server as srv
+        orig = srv._get_db
+        srv._get_db = lambda: conn
+        try:
+            result = _handle_geo_geocode({"location": "USA"})
+        finally:
+            srv._get_db = orig
+
+        assert result["count"] == 2
+        # Centroid of NYC + LA
+        assert 34.0 < result["lat"] < 41.0
+        assert -118.0 < result["lng"] < -74.0
+
+    def test_geocode_no_match(self, tmp_path):
+        conn = _make_test_db(tmp_path)
+
+        _insert_image(conn, "/a.jpg", lat=40.0, lng=-74.0, city="NYC", country="USA")
+
+        import imganalyzer.server as srv
+        orig = srv._get_db
+        srv._get_db = lambda: conn
+        try:
+            result = _handle_geo_geocode({"location": "Antarctica"})
+        finally:
+            srv._get_db = orig
+
+        assert result["count"] == 0
+        assert result["lat"] is None
+        assert result["lng"] is None
+
+    def test_geocode_empty_location(self, tmp_path):
+        conn = _make_test_db(tmp_path)
+
+        import imganalyzer.server as srv
+        orig = srv._get_db
+        srv._get_db = lambda: conn
+        try:
+            result = _handle_geo_geocode({"location": ""})
+        finally:
+            srv._get_db = orig
+
+        assert "error" in result
+
+    def test_geocode_by_state(self, tmp_path):
+        conn = _make_test_db(tmp_path)
+
+        _insert_image(conn, "/a.jpg", lat=37.7, lng=-122.4, city="SF", state="California", country="USA")
+        _insert_image(conn, "/b.jpg", lat=34.0, lng=-118.2, city="LA", state="California", country="USA")
+        _insert_image(conn, "/c.jpg", lat=40.7, lng=-74.0, city="NYC", state="New York", country="USA")
+
+        import imganalyzer.server as srv
+        orig = srv._get_db
+        srv._get_db = lambda: conn
+        try:
+            result = _handle_geo_geocode({"location": "California"})
+        finally:
+            srv._get_db = orig
+
+        assert result["count"] == 2
+        # Centroid of SF + LA — should be roughly central California
+        assert 34.0 < result["lat"] < 38.0
+        assert -123.0 < result["lng"] < -118.0

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Component } from 'react'
 import type { ErrorInfo, ReactNode } from 'react'
+import type { SearchFilters } from './global'
 import { DbGalleryView } from './components/DbGalleryView'
 import { BatchConfigView, BatchRunView } from './components/BatchView'
 import { SearchView } from './components/SearchView'
@@ -137,6 +138,26 @@ export default function App() {
     ))
   }, [])
 
+  // Cross-tab: Search ↔ Map
+  const [pendingMapFilters, setPendingMapFilters] = useState<SearchFilters | null>(null)
+  const [pendingGridSearch, setPendingGridSearch] = useState<{
+    filters: SearchFilters
+    mapBounds?: { north: number; south: number; east: number; west: number }
+  } | null>(null)
+
+  const handleViewOnMap = useCallback((filters: SearchFilters) => {
+    setPendingMapFilters(filters)
+    setTab('map')
+  }, [])
+
+  const handleViewAsGrid = useCallback((
+    filters: SearchFilters,
+    mapBounds?: { north: number; south: number; east: number; west: number },
+  ) => {
+    setPendingGridSearch({ filters: { ...filters, mapBounds }, mapBounds })
+    setTab('search')
+  }, [])
+
   return (
     <ErrorBoundary>
     <div className="h-full flex flex-col">
@@ -226,7 +247,12 @@ export default function App() {
 
       {/* ── Search tab — always mounted so search state survives tab switches ── */}
       <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'search' ? '' : ' hidden'}`}>
-        <SearchView onOpenFaceCluster={handleOpenFaceCluster} />
+        <SearchView
+          onOpenFaceCluster={handleOpenFaceCluster}
+          onViewOnMap={handleViewOnMap}
+          pendingSearch={pendingGridSearch}
+          onClearPendingSearch={() => setPendingGridSearch(null)}
+        />
       </div>
 
       {/* ── Faces tab ────────────────────────────────────────────────────────── */}
@@ -239,7 +265,11 @@ export default function App() {
 
       {/* ── Map tab ──────────────────────────────────────────────────────────── */}
       <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'map' ? '' : ' hidden'}`}>
-        <MapView />
+        <MapView
+          pendingFilters={pendingMapFilters}
+          onClearPending={() => setPendingMapFilters(null)}
+          onViewAsGrid={handleViewAsGrid}
+        />
       </div>
 
       {/* ── Settings tab ─────────────────────────────────────────────────────── */}

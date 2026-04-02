@@ -143,6 +143,13 @@ export interface TripTimelineResponse {
   error?: string
 }
 
+export interface GeoGeocodeResponse {
+  lat: number | null
+  lng: number | null
+  count: number
+  error?: string
+}
+
 export function registerGeoHandlers(): void {
   ipcMain.handle(
     'geo:clusters',
@@ -306,6 +313,19 @@ export function registerGeoHandlers(): void {
         return result
       } catch (err) {
         return { stops: [], route_points: [], total_images: 0, error: String(err) }
+      }
+    },
+  )
+
+  ipcMain.handle(
+    'geo:geocode',
+    async (_evt, params: { location: string }): Promise<GeoGeocodeResponse> => {
+      try {
+        await ensureServerRunning()
+        const result = (await rpc.call('geo/geocode', params)) as GeoGeocodeResponse
+        return result
+      } catch (err) {
+        return { lat: null, lng: null, count: 0, error: String(err) }
       }
     },
   )

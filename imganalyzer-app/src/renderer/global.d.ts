@@ -135,6 +135,7 @@ export interface SearchFilters {
   dateFrom?: string
   dateTo?: string
   hasPeople?: boolean
+  mapBounds?: { north: number; south: number; east: number; west: number }
   limit?: number
   offset?: number
 }
@@ -679,6 +680,9 @@ declare global {
       geoTripTimeline(params: {
         start_date: string; end_date: string; simplify?: boolean
       }): Promise<TripTimelineResponse>
+      geoGeocode(params: { location: string }): Promise<{
+        lat: number | null; lng: number | null; count: number; error?: string
+      }>
 
       // Batch processing
       batchIngest(

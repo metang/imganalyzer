@@ -5070,6 +5070,48 @@ def _handle_geo_trip_timeline(params: dict) -> dict:
     return {"stops": stops, "route_points": route_out, "total_images": total_images}
 
 
+def _handle_geo_geocode(params: dict) -> dict:
+    """Resolve a location name to coordinates using the image database.
+
+    Computes the centroid of all geotagged images whose city, state, or
+    country matches the query text.  No external geocoding API needed.
+
+    Params:
+        location (str): location text to resolve (e.g. "Beijing", "California")
+    Returns:
+        lat, lng (float): centroid of matching images
+        count (int): number of images that matched
+    """
+    conn = _get_db()
+    location = str(params.get("location", "")).strip()
+    if not location:
+        return {"error": "location parameter required"}
+
+    pattern = f"%{location}%"
+    try:
+        row = conn.execute(
+            """
+            SELECT AVG(gps_latitude) AS lat, AVG(gps_longitude) AS lng,
+                   COUNT(*) AS cnt
+            FROM analysis_metadata
+            WHERE (location_city LIKE ? OR location_state LIKE ? OR location_country LIKE ?)
+              AND gps_latitude IS NOT NULL AND gps_longitude IS NOT NULL
+            """,
+            [pattern, pattern, pattern],
+        ).fetchone()
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    if not row or not row["cnt"]:
+        return {"lat": None, "lng": None, "count": 0}
+
+    return {
+        "lat": round(row["lat"], 6),
+        "lng": round(row["lng"], 6),
+        "count": row["cnt"],
+    }
+
+
 # ── Method dispatch ──────────────────────────────────────────────────────────
 
 # Methods that return a result synchronously (the response is sent
@@ -5140,6 +5182,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "geo/gap-filler-apply": _handle_geo_gap_filler_apply,
     "geo/trip-detect": _handle_geo_trip_detect,
     "geo/trip-timeline": _handle_geo_trip_timeline,
+    "geo/geocode": _handle_geo_geocode,
 }
 
 # Methods that send their own result/error asynchronously (streaming).

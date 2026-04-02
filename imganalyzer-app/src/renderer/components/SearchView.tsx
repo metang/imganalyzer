@@ -11,6 +11,9 @@ const SEARCH_PAGE_SIZE = 200
 
 type SearchViewProps = {
   onOpenFaceCluster?: (clusterId: number, sourceImageId: number) => void
+  onViewOnMap?: (filters: SearchFilters) => void
+  pendingSearch?: { filters: SearchFilters; mapBounds?: { north: number; south: number; east: number; west: number } } | null
+  onClearPendingSearch?: () => void
 }
 
 function appendUniqueResults(
@@ -22,7 +25,7 @@ function appendUniqueResults(
   return [...existing, ...appended]
 }
 
-export function SearchView({ onOpenFaceCluster }: SearchViewProps) {
+export function SearchView({ onOpenFaceCluster, onViewOnMap, pendingSearch, onClearPendingSearch }: SearchViewProps) {
   const [results, setResults] = useState<SearchResult[]>([])
   const [total, setTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
@@ -39,6 +42,18 @@ export function SearchView({ onOpenFaceCluster }: SearchViewProps) {
   useEffect(() => {
     resultsRef.current = results
   }, [results])
+
+  // Pick up pending search from Map tab (cross-tab "View as Grid")
+  useEffect(() => {
+    if (!pendingSearch) return
+    const { filters, mapBounds } = pendingSearch
+    const filtersWithBounds = mapBounds
+      ? { ...filters, mapBounds }
+      : filters
+    const label = mapBounds ? '📍 Map region search' : null
+    runSearch(filtersWithBounds, label)
+    onClearPendingSearch?.()
+  }, [pendingSearch]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const resultSummary = useMemo(() => {
     if (!hasSearched) return null
@@ -163,8 +178,19 @@ export function SearchView({ onOpenFaceCluster }: SearchViewProps) {
                 {searchContextLabel ?? (loading ? 'Searching…' : hasSearched ? 'Search results' : 'Results')}
               </p>
               {resultSummary && (
-                <div className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-300">
-                  {resultSummary}
+                <div className="flex items-center gap-2">
+                  <div className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-300">
+                    {resultSummary}
+                  </div>
+                  {onViewOnMap && activeFiltersRef.current && (
+                    <button
+                      onClick={() => onViewOnMap(activeFiltersRef.current!)}
+                      className="rounded-full border border-neutral-700 hover:border-neutral-500 bg-neutral-900 px-3 py-1 text-xs text-neutral-400 hover:text-neutral-200 transition-colors"
+                      title="View search results on map"
+                    >
+                      🗺️ View on Map
+                    </button>
+                  )}
                 </div>
               )}
             </div>
