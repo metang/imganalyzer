@@ -2,7 +2,8 @@ import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } from 'elect
 import { join } from 'path'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
-import { listImages, getThumbnail, getFullImage, getCachedImage, getThumbnailCacheConfig, setThumbnailCacheConfig } from './images'
+import { listImages, getThumbnail, getThumbnailsBatch, getFullImage, getCachedImage, getThumbnailCacheConfig, setThumbnailCacheConfig } from './images'
+import type { ThumbnailBatchItem } from './images'
 import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
@@ -10,6 +11,7 @@ import { registerBatchHandlers, killAllBatchProcesses } from './batch'
 import { registerSearchHandlers } from './search'
 import { registerFaceHandlers } from './faces'
 import { registerGalleryHandlers } from './gallery'
+import { registerGeoHandlers } from './geo'
 import { applyCoordinatorSettings, getCoordinatorStatus, startCoordinator, startCoordinatorOnLaunch, stopCoordinator } from './coordinator'
 import type { AppSettingsInput } from './settings'
 import { getAppSettings, getAppSettingsBundle, updateAppSettings } from './settings'
@@ -55,6 +57,7 @@ app.whenReady().then(async () => {
   registerBatchHandlers(win)
   registerSearchHandlers()
   registerGalleryHandlers()
+  registerGeoHandlers()
   registerFaceHandlers()
   try {
     const settings = await getAppSettings()
@@ -106,6 +109,10 @@ ipcMain.handle('fs:listImages', async (_evt, folderPath: string) => {
 // ─── IPC: Get thumbnail ───────────────────────────────────────────────────────
 ipcMain.handle('fs:getThumbnail', async (_evt, imagePath: string) => {
   return getThumbnail(imagePath)
+})
+
+ipcMain.handle('fs:getThumbnailsBatch', async (_evt, items: ThumbnailBatchItem[]) => {
+  return getThumbnailsBatch(items)
 })
 
 // ─── IPC: Thumbnail cache config ─────────────────────────────────────────────

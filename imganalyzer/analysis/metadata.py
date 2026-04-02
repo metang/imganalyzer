@@ -178,6 +178,16 @@ class MetadataExtractor:
 
         # GPS reverse geocode
         if meta.get("gps_latitude") and meta.get("gps_longitude"):
+            # Compute geohash for map clustering
+            try:
+                from imganalyzer.db.geohash import encode as geohash_encode
+
+                meta["geohash"] = geohash_encode(
+                    meta["gps_latitude"], meta["gps_longitude"], precision=8
+                )
+            except Exception:
+                pass
+
             try:
                 geo = _reverse_geocode(meta["gps_latitude"], meta["gps_longitude"])
                 meta.update(geo)

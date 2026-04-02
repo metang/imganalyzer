@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('api', {
 
   getThumbnail: (imagePath: string): Promise<string> =>
     ipcRenderer.invoke('fs:getThumbnail', imagePath),
+  getThumbnailsBatch: (items: Array<{ file_path: string; image_id?: number }>): Promise<Record<string, string>> =>
+    ipcRenderer.invoke('fs:getThumbnailsBatch', items),
 
   getFullImage: (imagePath: string): Promise<string> =>
     ipcRenderer.invoke('fs:getFullImage', imagePath),
@@ -301,4 +303,41 @@ contextBridge.exposeInMainWorld('api', {
 
   getPersonDirectLinks: (personId: number): Promise<{ links: Array<{ occurrence_id: number; image_id: number; file_path: string }>; error?: string }> =>
     ipcRenderer.invoke('faces:personDirectLinks', personId),
+
+  // ── Geo / Map ──────────────────────────────────────────────────────────────
+
+  geoClusters: (params: {
+    north: number; south: number; east: number; west: number; zoom: number; limit?: number
+  }) => ipcRenderer.invoke('geo:clusters', params),
+
+  geoNearby: (params: {
+    lat: number; lng: number; radiusKm?: number; limit?: number; excludeId?: number
+  }) => ipcRenderer.invoke('geo:nearby', params),
+
+  geoStats: () => ipcRenderer.invoke('geo:stats'),
+
+  geoHeatmap: (params: {
+    north: number; south: number; east: number; west: number; zoom: number
+  }) => ipcRenderer.invoke('geo:heatmap', params),
+
+  geoClusterPreview: (params: { cell: string; limit?: number }) =>
+    ipcRenderer.invoke('geo:cluster-preview', params),
+
+  geoStatsExtended: (params?: { home_lat?: number; home_lng?: number }) =>
+    ipcRenderer.invoke('geo:stats-extended', params ?? {}),
+
+  geoGapFillerPreview: (params?: { max_gap_minutes?: number; preview_limit?: number }) =>
+    ipcRenderer.invoke('geo:gap-filler-preview', params ?? {}),
+
+  geoGapFillerApply: (params?: { max_gap_minutes?: number; min_confidence?: number }) =>
+    ipcRenderer.invoke('geo:gap-filler-apply', params ?? {}),
+
+  geoTripDetect: (params?: { min_images?: number }) =>
+    ipcRenderer.invoke('geo:trip-detect', params ?? {}),
+
+  geoTripTimeline: (params: { start_date: string; end_date: string; simplify?: boolean }) =>
+    ipcRenderer.invoke('geo:trip-timeline', params),
+
+  geoGeocode: (params: { location: string }) =>
+    ipcRenderer.invoke('geo:geocode', params),
 })

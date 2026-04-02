@@ -135,6 +135,7 @@ export interface SearchFilters {
   dateFrom?: string
   dateTo?: string
   hasPeople?: boolean
+  mapBounds?: { north: number; south: number; east: number; west: number }
   limit?: number
   offset?: number
 }
@@ -478,12 +479,111 @@ export interface PersonDirectLink {
   file_path: string
 }
 
+export interface GeoCluster {
+  cell: string
+  center_lat: number
+  center_lng: number
+  count: number
+  sample_ids: number[]
+}
+
+export interface GeoNearbyImage {
+  image_id: number
+  gps_latitude: number
+  gps_longitude: number
+  file_path: string
+}
+
+export interface GeoStatsExtended {
+  total_images: number
+  geotagged: number
+  gps_sources: Array<{ source: string; count: number }>
+  countries: Array<{ country: string; count: number }>
+  top_cities: Array<{ city: string; state: string; country: string; count: number }>
+  monthly_activity: Array<{ month: string; count: number }>
+  location_diversity: Array<{ month: string; unique_places: number }>
+  camera_by_country: Array<{ country: string; camera: string; count: number }>
+  top_locations: Array<{
+    cell: string
+    lat: number
+    lng: number
+    count: number
+    city: string | null
+    state: string | null
+    country: string | null
+  }>
+  furthest_from_home: {
+    image_id: number
+    file_path: string
+    lat: number
+    lng: number
+    distance_km: number
+  } | null
+  error?: string
+}
+
+export interface GapFillerPreviewItem {
+  image_id: number
+  file_path: string
+  inferred_lat: number
+  inferred_lng: number
+  confidence: number
+  nearest_before?: { image_id: number; gap_minutes: number }
+  nearest_after?: { image_id: number; gap_minutes: number }
+}
+
+export interface GapFillerPreviewResponse {
+  fillable: number
+  total_missing: number
+  previews: GapFillerPreviewItem[]
+  error?: string
+}
+
+export interface GapFillerApplyResponse {
+  filled: number
+  skipped_override: number
+  skipped_low_confidence: number
+  error?: string
+}
+
+export interface TripDetectResult {
+  start_date: string
+  end_date: string
+  start_location: string
+  end_location: string
+  image_count: number
+  distance_km: number
+}
+
+export interface TripDetectResponse {
+  trips: TripDetectResult[]
+  error?: string
+}
+
+export interface TripStop {
+  lat: number
+  lng: number
+  start_time: string
+  end_time: string
+  count: number
+  cover_image_id: number
+  cover_file_path: string
+}
+
+export interface TripTimelineResponse {
+  stops: TripStop[]
+  route_points: Array<{ lat: number; lng: number }>
+  total_images: number
+  error?: string
+}
+
 declare global {
   interface Window {
     api: {
       openFolder(): Promise<string | null>
       listImages(folderPath: string): Promise<ImageFile[]>
       getThumbnail(imagePath: string): Promise<string>
+      getThumbnailsBatch(items: Array<{ file_path: string; image_id?: number }>): Promise<Record<string, string>>
       getFullImage(imagePath: string): Promise<string>
       getCachedImage(imagePath: string): Promise<string>
       openPath(filePath: string): Promise<string>
@@ -541,6 +641,48 @@ declare global {
       linkOccurrencesToPerson(personId: number, occurrenceIds: number[]): Promise<{ ok: boolean; updated: number; error?: string }>
       unlinkOccurrenceFromPerson(occurrenceId: number): Promise<{ ok: boolean; updated: number; error?: string }>
       getPersonDirectLinks(personId: number): Promise<{ links: PersonDirectLink[]; error?: string }>
+
+      // Geo / Map
+      geoClusters(params: {
+        north: number; south: number; east: number; west: number; zoom: number; limit?: number
+      }): Promise<{ clusters: GeoCluster[]; total: number; error?: string }>
+      geoNearby(params: {
+        lat: number; lng: number; radiusKm?: number; limit?: number; excludeId?: number
+      }): Promise<{ images: GeoNearbyImage[]; total: number; error?: string }>
+      geoStats(): Promise<{
+        total_images: number; geotagged: number
+        countries: Array<{ country: string; count: number }>
+        top_cities: Array<{ city: string; state: string; country: string; count: number }>
+        error?: string
+      }>
+      geoHeatmap(params: {
+        north: number; south: number; east: number; west: number; zoom: number
+      }): Promise<{ points: Array<{ lat: number; lng: number; weight: number }>; error?: string }>
+      geoClusterPreview(params: {
+        cell: string; limit?: number
+      }): Promise<{
+        images: Array<{ image_id: number; file_path: string; date: string | null; aesthetic_score: number | null }>
+        total: number
+        error?: string
+      }>
+      geoStatsExtended(params?: {
+        home_lat?: number; home_lng?: number
+      }): Promise<GeoStatsExtended>
+      geoGapFillerPreview(params?: {
+        max_gap_minutes?: number; preview_limit?: number
+      }): Promise<GapFillerPreviewResponse>
+      geoGapFillerApply(params?: {
+        max_gap_minutes?: number; min_confidence?: number
+      }): Promise<GapFillerApplyResponse>
+      geoTripDetect(params?: {
+        min_images?: number
+      }): Promise<TripDetectResponse>
+      geoTripTimeline(params: {
+        start_date: string; end_date: string; simplify?: boolean
+      }): Promise<TripTimelineResponse>
+      geoGeocode(params: { location: string }): Promise<{
+        lat: number | null; lng: number | null; count: number; error?: string
+      }>
 
       // Batch processing
       batchIngest(

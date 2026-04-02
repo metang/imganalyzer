@@ -185,6 +185,22 @@ class Repository:
         known = self._known_columns(table)
         return {k: v for k, v in data.items() if k in known}
 
+    def _sync_geo_rtree(self, image_id: int, data: dict[str, Any]) -> None:
+        """Keep ``geo_rtree`` R*tree in sync after a metadata upsert."""
+        lat = data.get("gps_latitude")
+        lng = data.get("gps_longitude")
+        # Always remove old entry first (image may have lost GPS)
+        try:
+            self.conn.execute("DELETE FROM geo_rtree WHERE id = ?", [image_id])
+        except Exception:
+            return  # table may not exist yet (pre-v30)
+        if lat is not None and lng is not None:
+            self.conn.execute(
+                "INSERT INTO geo_rtree (id, min_lat, max_lat, min_lng, max_lng) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [image_id, lat, lat, lng, lng],
+            )
+
     # ── images ─────────────────────────────────────────────────────────────
 
     def register_image(
@@ -296,6 +312,8 @@ class Repository:
         self.conn.execute(
             f"INSERT INTO analysis_metadata ({col_str}) VALUES ({placeholders})", vals
         )
+        # Maintain R*tree spatial index
+        self._sync_geo_rtree(image_id, data)
 
     def upsert_technical(self, image_id: int, data: dict[str, Any]) -> None:
         """Atomic write of the full technical analysis result."""

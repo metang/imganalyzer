@@ -1,3 +1,5 @@
+@import 'leaflet/dist/leaflet.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -26,4 +28,17 @@
   ::-webkit-scrollbar-thumb:hover {
     @apply bg-neutral-500;
   }
+}
+
+/* Cluster hover tooltip — lightweight text label */
+.cluster-preview-tooltip {
+  background: white !important;
+  border: none !important;
+  border-radius: 6px !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+  padding: 6px 10px !important;
+  pointer-events: none !important;
+}
+.cluster-preview-tooltip::before {
+  display: none !important;
 }

@@ -11,9 +11,12 @@
   },
   "dependencies": {
     "@github/copilot-sdk": "^0.1.25",
+    "@types/leaflet": "^1.9.21",
     "fast-xml-parser": "^4.4.1",
+    "leaflet": "^1.9.4",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-leaflet": "^4.2.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
