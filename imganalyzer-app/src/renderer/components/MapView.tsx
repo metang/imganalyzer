@@ -696,14 +696,16 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
         </div>
       </div>
 
-      {/* Lightbox with analysis sidebar */}
+      {/* Lightbox with analysis sidebar — z-[10000] to render above Leaflet map layers */}
       {lightboxItem && (
-        <SearchLightbox
-          item={lightboxItem}
-          items={lightboxItems}
-          onClose={() => { setLightboxItem(null); setLightboxItems([]) }}
-          onNavigate={(item) => setLightboxItem(item)}
-        />
+        <div className="fixed inset-0 z-[10000]">
+          <SearchLightbox
+            item={lightboxItem}
+            items={lightboxItems}
+            onClose={() => { setLightboxItem(null); setLightboxItems([]) }}
+            onNavigate={(item) => setLightboxItem(item)}
+          />
+        </div>
       )}
     </div>
   )
