@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -54,6 +54,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         28: _migrate_v28,
         29: _migrate_v29,
         30: _migrate_v30,
+        31: _migrate_v31,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -1251,3 +1252,24 @@ def _migrate_v30(conn: sqlite3.Connection) -> None:
             "UPDATE analysis_metadata SET geohash = ? WHERE image_id = ?",
             batch,
         )
+
+
+def _migrate_v31(conn: sqlite3.Connection) -> None:
+    """Add gps_source column to track origin of GPS coordinates.
+
+    Values: 'exif' (original EXIF data), 'inferred' (gap filler),
+            'manual' (user override).
+    """
+    try:
+        conn.execute(
+            "ALTER TABLE analysis_metadata ADD COLUMN gps_source TEXT DEFAULT 'exif'"
+        )
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+    # Backfill: set gps_source='exif' for all rows that already have GPS
+    conn.execute(
+        "UPDATE analysis_metadata SET gps_source = 'exif' "
+        "WHERE gps_latitude IS NOT NULL AND gps_longitude IS NOT NULL "
+        "AND gps_source IS NULL"
+    )

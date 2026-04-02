@@ -3,6 +3,8 @@ import { MapContainer, TileLayer, Marker, Tooltip, useMapEvents, useMap } from '
 import L from 'leaflet'
 import type { GeoCluster, SearchResult } from '../global'
 import { SearchLightbox } from './SearchLightbox'
+import { LocationStatsPanel } from './LocationStatsPanel'
+import { TripTimeline } from './TripTimeline'
 
 interface ClusterPreviewImage {
   image_id: number
@@ -266,6 +268,11 @@ export function MapView() {
   const [lightboxItem, setLightboxItem] = useState<SearchResult | null>(null)
   const [lightboxItems, setLightboxItems] = useState<SearchResult[]>([])
 
+  // Stats panel
+  const [statsPanelOpen, setStatsPanelOpen] = useState(false)
+
+  // Trip timeline mode
+  const [timelineMode, setTimelineMode] = useState(false)
   // Load stats once on mount
   useEffect(() => {
     window.api.geoStats().then((s) => {
@@ -353,6 +360,28 @@ export function MapView() {
           >
             {theme === 'dark' ? '☀️ Light' : '🌙 Dark'}
           </button>
+          <button
+            onClick={() => setStatsPanelOpen(!statsPanelOpen)}
+            className={`px-2 py-0.5 rounded border transition-colors ${
+              statsPanelOpen
+                ? 'border-blue-500 bg-blue-500/20 text-blue-300'
+                : 'border-neutral-700 hover:border-neutral-500 text-neutral-300 hover:text-neutral-100'
+            }`}
+            title="Location Statistics"
+          >
+            📊 Stats
+          </button>
+          <button
+            onClick={() => setTimelineMode(!timelineMode)}
+            className={`px-2 py-0.5 rounded border transition-colors ${
+              timelineMode
+                ? 'border-emerald-500 bg-emerald-500/20 text-emerald-300'
+                : 'border-neutral-700 hover:border-neutral-500 text-neutral-300 hover:text-neutral-100'
+            }`}
+            title="Trip Timeline"
+          >
+            🗺️ Trips
+          </button>
         </span>
       </div>
 
@@ -381,7 +410,8 @@ export function MapView() {
           <InvalidateSize />
           <FitBounds clusters={clusters} />
 
-          {clusters.map((cluster) => (
+          {/* Cluster markers (hidden in timeline mode) */}
+          {!timelineMode && clusters.map((cluster) => (
             <Marker
               key={cluster.cell}
               position={[cluster.center_lat, cluster.center_lng]}
@@ -400,6 +430,9 @@ export function MapView() {
               </Tooltip>
             </Marker>
           ))}
+
+          {/* Trip timeline overlay */}
+          <TripTimeline active={timelineMode} onExit={() => setTimelineMode(false)} />
         </MapContainer>
 
         {/* Pinned preview panel (positioned over the map) */}
@@ -411,6 +444,9 @@ export function MapView() {
             onImageClick={handleImageClick}
           />
         )}
+
+        {/* Location statistics drawer */}
+        <LocationStatsPanel open={statsPanelOpen} onClose={() => setStatsPanelOpen(false)} />
       </div>
 
       {/* Lightbox with analysis sidebar */}

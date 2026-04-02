@@ -493,6 +493,89 @@ export interface GeoNearbyImage {
   file_path: string
 }
 
+export interface GeoStatsExtended {
+  total_images: number
+  geotagged: number
+  gps_sources: Array<{ source: string; count: number }>
+  countries: Array<{ country: string; count: number }>
+  top_cities: Array<{ city: string; state: string; country: string; count: number }>
+  monthly_activity: Array<{ month: string; count: number }>
+  location_diversity: Array<{ month: string; unique_places: number }>
+  camera_by_country: Array<{ country: string; camera: string; count: number }>
+  top_locations: Array<{
+    cell: string
+    lat: number
+    lng: number
+    count: number
+    city: string | null
+    state: string | null
+    country: string | null
+  }>
+  furthest_from_home: {
+    image_id: number
+    file_path: string
+    lat: number
+    lng: number
+    distance_km: number
+  } | null
+  error?: string
+}
+
+export interface GapFillerPreviewItem {
+  image_id: number
+  file_path: string
+  inferred_lat: number
+  inferred_lng: number
+  confidence: number
+  nearest_before?: { image_id: number; gap_minutes: number }
+  nearest_after?: { image_id: number; gap_minutes: number }
+}
+
+export interface GapFillerPreviewResponse {
+  fillable: number
+  total_missing: number
+  previews: GapFillerPreviewItem[]
+  error?: string
+}
+
+export interface GapFillerApplyResponse {
+  filled: number
+  skipped_override: number
+  skipped_low_confidence: number
+  error?: string
+}
+
+export interface TripDetectResult {
+  start_date: string
+  end_date: string
+  start_location: string
+  end_location: string
+  image_count: number
+  distance_km: number
+}
+
+export interface TripDetectResponse {
+  trips: TripDetectResult[]
+  error?: string
+}
+
+export interface TripStop {
+  lat: number
+  lng: number
+  start_time: string
+  end_time: string
+  count: number
+  cover_image_id: number
+  cover_file_path: string
+}
+
+export interface TripTimelineResponse {
+  stops: TripStop[]
+  route_points: Array<{ lat: number; lng: number }>
+  total_images: number
+  error?: string
+}
+
 declare global {
   interface Window {
     api: {
@@ -581,6 +664,21 @@ declare global {
         total: number
         error?: string
       }>
+      geoStatsExtended(params?: {
+        home_lat?: number; home_lng?: number
+      }): Promise<GeoStatsExtended>
+      geoGapFillerPreview(params?: {
+        max_gap_minutes?: number; preview_limit?: number
+      }): Promise<GapFillerPreviewResponse>
+      geoGapFillerApply(params?: {
+        max_gap_minutes?: number; min_confidence?: number
+      }): Promise<GapFillerApplyResponse>
+      geoTripDetect(params?: {
+        min_images?: number
+      }): Promise<TripDetectResponse>
+      geoTripTimeline(params: {
+        start_date: string; end_date: string; simplify?: boolean
+      }): Promise<TripTimelineResponse>
 
       // Batch processing
       batchIngest(

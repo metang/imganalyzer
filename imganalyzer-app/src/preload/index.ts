@@ -322,4 +322,19 @@ contextBridge.exposeInMainWorld('api', {
 
   geoClusterPreview: (params: { cell: string; limit?: number }) =>
     ipcRenderer.invoke('geo:cluster-preview', params),
+
+  geoStatsExtended: (params?: { home_lat?: number; home_lng?: number }) =>
+    ipcRenderer.invoke('geo:stats-extended', params ?? {}),
+
+  geoGapFillerPreview: (params?: { max_gap_minutes?: number; preview_limit?: number }) =>
+    ipcRenderer.invoke('geo:gap-filler-preview', params ?? {}),
+
+  geoGapFillerApply: (params?: { max_gap_minutes?: number; min_confidence?: number }) =>
+    ipcRenderer.invoke('geo:gap-filler-apply', params ?? {}),
+
+  geoTripDetect: (params?: { min_images?: number }) =>
+    ipcRenderer.invoke('geo:trip-detect', params ?? {}),
+
+  geoTripTimeline: (params: { start_date: string; end_date: string; simplify?: boolean }) =>
+    ipcRenderer.invoke('geo:trip-timeline', params),
 })

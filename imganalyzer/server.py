@@ -4396,6 +4396,680 @@ def _handle_geo_heatmap(params: dict) -> dict:
     return {"points": points}
 
 
+def _handle_geo_stats_extended(params: dict) -> dict:
+    """Return rich location statistics for the stats dashboard.
+
+    Extends geo/stats with monthly activity, location diversity, camera
+    distribution by country, furthest-from-home, and GPS source breakdown.
+
+    Params (all optional):
+        home_lat, home_lng (float): user's home coordinates for distance calc
+    """
+    import math
+
+    conn = _get_db()
+    result: dict[str, Any] = {}
+
+    try:
+        # ── Basic counts (same as geo/stats) ─────────────────────────────
+        total_row = conn.execute("SELECT COUNT(*) AS cnt FROM images").fetchone()
+        result["total_images"] = int(total_row["cnt"]) if total_row else 0
+
+        geo_row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM analysis_metadata "
+            "WHERE gps_latitude IS NOT NULL AND gps_longitude IS NOT NULL"
+        ).fetchone()
+        result["geotagged"] = int(geo_row["cnt"]) if geo_row else 0
+
+        # ── GPS source breakdown ─────────────────────────────────────────
+        try:
+            source_rows = conn.execute(
+                "SELECT COALESCE(gps_source, 'exif') AS source, COUNT(*) AS count "
+                "FROM analysis_metadata "
+                "WHERE gps_latitude IS NOT NULL "
+                "GROUP BY source ORDER BY count DESC"
+            ).fetchall()
+            result["gps_sources"] = [
+                {"source": r["source"], "count": r["count"]} for r in source_rows
+            ]
+        except Exception:
+            # gps_source column may not exist yet (pre-v31)
+            result["gps_sources"] = [{"source": "exif", "count": result["geotagged"]}]
+
+        # ── Countries ────────────────────────────────────────────────────
+        country_rows = conn.execute(
+            "SELECT location_country AS country, COUNT(*) AS count "
+            "FROM analysis_metadata "
+            "WHERE location_country IS NOT NULL AND location_country != '' "
+            "GROUP BY location_country ORDER BY count DESC LIMIT 50"
+        ).fetchall()
+        result["countries"] = [
+            {"country": r["country"], "count": r["count"]} for r in country_rows
+        ]
+
+        # ── Top cities ───────────────────────────────────────────────────
+        city_rows = conn.execute(
+            "SELECT location_city AS city, location_state AS state, "
+            "       location_country AS country, COUNT(*) AS count "
+            "FROM analysis_metadata "
+            "WHERE location_city IS NOT NULL AND location_city != '' "
+            "GROUP BY location_city, location_state, location_country "
+            "ORDER BY count DESC LIMIT 20"
+        ).fetchall()
+        result["top_cities"] = [
+            {"city": r["city"], "state": r["state"],
+             "country": r["country"], "count": r["count"]}
+            for r in city_rows
+        ]
+
+        # ── Monthly activity (images per month) ──────────────────────────
+        month_rows = conn.execute(
+            "SELECT substr(m.date_time_original, 1, 7) AS month, COUNT(*) AS count "
+            "FROM analysis_metadata m "
+            "WHERE m.date_time_original IS NOT NULL "
+            "  AND m.gps_latitude IS NOT NULL "
+            "GROUP BY month ORDER BY month"
+        ).fetchall()
+        result["monthly_activity"] = [
+            {"month": r["month"], "count": r["count"]}
+            for r in month_rows if r["month"]
+        ]
+
+        # ── Location diversity (unique geohash-4 cells per month) ────────
+        diversity_rows = conn.execute(
+            "SELECT substr(m.date_time_original, 1, 7) AS month, "
+            "       COUNT(DISTINCT substr(m.geohash, 1, 4)) AS unique_places "
+            "FROM analysis_metadata m "
+            "WHERE m.date_time_original IS NOT NULL "
+            "  AND m.geohash IS NOT NULL "
+            "GROUP BY month ORDER BY month"
+        ).fetchall()
+        result["location_diversity"] = [
+            {"month": r["month"], "unique_places": r["unique_places"]}
+            for r in diversity_rows if r["month"]
+        ]
+
+        # ── Camera × country distribution ────────────────────────────────
+        cam_rows = conn.execute(
+            "SELECT m.location_country AS country, m.camera_model AS camera, "
+            "       COUNT(*) AS count "
+            "FROM analysis_metadata m "
+            "WHERE m.location_country IS NOT NULL AND m.location_country != '' "
+            "  AND m.camera_model IS NOT NULL AND m.camera_model != '' "
+            "GROUP BY m.location_country, m.camera_model "
+            "ORDER BY count DESC LIMIT 100"
+        ).fetchall()
+        result["camera_by_country"] = [
+            {"country": r["country"], "camera": r["camera"], "count": r["count"]}
+            for r in cam_rows
+        ]
+
+        # ── Top 10 locations (geohash-5 ~1.2km clusters) ────────────────
+        top_loc_rows = conn.execute(
+            "SELECT substr(m.geohash, 1, 5) AS cell, "
+            "       AVG(m.gps_latitude) AS lat, AVG(m.gps_longitude) AS lng, "
+            "       COUNT(*) AS count, "
+            "       MIN(m.location_city) AS city, "
+            "       MIN(m.location_state) AS state, "
+            "       MIN(m.location_country) AS country "
+            "FROM analysis_metadata m "
+            "WHERE m.geohash IS NOT NULL "
+            "GROUP BY cell ORDER BY count DESC LIMIT 10"
+        ).fetchall()
+        result["top_locations"] = [
+            {"cell": r["cell"], "lat": round(r["lat"], 6), "lng": round(r["lng"], 6),
+             "count": r["count"], "city": r["city"], "state": r["state"],
+             "country": r["country"]}
+            for r in top_loc_rows
+        ]
+
+        # ── Furthest from home ───────────────────────────────────────────
+        home_lat = params.get("home_lat")
+        home_lng = params.get("home_lng")
+        if home_lat is not None and home_lng is not None:
+            home_lat, home_lng = float(home_lat), float(home_lng)
+
+            def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+                R = 6371.0  # km
+                dlat = math.radians(lat2 - lat1)
+                dlng = math.radians(lng2 - lng1)
+                a = (math.sin(dlat / 2) ** 2 +
+                     math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+                     math.sin(dlng / 2) ** 2)
+                return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+            # Sample up to 10k distant candidates from rtree extremes
+            far_rows = conn.execute(
+                "SELECT m.image_id, m.gps_latitude AS lat, m.gps_longitude AS lng, "
+                "       i.file_path "
+                "FROM analysis_metadata m "
+                "JOIN images i ON i.id = m.image_id "
+                "WHERE m.gps_latitude IS NOT NULL "
+                "ORDER BY (ABS(m.gps_latitude - ?) + ABS(m.gps_longitude - ?)) DESC "
+                "LIMIT 200",
+                [home_lat, home_lng],
+            ).fetchall()
+            best = None
+            best_dist = 0.0
+            for r in far_rows:
+                d = _haversine(home_lat, home_lng, r["lat"], r["lng"])
+                if d > best_dist:
+                    best_dist = d
+                    best = r
+            if best:
+                result["furthest_from_home"] = {
+                    "image_id": best["image_id"],
+                    "file_path": best["file_path"],
+                    "lat": round(best["lat"], 6),
+                    "lng": round(best["lng"], 6),
+                    "distance_km": round(best_dist, 1),
+                }
+            else:
+                result["furthest_from_home"] = None
+        else:
+            result["furthest_from_home"] = None
+
+    except Exception as exc:
+        import traceback
+        sys.stderr.write(f"[geo/stats-extended] error: {traceback.format_exc()}\n")
+        return {"error": str(exc)}
+
+    return result
+
+
+def _handle_geo_gap_filler_preview(params: dict) -> dict:
+    """Scan for images missing GPS and estimate locations from temporal neighbors.
+
+    Params:
+        max_gap_minutes (int): max time gap for interpolation (default 60)
+        preview_limit (int): max preview rows to return (default 100)
+    Returns:
+        fillable, total_missing, previews[...]
+    """
+    import math
+    from imganalyzer.db.geohash import encode as geohash_encode
+
+    conn = _get_db()
+    max_gap = int(params.get("max_gap_minutes", 60))
+    preview_limit = int(params.get("preview_limit", 100))
+
+    try:
+        # Images without GPS that have a timestamp
+        missing_rows = conn.execute(
+            "SELECT m.image_id, m.date_time_original AS dto, i.file_path "
+            "FROM analysis_metadata m "
+            "JOIN images i ON i.id = m.image_id "
+            "WHERE (m.gps_latitude IS NULL OR m.gps_longitude IS NULL) "
+            "  AND m.date_time_original IS NOT NULL "
+            "ORDER BY m.date_time_original"
+        ).fetchall()
+        total_missing = len(missing_rows)
+
+        # All geotagged images ordered by time (for temporal neighbor search)
+        geo_rows = conn.execute(
+            "SELECT m.image_id, m.date_time_original AS dto, "
+            "       m.gps_latitude AS lat, m.gps_longitude AS lng "
+            "FROM analysis_metadata m "
+            "WHERE m.gps_latitude IS NOT NULL AND m.gps_longitude IS NOT NULL "
+            "  AND m.date_time_original IS NOT NULL "
+            "ORDER BY m.date_time_original"
+        ).fetchall()
+
+        if not geo_rows:
+            return {"fillable": 0, "total_missing": total_missing, "previews": []}
+
+        geo_times = []
+        for r in geo_rows:
+            try:
+                from datetime import datetime as _dt
+                t = _dt.fromisoformat(r["dto"].replace("Z", "+00:00"))
+                geo_times.append((t, r["lat"], r["lng"], r["image_id"]))
+            except (ValueError, TypeError):
+                continue
+
+        # Check existing overrides
+        override_ids = set()
+        try:
+            ov_rows = conn.execute(
+                "SELECT DISTINCT image_id FROM overrides "
+                "WHERE table_name = 'analysis_metadata' "
+                "  AND field_name IN ('gps_latitude', 'gps_longitude')"
+            ).fetchall()
+            override_ids = {r["image_id"] for r in ov_rows}
+        except Exception:
+            pass
+
+        fillable = 0
+        previews: list[dict] = []
+
+        import bisect
+        from datetime import datetime as _dt
+
+        geo_timestamps = [gt[0] for gt in geo_times]
+
+        for row in missing_rows:
+            if row["image_id"] in override_ids:
+                continue
+            try:
+                t = _dt.fromisoformat(row["dto"].replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+
+            # Binary search for nearest neighbors
+            idx = bisect.bisect_left(geo_timestamps, t)
+            before = geo_times[idx - 1] if idx > 0 else None
+            after = geo_times[idx] if idx < len(geo_times) else None
+
+            before_gap = (t - before[0]).total_seconds() / 60 if before else float("inf")
+            after_gap = (after[0] - t).total_seconds() / 60 if after else float("inf")
+
+            if before_gap > max_gap and after_gap > max_gap:
+                continue
+
+            # Interpolate
+            if before_gap <= max_gap and after_gap <= max_gap:
+                total_gap = before_gap + after_gap
+                if total_gap < 0.01:
+                    lat = before[1]
+                    lng = before[2]
+                else:
+                    w_after = before_gap / total_gap
+                    lat = before[1] + w_after * (after[1] - before[1])
+                    lng = before[2] + w_after * (after[2] - before[2])
+                gap_min = total_gap
+                confidence = max(0.1, 1.0 - (gap_min / max_gap))
+            elif before_gap <= max_gap:
+                lat, lng = before[1], before[2]
+                gap_min = before_gap
+                confidence = max(0.1, 0.7 * (1.0 - (gap_min / max_gap)))
+            else:
+                lat, lng = after[1], after[2]
+                gap_min = after_gap
+                confidence = max(0.1, 0.7 * (1.0 - (gap_min / max_gap)))
+
+            fillable += 1
+            if len(previews) < preview_limit:
+                preview: dict[str, Any] = {
+                    "image_id": row["image_id"],
+                    "file_path": row["file_path"],
+                    "inferred_lat": round(lat, 6),
+                    "inferred_lng": round(lng, 6),
+                    "confidence": round(confidence, 3),
+                }
+                if before and before_gap <= max_gap:
+                    preview["nearest_before"] = {
+                        "image_id": before[3],
+                        "gap_minutes": round(before_gap, 1),
+                    }
+                if after and after_gap <= max_gap:
+                    preview["nearest_after"] = {
+                        "image_id": after[3],
+                        "gap_minutes": round(after_gap, 1),
+                    }
+                previews.append(preview)
+
+    except Exception as exc:
+        import traceback
+        sys.stderr.write(f"[geo/gap-filler-preview] error: {traceback.format_exc()}\n")
+        return {"error": str(exc)}
+
+    return {"fillable": fillable, "total_missing": total_missing, "previews": previews}
+
+
+def _handle_geo_gap_filler_apply(params: dict) -> dict:
+    """Apply GPS gap filling — write inferred coordinates to the database.
+
+    Params:
+        max_gap_minutes (int): max time gap (default 60)
+        min_confidence (float): minimum confidence threshold (default 0.5)
+    Returns:
+        filled, skipped_override, skipped_low_confidence
+    """
+    from imganalyzer.db.geohash import encode as geohash_encode
+    from imganalyzer.db.connection import begin_immediate
+
+    conn = _get_db()
+    max_gap = int(params.get("max_gap_minutes", 60))
+    min_confidence = float(params.get("min_confidence", 0.5))
+
+    try:
+        # Re-run the same analysis as preview
+        preview_result = _handle_geo_gap_filler_preview({
+            "max_gap_minutes": max_gap,
+            "preview_limit": 999_999_999,  # get all fillable
+        })
+        if "error" in preview_result:
+            return preview_result
+
+        # Check overrides
+        override_ids = set()
+        try:
+            ov_rows = conn.execute(
+                "SELECT DISTINCT image_id FROM overrides "
+                "WHERE table_name = 'analysis_metadata' "
+                "  AND field_name IN ('gps_latitude', 'gps_longitude')"
+            ).fetchall()
+            override_ids = {r["image_id"] for r in ov_rows}
+        except Exception:
+            pass
+
+        filled = 0
+        skipped_override = 0
+        skipped_low_confidence = 0
+
+        begin_immediate(conn)
+        try:
+            for p in preview_result["previews"]:
+                if p["image_id"] in override_ids:
+                    skipped_override += 1
+                    continue
+                if p["confidence"] < min_confidence:
+                    skipped_low_confidence += 1
+                    continue
+
+                lat = p["inferred_lat"]
+                lng = p["inferred_lng"]
+                gh = geohash_encode(lat, lng, precision=8)
+
+                conn.execute(
+                    "UPDATE analysis_metadata "
+                    "SET gps_latitude = ?, gps_longitude = ?, geohash = ?, "
+                    "    gps_source = 'inferred' "
+                    "WHERE image_id = ?",
+                    [lat, lng, gh, p["image_id"]],
+                )
+
+                # Update R*tree
+                conn.execute(
+                    "INSERT OR REPLACE INTO geo_rtree (id, min_lat, max_lat, min_lng, max_lng) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [p["image_id"], lat, lat, lng, lng],
+                )
+
+                filled += 1
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    except Exception as exc:
+        import traceback
+        sys.stderr.write(f"[geo/gap-filler-apply] error: {traceback.format_exc()}\n")
+        return {"error": str(exc)}
+
+    return {
+        "filled": filled,
+        "skipped_override": skipped_override,
+        "skipped_low_confidence": skipped_low_confidence,
+    }
+
+
+def _rdp_simplify(
+    points: list[tuple[float, float]], epsilon: float
+) -> list[tuple[float, float]]:
+    """Ramer-Douglas-Peucker line simplification (pure Python)."""
+    if len(points) <= 2:
+        return points
+
+    # Find the point farthest from the line between first and last
+    start, end = points[0], points[-1]
+    max_dist = 0.0
+    max_idx = 0
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    line_len_sq = dx * dx + dy * dy
+
+    for i in range(1, len(points) - 1):
+        px, py = points[i][0] - start[0], points[i][1] - start[1]
+        if line_len_sq > 0:
+            # perpendicular distance
+            dist = abs(px * dy - py * dx) / (line_len_sq**0.5)
+        else:
+            dist = (px * px + py * py) ** 0.5
+        if dist > max_dist:
+            max_dist = dist
+            max_idx = i
+
+    if max_dist > epsilon:
+        left = _rdp_simplify(points[: max_idx + 1], epsilon)
+        right = _rdp_simplify(points[max_idx:], epsilon)
+        return left[:-1] + right
+    else:
+        return [start, end]
+
+
+def _handle_geo_trip_detect(params: dict) -> dict:
+    """Auto-detect trips from geotagged photo sequences.
+
+    A "trip" is a sequence of photos where GPS moves >10km from the starting
+    area, with gaps >4h between trip segments.
+
+    Params:
+        min_images (int): minimum photos per trip (default 5)
+    Returns:
+        trips: [{start_date, end_date, start_location, end_location,
+                 image_count, distance_km}]
+    """
+    import math
+    from datetime import datetime as _dt, timedelta
+
+    conn = _get_db()
+    min_images = int(params.get("min_images", 5))
+
+    try:
+        rows = conn.execute(
+            "SELECT m.image_id, m.date_time_original AS dto, "
+            "       m.gps_latitude AS lat, m.gps_longitude AS lng, "
+            "       m.location_city AS city, m.location_country AS country "
+            "FROM analysis_metadata m "
+            "WHERE m.gps_latitude IS NOT NULL AND m.gps_longitude IS NOT NULL "
+            "  AND m.date_time_original IS NOT NULL "
+            "ORDER BY m.date_time_original"
+        ).fetchall()
+
+        if not rows:
+            return {"trips": []}
+
+        def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+            R = 6371.0
+            dlat = math.radians(lat2 - lat1)
+            dlng = math.radians(lng2 - lng1)
+            a = (math.sin(dlat / 2) ** 2 +
+                 math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+                 math.sin(dlng / 2) ** 2)
+            return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        # Parse timestamps and build image records
+        images: list[dict] = []
+        for r in rows:
+            try:
+                t = _dt.fromisoformat(r["dto"].replace("Z", "+00:00"))
+                images.append({
+                    "id": r["image_id"], "t": t,
+                    "lat": r["lat"], "lng": r["lng"],
+                    "city": r["city"], "country": r["country"],
+                })
+            except (ValueError, TypeError):
+                continue
+
+        if len(images) < min_images:
+            return {"trips": []}
+
+        # Segment into trips: split on time gaps > 4h
+        gap_threshold = timedelta(hours=4)
+        segments: list[list[dict]] = []
+        current_seg: list[dict] = [images[0]]
+        for i in range(1, len(images)):
+            gap = images[i]["t"] - images[i - 1]["t"]
+            if gap > gap_threshold:
+                segments.append(current_seg)
+                current_seg = []
+            current_seg.append(images[i])
+        if current_seg:
+            segments.append(current_seg)
+
+        # Filter: keep segments with enough images AND significant movement (>10km)
+        trips: list[dict] = []
+        for seg in segments:
+            if len(seg) < min_images:
+                continue
+            # Compute total distance
+            total_dist = 0.0
+            for i in range(1, len(seg)):
+                total_dist += _haversine(
+                    seg[i - 1]["lat"], seg[i - 1]["lng"],
+                    seg[i]["lat"], seg[i]["lng"],
+                )
+            max_dist = _haversine(
+                seg[0]["lat"], seg[0]["lng"],
+                seg[-1]["lat"], seg[-1]["lng"],
+            )
+            # Only include if there's meaningful movement (>10km total displacement)
+            # or significant path distance (>20km)
+            if max_dist < 10 and total_dist < 20:
+                continue
+
+            start_loc = seg[0]["city"] or seg[0]["country"] or (
+                f"{seg[0]['lat']:.2f}, {seg[0]['lng']:.2f}"
+            )
+            end_loc = seg[-1]["city"] or seg[-1]["country"] or (
+                f"{seg[-1]['lat']:.2f}, {seg[-1]['lng']:.2f}"
+            )
+            trips.append({
+                "start_date": seg[0]["t"].isoformat(),
+                "end_date": seg[-1]["t"].isoformat(),
+                "start_location": start_loc,
+                "end_location": end_loc,
+                "image_count": len(seg),
+                "distance_km": round(total_dist, 1),
+            })
+
+    except Exception as exc:
+        import traceback
+        sys.stderr.write(f"[geo/trip-detect] error: {traceback.format_exc()}\n")
+        return {"error": str(exc)}
+
+    return {"trips": trips}
+
+
+def _handle_geo_trip_timeline(params: dict) -> dict:
+    """Return a trip route with stops for timeline visualization.
+
+    Params:
+        start_date (str): ISO date start (inclusive)
+        end_date (str): ISO date end (inclusive)
+        simplify (bool): apply RDP simplification (default True)
+    Returns:
+        stops: [{lat, lng, start_time, end_time, count, cover_image_id, cover_file_path}]
+        route_points: [{lat, lng}]
+        total_images: int
+    """
+    import math
+    from datetime import datetime as _dt, timedelta
+
+    conn = _get_db()
+    start_date = params.get("start_date", "")
+    end_date = params.get("end_date", "")
+    simplify = params.get("simplify", True)
+
+    if not start_date or not end_date:
+        return {"error": "start_date and end_date are required"}
+
+    try:
+        rows = conn.execute(
+            "SELECT m.image_id, m.date_time_original AS dto, "
+            "       m.gps_latitude AS lat, m.gps_longitude AS lng, "
+            "       m.geohash, i.file_path "
+            "FROM analysis_metadata m "
+            "JOIN images i ON i.id = m.image_id "
+            "LEFT JOIN analysis_aesthetic a ON a.image_id = m.image_id "
+            "WHERE m.gps_latitude IS NOT NULL AND m.gps_longitude IS NOT NULL "
+            "  AND m.date_time_original >= ? AND m.date_time_original <= ? "
+            "ORDER BY m.date_time_original",
+            [start_date, end_date],
+        ).fetchall()
+
+        if not rows:
+            return {"stops": [], "route_points": [], "total_images": 0}
+
+        # Parse into records
+        images: list[dict] = []
+        for r in rows:
+            try:
+                t = _dt.fromisoformat(r["dto"].replace("Z", "+00:00"))
+                images.append({
+                    "id": r["image_id"], "t": t,
+                    "lat": r["lat"], "lng": r["lng"],
+                    "gh6": (r["geohash"] or "")[:6],
+                    "file_path": r["file_path"],
+                })
+            except (ValueError, TypeError):
+                continue
+
+        total_images = len(images)
+        if not images:
+            return {"stops": [], "route_points": [], "total_images": 0}
+
+        # Group into stops: same geohash-6 (~150m) AND within 30 min
+        stop_gap = timedelta(minutes=30)
+        stops_raw: list[list[dict]] = []
+        current_stop: list[dict] = [images[0]]
+
+        for i in range(1, len(images)):
+            same_area = images[i]["gh6"] == images[i - 1]["gh6"]
+            close_time = (images[i]["t"] - images[i - 1]["t"]) <= stop_gap
+            if same_area and close_time:
+                current_stop.append(images[i])
+            else:
+                stops_raw.append(current_stop)
+                current_stop = [images[i]]
+        if current_stop:
+            stops_raw.append(current_stop)
+
+        # Build stop summaries
+        stops: list[dict] = []
+        for group in stops_raw:
+            avg_lat = sum(im["lat"] for im in group) / len(group)
+            avg_lng = sum(im["lng"] for im in group) / len(group)
+            # Cover image: first image in the stop (could use aesthetic score later)
+            cover = group[0]
+            stops.append({
+                "lat": round(avg_lat, 6),
+                "lng": round(avg_lng, 6),
+                "start_time": group[0]["t"].isoformat(),
+                "end_time": group[-1]["t"].isoformat(),
+                "count": len(group),
+                "cover_image_id": cover["id"],
+                "cover_file_path": cover["file_path"],
+            })
+
+        # Build route polyline from all image positions
+        route_points = [(im["lat"], im["lng"]) for im in images]
+
+        # Simplify route if requested
+        if simplify and len(route_points) > 100:
+            # Adaptive epsilon based on route extent
+            lats = [p[0] for p in route_points]
+            lngs = [p[1] for p in route_points]
+            extent = max(max(lats) - min(lats), max(lngs) - min(lngs))
+            epsilon = extent * 0.001  # ~0.1% of extent
+            route_points = _rdp_simplify(route_points, epsilon)
+            # Cap at 1000 points
+            if len(route_points) > 1000:
+                step = len(route_points) // 1000
+                route_points = route_points[::step] + [route_points[-1]]
+
+        route_out = [
+            {"lat": round(p[0], 6), "lng": round(p[1], 6)} for p in route_points
+        ]
+
+    except Exception as exc:
+        import traceback
+        sys.stderr.write(f"[geo/trip-timeline] error: {traceback.format_exc()}\n")
+        return {"error": str(exc)}
+
+    return {"stops": stops, "route_points": route_out, "total_images": total_images}
+
+
 # ── Method dispatch ──────────────────────────────────────────────────────────
 
 # Methods that return a result synchronously (the response is sent
@@ -4461,6 +5135,11 @@ _SYNC_METHODS: dict[str, Any] = {
     "geo/nearby": _handle_geo_nearby,
     "geo/stats": _handle_geo_stats,
     "geo/heatmap": _handle_geo_heatmap,
+    "geo/stats-extended": _handle_geo_stats_extended,
+    "geo/gap-filler-preview": _handle_geo_gap_filler_preview,
+    "geo/gap-filler-apply": _handle_geo_gap_filler_apply,
+    "geo/trip-detect": _handle_geo_trip_detect,
+    "geo/trip-timeline": _handle_geo_trip_timeline,
 }
 
 # Methods that send their own result/error asynchronously (streaming).
