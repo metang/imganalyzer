@@ -1474,7 +1474,35 @@ class TestJobQueue:
         assert row is not None
         assert row["status"] == "pending"
 
-    def test_claim_leased_creates_job_lease(self, tmp_path):
+    def test_recover_stale_fails_jobs_over_max_attempts(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        img_id = repo.register_image(file_path="/photos/stale_max.jpg")
+        job_id = queue.enqueue(img_id, "caption")
+        assert job_id is not None
+
+        # Simulate a job that has been retried past max_attempts
+        conn.execute(
+            "UPDATE job_queue SET status = 'running', attempts = 5 WHERE id = ?",
+            [job_id],
+        )
+        conn.commit()
+
+        recovered = queue.recover_stale(timeout_minutes=0)
+        # Should NOT be re-queued (over max)
+        assert recovered == 0
+
+        row = conn.execute(
+            "SELECT status, error_message FROM job_queue WHERE id = ?", [job_id]
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "failed"
+        assert "max attempts" in row["error_message"].lower()
         from imganalyzer.db.repository import Repository
         from imganalyzer.db.queue import JobQueue
 
@@ -1538,6 +1566,104 @@ class TestJobQueue:
         assert row is not None
         assert row["status"] == "pending"
         lease_row = conn.execute("SELECT 1 FROM job_leases WHERE job_id = ?", [job_id]).fetchone()
+        assert lease_row is None
+
+    def test_claim_skips_jobs_over_max_attempts(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        img_id = repo.register_image(file_path="/photos/overclaimed.jpg")
+        job_id = queue.enqueue(img_id, "caption")
+        assert job_id is not None
+
+        # Set attempts > max_attempts but status = pending (simulates
+        # the state after recover_stale resets without the fix)
+        conn.execute(
+            "UPDATE job_queue SET attempts = 10 WHERE id = ?", [job_id]
+        )
+        conn.commit()
+
+        # Local claim should skip it
+        claimed = queue.claim(batch_size=10, module="caption")
+        assert len(claimed) == 0
+
+    def test_claim_leased_skips_jobs_over_max_attempts(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["test-worker", "Test Worker", "linux", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/overclaimed2.jpg")
+        job_id = queue.enqueue(img_id, "caption")
+        assert job_id is not None
+
+        conn.execute(
+            "UPDATE job_queue SET attempts = 10 WHERE id = ?", [job_id]
+        )
+        conn.commit()
+
+        # Leased claim should also skip it
+        claimed = queue.claim_leased(
+            worker_id="test-worker", lease_ttl_seconds=120, batch_size=10,
+        )
+        assert len(claimed) == 0
+
+    def test_release_expired_leases_fails_jobs_over_max_attempts(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["test-worker", "Test Worker", "linux", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/expired_max.jpg")
+        job_id = queue.enqueue(img_id, "caption")
+        assert job_id is not None
+
+        # Claim, then set attempts high and expire the lease
+        claimed = queue.claim_leased(
+            worker_id="test-worker", lease_ttl_seconds=1, batch_size=1,
+        )
+        assert len(claimed) == 1
+        conn.execute(
+            "UPDATE job_queue SET attempts = 5 WHERE id = ?", [job_id]
+        )
+        conn.execute(
+            "UPDATE job_leases SET lease_expires_at = datetime('now', '-1 minutes') WHERE job_id = ?",
+            [job_id],
+        )
+        conn.commit()
+
+        released = queue.release_expired_leases()
+        assert released == 1
+
+        row = conn.execute(
+            "SELECT status, error_message FROM job_queue WHERE id = ?", [job_id]
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "failed"
+        assert "max attempts" in row["error_message"].lower()
+
+        # Lease should be cleaned up
+        lease_row = conn.execute(
+            "SELECT 1 FROM job_leases WHERE job_id = ?", [job_id]
+        ).fetchone()
         assert lease_row is None
 
     def test_mark_done_leased_requires_matching_token(self, tmp_path):
