@@ -117,7 +117,7 @@ class JobQueue:
 
         If *modules* is given, only consider jobs for those modules.
         """
-        where = "WHERE status = 'pending'"
+        where = "WHERE status = 'pending' AND attempts <= max_attempts"
         params: list[Any] = []
         if modules:
             placeholders = ",".join("?" * len(modules))
@@ -147,7 +147,7 @@ class JobQueue:
 
         If *image_ids* is given, only claim jobs for those images (chunking).
         """
-        where = "WHERE status = 'pending'"
+        where = "WHERE status = 'pending' AND attempts <= max_attempts"
         params: list[Any] = []
         if module:
             where += " AND module = ?"
@@ -214,7 +214,7 @@ class JobQueue:
         If *restrict_image_ids* is given, ONLY jobs for those image IDs are
         eligible (cache-gated dispatch).
         """
-        where = "WHERE status = 'pending'"
+        where = "WHERE status = 'pending' AND attempts <= max_attempts"
         params: list[Any] = []
         if module:
             where += " AND module = ?"
@@ -318,25 +318,41 @@ class JobQueue:
 
             job_ids = [r["job_id"] for r in rows]
             placeholders = ",".join("?" * len(job_ids))
-            cur = self.conn.execute(
+
+            # Re-queue jobs that still have retries left
+            self.conn.execute(
                 f"""UPDATE job_queue
                     SET status = 'pending', started_at = NULL, attempts = attempts + 1,
                         last_node_id = NULL, last_node_role = NULL
-                    WHERE id IN ({placeholders})""",
+                    WHERE id IN ({placeholders})
+                      AND attempts < max_attempts""",
                 job_ids,
+            )
+            # Permanently fail jobs that exceeded max_attempts
+            self.conn.execute(
+                f"""UPDATE job_queue
+                    SET status = 'failed', attempts = attempts + 1,
+                        error_message = 'Exceeded max attempts (lease expired)',
+                        completed_at = ?
+                    WHERE id IN ({placeholders})
+                      AND attempts >= max_attempts AND status != 'failed'""",
+                [_now()] + job_ids,
             )
             self.conn.execute(
                 f"DELETE FROM job_leases WHERE job_id IN ({placeholders})",
                 job_ids,
             )
             self.conn.commit()
-            return cur.rowcount
+            return len(job_ids)
         except Exception:
             self.conn.rollback()
             raise
 
     def release_worker_leases(self, worker_id: str) -> int:
-        """Return all leases held by a worker to pending state."""
+        """Return all leases held by a worker to pending state.
+
+        Jobs that have exceeded ``max_attempts`` are permanently failed.
+        """
         _begin_immediate(self.conn)
         try:
             rows = self.conn.execute(
@@ -348,19 +364,31 @@ class JobQueue:
                 return 0
             job_ids = [r["job_id"] for r in rows]
             placeholders = ",".join("?" * len(job_ids))
-            cur = self.conn.execute(
+            # Re-queue jobs with retries left
+            self.conn.execute(
                 f"""UPDATE job_queue
                     SET status = 'pending', started_at = NULL, attempts = attempts + 1,
                         last_node_id = NULL, last_node_role = NULL
-                    WHERE id IN ({placeholders})""",
+                    WHERE id IN ({placeholders})
+                      AND attempts < max_attempts""",
                 job_ids,
+            )
+            # Fail jobs that exceeded max_attempts
+            self.conn.execute(
+                f"""UPDATE job_queue
+                    SET status = 'failed', attempts = attempts + 1,
+                        error_message = 'Exceeded max attempts (worker release)',
+                        completed_at = ?
+                    WHERE id IN ({placeholders})
+                      AND attempts >= max_attempts AND status != 'failed'""",
+                [_now()] + job_ids,
             )
             self.conn.execute(
                 f"DELETE FROM job_leases WHERE job_id IN ({placeholders})",
                 job_ids,
             )
             self.conn.commit()
-            return cur.rowcount
+            return len(job_ids)
         except Exception:
             self.conn.rollback()
             raise
@@ -794,25 +822,49 @@ class JobQueue:
     # ── Recover stale running jobs (crash recovery) ────────────────────────
 
     def recover_stale(self, timeout_minutes: int = 10) -> int:
-        """Reset jobs stuck in 'running' state (e.g. after a crash)."""
-        if timeout_minutes <= 0:
-            cur = self.conn.execute(
-                """UPDATE job_queue
-                   SET status = 'pending', attempts = attempts + 1,
-                       last_node_id = NULL, last_node_role = NULL
-                    WHERE status = 'running'"""
-            )
-        else:
-            cur = self.conn.execute(
-                """UPDATE job_queue
-                   SET status = 'pending', attempts = attempts + 1,
-                       last_node_id = NULL, last_node_role = NULL
-                    WHERE status = 'running'
-                    AND started_at <= datetime('now', '-' || ? || ' minutes')""",
-                [timeout_minutes],
-            )
+        """Reset jobs stuck in 'running' state (e.g. after a crash).
+
+        Jobs that have exceeded ``max_attempts`` are permanently failed
+        instead of being re-queued to prevent infinite retry cycling.
+        """
+        time_filter = ""
+        params: list[Any] = []
+        if timeout_minutes > 0:
+            time_filter = " AND started_at <= datetime('now', '-' || ? || ' minutes')"
+            params = [timeout_minutes]
+
+        # Re-queue jobs that still have retries left
+        cur = self.conn.execute(
+            f"""UPDATE job_queue
+                SET status = 'pending', attempts = attempts + 1,
+                    last_node_id = NULL, last_node_role = NULL
+                WHERE status = 'running' AND attempts < max_attempts
+                {time_filter}""",
+            params,
+        )
+        requeued = cur.rowcount
+
+        # Permanently fail jobs that exceeded max_attempts
+        self.conn.execute(
+            f"""UPDATE job_queue
+                SET status = 'failed', attempts = attempts + 1,
+                    error_message = 'Exceeded max attempts (stale recovery)',
+                    completed_at = ?
+                WHERE status = 'running' AND attempts >= max_attempts
+                {time_filter}""",
+            [_now()] + params,
+        )
+        # Clean up any orphaned leases for newly-failed jobs
+        self.conn.execute(
+            """DELETE FROM job_leases WHERE job_id IN (
+                SELECT id FROM job_queue
+                WHERE status = 'failed'
+                  AND error_message LIKE 'Exceeded max attempts%'
+                  AND completed_at >= datetime('now', '-1 minutes')
+            )"""
+        )
         self.conn.commit()
-        return cur.rowcount
+        return requeued
 
     # ── Status / stats ─────────────────────────────────────────────────────
 
@@ -886,7 +938,7 @@ class JobQueue:
         modules: list[str] | None = None,
         image_ids: set[int] | None = None,
     ) -> int:
-        where = "WHERE status = 'pending'"
+        where = "WHERE status = 'pending' AND attempts <= max_attempts"
         params: list[Any] = []
         if module:
             where += " AND module = ?"
