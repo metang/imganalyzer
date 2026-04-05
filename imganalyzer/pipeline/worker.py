@@ -564,6 +564,15 @@ class Worker:
             _consecutive_empty_sweeps = 0
             _MAX_EMPTY_SWEEPS = 3
             while not self._shutdown.is_set():
+                # Fail any zombie pending jobs (attempts > max_attempts)
+                # that accumulate from previous crash-recovery cycles.
+                zombie_count = self.queue.fail_exhausted_pending()
+                if zombie_count and self.verbose:
+                    console.print(
+                        f"[yellow]Failed {zombie_count} exhausted pending "
+                        "job(s) (attempts > max_attempts)[/yellow]"
+                    )
+
                 all_image_ids = self._pending_image_ids_with_running_wait(poll_interval_s=1.0)
                 if not all_image_ids:
                     # Safety: re-check globally before exiting.  The previous
@@ -976,10 +985,11 @@ class Worker:
                                     raise
 
                         if not processed_any:
-                            # No GPU phase had work — remaining jobs are
-                            # IO-only or running on workers.  The IO drain
-                            # above already handled IO jobs; loop back to
-                            # check running count and wait if needed.
+                            # No GPU phase had work — either nothing pending,
+                            # all phases deferred (e.g. VRAM cooldown), or
+                            # remaining jobs are IO-only / running on workers.
+                            # Sleep briefly to avoid a tight CPU loop.
+                            self._shutdown.wait(2.0)
                             continue
 
                         # IO drain for retried jobs
