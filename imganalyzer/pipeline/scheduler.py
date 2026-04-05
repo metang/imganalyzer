@@ -367,7 +367,13 @@ class ResourceScheduler:
 
                     # Consumer: GPU inference on prefetched images
                     while True:
-                        item = prefetch_q.get()
+                        try:
+                            item = prefetch_q.get(timeout=120)
+                        except _queue.Empty:
+                            # Producer may have died without sentinel
+                            if producer_done.is_set() or self.is_shutdown:
+                                break
+                            continue
                         if item is None:
                             break
                         job, img_data = item
@@ -390,9 +396,18 @@ class ResourceScheduler:
                     gpu_threads.append(t)
                     t.start()
 
-                # While GPU threads work, keep submitting and reaping IO jobs
+                # While GPU threads work, keep submitting and reaping IO jobs.
+                # Phase timeout prevents indefinite hang if a GPU thread stalls.
+                phase_deadline = time.monotonic() + 1800  # 30 min max per phase
                 alive = True
                 while alive and not self.is_shutdown:
+                    if time.monotonic() > phase_deadline:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "GPU phase timeout (30 min) — forcing phase exit"
+                        )
+                        break
+
                     new_io = submit_io_fn(local_pool, cloud_pool)
                     pending_futures.update(new_io)
 

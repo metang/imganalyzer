@@ -267,15 +267,40 @@ class Worker:
         self,
         poll_interval_s: float = 1.0,
         reclaim_interval_s: float = 15.0,
+        max_wait_s: float = 600.0,
     ) -> list[int]:
         """Return pending image_ids, waiting while leased jobs are still running.
 
         In distributed runs, workers can temporarily lease most pending jobs.
         During that window ``pending=0`` does not mean the queue is finished —
         it only means work is currently in ``running`` state on workers.
+
+        Gives up after *max_wait_s* seconds if no pending work appears,
+        recovering stale running jobs as a last resort.
         """
         idle_polls = 0
+        wait_deadline = time.perf_counter() + max_wait_s
         while not self._shutdown.is_set():
+            pending_image_ids = self.queue.get_pending_image_ids()
+            if pending_image_ids:
+                return pending_image_ids
+
+            running_jobs = self.queue.running_count()
+            if running_jobs <= 0:
+                return []
+
+            # Safety: don't wait forever for running jobs to finish
+            if time.perf_counter() > wait_deadline:
+                recovered = self.queue.recover_stale(timeout_minutes=0)
+                if recovered:
+                    console.print(
+                        f"[yellow]Wait limit reached; recovered {recovered} "
+                        f"stale running job(s)[/yellow]"
+                    )
+                    continue  # re-check pending after recovery
+                return []
+
+            idle_polls += 1
             pending_image_ids = self.queue.get_pending_image_ids()
             if pending_image_ids:
                 return pending_image_ids
@@ -470,10 +495,18 @@ class Worker:
             def _collect_futures(futures: dict[Future, dict[str, Any]]) -> None:
                 for fut, job in futures.items():
                     try:
-                        result_status = fut.result()
+                        result_status = fut.result(timeout=300)
                         stats[result_status] = stats.get(result_status, 0) + 1
                     except CancelledError:
                         self.queue.mark_pending(job["id"])
+                    except TimeoutError:
+                        error_msg = "Timed out waiting for job result (5 min)"
+                        self.queue.mark_failed(job["id"], error_msg)
+                        stats["failed"] += 1
+                        _emit_result(
+                            str(job.get("image_id", "?")),
+                            job["module"], "failed", 0, error_msg,
+                        )
                     except Exception as exc:
                         error_msg = f"{type(exc).__name__}: {exc}"
                         self.queue.mark_failed(job["id"], error_msg)
@@ -772,9 +805,25 @@ class Worker:
                     # or because slow modules weren't fully drained.
                     # ════════════════════════════════════════════════════════════
                     chunk_retry = 0
+                    max_chunk_retries = 50
+                    chunk_retry_deadline = time.perf_counter() + 1800  # 30 min max
                     last_stale_recovery = time.perf_counter()
                     stale_recovery_interval_s = 60.0  # recover stuck jobs every 60s
                     while not self._shutdown.is_set() and chunk_ids is not None:
+                        # ── Safety: abort chunk retry if stuck too long ────────
+                        if (chunk_retry >= max_chunk_retries
+                                or time.perf_counter() > chunk_retry_deadline):
+                            remaining = self.queue.pending_count(image_ids=chunk_ids)
+                            running = self.queue.running_count(image_ids=chunk_ids)
+                            if remaining or running:
+                                console.print(
+                                    f"[yellow]  Chunk retry limit reached "
+                                    f"({chunk_retry} passes / 30 min). "
+                                    f"Moving on with {remaining} pending + "
+                                    f"{running} running.[/yellow]"
+                                )
+                            break
+
                         # ── Periodic stale + lease recovery ──────────────────
                         # During long chunk processing, jobs claimed by
                         # distributed workers can get stuck in "running" state
