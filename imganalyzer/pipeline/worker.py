@@ -1236,8 +1236,9 @@ class Worker:
             prereq = _PREREQUISITES.get(module)
             if prereq and not repo.is_analyzed(image_id, prereq):
                 prereq_status = queue.get_image_module_job_status(image_id, prereq)
-                if prereq_status in ("failed", "skipped"):
-                    queue.mark_skipped(job_id, f"prerequisite_{prereq}_{prereq_status}")
+                if prereq_status in ("failed", "skipped", None):
+                    reason = f"prerequisite_{prereq}_{prereq_status or 'missing'}"
+                    queue.mark_skipped(job_id, reason)
                 else:
                     queue.mark_pending(job_id)
                 batch_stats["skipped"] += 1
@@ -1363,8 +1364,11 @@ class Worker:
                 prereq = _PREREQUISITES.get(module)
                 if prereq and not repo.is_analyzed(image_id, prereq):
                     prereq_status = queue.get_image_module_job_status(image_id, prereq)
-                    if prereq_status in ("failed", "skipped"):
-                        queue.mark_skipped(job_id, f"prerequisite_{prereq}_{prereq_status}")
+                    if prereq_status in ("failed", "skipped", None):
+                        # Prereq failed, was skipped, or has no job at all —
+                        # this dependent job will never be satisfiable.
+                        reason = f"prerequisite_{prereq}_{prereq_status or 'missing'}"
+                        queue.mark_skipped(job_id, reason)
                     else:
                         queue.defer(job_id)
                     return "skipped"
