@@ -900,10 +900,13 @@ class Worker:
                                     self.stale_timeout,
                                 )
                                 released = self.queue.release_expired_leases()
-                                if recovered or released:
+                                zombies = self.queue.fail_exhausted_pending()
+                                if recovered or released or zombies:
                                     console.print(
                                         f"[yellow]  Recovered {recovered} stale + "
-                                        f"{released} expired lease(s)[/yellow]"
+                                        f"{released} expired lease(s)"
+                                        f"{f' + {zombies} zombies' if zombies else ''}"
+                                        f"[/yellow]"
                                     )
                             except sqlite3.OperationalError:
                                 pass  # database busy — try again next interval
@@ -1102,8 +1105,10 @@ class Worker:
 
                         try:
                             unload_gpu_model("caption")
-                        except Exception:
-                            pass
+                        except Exception as unload_exc:
+                            sys.stderr.write(
+                                f"WARN: unload_gpu_model(caption) failed: {unload_exc}\n"
+                            )
 
                         def _drain_indie_gpu(module: str) -> None:
                             while not self._shutdown.is_set():
@@ -1240,7 +1245,7 @@ class Worker:
                     reason = f"prerequisite_{prereq}_{prereq_status or 'missing'}"
                     queue.mark_skipped(job_id, reason)
                 else:
-                    queue.mark_pending(job_id)
+                    queue.defer(job_id)
                 batch_stats["skipped"] += 1
                 continue
 
@@ -1457,8 +1462,10 @@ class Worker:
                 error_msg = f"{type(exc).__name__}: {exc}"
                 try:
                     queue.mark_failed(job_id, error_msg)
-                except Exception:
-                    pass
+                except Exception as mf_exc:
+                    sys.stderr.write(
+                        f"WARN: mark_failed({job_id}) failed: {mf_exc}\n"
+                    )
                 _emit_result(path, module, "failed", elapsed, error_msg)
                 if self.verbose:
                     console.print(f"  [red]Failed:[/red] {path} module={module}: {error_msg}")
@@ -1468,8 +1475,10 @@ class Worker:
         error_msg = "OperationalError: database is locked"
         try:
             queue.mark_failed(job_id, error_msg)
-        except Exception:
-            pass
+        except Exception as mf_exc:
+            sys.stderr.write(
+                f"WARN: mark_failed({job_id}) failed: {mf_exc}\n"
+            )
         _emit_result(path, module, "failed", elapsed, error_msg)
         if self.verbose:
             console.print(f"  [red]Failed:[/red] {path} module={module}: {error_msg}")
