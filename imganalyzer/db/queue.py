@@ -678,6 +678,24 @@ class JobQueue:
 
     # ── Retry failed jobs ──────────────────────────────────────────────────
 
+    def fail_exhausted_pending(self) -> int:
+        """Permanently fail pending jobs whose attempts exceeded max_attempts.
+
+        These "zombie" jobs can accumulate when older recovery logic reset
+        jobs to pending without checking the attempt count.
+        """
+        cur = self.conn.execute(
+            """UPDATE job_queue
+               SET status = 'failed',
+                   error_message = 'Exceeded max attempts (exhausted pending)',
+                   completed_at = ?
+               WHERE status = 'pending' AND attempts > max_attempts""",
+            [_now()],
+        )
+        if cur.rowcount:
+            self.conn.commit()
+        return cur.rowcount
+
     def retry_failed(self, max_attempts: int = 3) -> int:
         """Re-enqueue failed jobs that haven't exceeded max_attempts."""
         cur = self.conn.execute(
