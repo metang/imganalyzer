@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gc
 import queue as _queue
+import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -352,11 +353,18 @@ class ResourceScheduler:
                                             img_data = prefetch_fn(job)
                                         except Exception:
                                             img_data = None
-                                    prefetch_q.put((job, img_data))
+                                    try:
+                                        prefetch_q.put((job, img_data), timeout=30)
+                                    except _queue.Full:
+                                        # Consumer likely died; stop producing
+                                        return
                         finally:
                             producer_done.set()
                             # Sentinel: tell consumer no more items
-                            prefetch_q.put(None)
+                            try:
+                                prefetch_q.put(None, timeout=10)
+                            except _queue.Full:
+                                pass  # consumer already gone
 
                     # Start producer thread
                     prod_t = threading.Thread(
@@ -386,9 +394,20 @@ class ResourceScheduler:
 
                     prod_t.join(timeout=5)
 
+                thread_errors: dict[str, str] = {}
+
+                def _safe_drain_module(mod: str) -> None:
+                    try:
+                        _drain_module(mod)
+                    except Exception as exc:
+                        thread_errors[mod] = f"{type(exc).__name__}: {exc}"
+                        sys.stderr.write(
+                            f"ERROR: GPU thread {mod} crashed: {exc}\n"
+                        )
+
                 for mod in modules:
                     t = threading.Thread(
-                        target=_drain_module,
+                        target=_safe_drain_module,
                         args=(mod,),
                         daemon=True,
                         name=f"gpu-{mod}",
@@ -431,6 +450,10 @@ class ResourceScheduler:
             for mod in reserved_modules:
                 try:
                     unload_fn(mod)
+                except Exception as unload_exc:
+                    sys.stderr.write(
+                        f"WARN: unload_fn({mod}) failed: {unload_exc}\n"
+                    )
                 finally:
                     self.vram.release(mod)
             # Force allocator cleanup now so large model memory is released

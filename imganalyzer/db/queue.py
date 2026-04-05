@@ -319,24 +319,29 @@ class JobQueue:
             job_ids = [r["job_id"] for r in rows]
             placeholders = ",".join("?" * len(job_ids))
 
-            # Re-queue jobs that still have retries left
-            self.conn.execute(
-                f"""UPDATE job_queue
-                    SET status = 'pending', started_at = NULL, attempts = attempts + 1,
-                        last_node_id = NULL, last_node_role = NULL
-                    WHERE id IN ({placeholders})
-                      AND attempts < max_attempts""",
-                job_ids,
-            )
-            # Permanently fail jobs that exceeded max_attempts
+            # Permanently fail jobs that exceeded max_attempts (check BEFORE
+            # re-queue to avoid double-update on boundary: a job at
+            # attempts = max_attempts-1 would be re-queued by query 1 then
+            # immediately matched by query 2 if checked after).
             self.conn.execute(
                 f"""UPDATE job_queue
                     SET status = 'failed', attempts = attempts + 1,
                         error_message = 'Exceeded max attempts (lease expired)',
                         completed_at = ?
                     WHERE id IN ({placeholders})
-                      AND attempts >= max_attempts AND status != 'failed'""",
+                      AND status = 'running'
+                      AND attempts >= max_attempts""",
                 [_now()] + job_ids,
+            )
+            # Re-queue jobs that still have retries left
+            self.conn.execute(
+                f"""UPDATE job_queue
+                    SET status = 'pending', started_at = NULL, attempts = attempts + 1,
+                        last_node_id = NULL, last_node_role = NULL
+                    WHERE id IN ({placeholders})
+                      AND status = 'running'
+                      AND attempts < max_attempts""",
+                job_ids,
             )
             self.conn.execute(
                 f"DELETE FROM job_leases WHERE job_id IN ({placeholders})",
@@ -364,24 +369,27 @@ class JobQueue:
                 return 0
             job_ids = [r["job_id"] for r in rows]
             placeholders = ",".join("?" * len(job_ids))
-            # Re-queue jobs with retries left
-            self.conn.execute(
-                f"""UPDATE job_queue
-                    SET status = 'pending', started_at = NULL, attempts = attempts + 1,
-                        last_node_id = NULL, last_node_role = NULL
-                    WHERE id IN ({placeholders})
-                      AND attempts < max_attempts""",
-                job_ids,
-            )
-            # Fail jobs that exceeded max_attempts
+            # Fail jobs that exceeded max_attempts (before re-queue to
+            # avoid double-update on boundary cases)
             self.conn.execute(
                 f"""UPDATE job_queue
                     SET status = 'failed', attempts = attempts + 1,
                         error_message = 'Exceeded max attempts (worker release)',
                         completed_at = ?
                     WHERE id IN ({placeholders})
-                      AND attempts >= max_attempts AND status != 'failed'""",
+                      AND status = 'running'
+                      AND attempts >= max_attempts""",
                 [_now()] + job_ids,
+            )
+            # Re-queue jobs with retries left
+            self.conn.execute(
+                f"""UPDATE job_queue
+                    SET status = 'pending', started_at = NULL, attempts = attempts + 1,
+                        last_node_id = NULL, last_node_role = NULL
+                    WHERE id IN ({placeholders})
+                      AND status = 'running'
+                      AND attempts < max_attempts""",
+                job_ids,
             )
             self.conn.execute(
                 f"DELETE FROM job_leases WHERE job_id IN ({placeholders})",
@@ -654,7 +662,7 @@ class JobQueue:
             """UPDATE job_queue
                SET status = 'pending', started_at = NULL,
                    last_node_id = NULL, last_node_role = NULL
-               WHERE id = ?""",
+               WHERE id = ? AND status = 'running'""",
             [job_id],
         )
         self.conn.commit()
@@ -671,7 +679,7 @@ class JobQueue:
                SET status = 'pending', started_at = NULL,
                    queued_at = ?,
                    last_node_id = NULL, last_node_role = NULL
-               WHERE id = ?""",
+               WHERE id = ? AND status = 'running'""",
             [_now_plus(seconds), job_id],
         )
         self.conn.commit()
@@ -872,13 +880,12 @@ class JobQueue:
                 {time_filter}""",
             [_now()] + params,
         )
-        # Clean up any orphaned leases for newly-failed jobs
+        # Clean up orphaned leases — any lease whose job is no longer running
         self.conn.execute(
             """DELETE FROM job_leases WHERE job_id IN (
-                SELECT id FROM job_queue
-                WHERE status = 'failed'
-                  AND error_message LIKE 'Exceeded max attempts%'
-                  AND completed_at >= datetime('now', '-1 minutes')
+                SELECT jl.job_id FROM job_leases jl
+                JOIN job_queue jq ON jq.id = jl.job_id
+                WHERE jq.status NOT IN ('running')
             )"""
         )
         self.conn.commit()
