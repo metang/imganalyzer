@@ -487,6 +487,25 @@ class PreDecoder:
                 except Exception:
                     pass  # Headers are optional enrichment
 
+                # Pre-parse EXIF from the original file so remote workers
+                # don't need the file on disk for metadata extraction.
+                try:
+                    import exifread
+
+                    with open(path, "rb") as f:
+                        tags = exifread.process_file(
+                            f, details=False, strict=False,
+                        )
+                    from imganalyzer.analysis.metadata import MetadataExtractor
+
+                    parsed = MetadataExtractor(
+                        path, image_data,
+                    )._parse_exifread_tags(tags)
+                    if parsed:
+                        sidecar["parsed_exif"] = parsed
+                except Exception:
+                    pass  # Best-effort; metadata module falls back to file
+
                 self._store.put(image_id, pil_image, sidecar)
 
                 elapsed = time.monotonic() - t0

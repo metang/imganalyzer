@@ -129,32 +129,40 @@ class MetadataExtractor:
     def extract(self) -> dict[str, Any]:
         meta: dict[str, Any] = {}
 
-        # Try exifread (works for JPEG, TIFF, and RAW files)
-        try:
-            import exifread
-            with open(self.path, "rb") as f:
-                tags = exifread.process_file(f, details=False, strict=False)
-            meta.update(self._parse_exifread_tags(tags))
-        except Exception as exc:
-            log.debug(
-                "metadata extraction failed stage=exifread path=%s "
-                "error_type=%s error=%s",
-                self.path,
-                type(exc).__name__,
-                exc,
-            )
+        # 1. Try pre-parsed EXIF from sidecar (remote worker path — no
+        #    original file on disk, but coordinator extracted EXIF during
+        #    pre-decode and stored the result in the sidecar).
+        parsed_exif = self.image_data.get("parsed_exif")
+        if parsed_exif and isinstance(parsed_exif, dict):
+            meta.update(parsed_exif)
 
-        # Fallback: piexif for JPEG
-        if not meta and not self.image_data.get("is_raw"):
-            try:
-                import piexif
-                exif_bytes = self.image_data.get("exif_bytes")
-                if exif_bytes:
+        # 2. Try piexif from raw EXIF bytes (works without file access)
+        if not meta:
+            exif_bytes = self.image_data.get("exif_bytes")
+            if exif_bytes:
+                try:
+                    import piexif
                     exif_dict = piexif.load(exif_bytes)
                     meta.update(self._parse_piexif(exif_dict))
+                except Exception as exc:
+                    log.debug(
+                        "metadata extraction failed stage=piexif path=%s "
+                        "error_type=%s error=%s",
+                        self.path,
+                        type(exc).__name__,
+                        exc,
+                    )
+
+        # 3. Try exifread from the original file (master device path)
+        if not meta:
+            try:
+                import exifread
+                with open(self.path, "rb") as f:
+                    tags = exifread.process_file(f, details=False, strict=False)
+                meta.update(self._parse_exifread_tags(tags))
             except Exception as exc:
                 log.debug(
-                    "metadata extraction failed stage=piexif path=%s "
+                    "metadata extraction failed stage=exifread path=%s "
                     "error_type=%s error=%s",
                     self.path,
                     type(exc).__name__,
