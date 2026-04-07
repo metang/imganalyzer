@@ -20,7 +20,7 @@ def test_server_worker_pause_resume_controls_claim(tmp_path, monkeypatch):
     queue = JobQueue(conn)
 
     image_id = repo.register_image(file_path="/photos/paused-worker.jpg")
-    queue.enqueue(image_id, "metadata")
+    queue.enqueue(image_id, "caption")
     conn.close()
 
     monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
@@ -34,7 +34,7 @@ def test_server_worker_pause_resume_controls_claim(tmp_path, monkeypatch):
         {
             "workerId": "worker-1",
             "displayName": "Worker 1",
-            "capabilities": {"supportedModules": ["metadata"], "cuda": False},
+            "capabilities": {"supportedModules": ["caption"], "cuda": False},
         }
     )
     paused = server._handle_workers_pause(
@@ -60,7 +60,7 @@ def test_server_worker_pause_resume_controls_claim(tmp_path, monkeypatch):
 
     resumed_claim = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1})
     assert len(resumed_claim["jobs"]) == 1
-    assert resumed_claim["jobs"][0]["module"] == "metadata"
+    assert resumed_claim["jobs"][0]["module"] == "caption"
 
 
 def test_server_worker_pause_immediate_releases_leases(tmp_path, monkeypatch):
@@ -72,7 +72,7 @@ def test_server_worker_pause_immediate_releases_leases(tmp_path, monkeypatch):
     queue = JobQueue(conn)
 
     image_id = repo.register_image(file_path="/photos/pause-immediate.jpg")
-    queue.enqueue(image_id, "metadata")
+    queue.enqueue(image_id, "caption")
     conn.close()
 
     monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))

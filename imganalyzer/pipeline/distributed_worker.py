@@ -32,13 +32,14 @@ console = Console()
 _LOCAL_AI_MODULES = {"objects", "caption", "faces", "embedding", "perception"}
 
 # Modules that always work (pure Python / stdlib)
-_ALWAYS_AVAILABLE_MODULES = {"metadata"}
+_ALWAYS_AVAILABLE_MODULES: set[str] = set()
 
 # Modules that must run on the master device because they need
-# the original full-resolution image for accurate results:
+# the original file on disk for accurate results:
+#   metadata — exifread needs the raw file bytes for full EXIF extraction
 #   technical — noise/sharpness estimates are destroyed by resizing
 #   faces — small faces lost at 1024px, embedding quality degrades
-_MASTER_ONLY_MODULES = frozenset({"technical", "faces"})
+_MASTER_ONLY_MODULES = frozenset({"metadata", "technical", "faces"})
 _TRANSIENT_DB_LOCK_MARKERS = (
     "database is locked",
     "database table is locked",

@@ -1441,10 +1441,11 @@ def _handle_jobs_claim(params: dict) -> dict:
     prefer_module = policy.prefer_module
     prefer_image_ids = policy.prefer_image_ids
 
-    # Enforce master-only modules: technical and faces need the original
-    # full-resolution image for accurate results (noise estimation,
-    # small face detection, embedding quality).
-    _MASTER_ONLY = {"technical", "faces"}
+    # Enforce master-only modules: these need the original file on disk
+    # for accurate results. metadata needs exifread on the raw file,
+    # technical needs full-res for noise/sharpness, faces needs full-res
+    # for small face detection and embedding quality.
+    _MASTER_ONLY = {"metadata", "technical", "faces"}
     if module_filter and module_filter in _MASTER_ONLY:
         return {"jobs": []}
     if modules_filter:

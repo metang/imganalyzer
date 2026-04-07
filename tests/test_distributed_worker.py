@@ -710,7 +710,7 @@ def test_server_jobs_claim_reserves_work_for_idle_master(tmp_path, monkeypatch):
     queue = JobQueue(conn)
 
     image_id = repo.register_image(file_path="/nas/photos/master-reserve.jpg")
-    job_id = queue.enqueue(image_id, "metadata")
+    job_id = queue.enqueue(image_id, "caption")
     assert job_id is not None
     conn.close()
 
@@ -727,7 +727,7 @@ def test_server_jobs_claim_reserves_work_for_idle_master(tmp_path, monkeypatch):
     server._active_worker = ActiveWorkerStub()
     try:
         server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
-        result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "metadata"})
+        result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "caption"})
     finally:
         server._active_worker = None
 
@@ -755,7 +755,7 @@ def test_server_jobs_claim_allows_worker_when_master_is_busy(tmp_path, monkeypat
     queue.claim(batch_size=1, module="technical")
 
     pending_image_id = repo.register_image(file_path="/nas/photos/worker-eligible.jpg")
-    pending_job_id = queue.enqueue(pending_image_id, "metadata")
+    pending_job_id = queue.enqueue(pending_image_id, "caption")
     assert pending_job_id is not None
     conn.close()
 
@@ -772,7 +772,7 @@ def test_server_jobs_claim_allows_worker_when_master_is_busy(tmp_path, monkeypat
     server._active_worker = ActiveWorkerStub()
     try:
         server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
-        result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "metadata"})
+        result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "caption"})
     finally:
         server._active_worker = None
 
