@@ -32,7 +32,13 @@ console = Console()
 _LOCAL_AI_MODULES = {"objects", "caption", "faces", "embedding", "perception"}
 
 # Modules that always work (pure Python / stdlib)
-_ALWAYS_AVAILABLE_MODULES = {"metadata", "technical"}
+_ALWAYS_AVAILABLE_MODULES = {"metadata"}
+
+# Modules that must run on the master device because they need
+# the original full-resolution image for accurate results:
+#   technical — noise/sharpness estimates are destroyed by resizing
+#   faces — small faces lost at 1024px, embedding quality degrades
+_MASTER_ONLY_MODULES = frozenset({"technical", "faces"})
 _TRANSIENT_DB_LOCK_MARKERS = (
     "database is locked",
     "database table is locked",
@@ -181,13 +187,19 @@ def _probe_available_modules(_cloud_provider: str | None = None) -> list[str]:
 
         _sys.stderr.write(f"[probe] caption unavailable: {exc}\n")
 
-    # faces needs insightface
+    # faces needs insightface — but is master-only (needs full-res
+    # image for small face detection and accurate embeddings).
+    # Only probe so we can log if it *would* be available.
     try:
         import insightface  # noqa: F401
 
-        # insightface also needs torch (already checked above)
         if "objects" in available:
-            available.append("faces")
+            import sys as _sys
+
+            _sys.stderr.write(
+                "[probe] faces available but master-only "
+                "(needs full-resolution image)\n"
+            )
     except ImportError:
         pass
 

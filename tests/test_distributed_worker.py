@@ -843,7 +843,7 @@ def test_server_jobs_claim_scans_past_prereq_blocked_jobs(tmp_path, monkeypatch)
 
     for idx in range(300):
         image_id = repo.register_image(file_path=f"/nas/photos/blocked-{idx}.jpg")
-        job_id = queue.enqueue(image_id, "faces")
+        job_id = queue.enqueue(image_id, "embedding")
         assert job_id is not None
         conn.execute(
             "UPDATE job_queue SET queued_at = ? WHERE id = ?",
@@ -851,7 +851,7 @@ def test_server_jobs_claim_scans_past_prereq_blocked_jobs(tmp_path, monkeypatch)
         )
 
     eligible_image_id = repo.register_image(file_path="/nas/photos/eligible.jpg")
-    eligible_job_id = queue.enqueue(eligible_image_id, "faces")
+    eligible_job_id = queue.enqueue(eligible_image_id, "embedding")
     assert eligible_job_id is not None
     conn.execute(
         "UPDATE job_queue SET queued_at = ? WHERE id = ?",
@@ -870,7 +870,7 @@ def test_server_jobs_claim_scans_past_prereq_blocked_jobs(tmp_path, monkeypatch)
     server._db_local = threading.local()
     server._decoded_store = None
     server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
-    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "faces"})
+    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "embedding"})
 
     assert len(result["jobs"]) == 1
     job = result["jobs"][0]
@@ -888,9 +888,9 @@ def test_server_jobs_claim_skips_when_prerequisite_failed(tmp_path, monkeypatch)
 
     image_id = repo.register_image(file_path="/nas/photos/prereq-failed.jpg")
     objects_job = queue.enqueue(image_id, "objects")
-    faces_job = queue.enqueue(image_id, "faces")
+    embedding_job = queue.enqueue(image_id, "embedding")
     assert objects_job is not None
-    assert faces_job is not None
+    assert embedding_job is not None
     queue.mark_failed(objects_job, "ImportError: PyTorch not installed")
     conn.close()
 
@@ -900,14 +900,14 @@ def test_server_jobs_claim_skips_when_prerequisite_failed(tmp_path, monkeypatch)
     server._db_local = threading.local()
     server._decoded_store = None
     server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
-    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "faces"})
+    result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "embedding"})
     assert result["jobs"] == []
 
     check = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
     check.row_factory = sqlite3.Row
     row = check.execute(
         "SELECT status, skip_reason FROM job_queue WHERE id = ?",
-        [faces_job],
+        [embedding_job],
     ).fetchone()
     check.close()
     assert row is not None

@@ -3441,12 +3441,14 @@ class TestProbeAvailableModules:
         _probe_available_modules()
         assert os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") == "1"
 
-    def test_always_includes_metadata_and_technical(self):
+    def test_always_includes_metadata(self):
         from imganalyzer.pipeline.distributed_worker import _probe_available_modules
 
         modules = _probe_available_modules()
         assert "metadata" in modules
-        assert "technical" in modules
+        # technical and faces are master-only (need full-res image)
+        assert "technical" not in modules
+        assert "faces" not in modules
 
     def test_copilot_provider_includes_cloud_modules(self):
         from imganalyzer.pipeline.distributed_worker import _probe_available_modules
@@ -3457,7 +3459,8 @@ class TestProbeAvailableModules:
         assert "aesthetic" not in modules
         # basic always-available modules should be present
         assert "metadata" in modules
-        assert "technical" in modules
+        # technical is master-only, not advertised by workers
+        assert "technical" not in modules
 
     def test_returns_sorted_unique_list(self):
         from imganalyzer.pipeline.distributed_worker import _probe_available_modules
@@ -3470,7 +3473,8 @@ class TestProbeAvailableModules:
 
         modules = _probe_available_modules("copilot")
         assert "metadata" in modules
-        assert "technical" in modules
+        # technical is master-only
+        assert "technical" not in modules
 
 
 class TestClaimLeasedModulesFilter:

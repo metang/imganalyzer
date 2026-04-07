@@ -1440,6 +1440,18 @@ def _handle_jobs_claim(params: dict) -> dict:
     modules_filter = policy.modules_filter
     prefer_module = policy.prefer_module
     prefer_image_ids = policy.prefer_image_ids
+
+    # Enforce master-only modules: technical and faces need the original
+    # full-resolution image for accurate results (noise estimation,
+    # small face detection, embedding quality).
+    _MASTER_ONLY = {"technical", "faces"}
+    if module_filter and module_filter in _MASTER_ONLY:
+        return {"jobs": []}
+    if modules_filter:
+        modules_filter = [m for m in modules_filter if m not in _MASTER_ONLY]
+        if not modules_filter:
+            return {"jobs": []}
+
     pending_eligible = queue.pending_count(module_filter, modules=modules_filter)
     pending_candidates = max(requested, pending_eligible)
     # Scan far enough in one request to rotate past large blocked backlogs
