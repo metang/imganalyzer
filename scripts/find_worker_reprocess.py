@@ -1,6 +1,6 @@
-"""Identify images where technical/faces were processed by a remote worker
-(using a resized 1024px image) and should be reprocessed on the master device
-for full-resolution accuracy.
+"""Identify images where metadata/technical/faces were processed by a remote
+worker (using a resized 1024px image) and should be reprocessed on the master
+device for full-resolution accuracy.
 
 Usage:
     python scripts/find_worker_reprocess.py          # dry-run: just count
@@ -12,8 +12,8 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-# Master-only modules: need original full-res image
-MASTER_ONLY_MODULES = ("technical", "faces")
+# Modules that need the original file for accurate results
+MASTER_ONLY_MODULES = ("metadata", "technical", "faces")
 
 
 def main() -> None:
