@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -55,6 +55,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         29: _migrate_v29,
         30: _migrate_v30,
         31: _migrate_v31,
+        32: _migrate_v32,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -1273,3 +1274,89 @@ def _migrate_v31(conn: sqlite3.Connection) -> None:
         "WHERE gps_latitude IS NOT NULL AND gps_longitude IS NOT NULL "
         "AND gps_source IS NULL"
     )
+
+
+def _migrate_v32(conn: sqlite3.Connection) -> None:
+    """Add smart albums, story chapters, moments, and related tables.
+
+    Smart albums store rule-based image collections with materialized
+    membership for fast lookups.  Story chapters and moments provide a
+    hierarchical narrative structure on top of album images.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS smart_albums (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            description     TEXT,
+            cover_image_id  INTEGER REFERENCES images(id) ON DELETE SET NULL,
+            rules           TEXT NOT NULL,
+            story_enabled   INTEGER DEFAULT 1,
+            sort_order      TEXT DEFAULT 'chronological',
+            item_count      INTEGER DEFAULT 0,
+            chapter_count   INTEGER DEFAULT 0,
+            created_at      TEXT DEFAULT (datetime('now')),
+            updated_at      TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS album_items (
+            album_id    TEXT NOT NULL REFERENCES smart_albums(id) ON DELETE CASCADE,
+            image_id    INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+            added_at    TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (album_id, image_id)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_album_items_image "
+        "ON album_items(image_id)"
+    )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS story_chapters (
+            id              TEXT PRIMARY KEY,
+            album_id        TEXT NOT NULL REFERENCES smart_albums(id) ON DELETE CASCADE,
+            title           TEXT,
+            summary         TEXT,
+            sort_order      INTEGER NOT NULL,
+            start_date      TEXT,
+            end_date        TEXT,
+            location        TEXT,
+            cover_image_id  INTEGER REFERENCES images(id) ON DELETE SET NULL,
+            image_count     INTEGER DEFAULT 0,
+            moment_count    INTEGER DEFAULT 0
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chapters_album "
+        "ON story_chapters(album_id, sort_order)"
+    )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS story_moments (
+            id              TEXT PRIMARY KEY,
+            chapter_id      TEXT NOT NULL REFERENCES story_chapters(id) ON DELETE CASCADE,
+            title           TEXT,
+            sort_order      INTEGER NOT NULL,
+            start_time      TEXT,
+            end_time        TEXT,
+            lat             REAL,
+            lng             REAL,
+            hero_image_id   INTEGER REFERENCES images(id) ON DELETE SET NULL,
+            image_count     INTEGER DEFAULT 0
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_moments_chapter "
+        "ON story_moments(chapter_id, sort_order)"
+    )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS moment_images (
+            moment_id   TEXT NOT NULL REFERENCES story_moments(id) ON DELETE CASCADE,
+            image_id    INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+            sort_order  INTEGER NOT NULL,
+            is_hero     INTEGER DEFAULT 0,
+            PRIMARY KEY (moment_id, image_id)
+        )
+    """)
