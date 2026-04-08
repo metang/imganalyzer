@@ -5293,6 +5293,85 @@ def _handle_albums_moment_images(params: dict) -> dict:
     return {"images": images}
 
 
+def _handle_albums_check_new(params: dict) -> dict:
+    """Check a newly analyzed image against all smart album rules."""
+    from imganalyzer.storyline.incremental import check_and_add_image
+
+    conn = _get_db()
+    added = check_and_add_image(conn, params["image_id"])
+    return {"added_to_albums": added}
+
+
+def _handle_albums_generate_narrative(params: dict) -> dict:
+    """Generate AI narratives for all chapters in an album."""
+    from imganalyzer.storyline.narrative import generate_all_chapter_narratives
+
+    conn = _get_db()
+    updated = generate_all_chapter_narratives(
+        conn,
+        params["album_id"],
+        use_ai=params.get("use_ai", True),
+    )
+    return {"chapters_updated": updated}
+
+
+def _handle_albums_export(params: dict) -> dict:
+    """Export a story album as a standalone HTML file."""
+    from imganalyzer.storyline.export import export_story_html
+
+    conn = _get_db()
+    output = export_story_html(
+        conn,
+        params["album_id"],
+        params["output_path"],
+        include_thumbnails=params.get("include_thumbnails", True),
+        max_heroes_per_chapter=params.get("max_heroes_per_chapter", 6),
+    )
+    return {"path": str(output)}
+
+
+def _handle_albums_presets(_params: dict) -> dict:
+    """List available album presets."""
+    from imganalyzer.storyline.presets import PRESET_REGISTRY
+
+    return {"presets": PRESET_REGISTRY}
+
+
+def _handle_albums_create_preset(params: dict) -> dict:
+    """Create a smart album from a preset."""
+    from imganalyzer.storyline.presets import (
+        create_location_story,
+        create_on_this_day,
+        create_person_timeline,
+        create_together_album,
+        create_year_in_review,
+    )
+
+    conn = _get_db()
+    preset = params["preset"]
+
+    if preset == "year_in_review":
+        album = create_year_in_review(conn, year=params.get("year"))
+    elif preset == "on_this_day":
+        album = create_on_this_day(conn, month=params.get("month"), day=params.get("day"))
+    elif preset == "person_timeline":
+        album = create_person_timeline(
+            conn, params["person_id"], person_name=params.get("person_name"),
+        )
+    elif preset == "together":
+        album = create_together_album(
+            conn, params["person_ids"], person_names=params.get("person_names"),
+        )
+    elif preset == "location":
+        album = create_location_story(
+            conn, params["country"], city=params.get("city"),
+        )
+    else:
+        return {"error": f"Unknown preset: {preset}"}
+
+    return {"id": album.id, "name": album.name, "item_count": album.item_count}
+
+
 # ── Method dispatch ──────────────────────────────────────────────────────────
 
 # Methods that return a result synchronously (the response is sent
@@ -5373,8 +5452,13 @@ _SYNC_METHODS: dict[str, Any] = {
     "albums/refresh": _handle_albums_refresh,
     "albums/story": _handle_albums_story,
     "albums/story/generate": _handle_albums_story_generate,
+    "albums/story/generate-narrative": _handle_albums_generate_narrative,
     "albums/chapter/moments": _handle_albums_chapter_moments,
     "albums/moment/images": _handle_albums_moment_images,
+    "albums/check-new": _handle_albums_check_new,
+    "albums/export": _handle_albums_export,
+    "albums/presets": _handle_albums_presets,
+    "albums/create-preset": _handle_albums_create_preset,
 }
 
 # Methods that send their own result/error asynchronously (streaming).

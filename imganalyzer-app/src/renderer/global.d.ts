@@ -693,6 +693,11 @@ declare global {
       albumsStoryGenerate(params: { album_id: string; time_window_minutes?: number; chapter_gap_hours?: number; chapter_distance_km?: number; force_year_breaks?: boolean }): Promise<StoryGenerateResult>
       albumsChapterMoments(chapterId: string): Promise<{ moments: StoryMoment[] }>
       albumsMomentImages(momentId: string): Promise<{ images: MomentImage[] }>
+      albumsCheckNew(imageId: number): Promise<{ added_to_albums: string[] }>
+      albumsGenerateNarrative(params: { album_id: string; use_ai?: boolean }): Promise<{ chapters_updated: number }>
+      albumsExport(params: { album_id: string; output_path: string; include_thumbnails?: boolean; max_heroes_per_chapter?: number }): Promise<{ path: string }>
+      albumsPresets(): Promise<{ presets: Record<string, { name: string; description: string; params: string[] }> }>
+      albumsCreatePreset(params: { preset: string; [key: string]: unknown }): Promise<{ id: string; name: string; item_count: number } | { error: string }>
 
       // Face management
       listFaces(): Promise<{ faces: FaceSummary[]; error?: string }>

@@ -773,3 +773,323 @@ class TestEvaluator:
         report = evaluate_story(conn, album.id)
         a4 = next(c for c in report.criteria if c.id == "A4")
         assert a4.passed, "Rule evaluation should be idempotent"
+
+
+# ── Test: Presets ────────────────────────────────────────────────────────────
+
+class TestPresets:
+    def test_year_in_review(self, tmp_path):
+        from imganalyzer.storyline.presets import create_year_in_review
+
+        conn = _make_test_db(tmp_path)
+        # Seed images in 2024
+        for i in range(1, 6):
+            _insert_image(conn, i)
+            _insert_search_features(conn, i, dt=f"2024-0{i}-15T12:00:00")
+        # Seed one image in 2023 — should NOT be included
+        _insert_image(conn, 100)
+        _insert_search_features(conn, 100, dt="2023-06-15T12:00:00")
+
+        album = create_year_in_review(conn, year=2024)
+        assert album.name == "2024 Year in Review"
+        assert album.item_count == 5
+
+    def test_year_in_review_default_year(self, tmp_path):
+        from imganalyzer.storyline.presets import create_year_in_review
+
+        conn = _make_test_db(tmp_path)
+        album = create_year_in_review(conn)
+        # Should default to previous year
+        from datetime import timezone
+        expected_year = datetime.now(timezone.utc).year - 1
+        assert str(expected_year) in album.name
+
+    def test_person_timeline(self, tmp_path):
+        from imganalyzer.storyline.presets import create_person_timeline
+
+        conn = _make_test_db(tmp_path)
+        person_id = _create_person(conn, "Bob")
+
+        for i in range(1, 4):
+            _insert_image(conn, i)
+            _insert_search_features(conn, i, dt=f"2024-01-{i:02d}T12:00:00")
+            _insert_face_occurrence(conn, i, person_id=person_id, cluster_id=i)
+
+        album = create_person_timeline(conn, person_id)
+        assert "Bob" in album.name
+        assert album.item_count == 3
+
+    def test_person_timeline_auto_name(self, tmp_path):
+        from imganalyzer.storyline.presets import create_person_timeline
+
+        conn = _make_test_db(tmp_path)
+        person_id = _create_person(conn, "Charlie")
+        album = create_person_timeline(conn, person_id)
+        assert "Charlie" in album.name
+
+    def test_together_album(self, tmp_path):
+        from imganalyzer.storyline.presets import create_together_album
+
+        conn = _make_test_db(tmp_path)
+        pid_a = _create_person(conn, "Alice")
+        pid_b = _create_person(conn, "Bob")
+
+        # Images with both people
+        for i in range(1, 4):
+            _insert_image(conn, i)
+            _insert_search_features(conn, i, dt=f"2024-01-{i:02d}T12:00:00")
+            _insert_face_occurrence(conn, i, person_id=pid_a, cluster_id=i * 10)
+            # Need a different face_idx for second person
+            emb = np.zeros(512, dtype=np.float32).tobytes()
+            conn.execute(
+                "INSERT INTO face_occurrences "
+                "(image_id, face_idx, embedding, cluster_id, person_id, "
+                " bbox_x1, bbox_y1, bbox_x2, bbox_y2) "
+                "VALUES (?, 1, ?, ?, ?, 0.5, 0.5, 0.9, 0.9)",
+                [i, emb, i * 10 + 1, pid_b],
+            )
+
+        album = create_together_album(conn, [pid_a, pid_b])
+        assert "Alice" in album.name and "Bob" in album.name
+        assert album.item_count == 3
+
+    def test_location_story(self, tmp_path):
+        from imganalyzer.storyline.presets import create_location_story
+
+        conn = _make_test_db(tmp_path)
+        for i in range(1, 4):
+            _insert_image(conn, i)
+            _insert_search_features(conn, i, dt=f"2024-0{i}-15T12:00:00", country="JP")
+
+        album = create_location_story(conn, country="JP")
+        assert album.item_count == 3
+        assert "JP" in album.name
+
+    def test_location_with_city(self, tmp_path):
+        from imganalyzer.storyline.presets import create_location_story
+
+        conn = _make_test_db(tmp_path)
+        for i in range(1, 3):
+            _insert_image(conn, i)
+            _insert_search_features(conn, i, dt=f"2024-01-{i:02d}T12:00:00")
+            _insert_metadata(conn, i, dt=f"2024-01-{i:02d}T12:00:00", city="Tokyo", country="JP")
+
+        album = create_location_story(conn, country="JP", city="Tokyo")
+        assert "Tokyo" in album.name
+
+    def test_on_this_day(self, tmp_path):
+        from imganalyzer.storyline.presets import create_on_this_day
+
+        conn = _make_test_db(tmp_path)
+        # Images on March 15 across multiple years
+        for yr in [2020, 2021, 2022]:
+            iid = yr
+            _insert_image(conn, iid)
+            _insert_search_features(conn, iid, dt=f"{yr}-03-15T10:00:00")
+
+        album = create_on_this_day(conn, month=3, day=15)
+        assert "March 15" in album.name
+        assert album.item_count == 3
+
+    def test_preset_registry(self):
+        from imganalyzer.storyline.presets import PRESET_REGISTRY
+
+        assert "year_in_review" in PRESET_REGISTRY
+        assert "on_this_day" in PRESET_REGISTRY
+        assert "person_timeline" in PRESET_REGISTRY
+        assert "together" in PRESET_REGISTRY
+        assert "location" in PRESET_REGISTRY
+
+
+# ── Test: Export ─────────────────────────────────────────────────────────────
+
+class TestExport:
+    def test_export_html_basic(self, tmp_path):
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.export import export_story_html
+        from imganalyzer.storyline.generator import generate_story
+
+        conn = _make_test_db(tmp_path)
+        person_id, _ = _seed_timeline_album(conn, n_images=10, days_span=10)
+
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [person_id]}
+        ]}
+        album = create_album(conn, "Export Test", rules)
+        generate_story(conn, album.id)
+
+        out = tmp_path / "story.html"
+        result = export_story_html(
+            conn, album.id, out, include_thumbnails=False,
+        )
+        assert result.exists()
+        html = result.read_text(encoding="utf-8")
+        assert "Export Test" in html
+        assert "<!DOCTYPE html>" in html
+        assert "chapter" in html.lower()
+
+    def test_export_nonexistent_album(self, tmp_path):
+        conn = _make_test_db(tmp_path)
+        out = tmp_path / "bad.html"
+
+        from imganalyzer.storyline.export import export_story_html
+        with pytest.raises(ValueError, match="not found"):
+            export_story_html(conn, "nonexistent", out)
+
+    def test_export_empty_story(self, tmp_path):
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.export import export_story_html
+        from imganalyzer.storyline.generator import generate_story
+
+        conn = _make_test_db(tmp_path)
+        rules = {"match": "all", "rules": []}
+        album = create_album(conn, "Empty Export", rules)
+        generate_story(conn, album.id)
+
+        out = tmp_path / "empty.html"
+        result = export_story_html(
+            conn, album.id, out, include_thumbnails=False,
+        )
+        html = result.read_text(encoding="utf-8")
+        assert "Empty Export" in html
+        assert "0 photos" in html
+
+
+# ── Test: Incremental ────────────────────────────────────────────────────────
+
+class TestIncremental:
+    def test_check_and_add_image_matching(self, tmp_path):
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.incremental import check_and_add_image
+
+        conn = _make_test_db(tmp_path)
+        person_id = _create_person(conn, "Dave")
+
+        # Create album for person
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [person_id]}
+        ]}
+        album = create_album(conn, "Dave", rules)
+
+        # Now add a new image matching the rule
+        _insert_image(conn, 999)
+        _insert_search_features(conn, 999, dt="2024-06-01T12:00:00")
+        _insert_face_occurrence(conn, 999, person_id=person_id, cluster_id=999)
+
+        added = check_and_add_image(conn, 999)
+        assert album.id in added
+
+        # Verify it's in album_items
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM album_items WHERE album_id=? AND image_id=999",
+            [album.id],
+        ).fetchone()
+        assert row["cnt"] == 1
+
+    def test_check_and_add_image_not_matching(self, tmp_path):
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.incremental import check_and_add_image
+
+        conn = _make_test_db(tmp_path)
+        person_id = _create_person(conn, "Eve")
+
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [person_id]}
+        ]}
+        create_album(conn, "Eve", rules)
+
+        # Image WITHOUT person_id match
+        _insert_image(conn, 888)
+        _insert_search_features(conn, 888, dt="2024-06-01T12:00:00")
+
+        added = check_and_add_image(conn, 888)
+        assert len(added) == 0
+
+    def test_check_and_add_idempotent(self, tmp_path):
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.incremental import check_and_add_image
+
+        conn = _make_test_db(tmp_path)
+        person_id = _create_person(conn, "Fay")
+
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [person_id]}
+        ]}
+        album = create_album(conn, "Fay", rules)
+
+        _insert_image(conn, 777)
+        _insert_search_features(conn, 777, dt="2024-06-01T12:00:00")
+        _insert_face_occurrence(conn, 777, person_id=person_id, cluster_id=777)
+
+        added1 = check_and_add_image(conn, 777)
+        added2 = check_and_add_image(conn, 777)
+        # First call adds, second should not error
+        assert album.id in added1
+
+    def test_refresh_all_albums(self, tmp_path):
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.incremental import refresh_all_albums
+
+        conn = _make_test_db(tmp_path)
+        person_id = _create_person(conn, "Gina")
+
+        # Seed initial images
+        for i in range(1, 4):
+            _insert_image(conn, i)
+            _insert_search_features(conn, i, dt=f"2024-01-{i:02d}T12:00:00")
+            _insert_face_occurrence(conn, i, person_id=person_id, cluster_id=i)
+
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [person_id]}
+        ]}
+        album = create_album(conn, "Gina", rules)
+        assert album.item_count == 3
+
+        # Add 2 more images
+        for i in range(4, 6):
+            _insert_image(conn, i)
+            _insert_search_features(conn, i, dt=f"2024-01-{i:02d}T12:00:00")
+            _insert_face_occurrence(conn, i, person_id=person_id, cluster_id=i)
+
+        counts = refresh_all_albums(conn)
+        assert album.id in counts
+        assert counts[album.id] == 5  # all 5 images now
+
+
+# ── Test: Narrative ──────────────────────────────────────────────────────────
+
+class TestNarrative:
+    def test_heuristic_narrative(self, tmp_path):
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.generator import generate_story, get_story_chapters
+        from imganalyzer.storyline.narrative import generate_all_chapter_narratives
+
+        conn = _make_test_db(tmp_path)
+        person_id, _ = _seed_timeline_album(conn, n_images=10, days_span=10)
+
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [person_id]}
+        ]}
+        album = create_album(conn, "Narrative Test", rules)
+        generate_story(conn, album.id)
+
+        # Use heuristic (no AI) — should always work
+        updated = generate_all_chapter_narratives(conn, album.id, use_ai=False)
+        assert updated > 0
+
+        chapters = get_story_chapters(conn, album.id)
+        for ch in chapters:
+            assert ch["summary"] is not None and len(ch["summary"]) > 0
+
+    def test_narrative_on_empty_story(self, tmp_path):
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.generator import generate_story
+        from imganalyzer.storyline.narrative import generate_all_chapter_narratives
+
+        conn = _make_test_db(tmp_path)
+        rules = {"match": "all", "rules": []}
+        album = create_album(conn, "Empty Narr", rules)
+        generate_story(conn, album.id)
+
+        updated = generate_all_chapter_narratives(conn, album.id, use_ai=False)
+        assert updated == 0

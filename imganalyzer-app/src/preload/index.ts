@@ -219,6 +219,21 @@ contextBridge.exposeInMainWorld('api', {
   albumsMomentImages: (momentId: string): Promise<{ images: Array<Record<string, unknown>> }> =>
     ipcRenderer.invoke('albums:moment:images', momentId),
 
+  albumsCheckNew: (imageId: number): Promise<{ added_to_albums: string[] }> =>
+    ipcRenderer.invoke('albums:check-new', imageId),
+
+  albumsGenerateNarrative: (params: { album_id: string; use_ai?: boolean }): Promise<{ chapters_updated: number }> =>
+    ipcRenderer.invoke('albums:story:generate-narrative', params),
+
+  albumsExport: (params: { album_id: string; output_path: string; include_thumbnails?: boolean; max_heroes_per_chapter?: number }): Promise<{ path: string }> =>
+    ipcRenderer.invoke('albums:export', params),
+
+  albumsPresets: (): Promise<{ presets: Record<string, { name: string; description: string; params: string[] }> }> =>
+    ipcRenderer.invoke('albums:presets'),
+
+  albumsCreatePreset: (params: { preset: string; [key: string]: unknown }): Promise<{ id: string; name: string; item_count: number } | { error: string }> =>
+    ipcRenderer.invoke('albums:create-preset', params),
+
   // ── Face management ────────────────────────────────────────────────────────
 
   listFaces: (): Promise<{ faces: Array<{ canonical_name: string; display_name: string | null; image_count: number; identity_id: number | null }>; error?: string }> =>

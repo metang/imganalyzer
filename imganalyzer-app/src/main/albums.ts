@@ -158,4 +158,40 @@ export function registerAlbumHandlers(): void {
     await ensureServerRunning()
     return await rpc.call('albums/moment/images', { moment_id: momentId })
   })
+
+  ipcMain.handle('albums:check-new', async (_evt, imageId: number): Promise<{ added_to_albums: string[] }> => {
+    await ensureServerRunning()
+    return await rpc.call('albums/check-new', { image_id: imageId })
+  })
+
+  ipcMain.handle('albums:story:generate-narrative', async (_evt, params: {
+    album_id: string
+    use_ai?: boolean
+  }): Promise<{ chapters_updated: number }> => {
+    await ensureServerRunning()
+    return await rpc.call('albums/story/generate-narrative', params)
+  })
+
+  ipcMain.handle('albums:export', async (_evt, params: {
+    album_id: string
+    output_path: string
+    include_thumbnails?: boolean
+    max_heroes_per_chapter?: number
+  }): Promise<{ path: string }> => {
+    await ensureServerRunning()
+    return await rpc.call('albums/export', params)
+  })
+
+  ipcMain.handle('albums:presets', async (): Promise<{ presets: Record<string, unknown> }> => {
+    await ensureServerRunning()
+    return await rpc.call('albums/presets', {})
+  })
+
+  ipcMain.handle('albums:create-preset', async (_evt, params: {
+    preset: string
+    [key: string]: unknown
+  }): Promise<{ id: string; name: string; item_count: number } | { error: string }> => {
+    await ensureServerRunning()
+    return await rpc.call('albums/create-preset', params)
+  })
 }
