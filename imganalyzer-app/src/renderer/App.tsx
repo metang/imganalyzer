@@ -7,9 +7,10 @@ import { SearchView } from './components/SearchView'
 import { FacesView } from './components/FacesView'
 import { SettingsView } from './components/SettingsView'
 import { MapView } from './components/MapView'
+import { AlbumsView } from './components/AlbumsView'
 import { useBatchProcess } from './hooks/useBatchProcess'
 
-type Tab = 'gallery' | 'batch' | 'running' | 'search' | 'faces' | 'map' | 'settings'
+type Tab = 'gallery' | 'batch' | 'running' | 'search' | 'albums' | 'faces' | 'map' | 'settings'
 type FaceClusterDeepLink = {
   clusterId: number
   sourceImageId: number
@@ -197,6 +198,11 @@ export default function App() {
           Search
         </TabButton>
 
+        {/* Albums */}
+        <TabButton active={tab === 'albums'} onClick={() => setTab('albums')}>
+          Albums
+        </TabButton>
+
         {/* Faces */}
         <TabButton active={tab === 'faces'} onClick={() => setTab('faces')}>
           Faces
@@ -253,6 +259,11 @@ export default function App() {
           pendingSearch={pendingGridSearch}
           onClearPendingSearch={() => setPendingGridSearch(null)}
         />
+      </div>
+
+      {/* ── Albums tab ─────────────────────────────────────────────────────── */}
+      <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'albums' ? '' : ' hidden'}`}>
+        <AlbumsView />
       </div>
 
       {/* ── Faces tab ────────────────────────────────────────────────────────── */}

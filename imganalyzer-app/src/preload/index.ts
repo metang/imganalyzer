@@ -187,6 +187,38 @@ contextBridge.exposeInMainWorld('api', {
   stopCoordinator: (): Promise<CoordinatorStatus> =>
     ipcRenderer.invoke('settings:stopCoordinator'),
 
+  // ── Albums / Storyline ──────────────────────────────────────────────────────
+
+  albumsList: (): Promise<{ albums: Array<{ id: string; name: string; description: string | null; cover_image_id: number | null; story_enabled: boolean; sort_order: string; item_count: number; chapter_count: number; created_at: string; updated_at: string }> }> =>
+    ipcRenderer.invoke('albums:list'),
+
+  albumsCreate: (params: { name: string; rules: { match: string; rules: Array<Record<string, unknown>> }; description?: string; story_enabled?: boolean; sort_order?: string }): Promise<{ id: string; item_count: number }> =>
+    ipcRenderer.invoke('albums:create', params),
+
+  albumsGet: (albumId: string): Promise<Record<string, unknown>> =>
+    ipcRenderer.invoke('albums:get', albumId),
+
+  albumsUpdate: (params: { album_id: string; name?: string; description?: string; rules?: Record<string, unknown>; story_enabled?: boolean; sort_order?: string }): Promise<{ id: string; item_count: number } | { error: string }> =>
+    ipcRenderer.invoke('albums:update', params),
+
+  albumsDelete: (albumId: string): Promise<{ deleted: boolean }> =>
+    ipcRenderer.invoke('albums:delete', albumId),
+
+  albumsRefresh: (albumId: string): Promise<{ item_count: number }> =>
+    ipcRenderer.invoke('albums:refresh', albumId),
+
+  albumsStory: (albumId: string): Promise<{ chapters: Array<Record<string, unknown>> }> =>
+    ipcRenderer.invoke('albums:story', albumId),
+
+  albumsStoryGenerate: (params: { album_id: string; time_window_minutes?: number; chapter_gap_hours?: number; chapter_distance_km?: number; force_year_breaks?: boolean }): Promise<Record<string, unknown>> =>
+    ipcRenderer.invoke('albums:story:generate', params),
+
+  albumsChapterMoments: (chapterId: string): Promise<{ moments: Array<Record<string, unknown>> }> =>
+    ipcRenderer.invoke('albums:chapter:moments', chapterId),
+
+  albumsMomentImages: (momentId: string): Promise<{ images: Array<Record<string, unknown>> }> =>
+    ipcRenderer.invoke('albums:moment:images', momentId),
+
   // ── Face management ────────────────────────────────────────────────────────
 
   listFaces: (): Promise<{ faces: Array<{ canonical_name: string; display_name: string | null; image_count: number; identity_id: number | null }>; error?: string }> =>

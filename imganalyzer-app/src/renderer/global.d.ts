@@ -385,6 +385,79 @@ export interface BatchIngestProgress {
   current: string
 }
 
+// ── Albums / Storyline types ──────────────────────────────────────────────────
+
+export interface SmartAlbumSummary {
+  id: string
+  name: string
+  description: string | null
+  cover_image_id: number | null
+  story_enabled: boolean
+  sort_order: string
+  item_count: number
+  chapter_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface AlbumRules {
+  match: 'all' | 'any'
+  rules: Array<Record<string, unknown>>
+}
+
+export interface StoryChapter {
+  id: string
+  album_id: string
+  title: string | null
+  summary: string | null
+  sort_order: number
+  start_date: string | null
+  end_date: string | null
+  location: string | null
+  cover_image_id: number | null
+  image_count: number
+  moment_count: number
+}
+
+export interface StoryMoment {
+  id: string
+  chapter_id: string
+  title: string | null
+  sort_order: number
+  start_time: string | null
+  end_time: string | null
+  lat: number | null
+  lng: number | null
+  hero_image_id: number | null
+  image_count: number
+}
+
+export interface MomentImage {
+  image_id: number
+  sort_order: number
+  is_hero: number
+  date_time_original: string | null
+  perception_iaa: number | null
+}
+
+export interface StoryGenerateResult {
+  images: number
+  moments: number
+  chapters: number
+  generation_time_s: number
+  evaluation: {
+    album_id: string
+    overall_pass: boolean
+    criteria: Record<string, {
+      name: string
+      passed: boolean
+      value: unknown
+      threshold: unknown
+      detail?: string
+    }>
+  }
+}
+
 // ── Face management types ─────────────────────────────────────────────────────
 
 export interface FaceSummary {
@@ -608,6 +681,18 @@ declare global {
       getCoordinatorStatus(): Promise<CoordinatorStatus>
       startCoordinator(): Promise<CoordinatorStatus>
       stopCoordinator(): Promise<CoordinatorStatus>
+
+      // Albums / Storyline
+      albumsList(): Promise<{ albums: SmartAlbumSummary[] }>
+      albumsCreate(params: { name: string; rules: AlbumRules; description?: string; story_enabled?: boolean; sort_order?: string }): Promise<{ id: string; item_count: number }>
+      albumsGet(albumId: string): Promise<SmartAlbumSummary & { rules: AlbumRules }>
+      albumsUpdate(params: { album_id: string; name?: string; description?: string; rules?: AlbumRules; story_enabled?: boolean; sort_order?: string }): Promise<{ id: string; item_count: number } | { error: string }>
+      albumsDelete(albumId: string): Promise<{ deleted: boolean }>
+      albumsRefresh(albumId: string): Promise<{ item_count: number }>
+      albumsStory(albumId: string): Promise<{ chapters: StoryChapter[] }>
+      albumsStoryGenerate(params: { album_id: string; time_window_minutes?: number; chapter_gap_hours?: number; chapter_distance_km?: number; force_year_breaks?: boolean }): Promise<StoryGenerateResult>
+      albumsChapterMoments(chapterId: string): Promise<{ moments: StoryMoment[] }>
+      albumsMomentImages(momentId: string): Promise<{ images: MomentImage[] }>
 
       // Face management
       listFaces(): Promise<{ faces: FaceSummary[]; error?: string }>

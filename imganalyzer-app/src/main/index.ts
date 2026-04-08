@@ -9,6 +9,7 @@ import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
 import { registerBatchHandlers, killAllBatchProcesses } from './batch'
 import { registerSearchHandlers } from './search'
+import { registerAlbumHandlers } from './albums'
 import { registerFaceHandlers } from './faces'
 import { registerGalleryHandlers } from './gallery'
 import { registerGeoHandlers } from './geo'
@@ -56,6 +57,7 @@ app.whenReady().then(async () => {
   const win = createWindow()
   registerBatchHandlers(win)
   registerSearchHandlers()
+  registerAlbumHandlers()
   registerGalleryHandlers()
   registerGeoHandlers()
   registerFaceHandlers()
