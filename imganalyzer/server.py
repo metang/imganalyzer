@@ -5126,6 +5126,173 @@ def _handle_geo_geocode(params: dict) -> dict:
     }
 
 
+# ── Albums / Storyline handlers ──────────────────────────────────────────────
+
+
+def _handle_albums_list(_params: dict) -> dict:
+    """List all smart albums."""
+    from imganalyzer.storyline.albums import list_albums
+
+    conn = _get_db()
+    albums = list_albums(conn)
+    return {
+        "albums": [
+            {
+                "id": a.id,
+                "name": a.name,
+                "description": a.description,
+                "cover_image_id": a.cover_image_id,
+                "story_enabled": a.story_enabled,
+                "sort_order": a.sort_order,
+                "item_count": a.item_count,
+                "chapter_count": a.chapter_count,
+                "created_at": a.created_at,
+                "updated_at": a.updated_at,
+            }
+            for a in albums
+        ]
+    }
+
+
+def _handle_albums_create(params: dict) -> dict:
+    """Create a smart album and materialize membership."""
+    from imganalyzer.storyline.albums import create_album
+
+    conn = _get_db()
+    album = create_album(
+        conn,
+        name=params["name"],
+        rules=params["rules"],
+        description=params.get("description"),
+        story_enabled=params.get("story_enabled", True),
+        sort_order=params.get("sort_order", "chronological"),
+    )
+    return {"id": album.id, "item_count": album.item_count}
+
+
+def _handle_albums_get(params: dict) -> dict:
+    """Get a smart album by ID."""
+    from imganalyzer.storyline.albums import get_album
+
+    conn = _get_db()
+    album = get_album(conn, params["album_id"])
+    if album is None:
+        return {"error": "Album not found"}
+    return {
+        "id": album.id,
+        "name": album.name,
+        "description": album.description,
+        "cover_image_id": album.cover_image_id,
+        "rules": album.rules,
+        "story_enabled": album.story_enabled,
+        "sort_order": album.sort_order,
+        "item_count": album.item_count,
+        "chapter_count": album.chapter_count,
+        "created_at": album.created_at,
+        "updated_at": album.updated_at,
+    }
+
+
+def _handle_albums_update(params: dict) -> dict:
+    """Update a smart album."""
+    from imganalyzer.storyline.albums import update_album
+
+    conn = _get_db()
+    kwargs: dict = {}
+    if "name" in params:
+        kwargs["name"] = params["name"]
+    if "description" in params:
+        kwargs["description"] = params["description"]
+    if "rules" in params:
+        kwargs["rules"] = params["rules"]
+    if "story_enabled" in params:
+        kwargs["story_enabled"] = params["story_enabled"]
+    if "sort_order" in params:
+        kwargs["sort_order"] = params["sort_order"]
+
+    album = update_album(conn, params["album_id"], **kwargs)
+    if album is None:
+        return {"error": "Album not found"}
+    return {"id": album.id, "item_count": album.item_count}
+
+
+def _handle_albums_delete(params: dict) -> dict:
+    """Delete a smart album."""
+    from imganalyzer.storyline.albums import delete_album
+
+    conn = _get_db()
+    ok = delete_album(conn, params["album_id"])
+    return {"deleted": ok}
+
+
+def _handle_albums_refresh(params: dict) -> dict:
+    """Re-evaluate album rules and refresh membership."""
+    from imganalyzer.storyline.albums import refresh_membership
+
+    conn = _get_db()
+    count = refresh_membership(conn, params["album_id"])
+    return {"item_count": count}
+
+
+def _handle_albums_story(params: dict) -> dict:
+    """Get the story structure (chapters) for an album."""
+    from imganalyzer.storyline.generator import get_story_chapters
+
+    conn = _get_db()
+    chapters = get_story_chapters(conn, params["album_id"])
+    return {"chapters": chapters}
+
+
+def _handle_albums_story_generate(params: dict) -> dict:
+    """Generate (or regenerate) story structure for an album."""
+    import time as _time
+
+    from imganalyzer.storyline.evaluator import evaluate_story
+    from imganalyzer.storyline.generator import generate_story
+
+    conn = _get_db()
+    album_id = params["album_id"]
+
+    t0 = _time.monotonic()
+    result = generate_story(
+        conn,
+        album_id,
+        time_window_minutes=params.get("time_window_minutes", 30),
+        chapter_gap_hours=params.get("chapter_gap_hours", 4),
+        chapter_distance_km=params.get("chapter_distance_km", 50.0),
+        force_year_breaks=params.get("force_year_breaks", True),
+    )
+    gen_time = _time.monotonic() - t0
+
+    report = evaluate_story(conn, album_id, generation_time_s=gen_time)
+
+    return {
+        "images": result.image_count,
+        "moments": result.moment_count,
+        "chapters": result.chapter_count,
+        "generation_time_s": round(gen_time, 2),
+        "evaluation": report.to_dict(),
+    }
+
+
+def _handle_albums_chapter_moments(params: dict) -> dict:
+    """Get moments for a story chapter."""
+    from imganalyzer.storyline.generator import get_chapter_moments
+
+    conn = _get_db()
+    moments = get_chapter_moments(conn, params["chapter_id"])
+    return {"moments": moments}
+
+
+def _handle_albums_moment_images(params: dict) -> dict:
+    """Get images for a story moment."""
+    from imganalyzer.storyline.generator import get_moment_images
+
+    conn = _get_db()
+    images = get_moment_images(conn, params["moment_id"])
+    return {"images": images}
+
+
 # ── Method dispatch ──────────────────────────────────────────────────────────
 
 # Methods that return a result synchronously (the response is sent
@@ -5197,6 +5364,17 @@ _SYNC_METHODS: dict[str, Any] = {
     "geo/trip-detect": _handle_geo_trip_detect,
     "geo/trip-timeline": _handle_geo_trip_timeline,
     "geo/geocode": _handle_geo_geocode,
+    # ── Albums / Storyline ───────────────────────────────────
+    "albums/list": _handle_albums_list,
+    "albums/create": _handle_albums_create,
+    "albums/get": _handle_albums_get,
+    "albums/update": _handle_albums_update,
+    "albums/delete": _handle_albums_delete,
+    "albums/refresh": _handle_albums_refresh,
+    "albums/story": _handle_albums_story,
+    "albums/story/generate": _handle_albums_story_generate,
+    "albums/chapter/moments": _handle_albums_chapter_moments,
+    "albums/moment/images": _handle_albums_moment_images,
 }
 
 # Methods that send their own result/error asynchronously (streaming).
