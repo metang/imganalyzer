@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import sys
 from typing import Any
 
 
@@ -46,10 +45,15 @@ def check_and_add_image(
                 "INSERT OR IGNORE INTO album_items (album_id, image_id) VALUES (?, ?)",
                 [album_id, image_id],
             )
-            conn.execute(
-                "UPDATE smart_albums SET item_count = item_count + 1, "
-                "updated_at = datetime('now') WHERE id = ?",
+            # Recompute count from source-of-truth to avoid lost updates
+            count = conn.execute(
+                "SELECT COUNT(*) FROM album_items WHERE album_id = ?",
                 [album_id],
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE smart_albums SET item_count = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                [count, album_id],
             )
             added_to.append(album_id)
 

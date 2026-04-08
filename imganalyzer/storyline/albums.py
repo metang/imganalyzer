@@ -207,10 +207,12 @@ def check_image_against_rules(
     Used for incremental refresh when a new image is analyzed.
     """
     sql, params = compile_rules(rules)
-    # Add image_id filter to the query
-    sql += " AND i.id = ?" if " WHERE " in sql else " WHERE i.id = ?"
-    params.append(image_id)
-    row = conn.execute(sql, params).fetchone()
+    wrapped_sql = (
+        "SELECT 1 FROM (\n"
+        f"{sql}\n"
+        ") matched_rules WHERE matched_rules.image_id = ? LIMIT 1"
+    )
+    row = conn.execute(wrapped_sql, [*params, image_id]).fetchone()
     return row is not None
 
 

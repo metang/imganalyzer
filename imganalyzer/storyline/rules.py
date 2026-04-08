@@ -99,13 +99,23 @@ def _compile_location(rule: dict[str, Any], idx: int) -> CompiledFragment:
     )
 
 
+def _escape_fts5_value(value: str) -> str:
+    """Escape a value for safe use in an FTS5 MATCH expression.
+
+    Wraps in double quotes so that FTS5 operators (*, NEAR, NOT, OR, AND)
+    and special characters are treated as literals.
+    """
+    escaped = value.replace('"', '""')
+    return f'"{escaped}"'
+
+
 def _compile_keyword(rule: dict[str, Any], idx: int) -> CompiledFragment:
     """Compile a keyword rule using FTS5 search_index."""
     values: list[str] = rule.get("values", [])
     if not values:
         return CompiledFragment([], [], [])
 
-    match_expr = " OR ".join(values)
+    match_expr = " OR ".join(_escape_fts5_value(v) for v in values)
     alias = f"fts{idx}"
     return CompiledFragment(
         joins=[
@@ -177,6 +187,36 @@ _COMPILERS: dict[str, Any] = {
 
 # ── Top-level compiler ───────────────────────────────────────────────────────
 
+
+def _rule_needs_search_features(rule_type: str) -> bool:
+    return rule_type in {"date_range", "location", "min_quality"}
+
+
+def _compile_rule_select(rule: dict[str, Any], idx: int) -> tuple[str, list[Any]] | None:
+    """Compile a single rule into a standalone SELECT over image IDs."""
+    rule_type = rule.get("type", "")
+    compiler = _COMPILERS.get(rule_type)
+    if compiler is None:
+        return None
+
+    fragment = compiler(rule, idx)
+    if not fragment.joins and not fragment.conditions and not fragment.params:
+        return None
+
+    select = "SELECT DISTINCT i.id AS image_id FROM images i"
+    if _rule_needs_search_features(rule_type):
+        select += "\nJOIN search_features sf ON sf.image_id = i.id"
+
+    joins_sql = "\n".join(fragment.joins)
+    if joins_sql:
+        select += "\n" + joins_sql
+
+    if fragment.conditions:
+        select += "\nWHERE " + " AND ".join(fragment.conditions)
+
+    return select, fragment.params
+
+
 def compile_rules(rules_json: str | dict) -> tuple[str, list[Any]]:
     """Compile a smart-album rule set into a ``(sql, params)`` tuple.
 
@@ -204,50 +244,19 @@ def compile_rules(rules_json: str | dict) -> tuple[str, list[Any]]:
     if not rule_list:
         return "SELECT id AS image_id FROM images WHERE 0", []
 
-    all_joins: list[str] = []
-    all_conditions: list[str] = []
-    all_params: list[Any] = []
-
-    # Always join search_features for date/location/quality filtering
-    needs_sf = any(
-        r.get("type") in ("date_range", "location", "min_quality")
-        for r in rule_list
-    )
-
-    seen_joins: set[str] = set()
-
+    compiled_rules: list[tuple[str, list[Any]]] = []
     for idx, rule in enumerate(rule_list):
-        rule_type = rule.get("type", "")
-        compiler = _COMPILERS.get(rule_type)
-        if compiler is None:
-            continue
+        compiled = _compile_rule_select(rule, idx)
+        if compiled is not None:
+            compiled_rules.append(compiled)
 
-        fragment = compiler(rule, idx)
-        for j in fragment.joins:
-            # Deduplicate joins by their table alias
-            if j not in seen_joins:
-                all_joins.append(j)
-                seen_joins.add(j)
-        all_conditions.extend(fragment.conditions)
-        all_params.extend(fragment.params)
+    if not compiled_rules:
+        return "SELECT id AS image_id FROM images WHERE 0", []
 
-    # Build query
-    select = "SELECT DISTINCT i.id AS image_id FROM images i"
-    if needs_sf:
-        select += "\nJOIN search_features sf ON sf.image_id = i.id"
-
-    joins_sql = "\n".join(all_joins)
-    if joins_sql:
-        select += "\n" + joins_sql
-
-    if all_conditions:
-        joiner = " AND " if match_mode == "all" else " OR "
-        where = "\nWHERE " + joiner.join(all_conditions)
-    else:
-        where = ""
-
-    sql = select + where
-    return sql, all_params
+    operator = "\nINTERSECT\n" if match_mode == "all" else "\nUNION\n"
+    sql = operator.join(select for select, _ in compiled_rules)
+    params = [param for _, rule_params in compiled_rules for param in rule_params]
+    return sql, params
 
 
 def evaluate_rules(

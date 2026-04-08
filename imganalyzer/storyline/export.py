@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import base64
 import sqlite3
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from imganalyzer.readers import open_as_pil
 from imganalyzer.storyline.generator import (
     get_chapter_moments,
     get_story_chapters,
@@ -100,22 +102,20 @@ def export_story_html(
 
 
 def _load_thumbnail_base64(file_path: str) -> str | None:
-    """Load an image file and return as base64 data URL (best-effort)."""
+    """Load an image file and return a resized JPEG thumbnail data URL."""
     try:
         p = Path(file_path)
         if not p.exists():
             return None
-        data = p.read_bytes()
-        ext = p.suffix.lower()
-        mime = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".webp": "image/webp",
-        }.get(ext, "image/jpeg")
-        b64 = base64.b64encode(data).decode("ascii")
-        return f"data:{mime};base64,{b64}"
-    except Exception:
+        img = open_as_pil(p)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img.thumbnail((400, 300))
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{b64}"
+    except (OSError, ValueError, TypeError):
         return None
 
 
@@ -212,4 +212,5 @@ def _escape(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
+        .replace("'", "&#39;")
     )

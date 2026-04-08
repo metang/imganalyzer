@@ -163,6 +163,45 @@ class OllamaAI:
             results.append(self.analyze(p, {}))
         return results
 
+    def generate_text(self, prompt: str) -> str | None:
+        """Generate a text-only response from Ollama."""
+        from urllib import request as urllib_request
+        from urllib.error import URLError
+
+        payload = json.dumps({
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "think": False,
+            "options": {
+                "temperature": 0,
+            },
+        }).encode("utf-8")
+
+        last_error: Exception | None = None
+        for attempt in range(1, _RETRIES + 1):
+            try:
+                req = urllib_request.Request(
+                    f"{self.url}/api/generate",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib_request.urlopen(req, timeout=_TIMEOUT) as resp:
+                    body = json.loads(resp.read())
+                return str(body.get("response", "")).strip() or None
+            except (URLError, OSError, json.JSONDecodeError) as exc:
+                last_error = exc
+                log.warning(
+                    "Ollama text generation attempt %d/%d failed: %s",
+                    attempt, _RETRIES, exc,
+                )
+                time.sleep(1)
+
+        if last_error is not None:
+            raise last_error
+        return None  # unreachable but satisfies type checker
+
     def _call_ollama(self, b64_image: str) -> dict[str, Any]:
         """Send image to Ollama and parse JSON response with retries.
 

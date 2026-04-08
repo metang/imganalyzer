@@ -30,7 +30,7 @@ def create_year_in_review(
             {
                 "type": "date_range",
                 "start": f"{year}-01-01",
-                "end": f"{year}-12-31",
+                "end": f"{year}-12-31T23:59:59",
             }
         ],
     }
@@ -127,6 +127,32 @@ def create_person_timeline(
     )
 
 
+def create_growth_story(
+    conn: sqlite3.Connection,
+    person_id: int,
+    person_name: str | None = None,
+) -> Any:
+    """Create a growth-story album for a specific person."""
+    if person_name is None:
+        row = conn.execute(
+            "SELECT name FROM face_persons WHERE id = ?", [person_id]
+        ).fetchone()
+        person_name = row["name"] if row else f"Person {person_id}"
+
+    rules: dict[str, Any] = {
+        "match": "all",
+        "rules": [
+            {"type": "person", "person_ids": [person_id], "mode": "any"},
+        ],
+    }
+    return create_album(
+        conn,
+        name=f"Growing Up — {person_name}",
+        rules=rules,
+        description=f"A year-by-year story of {person_name}",
+    )
+
+
 def create_together_album(
     conn: sqlite3.Connection,
     person_ids: list[int],
@@ -194,6 +220,11 @@ PRESET_REGISTRY: dict[str, dict[str, Any]] = {
     "person_timeline": {
         "name": "Person Timeline",
         "description": "All photos of a specific person",
+        "params": ["person_id", "person_name"],
+    },
+    "growth_story": {
+        "name": "Growth Story",
+        "description": "A year-by-year story for a specific person",
         "params": ["person_id", "person_name"],
     },
     "together": {

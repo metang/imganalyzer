@@ -174,17 +174,7 @@ def generate_story(
 
 
 def _clear_story(conn: sqlite3.Connection, album_id: str) -> None:
-    """Remove all story structure for an album (chapters cascade to moments)."""
-    chapter_ids = conn.execute(
-        "SELECT id FROM story_chapters WHERE album_id = ?", [album_id]
-    ).fetchall()
-    for (cid,) in chapter_ids:
-        moment_ids = conn.execute(
-            "SELECT id FROM story_moments WHERE chapter_id = ?", [cid]
-        ).fetchall()
-        for (mid,) in moment_ids:
-            conn.execute("DELETE FROM moment_images WHERE moment_id = ?", [mid])
-        conn.execute("DELETE FROM story_moments WHERE chapter_id = ?", [cid])
+    """Remove all story structure for an album (relies on ON DELETE CASCADE)."""
     conn.execute("DELETE FROM story_chapters WHERE album_id = ?", [album_id])
 
 

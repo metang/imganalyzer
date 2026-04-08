@@ -1797,6 +1797,15 @@ def _handle_jobs_complete(params: dict) -> dict:
                 time.sleep(delay_s)
                 delay_s = min(delay_s * 2, 1.0)
 
+        try:
+            from imganalyzer.storyline.incremental import check_and_add_image
+
+            check_and_add_image(conn, image_id)
+        except Exception as exc:
+            sys.stderr.write(
+                f"[server] jobs/complete storyline refresh failed for image {image_id}: {exc}\n"
+            )
+
     if worker_id_for_timing and processing_ms > 0:
         try:
             record_worker_module_timing(
@@ -3136,11 +3145,21 @@ def _handle_thumbnails_batch(params: dict) -> dict:
     thumbnails: dict[str, str] = {}
     errors: dict[str, str] = {}
     store = _get_decoded_store()
+    conn = _get_db()
 
     for item in raw_items[:50]:
         file_path = item.get("file_path", "") if isinstance(item, dict) else str(item)
         image_id = item.get("image_id") if isinstance(item, dict) else None
+        cache_key = file_path or (str(image_id) if image_id is not None else "")
         try:
+            if not file_path and image_id is not None:
+                row = conn.execute(
+                    "SELECT file_path FROM images WHERE id = ?",
+                    [image_id],
+                ).fetchone()
+                if row is not None:
+                    file_path = str(row["file_path"] or "")
+
             # Fast path: resize from pre-decoded 1024px cache (~5ms vs ~200-500ms)
             if image_id is not None and store.has(image_id):
                 img_bytes = store.get_image_bytes(image_id)
@@ -3150,14 +3169,19 @@ def _handle_thumbnails_batch(params: dict) -> dict:
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=80)
                     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-                    thumbnails[file_path] = f"data:image/jpeg;base64,{b64}"
+                    if cache_key:
+                        thumbnails[cache_key] = f"data:image/jpeg;base64,{b64}"
                     continue
 
             # Slow path: full decode from source file
+            if not file_path:
+                raise ValueError("file_path or image_id is required")
             result = _handle_thumbnail({"imagePath": file_path})
-            thumbnails[file_path] = f"data:image/jpeg;base64,{result['data']}"
+            if cache_key:
+                thumbnails[cache_key] = f"data:image/jpeg;base64,{result['data']}"
         except Exception as exc:
-            errors[file_path] = str(exc)
+            if cache_key:
+                errors[cache_key] = str(exc)
 
     return {"thumbnails": thumbnails, "errors": errors}
 
@@ -5340,6 +5364,7 @@ def _handle_albums_presets(_params: dict) -> dict:
 def _handle_albums_create_preset(params: dict) -> dict:
     """Create a smart album from a preset."""
     from imganalyzer.storyline.presets import (
+        create_growth_story,
         create_location_story,
         create_on_this_day,
         create_person_timeline,
@@ -5356,6 +5381,10 @@ def _handle_albums_create_preset(params: dict) -> dict:
         album = create_on_this_day(conn, month=params.get("month"), day=params.get("day"))
     elif preset == "person_timeline":
         album = create_person_timeline(
+            conn, params["person_id"], person_name=params.get("person_name"),
+        )
+    elif preset == "growth_story":
+        album = create_growth_story(
             conn, params["person_id"], person_name=params.get("person_name"),
         )
     elif preset == "together":

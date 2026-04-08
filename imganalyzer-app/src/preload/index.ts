@@ -23,12 +23,15 @@ contextBridge.exposeInMainWorld('api', {
   openFolder: (): Promise<string | null> =>
     ipcRenderer.invoke('dialog:openFolder'),
 
+  saveStoryExport: (defaultPath?: string): Promise<string | null> =>
+    ipcRenderer.invoke('dialog:saveStoryExport', defaultPath),
+
   listImages: (folderPath: string): Promise<ImageFile[]> =>
     ipcRenderer.invoke('fs:listImages', folderPath),
 
   getThumbnail: (imagePath: string): Promise<string> =>
     ipcRenderer.invoke('fs:getThumbnail', imagePath),
-  getThumbnailsBatch: (items: Array<{ file_path: string; image_id?: number }>): Promise<Record<string, string>> =>
+  getThumbnailsBatch: (items: Array<{ file_path?: string; image_id?: number }>): Promise<Record<string, string>> =>
     ipcRenderer.invoke('fs:getThumbnailsBatch', items),
 
   getFullImage: (imagePath: string): Promise<string> =>

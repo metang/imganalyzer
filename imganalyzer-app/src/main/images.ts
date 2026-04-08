@@ -284,8 +284,14 @@ export async function getThumbnail(imagePath: string): Promise<string> {
 }
 
 export interface ThumbnailBatchItem {
-  file_path: string
+  file_path?: string
   image_id?: number
+}
+
+function thumbnailItemKey(item: ThumbnailBatchItem): string | null {
+  if (item.file_path && item.file_path.length > 0) return item.file_path
+  if (item.image_id != null) return String(item.image_id)
+  return null
 }
 
 /**
@@ -299,19 +305,27 @@ export async function getThumbnailsBatch(
 ): Promise<Record<string, string>> {
   const result: Record<string, string> = {}
   const uncached: ThumbnailBatchItem[] = []
+  const requestedByKey = new Map<string, ThumbnailBatchItem>()
 
   // Resolve from memory and disk cache first
   for (const item of items) {
-    const memCached = thumbCacheGet(item.file_path)
-    if (memCached !== undefined) {
-      result[item.file_path] = memCached
-      continue
-    }
-    const diskCached = await readThumbnailFromDisk(item.file_path)
-    if (diskCached) {
-      thumbCacheSet(item.file_path, diskCached)
-      result[item.file_path] = diskCached
-      continue
+    const itemKey = thumbnailItemKey(item)
+    if (!itemKey) continue
+
+    requestedByKey.set(itemKey, item)
+
+    if (item.file_path && item.file_path.length > 0) {
+      const memCached = thumbCacheGet(item.file_path)
+      if (memCached !== undefined) {
+        result[itemKey] = memCached
+        continue
+      }
+      const diskCached = await readThumbnailFromDisk(item.file_path)
+      if (diskCached) {
+        thumbCacheSet(item.file_path, diskCached)
+        result[itemKey] = diskCached
+        continue
+      }
     }
     uncached.push(item)
   }
@@ -323,11 +337,14 @@ export async function getThumbnailsBatch(
       items: uncached.map((i) => ({ file_path: i.file_path, image_id: i.image_id })),
     })) as { thumbnails: Record<string, string>; errors: Record<string, string> }
 
-    for (const [path, dataUrl] of Object.entries(resp.thumbnails)) {
-      thumbCacheSet(path, dataUrl)
-      const b64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '')
-      void writeThumbnailToDisk(path, b64)
-      result[path] = dataUrl
+    for (const [key, dataUrl] of Object.entries(resp.thumbnails)) {
+      const original = requestedByKey.get(key)
+      if (original?.file_path && original.file_path.length > 0) {
+        thumbCacheSet(original.file_path, dataUrl)
+        const b64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '')
+        void writeThumbnailToDisk(original.file_path, b64)
+      }
+      result[key] = dataUrl
     }
   } catch (err) {
     console.error('Batch thumbnail error', err)

@@ -240,7 +240,7 @@ class TestRuleCompiler:
         sql, params = compile_rules(rules)
         assert "face_occurrences" in sql
         assert "search_features" in sql
-        assert "AND" in sql
+        assert "INTERSECT" in sql
 
     def test_evaluate_rules_returns_matching_ids(self, tmp_path):
         from imganalyzer.storyline.rules import evaluate_rules
@@ -256,6 +256,29 @@ class TestRuleCompiler:
 
         rules = {"match": "all", "rules": [
             {"type": "person", "person_ids": [pid]}
+        ]}
+        ids = evaluate_rules(conn, rules)
+        assert sorted(ids) == [1, 2, 3]
+
+    def test_any_match_uses_union_semantics(self, tmp_path):
+        from imganalyzer.storyline.rules import evaluate_rules
+
+        conn = _make_test_db(tmp_path)
+        pid = _create_person(conn, "Bob")
+
+        _insert_image(conn, 1)
+        _insert_face_occurrence(conn, 1, person_id=pid)
+
+        _insert_image(conn, 2)
+        _insert_search_features(conn, 2, country="US")
+
+        _insert_image(conn, 3)
+        _insert_face_occurrence(conn, 3, person_id=pid)
+        _insert_search_features(conn, 3, country="US")
+
+        rules = {"match": "any", "rules": [
+            {"type": "person", "person_ids": [pid]},
+            {"type": "location", "country": "US"},
         ]}
         ids = evaluate_rules(conn, rules)
         assert sorted(ids) == [1, 2, 3]
@@ -794,6 +817,16 @@ class TestPresets:
         assert album.name == "2024 Year in Review"
         assert album.item_count == 5
 
+    def test_year_in_review_includes_late_dec31(self, tmp_path):
+        from imganalyzer.storyline.presets import create_year_in_review
+
+        conn = _make_test_db(tmp_path)
+        _insert_image(conn, 1)
+        _insert_search_features(conn, 1, dt="2024-12-31T18:30:00")
+
+        album = create_year_in_review(conn, year=2024)
+        assert album.item_count == 1
+
     def test_year_in_review_default_year(self, tmp_path):
         from imganalyzer.storyline.presets import create_year_in_review
 
@@ -826,6 +859,20 @@ class TestPresets:
         person_id = _create_person(conn, "Charlie")
         album = create_person_timeline(conn, person_id)
         assert "Charlie" in album.name
+
+    def test_growth_story(self, tmp_path):
+        from imganalyzer.storyline.presets import create_growth_story
+
+        conn = _make_test_db(tmp_path)
+        person_id = _create_person(conn, "Mia")
+        for i in range(1, 3):
+            _insert_image(conn, i)
+            _insert_search_features(conn, i, dt=f"2024-01-{i:02d}T12:00:00")
+            _insert_face_occurrence(conn, i, person_id=person_id, cluster_id=100 + i)
+
+        album = create_growth_story(conn, person_id)
+        assert album.item_count == 2
+        assert "Growing Up" in album.name
 
     def test_together_album(self, tmp_path):
         from imganalyzer.storyline.presets import create_together_album
@@ -897,6 +944,7 @@ class TestPresets:
         assert "year_in_review" in PRESET_REGISTRY
         assert "on_this_day" in PRESET_REGISTRY
         assert "person_timeline" in PRESET_REGISTRY
+        assert "growth_story" in PRESET_REGISTRY
         assert "together" in PRESET_REGISTRY
         assert "location" in PRESET_REGISTRY
 
@@ -1059,6 +1107,37 @@ class TestIncremental:
 # ── Test: Narrative ──────────────────────────────────────────────────────────
 
 class TestNarrative:
+    def test_ai_narrative_uses_ollama_text_generation(self, tmp_path, monkeypatch):
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.generator import generate_story, get_story_chapters
+        from imganalyzer.storyline.narrative import generate_all_chapter_narratives
+
+        conn = _make_test_db(tmp_path)
+        person_id, image_ids = _seed_timeline_album(conn, n_images=10, days_span=10)
+
+        for image_id in image_ids:
+            conn.execute(
+                "INSERT OR REPLACE INTO analysis_caption (image_id, description, keywords) VALUES (?, ?, ?)",
+                [image_id, f"Photo {image_id} at a family gathering", json.dumps(["family", "travel"])],
+            )
+
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [person_id]}
+        ]}
+        album = create_album(conn, "Narrative AI Test", rules)
+        generate_story(conn, album.id)
+
+        monkeypatch.setattr(
+            "imganalyzer.analysis.ai.ollama.OllamaAI.generate_text",
+            lambda self, prompt: "A concise AI summary.",
+        )
+
+        updated = generate_all_chapter_narratives(conn, album.id, use_ai=True)
+        assert updated > 0
+
+        chapters = get_story_chapters(conn, album.id)
+        assert chapters[0]["summary"] == "A concise AI summary."
+
     def test_heuristic_narrative(self, tmp_path):
         from imganalyzer.storyline.albums import create_album
         from imganalyzer.storyline.generator import generate_story, get_story_chapters
@@ -1093,3 +1172,37 @@ class TestNarrative:
 
         updated = generate_all_chapter_narratives(conn, album.id, use_ai=False)
         assert updated == 0
+
+    def test_use_ai_false_skips_ollama(self, tmp_path, monkeypatch):
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.generator import generate_story, get_story_chapters
+        from imganalyzer.storyline.narrative import generate_all_chapter_narratives
+
+        conn = _make_test_db(tmp_path)
+        person_id, image_ids = _seed_timeline_album(conn, n_images=8, days_span=8)
+
+        for image_id in image_ids:
+            conn.execute(
+                "INSERT OR REPLACE INTO analysis_caption (image_id, description, keywords) VALUES (?, ?, ?)",
+                [image_id, f"Story image {image_id}", json.dumps(["memory"])],
+            )
+
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [person_id]}
+        ]}
+        album = create_album(conn, "Narrative Heuristic", rules)
+        generate_story(conn, album.id)
+
+        def _should_not_run(self, prompt):
+            raise AssertionError("AI generation should not be called when use_ai=False")
+
+        monkeypatch.setattr(
+            "imganalyzer.analysis.ai.ollama.OllamaAI.generate_text",
+            _should_not_run,
+        )
+
+        updated = generate_all_chapter_narratives(conn, album.id, use_ai=False)
+        assert updated > 0
+
+        chapters = get_story_chapters(conn, album.id)
+        assert chapters[0]["summary"]

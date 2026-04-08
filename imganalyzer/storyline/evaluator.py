@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import statistics
 import struct
 import time
 from dataclasses import dataclass, field
@@ -167,8 +168,10 @@ def _eval_rule_accuracy(
     report.add(CriterionResult("A2", "Rule recall", recall >= 0.99, round(recall, 4), 0.99))
 
     # A3: Query performance — measured externally via generation_time_s
-    # (placeholder — actual benchmark done in F1)
-    report.add(CriterionResult("A3", "Query performance", True, "deferred to F1", "< 2s"))
+    report.add(CriterionResult(
+        "A3", "Query performance", True, "N/A (measured in F1)", "< 2s",
+        detail="Measured via F1 generation time criterion",
+    ))
 
     # A4: Idempotency — re-evaluation yields same results
     fresh_ids2 = set(evaluate_rules(conn, rules))
@@ -272,7 +275,7 @@ def _eval_chapter_quality(
                 gaps_hours.append(gap)
             except (ValueError, TypeError):
                 pass
-    median_gap = sorted(gaps_hours)[len(gaps_hours) // 2] if gaps_hours else 0
+    median_gap = statistics.median(gaps_hours) if gaps_hours else 0.0
     report.add(CriterionResult(
         "C1", "Inter-chapter gap",
         median_gap >= 2.0 or len(chapters) <= 1,
@@ -290,7 +293,7 @@ def _eval_chapter_quality(
                 spans_days.append((e - s).total_seconds() / 86400.0)
             except (ValueError, TypeError):
                 pass
-    p95_span = sorted(spans_days)[int(len(spans_days) * 0.95)] if spans_days else 0
+    p95_span = sorted(spans_days)[min(int(len(spans_days) * 0.95), len(spans_days) - 1)] if spans_days else 0
     report.add(CriterionResult(
         "C2", "Intra-chapter span",
         p95_span <= 7.0 or len(chapters) <= 1,
@@ -536,12 +539,13 @@ def _eval_narrative(
     else:
         report.add(CriterionResult("E4", "Date grounding", True, "No dated chapters", "≥ 90%"))
 
-    # E5: No hallucination — needs AI narrative, skip for heuristic mode
+    # E5: No hallucination — requires AI narrative analysis, not applicable in heuristic mode
     report.add(CriterionResult(
         "E5", "No hallucination",
         True,
-        "Heuristic mode (no AI narrative yet)",
+        "N/A (heuristic mode)",
         "Spot-check",
+        detail="Skipped: only applicable when AI narratives are generated",
     ))
 
 
@@ -564,12 +568,13 @@ def _eval_scale(
         f"< {threshold:.0f}s",
     ))
 
-    # F2: Memory usage — can't measure post-hoc, mark as deferred
+    # F2: Memory usage — not measurable post-hoc
     report.add(CriterionResult(
         "F2", "Memory usage",
         True,
-        "Deferred (needs profiling)",
+        "N/A (requires live profiling)",
         "< 500 MB",
+        detail="Skipped: memory measurement needs psutil during generation",
     ))
 
     # F3: Hierarchy reduction ratio (≥ 10:1 images-to-moments)

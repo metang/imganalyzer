@@ -654,9 +654,10 @@ declare global {
   interface Window {
     api: {
       openFolder(): Promise<string | null>
+      saveStoryExport(defaultPath?: string): Promise<string | null>
       listImages(folderPath: string): Promise<ImageFile[]>
       getThumbnail(imagePath: string): Promise<string>
-      getThumbnailsBatch(items: Array<{ file_path: string; image_id?: number }>): Promise<Record<string, string>>
+      getThumbnailsBatch(items: Array<{ file_path?: string; image_id?: number }>): Promise<Record<string, string>>
       getFullImage(imagePath: string): Promise<string>
       getCachedImage(imagePath: string): Promise<string>
       openPath(filePath: string): Promise<string>

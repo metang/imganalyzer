@@ -6,7 +6,7 @@ with configurable time windows and geohash precision.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Sequence
 
@@ -145,8 +145,8 @@ def cluster_moments(
             prev = timed[i - 1]
             curr = timed[i]
 
-            assert prev.timestamp is not None
-            assert curr.timestamp is not None
+            if prev.timestamp is None or curr.timestamp is None:
+                continue
             close_time = (curr.timestamp - prev.timestamp) <= time_window
 
             # Spatial check: same area if both have geohash and they match,

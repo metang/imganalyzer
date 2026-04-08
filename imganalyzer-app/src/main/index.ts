@@ -103,6 +103,15 @@ ipcMain.handle('dialog:openFolder', async () => {
   return result.canceled ? null : result.filePaths[0]
 })
 
+ipcMain.handle('dialog:saveStoryExport', async (_evt, defaultPath?: string) => {
+  const result = await dialog.showSaveDialog({
+    title: 'Export story as HTML',
+    defaultPath,
+    filters: [{ name: 'HTML files', extensions: ['html'] }]
+  })
+  return result.canceled ? null : (result.filePath ?? null)
+})
+
 // ─── IPC: List images in folder ───────────────────────────────────────────────
 ipcMain.handle('fs:listImages', async (_evt, folderPath: string) => {
   return listImages(folderPath)

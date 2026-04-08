@@ -15,6 +15,7 @@ def generate_chapter_narrative(
     conn: sqlite3.Connection,
     chapter_id: str,
     *,
+    use_ai: bool = True,
     max_descriptions: int = 20,
 ) -> str:
     """Generate an AI narrative summary for a chapter.
@@ -29,40 +30,40 @@ def generate_chapter_narrative(
     if chapter is None:
         return ""
 
-    # Collect image descriptions from this chapter's moments
+    # Collect image descriptions from this chapter's moments (single query)
     descriptions: list[str] = []
     keywords_set: set[str] = set()
     locations: set[str] = set()
 
-    moment_ids = conn.execute(
-        "SELECT id FROM story_moments WHERE chapter_id = ?", [chapter_id]
+    rows = conn.execute(
+        "SELECT ac.description, ac.keywords, am.location_city "
+        "FROM story_moments sm "
+        "JOIN moment_images mi ON mi.moment_id = sm.id "
+        "JOIN analysis_caption ac ON ac.image_id = mi.image_id "
+        "LEFT JOIN analysis_metadata am ON am.image_id = mi.image_id "
+        "WHERE sm.chapter_id = ? "
+        "ORDER BY sm.sort_order, mi.sort_order "
+        "LIMIT ?",
+        [chapter_id, max_descriptions],
     ).fetchall()
 
-    for (mid,) in moment_ids:
-        rows = conn.execute(
-            "SELECT ac.description, ac.keywords, am.location_city "
-            "FROM moment_images mi "
-            "JOIN analysis_caption ac ON ac.image_id = mi.image_id "
-            "LEFT JOIN analysis_metadata am ON am.image_id = mi.image_id "
-            "WHERE mi.moment_id = ? "
-            "ORDER BY mi.sort_order LIMIT ?",
-            [mid, max_descriptions],
-        ).fetchall()
-
-        for r in rows:
-            if r["description"]:
-                descriptions.append(r["description"])
-            if r["keywords"]:
-                try:
-                    kws = json.loads(r["keywords"]) if isinstance(r["keywords"], str) else r["keywords"]
-                    if isinstance(kws, list):
-                        keywords_set.update(str(k) for k in kws[:10])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            if r["location_city"]:
-                locations.add(r["location_city"])
+    for r in rows:
+        if r["description"]:
+            descriptions.append(r["description"])
+        if r["keywords"]:
+            try:
+                kws = json.loads(r["keywords"]) if isinstance(r["keywords"], str) else r["keywords"]
+                if isinstance(kws, list):
+                    keywords_set.update(str(k) for k in kws[:10])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if r["location_city"]:
+            locations.add(r["location_city"])
 
     if not descriptions:
+        return _heuristic_summary(chapter, keywords_set, locations)
+
+    if not use_ai:
         return _heuristic_summary(chapter, keywords_set, locations)
 
     # Try AI generation via Ollama
@@ -73,7 +74,7 @@ def generate_chapter_narrative(
             locations,
             chapter,
         )
-    except Exception:
+    except (RuntimeError, OSError, ValueError, KeyError):
         return _heuristic_summary(chapter, keywords_set, locations)
 
 
@@ -149,7 +150,7 @@ def generate_all_chapter_narratives(
 
     updated = 0
     for (chapter_id,) in chapters:
-        summary = generate_chapter_narrative(conn, chapter_id)
+        summary = generate_chapter_narrative(conn, chapter_id, use_ai=use_ai)
         if summary:
             conn.execute(
                 "UPDATE story_chapters SET summary = ? WHERE id = ?",
