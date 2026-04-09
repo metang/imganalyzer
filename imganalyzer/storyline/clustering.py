@@ -13,6 +13,29 @@ from typing import Sequence
 from imganalyzer.db.geohash import encode as geohash_encode
 
 
+def _parse_datetime(raw: str) -> datetime | None:
+    """Parse a date string from either EXIF or ISO format.
+
+    EXIF format:  ``"2024:06:15 14:30:00"``
+    ISO format:   ``"2024-06-15T14:30:00"``
+    """
+    # If already ISO-like (has dashes in date part), try directly
+    if len(raw) >= 10 and raw[4] == "-":
+        try:
+            return datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
+            return None
+
+    # EXIF format: replace first two colons (date separators) with dashes
+    normalised = raw.replace(":", "-", 2)
+    if " " in normalised and "T" not in normalised:
+        normalised = normalised.replace(" ", "T", 1)
+    try:
+        return datetime.fromisoformat(normalised)
+    except (ValueError, TypeError):
+        return None
+
+
 # ── Data classes ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -92,10 +115,7 @@ def load_album_points(
     for r in rows:
         ts = None
         if r["date_time_original"]:
-            try:
-                ts = datetime.fromisoformat(r["date_time_original"])
-            except (ValueError, TypeError):
-                pass
+            ts = _parse_datetime(r["date_time_original"])
 
         gh6 = ""
         if r["geohash"]:

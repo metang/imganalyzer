@@ -470,6 +470,55 @@ class TestMomentClustering:
         assert moments[0].start_time == t1
         assert moments[0].end_time == t2
 
+    def test_exif_date_format_parsed(self, tmp_path):
+        """Real images store dates in EXIF format 'YYYY:MM:DD HH:MM:SS'."""
+        conn = _make_test_db(tmp_path)
+        person_id = _create_person(conn, "Alice")
+
+        # Simulate real EXIF dates (colon-separated date part)
+        exif_dates = [
+            "2024:06:15 09:30:00",  # morning
+            "2024:06:15 09:45:00",  # same session
+            "2024:06:15 15:00:00",  # afternoon (>30 min gap → new moment)
+        ]
+        for i, dt_str in enumerate(exif_dates, 1):
+            _insert_image(conn, i)
+            _insert_search_features(conn, i, dt=dt_str, country="US")
+            _insert_metadata(conn, i, dt=dt_str, lat=40.7, lng=-74.0, geohash="dr5reg")
+            _insert_face_occurrence(conn, i, person_id=person_id)
+
+        conn.commit()
+
+        from imganalyzer.storyline.albums import create_album
+        from imganalyzer.storyline.generator import generate_story
+
+        rules = {"match": "all", "rules": [{"type": "person", "person_ids": [person_id]}]}
+        album = create_album(conn, "EXIF Date Test", rules)
+        result = generate_story(conn, album.id)
+
+        # Should produce 2 moments (morning cluster + afternoon), not 1 untimed lump
+        assert result.moment_count >= 2, (
+            f"Expected ≥2 moments from EXIF dates, got {result.moment_count}"
+        )
+
+    def test_parse_datetime_both_formats(self):
+        """_parse_datetime handles EXIF and ISO formats."""
+        from imganalyzer.storyline.clustering import _parse_datetime
+
+        # EXIF format
+        dt = _parse_datetime("2024:06:15 14:30:00")
+        assert dt is not None
+        assert dt.year == 2024 and dt.month == 6 and dt.day == 15
+        assert dt.hour == 14 and dt.minute == 30
+
+        # ISO format
+        dt2 = _parse_datetime("2024-06-15T14:30:00")
+        assert dt2 is not None
+        assert dt == dt2
+
+        # Invalid
+        assert _parse_datetime("not a date") is None
+
 
 # ── Test: Chapter Detection ──────────────────────────────────────────────────
 
