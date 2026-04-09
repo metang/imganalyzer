@@ -1069,21 +1069,43 @@ function StoryTimeline({
                     </span>
                   </div>
 
-                  {/* ── Chapter grid: 2 columns, expanded chapters span full width ── */}
-                  <div className="grid grid-cols-2 gap-3">
-                    {yearChapters.map((chapter) => {
+                  {/* ── Chapter masonry: 3-col grid with varied card sizes ── */}
+                  <div
+                    className="grid gap-2"
+                    style={{
+                      gridTemplateColumns: 'repeat(3, 1fr)',
+                      gridAutoRows: '100px',
+                    }}
+                  >
+                    {yearChapters.map((chapter, idx) => {
                       const isExpanded = expandedChapter === chapter.id
                       const coverThumb = chapter.cover_image_id ? heroThumbs[chapter.cover_image_id] : undefined
                       const dateRange = formatChapterDateRange(chapter.start_date, chapter.end_date)
 
+                      /* ── Card sizing: repeating pattern for visual variety ── */
+                      let colSpan = 1
+                      let rowSpan = 2
+                      if (isExpanded) {
+                        colSpan = 3
+                        rowSpan = 0 // auto height for expanded
+                      } else {
+                        const pos = idx % 7
+                        // Pattern: feature, small, tall, small, wide, small, small
+                        if (pos === 0) { colSpan = 2; rowSpan = 3 }         // feature — large
+                        else if (pos === 2) { colSpan = 1; rowSpan = 3 }    // tall portrait
+                        else if (pos === 4) { colSpan = 2; rowSpan = 2 }    // wide landscape
+                        // pos 1,3,5,6 default to 1×2 (standard)
+                      }
+
+                      const gridStyle: React.CSSProperties = isExpanded
+                        ? { gridColumn: '1 / -1' }
+                        : { gridColumn: `span ${colSpan}`, gridRow: `span ${rowSpan}` }
+
                       return (
-                        <div
-                          key={chapter.id}
-                          className={isExpanded ? 'col-span-2' : ''}
-                        >
+                        <div key={chapter.id} style={gridStyle}>
                           {/* Chapter card */}
                           <div
-                            className={`group rounded-xl overflow-hidden transition-all duration-200 cursor-pointer ${
+                            className={`group rounded-xl overflow-hidden transition-all duration-200 cursor-pointer h-full ${
                               isExpanded
                                 ? 'bg-neutral-850 ring-1 ring-blue-500/20'
                                 : 'bg-neutral-900/70 hover:bg-neutral-800/60 hover:ring-1 hover:ring-neutral-700/50'
@@ -1091,7 +1113,7 @@ function StoryTimeline({
                             onClick={() => toggleChapter(chapter.id)}
                           >
                             {isExpanded ? (
-                              /* ── Expanded view: side-by-side text + moment collages ── */
+                              /* ── Expanded view ── */
                               <div className="p-4">
                                 <div className="flex items-start justify-between mb-3">
                                   <div className="flex-1 min-w-0">
@@ -1154,45 +1176,40 @@ function StoryTimeline({
                                 )}
                               </div>
                             ) : (
-                              /* ── Collapsed card: image + overlay ── */
-                              <>
+                              /* ── Collapsed card: fill full height with image ── */
+                              <div className="relative w-full h-full overflow-hidden">
                                 {coverThumb ? (
-                                  <div className="relative aspect-[4/3] overflow-hidden">
+                                  <>
                                     <img
                                       src={coverThumb}
                                       alt=""
-                                      className="w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
+                                      className="absolute inset-0 w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
                                     />
-                                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
-                                    <div className="absolute bottom-0 left-0 right-0 p-3">
-                                      <h3 className="text-sm font-semibold text-white drop-shadow-lg leading-tight truncate">
-                                        {chapter.title || 'Untitled Chapter'}
-                                      </h3>
-                                      <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-neutral-300/80">
-                                        {dateRange && <span>{dateRange}</span>}
-                                        <span className="opacity-60">{chapter.image_count} photos</span>
-                                      </div>
-                                    </div>
-                                  </div>
+                                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
+                                  </>
                                 ) : (
-                                  <div className="aspect-[4/3] flex flex-col justify-end p-3 bg-neutral-800/50">
-                                    <h3 className="text-sm font-semibold text-neutral-200 leading-tight truncate">
-                                      {chapter.title || 'Untitled Chapter'}
-                                    </h3>
-                                    <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-neutral-500">
-                                      {dateRange && <span>{dateRange}</span>}
-                                      <span>{chapter.image_count} photos</span>
-                                    </div>
-                                  </div>
+                                  <div className="absolute inset-0 bg-neutral-800/60" />
                                 )}
-                                {chapter.summary && (
-                                  <div className="px-3 py-2">
-                                    <p className="text-xs text-neutral-500 italic line-clamp-2 leading-relaxed">
+                                <div className="absolute bottom-0 left-0 right-0 p-3">
+                                  <h3 className={`font-semibold text-white drop-shadow-lg leading-tight ${
+                                    colSpan >= 2 ? 'text-base' : 'text-sm truncate'
+                                  }`}>
+                                    {chapter.title || 'Untitled Chapter'}
+                                  </h3>
+                                  <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-neutral-300/80">
+                                    {chapter.location && (
+                                      <span className="text-blue-400/90">📍 {chapter.location}</span>
+                                    )}
+                                    {dateRange && <span>{dateRange}</span>}
+                                    <span className="opacity-60">{chapter.image_count} photos</span>
+                                  </div>
+                                  {chapter.summary && colSpan >= 2 && (
+                                    <p className="text-xs text-neutral-400/80 italic line-clamp-2 leading-relaxed mt-1">
                                       {chapter.summary}
                                     </p>
-                                  </div>
-                                )}
-                              </>
+                                  )}
+                                </div>
+                              </div>
                             )}
                           </div>
                         </div>
