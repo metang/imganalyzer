@@ -603,111 +603,300 @@ function formatChapterDateRange(start: string | null, end: string | null): strin
 }
 
 /** Collage layout for moment images — 1 hero large + rest arranged around it. */
+/**
+ * Collage cell — renders a thumbnail or placeholder at the given grid position.
+ * Uses CSS grid placement so each cell can span different rows/columns.
+ */
+function CollageCell({
+  img,
+  thumb,
+  style,
+}: {
+  img: MomentImage
+  thumb: string | undefined
+  style: React.CSSProperties
+}) {
+  return (
+    <div className="overflow-hidden relative" style={style}>
+      {thumb ? (
+        <img
+          src={thumb}
+          alt=""
+          className="absolute inset-0 w-full h-full object-cover object-top"
+        />
+      ) : (
+        <div className="absolute inset-0 bg-neutral-800" />
+      )}
+    </div>
+  )
+}
+
+/**
+ * Layout definition for collage — each slot specifies CSS grid placement.
+ * gridColumn/gridRow use CSS shorthand like "1 / 3" meaning "start at 1, end at 3".
+ */
+type CollageLayout = {
+  columns: string          // grid-template-columns
+  rows: string             // grid-template-rows
+  slots: React.CSSProperties[]
+}
+
+/** Pick a deterministic layout variant from moment id to avoid re-shuffling on re-render. */
+function pickVariant(momentId: number, count: number): number {
+  return Math.abs(momentId) % count
+}
+
+function getLayout(count: number, momentId: number): CollageLayout {
+  if (count === 1) {
+    return {
+      columns: '1fr',
+      rows: '200px',
+      slots: [{ gridColumn: '1', gridRow: '1' }],
+    }
+  }
+
+  if (count === 2) {
+    const variant = pickVariant(momentId, 2)
+    if (variant === 0) {
+      // Wide left, narrow right
+      return {
+        columns: '3fr 2fr',
+        rows: '180px',
+        slots: [
+          { gridColumn: '1', gridRow: '1' },
+          { gridColumn: '2', gridRow: '1' },
+        ],
+      }
+    }
+    // Narrow left, wide right
+    return {
+      columns: '2fr 3fr',
+      rows: '180px',
+      slots: [
+        { gridColumn: '1', gridRow: '1' },
+        { gridColumn: '2', gridRow: '1' },
+      ],
+    }
+  }
+
+  if (count === 3) {
+    const variant = pickVariant(momentId, 3)
+    if (variant === 0) {
+      // Big left, 2 stacked right
+      return {
+        columns: '3fr 2fr',
+        rows: '110px 110px',
+        slots: [
+          { gridColumn: '1', gridRow: '1 / 3' },
+          { gridColumn: '2', gridRow: '1' },
+          { gridColumn: '2', gridRow: '2' },
+        ],
+      }
+    }
+    if (variant === 1) {
+      // 2 stacked left, big right
+      return {
+        columns: '2fr 3fr',
+        rows: '110px 110px',
+        slots: [
+          { gridColumn: '1', gridRow: '1' },
+          { gridColumn: '1', gridRow: '2' },
+          { gridColumn: '2', gridRow: '1 / 3' },
+        ],
+      }
+    }
+    // Top wide, 2 bottom
+    return {
+      columns: '1fr 1fr',
+      rows: '140px 100px',
+      slots: [
+        { gridColumn: '1 / 3', gridRow: '1' },
+        { gridColumn: '1', gridRow: '2' },
+        { gridColumn: '2', gridRow: '2' },
+      ],
+    }
+  }
+
+  if (count === 4) {
+    const variant = pickVariant(momentId, 3)
+    if (variant === 0) {
+      // Big hero top-left spanning 2 rows, 2 small right, 1 bottom-left
+      return {
+        columns: '3fr 2fr',
+        rows: '100px 100px 80px',
+        slots: [
+          { gridColumn: '1', gridRow: '1 / 3' },
+          { gridColumn: '2', gridRow: '1' },
+          { gridColumn: '2', gridRow: '2' },
+          { gridColumn: '1 / 3', gridRow: '3' },
+        ],
+      }
+    }
+    if (variant === 1) {
+      // L-shape: hero top spanning full width, 3 across bottom
+      return {
+        columns: '1fr 1fr 1fr',
+        rows: '150px 90px',
+        slots: [
+          { gridColumn: '1 / 4', gridRow: '1' },
+          { gridColumn: '1', gridRow: '2' },
+          { gridColumn: '2', gridRow: '2' },
+          { gridColumn: '3', gridRow: '2' },
+        ],
+      }
+    }
+    // 2×2 with uneven sizes
+    return {
+      columns: '2fr 3fr',
+      rows: '130px 110px',
+      slots: [
+        { gridColumn: '1', gridRow: '1' },
+        { gridColumn: '2', gridRow: '1' },
+        { gridColumn: '1', gridRow: '2' },
+        { gridColumn: '2', gridRow: '2' },
+      ],
+    }
+  }
+
+  if (count === 5) {
+    const variant = pickVariant(momentId, 2)
+    if (variant === 0) {
+      // Hero tall left, 4 in 2×2 grid right
+      return {
+        columns: '3fr 2fr 2fr',
+        rows: '110px 110px',
+        slots: [
+          { gridColumn: '1', gridRow: '1 / 3' },
+          { gridColumn: '2', gridRow: '1' },
+          { gridColumn: '3', gridRow: '1' },
+          { gridColumn: '2', gridRow: '2' },
+          { gridColumn: '3', gridRow: '2' },
+        ],
+      }
+    }
+    // Top row: 2 images, bottom row: 3 images
+    return {
+      columns: '1fr 1fr 1fr',
+      rows: '130px 100px',
+      slots: [
+        { gridColumn: '1 / 3', gridRow: '1' },
+        { gridColumn: '3', gridRow: '1' },
+        { gridColumn: '1', gridRow: '2' },
+        { gridColumn: '2', gridRow: '2' },
+        { gridColumn: '3', gridRow: '2' },
+      ],
+    }
+  }
+
+  if (count === 6) {
+    const variant = pickVariant(momentId, 2)
+    if (variant === 0) {
+      // Hero left 2 rows, 2×2 right, 2 across bottom
+      return {
+        columns: '3fr 2fr 2fr',
+        rows: '95px 95px 80px',
+        slots: [
+          { gridColumn: '1', gridRow: '1 / 3' },
+          { gridColumn: '2', gridRow: '1' },
+          { gridColumn: '3', gridRow: '1' },
+          { gridColumn: '2', gridRow: '2' },
+          { gridColumn: '3', gridRow: '2' },
+          { gridColumn: '1 / 4', gridRow: '3' },
+        ],
+      }
+    }
+    // 3 columns, top 2 with big left, bottom row 3 equal
+    return {
+      columns: '2fr 1fr 1fr',
+      rows: '130px 100px',
+      slots: [
+        { gridColumn: '1', gridRow: '1 / 3' },
+        { gridColumn: '2', gridRow: '1' },
+        { gridColumn: '3', gridRow: '1' },
+        { gridColumn: '1', gridRow: '2' },    // under hero — hero col only
+        { gridColumn: '2', gridRow: '2' },
+        { gridColumn: '3', gridRow: '2' },
+      ],
+    }
+  }
+
+  // 7+ images: show first 7 in a varied layout, +N badge on last cell
+  return {
+    columns: '2fr 1fr 1fr 1fr',
+    rows: '110px 90px 90px',
+    slots: [
+      { gridColumn: '1', gridRow: '1 / 3' },    // hero tall left
+      { gridColumn: '2', gridRow: '1' },
+      { gridColumn: '3 / 5', gridRow: '1' },     // wide top-right
+      { gridColumn: '2', gridRow: '2' },
+      { gridColumn: '3', gridRow: '2' },
+      { gridColumn: '4', gridRow: '2' },
+      { gridColumn: '1 / 5', gridRow: '3' },     // panoramic bottom strip
+    ],
+  }
+}
+
 function MomentCollage({
   images,
   thumbs,
+  momentId,
 }: {
   images: MomentImage[]
   thumbs: Record<number, string>
+  momentId: number
 }) {
   if (images.length === 0) return null
 
   const hero = images.find((img) => img.is_hero) ?? images[0]
-  const rest = images.filter((img) => img.image_id !== hero.image_id)
-  const heroThumb = thumbs[hero.image_id]
+  // Put hero first, then the rest in original order
+  const ordered = [hero, ...images.filter((img) => img.image_id !== hero.image_id)]
 
-  if (images.length === 1) {
-    return (
-      <div className="rounded-lg overflow-hidden">
-        {heroThumb ? (
-          <img src={heroThumb} alt="" className="w-full h-48 object-cover object-top" />
-        ) : (
-          <div className="w-full h-48 bg-neutral-800" />
-        )}
-      </div>
-    )
-  }
+  const displayCount = Math.min(ordered.length, 7)
+  const overflow = ordered.length - displayCount
+  const layout = getLayout(displayCount, momentId)
+  const shown = ordered.slice(0, displayCount)
 
-  if (images.length === 2) {
-    return (
-      <div className="grid grid-cols-2 gap-1 rounded-lg overflow-hidden">
-        {images.map((img) => (
-          <div key={img.image_id} className={`overflow-hidden ${img.is_hero ? 'ring-1 ring-amber-400/50' : ''}`}>
-            {thumbs[img.image_id] ? (
-              <img src={thumbs[img.image_id]} alt="" className="w-full h-40 object-cover object-top" />
-            ) : (
-              <div className="w-full h-40 bg-neutral-800" />
-            )}
-          </div>
-        ))}
-      </div>
-    )
-  }
-
-  if (images.length <= 4) {
-    // Hero takes left half, rest stack on right
-    return (
-      <div className="grid grid-cols-5 gap-1 rounded-lg overflow-hidden" style={{ height: '220px' }}>
-        <div className="col-span-3 overflow-hidden">
-          {heroThumb ? (
-            <img src={heroThumb} alt="" className="w-full h-full object-cover object-top" />
-          ) : (
-            <div className="w-full h-full bg-neutral-800" />
-          )}
-        </div>
-        <div className="col-span-2 grid gap-1" style={{ gridTemplateRows: `repeat(${rest.length}, 1fr)` }}>
-          {rest.map((img) => (
-            <div key={img.image_id} className="overflow-hidden">
-              {thumbs[img.image_id] ? (
-                <img src={thumbs[img.image_id]} alt="" className="w-full h-full object-cover object-top" />
-              ) : (
-                <div className="w-full h-full bg-neutral-800" />
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
-    )
-  }
-
-  // 5+ images: hero large on left, 2×2 grid on right, overflow strip below
-  const side = rest.slice(0, 3)
-  const overflow = rest.slice(3)
   return (
-    <div className="space-y-1">
-      <div className="grid grid-cols-5 gap-1 rounded-lg overflow-hidden" style={{ height: '220px' }}>
-        <div className="col-span-3 overflow-hidden">
-          {heroThumb ? (
-            <img src={heroThumb} alt="" className="w-full h-full object-cover object-top" />
-          ) : (
-            <div className="w-full h-full bg-neutral-800" />
-          )}
-        </div>
-        <div className="col-span-2 grid grid-rows-3 gap-1">
-          {side.map((img) => (
-            <div key={img.image_id} className="overflow-hidden">
+    <div
+      className="rounded-lg overflow-hidden"
+      style={{
+        display: 'grid',
+        gridTemplateColumns: layout.columns,
+        gridTemplateRows: layout.rows,
+        gap: '3px',
+      }}
+    >
+      {shown.map((img, i) => {
+        const isLast = i === displayCount - 1 && overflow > 0
+        const slot = layout.slots[i]
+        if (isLast) {
+          // Last cell with +N overflow badge
+          return (
+            <div key={img.image_id} className="overflow-hidden relative" style={slot}>
               {thumbs[img.image_id] ? (
-                <img src={thumbs[img.image_id]} alt="" className="w-full h-full object-cover object-top" />
+                <img
+                  src={thumbs[img.image_id]}
+                  alt=""
+                  className="absolute inset-0 w-full h-full object-cover object-top"
+                />
               ) : (
-                <div className="w-full h-full bg-neutral-800" />
+                <div className="absolute inset-0 bg-neutral-800" />
               )}
+              <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                <span className="text-white text-lg font-semibold">+{overflow}</span>
+              </div>
             </div>
-          ))}
-        </div>
-      </div>
-      {overflow.length > 0 && (
-        <div className="flex gap-1 overflow-x-auto pb-1 scrollbar-thin scrollbar-thumb-neutral-700">
-          {overflow.map((img) => (
-            <div key={img.image_id} className="shrink-0 w-24 h-20 rounded-md overflow-hidden">
-              {thumbs[img.image_id] ? (
-                <img src={thumbs[img.image_id]} alt="" className="w-full h-full object-cover object-top" />
-              ) : (
-                <div className="w-full h-full bg-neutral-800" />
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+          )
+        }
+        return (
+          <CollageCell
+            key={img.image_id}
+            img={img}
+            thumb={thumbs[img.image_id]}
+            style={slot}
+          />
+        )
+      })}
     </div>
   )
 }
@@ -944,6 +1133,7 @@ function StoryTimeline({
                                           <MomentCollage
                                             images={momentImages[moment.id]}
                                             thumbs={heroThumbs}
+                                            momentId={moment.id}
                                           />
                                         ) : moment.hero_image_id && heroThumbs[moment.hero_image_id] ? (
                                           <div className="rounded-lg overflow-hidden">
