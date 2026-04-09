@@ -567,6 +567,41 @@ function PresetAlbumDialog({
 
 // ── Story Chapter Timeline ──────────────────────────────────────────────────
 
+/** Group chapters by year for visual sectioning. */
+function groupChaptersByYear(chapters: StoryChapter[]): Record<string, StoryChapter[]> {
+  const groups: Record<string, StoryChapter[]> = {}
+  for (const ch of chapters) {
+    let year = 'Unknown'
+    if (ch.start_date) {
+      try {
+        const d = new Date(ch.start_date)
+        if (!isNaN(d.getTime())) year = String(d.getFullYear())
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!groups[year]) groups[year] = []
+    groups[year].push(ch)
+  }
+  return groups
+}
+
+function formatChapterDateRange(start: string | null, end: string | null): string {
+  if (!start) return ''
+  try {
+    const s = new Date(start)
+    if (isNaN(s.getTime())) return ''
+    const opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' }
+    if (!end) return s.toLocaleDateString(undefined, opts)
+    const e = new Date(end)
+    if (isNaN(e.getTime())) return s.toLocaleDateString(undefined, opts)
+    if (s.toDateString() === e.toDateString()) return s.toLocaleDateString(undefined, opts)
+    return `${s.toLocaleDateString(undefined, opts)} – ${e.toLocaleDateString(undefined, opts)}`
+  } catch {
+    return ''
+  }
+}
+
 function StoryTimeline({
   album,
   chapters,
@@ -595,7 +630,6 @@ function StoryTimeline({
   const loadedMomentIdsRef = useRef<Set<string>>(new Set())
   const expandedChapterRef = useRef<string | null>(null)
 
-  // Reset state when album changes
   useEffect(() => {
     requestedThumbsRef.current.clear()
     loadedMomentIdsRef.current.clear()
@@ -606,7 +640,6 @@ function StoryTimeline({
   const loadThumbnailIds = useCallback(async (imageIds: number[]) => {
     const unique = [...new Set(imageIds)].filter((id) => !requestedThumbsRef.current.has(id))
     if (unique.length === 0) return
-
     unique.forEach((id) => requestedThumbsRef.current.add(id))
     try {
       const thumbs = await window.api.getThumbnailsBatch(unique.map((imageId) => ({ image_id: imageId })))
@@ -619,8 +652,8 @@ function StoryTimeline({
 
   useEffect(() => {
     const coverIds = chapters
-      .map((chapter) => chapter.cover_image_id)
-      .filter((imageId): imageId is number => imageId != null)
+      .map((ch) => ch.cover_image_id)
+      .filter((id): id is number => id != null)
     void loadThumbnailIds(coverIds)
   }, [chapters, loadThumbnailIds])
 
@@ -628,15 +661,13 @@ function StoryTimeline({
     if (loadingRef.current) return
     loadingRef.current = true
     try {
-      const { moments: loadedMoments } = await window.api.albumsChapterMoments(chapterId)
-      // Guard against stale responses from a previously expanded chapter
+      const { moments: loaded } = await window.api.albumsChapterMoments(chapterId)
       if (expandedChapterRef.current !== chapterId) return
-      const nextMoments = loadedMoments as StoryMoment[]
+      const nextMoments = loaded as StoryMoment[]
       setMoments(nextMoments)
-
       const heroIds = nextMoments
-        .map((moment) => moment.hero_image_id)
-        .filter((imageId): imageId is number => imageId != null)
+        .map((m) => m.hero_image_id)
+        .filter((id): id is number => id != null)
       void loadThumbnailIds(heroIds)
     } finally {
       loadingRef.current = false
@@ -662,153 +693,237 @@ function StoryTimeline({
       const { images } = await window.api.albumsMomentImages(momentId)
       const nextImages = images as MomentImage[]
       setMomentImages((prev) => ({ ...prev, [momentId]: nextImages }))
-      void loadThumbnailIds(nextImages.map((image) => image.image_id))
+      void loadThumbnailIds(nextImages.map((img) => img.image_id))
     } catch {
       loadedMomentIdsRef.current.delete(momentId)
     }
   }, [loadThumbnailIds])
 
+  const yearGroups = groupChaptersByYear(chapters)
+  const years = Object.keys(yearGroups).sort()
+
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-neutral-700">
-        <div>
-          <h2 className="text-lg font-semibold text-white">{album.name}</h2>
-          <p className="text-xs text-neutral-500">
-            {album.item_count} images · {chapters.length} chapters
-            {album.description && ` · ${album.description}`}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onGenerateNarrative}
-            disabled={narrating || chapters.length === 0}
-            className="px-3 py-1.5 text-sm rounded bg-violet-700 text-white hover:bg-violet-600 disabled:opacity-50"
-          >
-            {narrating ? 'Summarizing...' : 'Generate Summaries'}
-          </button>
-          <button
-            onClick={onExportStory}
-            disabled={exporting || chapters.length === 0}
-            className="px-3 py-1.5 text-sm rounded bg-neutral-700 text-white hover:bg-neutral-600 disabled:opacity-50"
-          >
-            {exporting ? 'Exporting...' : 'Export HTML'}
-          </button>
-          <button
-            onClick={onGenerateStory}
-            disabled={generating}
-            className="px-3 py-1.5 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50"
-          >
-            {generating ? 'Generating...' : chapters.length > 0 ? 'Regenerate Story' : 'Generate Story'}
-          </button>
+      {/* ── Header bar ── */}
+      <div className="shrink-0 px-6 py-4 border-b border-neutral-800 bg-neutral-900/60 backdrop-blur-sm">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-white tracking-tight">{album.name}</h2>
+            <p className="text-xs text-neutral-500 mt-0.5">
+              {album.item_count} photos · {chapters.length} chapters
+              {years.length > 1 && ` · ${years[0]}–${years[years.length - 1]}`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onGenerateNarrative}
+              disabled={narrating || chapters.length === 0}
+              className="px-3 py-1.5 text-xs font-medium rounded-full bg-neutral-800 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 transition-colors"
+            >
+              {narrating ? 'Summarizing…' : '✨ Summaries'}
+            </button>
+            <button
+              onClick={onExportStory}
+              disabled={exporting || chapters.length === 0}
+              className="px-3 py-1.5 text-xs font-medium rounded-full bg-neutral-800 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 transition-colors"
+            >
+              {exporting ? 'Exporting…' : '↗ Export'}
+            </button>
+            <button
+              onClick={onGenerateStory}
+              disabled={generating}
+              className="px-3 py-1.5 text-xs font-medium rounded-full bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 transition-colors"
+            >
+              {generating ? 'Generating…' : chapters.length > 0 ? '↻ Regenerate' : '▶ Generate Story'}
+            </button>
+          </div>
         </div>
       </div>
 
+      {/* ── Timeline body ── */}
       <div className="flex-1 overflow-y-auto">
-        {chapters.length === 0 && (
-          <div className="p-8 text-center text-neutral-500">
+        {chapters.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-neutral-500 gap-3 px-8">
+            <div className="text-4xl opacity-30">📖</div>
             <p className="text-sm">No story generated yet.</p>
-            <p className="text-xs mt-1">Generate the story, then create summaries or export it.</p>
+            <p className="text-xs text-neutral-600 text-center max-w-xs">
+              Generate a story to organise your photos into an automatic timeline
+              with chapters, moments, and hero images.
+            </p>
           </div>
-        )}
-
-        {chapters.map((chapter, idx) => (
-          <div key={chapter.id} className="border-b border-neutral-800">
-            <button
-              onClick={() => toggleChapter(chapter.id)}
-              className="w-full text-left px-4 py-3 hover:bg-neutral-800/50 transition-colors"
-            >
-              <div className="flex items-center gap-3">
-                <span className={`text-neutral-500 transition-transform ${expandedChapter === chapter.id ? 'rotate-90' : ''}`}>
-                  ▸
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-neutral-200 truncate">
-                    {chapter.title || `Chapter ${idx + 1}`}
-                  </div>
-                  <div className="text-xs text-neutral-500 mt-0.5">
-                    {chapter.image_count} images · {chapter.moment_count} moments
-                    {chapter.location && ` · ${chapter.location}`}
-                  </div>
-                  {chapter.summary && (
-                    <div className="text-xs text-neutral-400 mt-1 line-clamp-2">
-                      {chapter.summary}
-                    </div>
-                  )}
-                </div>
-                {chapter.cover_image_id && heroThumbs[chapter.cover_image_id] && (
-                  <img
-                    src={heroThumbs[chapter.cover_image_id]}
-                    className="w-10 h-10 rounded object-cover shrink-0"
-                    alt=""
-                  />
-                )}
-              </div>
-            </button>
-
-            {expandedChapter === chapter.id && (
-              <div className="bg-neutral-900/50 px-4 pb-3">
-                {moments.length === 0 && (
-                  <div className="text-xs text-neutral-500 py-2">Loading moments...</div>
-                )}
-                <div className="grid grid-cols-3 gap-2">
-                  {moments.map((moment) => (
-                    <button
-                      key={moment.id}
-                      onClick={() => void loadMomentImages(moment.id)}
-                      className="text-left bg-neutral-800 rounded-lg overflow-hidden hover:ring-1 hover:ring-blue-500 transition-all"
-                    >
-                      {moment.hero_image_id && heroThumbs[moment.hero_image_id] ? (
-                        <img
-                          src={heroThumbs[moment.hero_image_id]}
-                          className="w-full h-24 object-cover"
-                          alt=""
-                        />
-                      ) : (
-                        <div className="w-full h-24 bg-neutral-700 flex items-center justify-center text-neutral-500 text-xs">
-                          No preview
-                        </div>
-                      )}
-                      <div className="px-2 py-1.5">
-                        <div className="text-xs text-neutral-400 truncate">
-                          {moment.title || formatMomentTime(moment.start_time)}
-                        </div>
-                        <div className="text-[10px] text-neutral-500">
-                          {moment.image_count} images
-                        </div>
-                      </div>
-                    </button>
-                  ))}
+        ) : (
+          <div className="max-w-3xl mx-auto py-8 px-6">
+            {years.map((year) => (
+              <div key={year} className="mb-10">
+                {/* ── Year divider ── */}
+                <div className="flex items-center gap-4 mb-6">
+                  <span className="text-2xl font-black text-white tracking-tight">{year}</span>
+                  <div className="flex-1 h-px bg-gradient-to-r from-neutral-700 to-transparent" />
+                  <span className="text-xs text-neutral-600 tabular-nums">
+                    {yearGroups[year].length} chapter{yearGroups[year].length !== 1 ? 's' : ''}
+                  </span>
                 </div>
 
-                {moments.map((moment) =>
-                  momentImages[moment.id] ? (
-                    <div key={`imgs-${moment.id}`} className="mt-2">
-                      <div className="text-xs text-neutral-500 mb-1">
-                        {moment.title || formatMomentTime(moment.start_time)} — {moment.image_count} images
-                      </div>
-                      <div className="flex gap-1 flex-wrap">
-                        {momentImages[moment.id].map((image) => (
-                          <div
-                            key={image.image_id}
-                            className={`w-16 h-16 rounded overflow-hidden ${
-                              image.is_hero ? 'ring-2 ring-yellow-500' : ''
-                            }`}
-                          >
-                            {heroThumbs[image.image_id] ? (
-                              <img src={heroThumbs[image.image_id]} className="w-full h-full object-cover" alt="" />
-                            ) : (
-                              <div className="w-full h-full bg-neutral-700" />
+                {/* ── Chapter cards ── */}
+                <div className="relative pl-6 border-l border-neutral-800">
+                  {yearGroups[year].map((chapter) => {
+                    const isExpanded = expandedChapter === chapter.id
+                    const coverThumb = chapter.cover_image_id ? heroThumbs[chapter.cover_image_id] : undefined
+                    const dateRange = formatChapterDateRange(chapter.start_date, chapter.end_date)
+
+                    return (
+                      <div key={chapter.id} className="relative mb-4 last:mb-0">
+                        {/* Timeline dot */}
+                        <div className="absolute -left-[25px] top-5 w-2 h-2 rounded-full bg-blue-500 ring-4 ring-neutral-950" />
+
+                        {/* Chapter card */}
+                        <div
+                          className={`group rounded-xl overflow-hidden transition-all duration-200 cursor-pointer ${
+                            isExpanded
+                              ? 'bg-neutral-800/80 ring-1 ring-blue-500/30'
+                              : 'bg-neutral-900/60 hover:bg-neutral-800/50'
+                          }`}
+                          onClick={() => toggleChapter(chapter.id)}
+                        >
+                          {/* Cover image as hero banner */}
+                          {coverThumb ? (
+                            <div className="relative h-44 overflow-hidden">
+                              <img
+                                src={coverThumb}
+                                alt=""
+                                className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                              />
+                              {/* Gradient overlay for text readability */}
+                              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+                              {/* Title over the image */}
+                              <div className="absolute bottom-0 left-0 right-0 p-4">
+                                <h3 className="text-base font-semibold text-white drop-shadow-lg leading-tight">
+                                  {chapter.title || 'Untitled Chapter'}
+                                </h3>
+                                <div className="flex items-center gap-2 mt-1 text-xs text-neutral-300/90">
+                                  {chapter.location && (
+                                    <span className="flex items-center gap-1">
+                                      <span className="text-blue-400">📍</span> {chapter.location}
+                                    </span>
+                                  )}
+                                  {dateRange && <span className="opacity-80">{dateRange}</span>}
+                                  <span className="opacity-60">
+                                    {chapter.image_count} photo{chapter.image_count !== 1 ? 's' : ''}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="px-4 py-4">
+                              <h3 className="text-base font-semibold text-neutral-200 leading-tight">
+                                {chapter.title || 'Untitled Chapter'}
+                              </h3>
+                              <div className="flex items-center gap-2 mt-1 text-xs text-neutral-500">
+                                {chapter.location && (
+                                  <span className="flex items-center gap-1">
+                                    <span className="text-blue-400">📍</span> {chapter.location}
+                                  </span>
+                                )}
+                                {dateRange && <span>{dateRange}</span>}
+                                <span>
+                                  {chapter.image_count} photo{chapter.image_count !== 1 ? 's' : ''}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Summary text below the hero */}
+                          {chapter.summary && (
+                            <div className="px-4 py-3 border-t border-neutral-700/40">
+                              <p className="text-sm text-neutral-400 italic leading-relaxed line-clamp-3">
+                                "{chapter.summary}"
+                              </p>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* ── Expanded moments ── */}
+                        {isExpanded && (
+                          <div className="mt-3 ml-2 space-y-3">
+                            {moments.length === 0 && (
+                              <div className="text-xs text-neutral-500 py-2 px-3">Loading moments…</div>
+                            )}
+
+                            {/* Moment cards as a visual strip */}
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                              {moments.map((moment) => {
+                                const momentThumb = moment.hero_image_id ? heroThumbs[moment.hero_image_id] : undefined
+                                return (
+                                  <button
+                                    key={moment.id}
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      void loadMomentImages(moment.id)
+                                    }}
+                                    className="text-left rounded-lg overflow-hidden bg-neutral-800/60 hover:ring-1 hover:ring-blue-500/50 transition-all"
+                                  >
+                                    {momentThumb ? (
+                                      <img src={momentThumb} alt="" className="w-full h-28 object-cover" />
+                                    ) : (
+                                      <div className="w-full h-28 bg-neutral-800 flex items-center justify-center">
+                                        <span className="text-neutral-600 text-lg">📷</span>
+                                      </div>
+                                    )}
+                                    <div className="px-2.5 py-2">
+                                      <div className="text-xs text-neutral-300 truncate">
+                                        {moment.title || formatMomentTime(moment.start_time)}
+                                      </div>
+                                      <div className="text-[10px] text-neutral-500 mt-0.5">
+                                        {moment.image_count} photo{moment.image_count !== 1 ? 's' : ''}
+                                      </div>
+                                    </div>
+                                  </button>
+                                )
+                              })}
+                            </div>
+
+                            {/* Expanded moment image strips */}
+                            {moments.map((moment) =>
+                              momentImages[moment.id] ? (
+                                <div key={`imgs-${moment.id}`} className="px-1">
+                                  <div className="text-xs text-neutral-500 mb-1.5">
+                                    {moment.title || formatMomentTime(moment.start_time)}
+                                  </div>
+                                  <div className="flex gap-1.5 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-neutral-700">
+                                    {momentImages[moment.id].map((image) => (
+                                      <div
+                                        key={image.image_id}
+                                        className={`shrink-0 w-20 h-20 rounded-lg overflow-hidden ${
+                                          image.is_hero
+                                            ? 'ring-2 ring-amber-400/70'
+                                            : ''
+                                        }`}
+                                      >
+                                        {heroThumbs[image.image_id] ? (
+                                          <img
+                                            src={heroThumbs[image.image_id]}
+                                            className="w-full h-full object-cover"
+                                            alt=""
+                                          />
+                                        ) : (
+                                          <div className="w-full h-full bg-neutral-800" />
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ) : null,
                             )}
                           </div>
-                        ))}
+                        )}
                       </div>
-                    </div>
-                  ) : null,
-                )}
+                    )
+                  })}
+                </div>
               </div>
-            )}
+            ))}
           </div>
-        ))}
+        )}
       </div>
     </div>
   )
