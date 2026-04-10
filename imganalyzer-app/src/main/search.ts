@@ -6,7 +6,7 @@
  * per search (the CLIP model stays loaded in the persistent process).
  */
 
-import { ipcMain } from 'electron'
+import { ipcMain, BrowserWindow } from 'electron'
 import { rpc, ensureServerRunning } from './python-rpc'
 import { planSearchWithCopilot } from './search-planner'
 
@@ -150,7 +150,20 @@ export interface SearchPlanResponse {
   error?: string
 }
 
+export interface SearchProgress {
+  phase: string
+  message: string
+  progress: number
+}
+
 // ── IPC Registration ──────────────────────────────────────────────────────────
+
+let searchWin: BrowserWindow | null = null
+
+/** Update the BrowserWindow reference used for search progress events. */
+export function setSearchWindow(win: BrowserWindow): void {
+  searchWin = win
+}
 
 export function registerSearchHandlers(): void {
   ipcMain.handle('search:run', async (_evt, filters: SearchFilters): Promise<SearchResponse> => {
@@ -195,7 +208,12 @@ export function registerSearchHandlers(): void {
         hasPeople: filters.hasPeople,
         limit: filters.limit,
         offset: filters.offset,
-         }) as { results: SearchResult[]; total: number | null; hasMore: boolean }
+      }, (notification) => {
+        // Forward search progress notifications to the renderer
+        if (notification.method === 'search/progress') {
+          searchWin?.webContents?.send('search:progress', notification.params)
+        }
+      }) as { results: SearchResult[]; total: number | null; hasMore: boolean }
 
         return { results: result.results, total: result.total, hasMore: result.hasMore }
     } catch (err) {
@@ -231,4 +249,15 @@ export function registerSearchHandlers(): void {
       return { result: null, error: String(err) }
     }
   })
+
+  // Pre-load search caches in background after server is ready.
+  // This eliminates cold-start latency on the first search.
+  setTimeout(async () => {
+    try {
+      await ensureServerRunning()
+      await rpc.call('search/warmup', {})
+    } catch {
+      // Non-critical — first search will load caches on demand
+    }
+  }, 2_000)
 }

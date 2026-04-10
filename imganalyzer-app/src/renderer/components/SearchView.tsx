@@ -2,7 +2,7 @@
  * SearchView.tsx — The "Search" tab: orchestrates SearchBar → VirtualGrid → SearchLightbox.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SearchFilters, SearchResult } from '../global'
+import type { SearchFilters, SearchProgress, SearchResult } from '../global'
 import { SearchBar } from './SearchBar'
 import { VirtualGrid } from './VirtualGrid'
 import { SearchLightbox } from './SearchLightbox'
@@ -35,6 +35,7 @@ export function SearchView({ onOpenFaceCluster, onViewOnMap, pendingSearch, onCl
   const [error, setError] = useState<string | null>(null)
   const [selectedItem, setSelectedItem] = useState<SearchResult | null>(null)
   const [searchContextLabel, setSearchContextLabel] = useState<string | null>(null)
+  const [searchProgress, setSearchProgress] = useState<SearchProgress | null>(null)
   const activeFiltersRef = useRef<SearchFilters | null>(null)
   const requestIdRef = useRef(0)
   const resultsRef = useRef<SearchResult[]>([])
@@ -42,6 +43,13 @@ export function SearchView({ onOpenFaceCluster, onViewOnMap, pendingSearch, onCl
   useEffect(() => {
     resultsRef.current = results
   }, [results])
+
+  // Subscribe to search progress notifications from the Python backend
+  useEffect(() => {
+    return window.api.onSearchProgress((progress) => {
+      setSearchProgress(progress)
+    })
+  }, [])
 
   // Pick up pending search from Map tab (cross-tab "View as Grid")
   useEffect(() => {
@@ -84,6 +92,7 @@ export function SearchView({ onOpenFaceCluster, onViewOnMap, pendingSearch, onCl
     setError(null)
     setSelectedItem(null)
     setSearchContextLabel(contextLabel)
+    setSearchProgress(null)
 
     try {
       const resp = await window.api.searchImages({
@@ -111,6 +120,7 @@ export function SearchView({ onOpenFaceCluster, onViewOnMap, pendingSearch, onCl
     } finally {
       if (requestIdRef.current !== requestId) return
       setLoading(false)
+      setSearchProgress(null)
     }
   }, [])
 
@@ -203,9 +213,21 @@ export function SearchView({ onOpenFaceCluster, onViewOnMap, pendingSearch, onCl
         )}
 
         {loading && (
-          <div className="flex flex-1 items-center justify-center gap-2 text-sm text-neutral-600">
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 px-8">
             <div className="h-4 w-4 rounded-full border-2 border-neutral-700 border-t-neutral-400 animate-spin" />
-            Searching…
+            <p className="text-sm text-neutral-500">
+              {searchProgress?.message ?? 'Searching…'}
+            </p>
+            {searchProgress && (
+              <div className="w-64">
+                <div className="h-1.5 overflow-hidden rounded-full bg-neutral-800">
+                  <div
+                    className="h-full rounded-full bg-cyan-600 transition-all duration-500 ease-out"
+                    style={{ width: `${Math.round(searchProgress.progress * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         )}
 

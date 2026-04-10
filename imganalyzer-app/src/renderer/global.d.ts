@@ -216,6 +216,12 @@ export interface SearchResponse {
   error?: string
 }
 
+export interface SearchProgress {
+  phase: string
+  message: string
+  progress: number
+}
+
 export interface SearchFaceResolution {
   face: string | null
   faces: string[]
@@ -670,6 +676,7 @@ declare global {
 
       // Search
       searchImages(filters: SearchFilters): Promise<SearchResponse>
+      onSearchProgress(cb: (progress: SearchProgress) => void): () => void
       getImageDetails(params: { image_id?: number; file_path?: string }): Promise<{ result: SearchResult | null; error?: string }>
       resolveSearchFaceQuery(query: string): Promise<SearchFaceResolution>
       planSearchQuery(request: SearchPlanRequest): Promise<SearchPlanResponse>

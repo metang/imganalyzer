@@ -8,7 +8,7 @@ import { parseXmp } from './xmp'
 import { runAnalysis, cancelAnalysis } from './analyzer'
 import { runCopilotAnalysis } from './copilot-analyzer'
 import { registerBatchHandlers, killAllBatchProcesses } from './batch'
-import { registerSearchHandlers } from './search'
+import { registerSearchHandlers, setSearchWindow } from './search'
 import { registerAlbumHandlers } from './albums'
 import { registerFaceHandlers } from './faces'
 import { registerGalleryHandlers } from './gallery'
@@ -57,6 +57,7 @@ app.whenReady().then(async () => {
   const win = createWindow()
   registerBatchHandlers(win)
   registerSearchHandlers()
+  setSearchWindow(win)
   registerAlbumHandlers()
   registerGalleryHandlers()
   registerGeoHandlers()
@@ -74,6 +75,7 @@ app.whenReady().then(async () => {
       // Do NOT re-register search handlers — ipcMain.handle() throws on
       // duplicate registration, crashing the app (Opus Bug #1).
       registerBatchHandlers(w)
+      setSearchWindow(w)
     }
   })
 })

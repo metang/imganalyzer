@@ -900,7 +900,7 @@ def test_hybrid_search_semantic_primary_keeps_lexical_candidates(
         monkeypatch.setattr(
             engine,
             "_semantic_search",
-            lambda _query, _limit, _profile=None: [{"image_id": 202, "file_path": "/sem.jpg", "score": 0.8}],
+            lambda _query, _limit, _profile=None, **_kw: [{"image_id": 202, "file_path": "/sem.jpg", "score": 0.8}],
         )
 
         results = engine._hybrid_search("striped cardigan", limit=20, semantic_weight=0.5)

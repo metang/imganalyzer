@@ -9,7 +9,7 @@ import type {
   BatchResult,
   BatchStats,
 } from '../main/batch'
-import type { SearchFilters, SearchPlanRequest, SearchPlanResponse, SearchResponse, SearchResult } from '../main/search'
+import type { SearchFilters, SearchPlanRequest, SearchPlanResponse, SearchProgress, SearchResponse, SearchResult } from '../main/search'
 import type { GalleryChunkParams, GalleryChunkResponse, GalleryFoldersResponse } from '../main/gallery'
 import type {
   AppSettingsBundle,
@@ -153,6 +153,12 @@ contextBridge.exposeInMainWorld('api', {
 
   searchImages: (filters: SearchFilters): Promise<SearchResponse> =>
     ipcRenderer.invoke('search:run', filters),
+
+  onSearchProgress: (cb: (progress: SearchProgress) => void) => {
+    const handler = (_evt: Electron.IpcRendererEvent, progress: SearchProgress) => cb(progress)
+    ipcRenderer.on('search:progress', handler)
+    return () => ipcRenderer.removeListener('search:progress', handler)
+  },
 
   getImageDetails: (params: { image_id?: number; file_path?: string }): Promise<{ result: SearchResult | null; error?: string }> =>
     ipcRenderer.invoke('image:details', params),
