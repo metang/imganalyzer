@@ -7,10 +7,10 @@
  *  3. Compute total virtual height = Math.ceil(items/cols) * rowHeight.
  *  4. On scroll, compute which rows are in view (plus OVERSCAN).
  *  5. Only mount <GridCell> for visible rows — invisible rows are a spacer div.
- *  6. Batch-prefetch thumbnails for all visible items via getThumbnailsBatch
- *     (with image_id to hit the pre-decoded 5ms cache path).
- *  7. Each <GridCell> reads from a shared thumbnail map, with a fallback to
- *     individual getThumbnail on cache miss.
+ *  6. Batch-prefetch thumbnails in progressive chunks via getThumbnailsBatch
+ *     (with image_id to hit the pre-decoded 5ms cache path). Chunks of 8
+ *     items are sent in parallel so thumbnails appear row-by-row as each
+ *     chunk completes, instead of waiting for all items to decode.
  */
 import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import type { SearchResult } from '../global'
@@ -20,7 +20,8 @@ import type { SearchResult } from '../global'
 const CELL_MIN = 160  // minimum cell width in px
 const CELL_MAX = 220  // maximum cell width — drives column count
 const OVERSCAN_ROWS = 3  // extra rows rendered above/below viewport
-const BATCH_DEBOUNCE_MS = 80  // debounce batch prefetch on scroll
+const BATCH_DEBOUNCE_MS = 60  // debounce batch prefetch on scroll
+const CHUNK_SIZE = 8  // items per batch RPC call for progressive loading
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -43,62 +44,12 @@ interface GridCellProps {
 
 const GridCell = memo(function GridCell({ item, selected, onClick, prefetchedSrc }: GridCellProps) {
   const [src, setSrc] = useState<string>(prefetchedSrc ?? '')
-  const [loading, setLoading] = useState(!prefetchedSrc)
-  const [error, setError] = useState(false)
-  const cellRef = useRef<HTMLButtonElement>(null)
-  const loadedRef = useRef(!!prefetchedSrc)
+  const loading = !src
 
-  // If prefetchedSrc arrives after mount, pick it up
+  // Pick up prefetchedSrc when it arrives after mount
   useEffect(() => {
-    if (prefetchedSrc && !loadedRef.current) {
-      loadedRef.current = true
-      setSrc(prefetchedSrc)
-      setLoading(false)
-    }
-  }, [prefetchedSrc])
-
-  // Fallback: if batch prefetch hasn't resolved, load individually on visible
-  useEffect(() => {
-    if (loadedRef.current) return
-    const el = cellRef.current
-    if (!el) return
-
-    let cancelled = false
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting && !loadedRef.current) {
-          loadedRef.current = true
-          observer.disconnect()
-
-          setLoading(true)
-          setError(false)
-
-          window.api.getThumbnail(item.file_path).then((dataUrl) => {
-            if (cancelled) return
-            if (dataUrl) {
-              setSrc(dataUrl)
-            } else {
-              setError(true)
-            }
-            setLoading(false)
-          }).catch(() => {
-            if (!cancelled) {
-              setError(true)
-              setLoading(false)
-            }
-          })
-        }
-      },
-      { rootMargin: '200px' }
-    )
-
-    observer.observe(el)
-    return () => {
-      cancelled = true
-      observer.disconnect()
-    }
-  }, [item.file_path])
+    if (prefetchedSrc && !src) setSrc(prefetchedSrc)
+  }, [prefetchedSrc, src])
 
   // Top-level badge uses IAA (Aesthetic Appeal)
   const scoreColor = item.perception_iaa !== null
@@ -114,7 +65,6 @@ const GridCell = memo(function GridCell({ item, selected, onClick, prefetchedSrc
 
   return (
     <button
-      ref={cellRef}
       onClick={onClick}
       className={`
         relative group rounded overflow-hidden aspect-square bg-neutral-900
@@ -126,17 +76,6 @@ const GridCell = memo(function GridCell({ item, selected, onClick, prefetchedSrc
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="w-5 h-5 border-2 border-neutral-700 border-t-neutral-400 rounded-full animate-spin" />
-        </div>
-      )}
-
-      {/* Error state */}
-      {error && !loading && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-neutral-600">
-          <svg className="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
-            <path strokeLinecap="round" strokeLinejoin="round"
-              d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3 3l18 18" />
-          </svg>
-          <span className="text-[10px]">{ext}</span>
         </div>
       )}
 
@@ -206,6 +145,9 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
   const [thumbMap, setThumbMap] = useState<Record<number, string>>({})
   const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingBatchRef = useRef(new Set<number>())
+  // Ref mirror of thumbMap to avoid dependency cycle in batch effect
+  const thumbMapRef = useRef<Record<number, string>>({})
+  thumbMapRef.current = thumbMap
 
   // ── Measure container ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -245,11 +187,12 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
     Math.ceil((scrollTop + viewportHeight - PADDING) / rowHeight) + OVERSCAN_ROWS
   )
 
-  // ── Batch thumbnail prefetch for visible items ────────────────────────────
+  // ── Progressive chunked batch thumbnail prefetch ────────────────────────
   useEffect(() => {
     if (items.length === 0 || cols <= 0) return
 
     if (batchTimerRef.current) clearTimeout(batchTimerRef.current)
+    let cancelled = false
 
     batchTimerRef.current = setTimeout(() => {
       const startIdx = firstVisibleRow * cols
@@ -258,7 +201,7 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
 
       const needed: Array<{ file_path: string; image_id: number }> = []
       for (const item of visibleItems) {
-        if (!thumbMap[item.image_id] && !pendingBatchRef.current.has(item.image_id)) {
+        if (!thumbMapRef.current[item.image_id] && !pendingBatchRef.current.has(item.image_id)) {
           needed.push({ file_path: item.file_path, image_id: item.image_id })
           pendingBatchRef.current.add(item.image_id)
         }
@@ -266,25 +209,36 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
 
       if (needed.length === 0) return
 
-      window.api.getThumbnailsBatch(needed).then((result) => {
-        const newEntries: Record<number, string> = {}
-        for (const item of needed) {
-          const url = result[item.file_path] ?? result[String(item.image_id)]
-          if (url) newEntries[item.image_id] = url
-          pendingBatchRef.current.delete(item.image_id)
-        }
-        if (Object.keys(newEntries).length > 0) {
-          setThumbMap((prev) => ({ ...prev, ...newEntries }))
-        }
-      }).catch(() => {
-        for (const item of needed) pendingBatchRef.current.delete(item.image_id)
-      })
+      // Split into small chunks and fire in parallel so thumbnails appear
+      // progressively as each chunk completes (row-by-row).
+      const chunks: Array<typeof needed> = []
+      for (let i = 0; i < needed.length; i += CHUNK_SIZE) {
+        chunks.push(needed.slice(i, i + CHUNK_SIZE))
+      }
+
+      for (const chunk of chunks) {
+        window.api.getThumbnailsBatch(chunk).then((result) => {
+          if (cancelled) return
+          const newEntries: Record<number, string> = {}
+          for (const item of chunk) {
+            const url = result[item.file_path] ?? result[String(item.image_id)]
+            if (url) newEntries[item.image_id] = url
+            pendingBatchRef.current.delete(item.image_id)
+          }
+          if (Object.keys(newEntries).length > 0) {
+            setThumbMap((prev) => ({ ...prev, ...newEntries }))
+          }
+        }).catch(() => {
+          for (const item of chunk) pendingBatchRef.current.delete(item.image_id)
+        })
+      }
     }, BATCH_DEBOUNCE_MS)
 
     return () => {
+      cancelled = true
       if (batchTimerRef.current) clearTimeout(batchTimerRef.current)
     }
-  }, [firstVisibleRow, lastVisibleRow, cols, items, thumbMap])
+  }, [firstVisibleRow, lastVisibleRow, cols, items])
 
   useEffect(() => {
     if (!onEndReached || rowCount <= 0) return
