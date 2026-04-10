@@ -1336,12 +1336,18 @@ function StoryTimeline({
     const unique = [...new Set(imageIds)].filter((id) => !requestedThumbsRef.current.has(id))
     if (unique.length === 0) return
     unique.forEach((id) => requestedThumbsRef.current.add(id))
-    try {
-      const thumbs = await window.api.getThumbnailsBatch(unique.map((imageId) => ({ image_id: imageId })))
-      const mapped = mergeThumbnailMap(thumbs)
-      setHeroThumbs((prev) => ({ ...prev, ...mapped }))
-    } catch {
-      unique.forEach((id) => requestedThumbsRef.current.delete(id))
+
+    // Server caps at 50 per batch — chunk to avoid silent truncation
+    const BATCH_SIZE = 50
+    for (let i = 0; i < unique.length; i += BATCH_SIZE) {
+      const chunk = unique.slice(i, i + BATCH_SIZE)
+      try {
+        const thumbs = await window.api.getThumbnailsBatch(chunk.map((imageId) => ({ image_id: imageId })))
+        const mapped = mergeThumbnailMap(thumbs)
+        setHeroThumbs((prev) => ({ ...prev, ...mapped }))
+      } catch {
+        chunk.forEach((id) => requestedThumbsRef.current.delete(id))
+      }
     }
   }, [])
 
