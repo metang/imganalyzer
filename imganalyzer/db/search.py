@@ -218,29 +218,59 @@ class _EmbeddingMatrix:
     """Cached (N, 768) float32 matrix for a single embedding type.
 
     Loads all vectors from the DB into a contiguous numpy array and an
-    aligned ``image_ids`` list.  A simple row-count check detects when new
-    embeddings have been inserted so the matrix can be rebuilt cheaply.
+    aligned ``image_ids`` list.  Staleness is detected via both row count
+    and MAX(rowid).  When the DB has only grown (append-only), new rows
+    are fetched incrementally instead of rebuilding the whole matrix.
     """
 
     def __init__(self) -> None:
         self.matrix: np.ndarray | None = None      # (N, dim) float32
         self.image_ids: list[int] = []              # aligned with matrix rows
         self._row_count: int = 0                    # last-known DB row count
+        self._max_rowid: int = 0                    # last-known MAX(rowid)
 
     def get(
         self, conn: sqlite3.Connection, embedding_type: str
     ) -> tuple[np.ndarray, list[int]]:
-        """Return ``(matrix, image_ids)`` -- rebuilds if stale."""
+        """Return ``(matrix, image_ids)`` -- rebuilds or appends if stale."""
         row = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_type = ?",
+            "SELECT COUNT(*) AS cnt, MAX(rowid) AS max_rid FROM embeddings"
+            " WHERE embedding_type = ?",
             [embedding_type],
         ).fetchone()
         current_count = row["cnt"] if row else 0
+        current_max = int(row["max_rid"]) if row and row["max_rid"] is not None else 0
 
-        if self.matrix is not None and current_count == self._row_count:
+        if (
+            self.matrix is not None
+            and current_count == self._row_count
+            and current_max == self._max_rowid
+        ):
             return self.matrix, self.image_ids
 
-        # (Re)build the matrix from the DB
+        # Incremental append: only new rows were added (no deletes/updates)
+        if (
+            self.matrix is not None
+            and self.matrix.size > 0
+            and current_count > self._row_count
+            and current_count - self._row_count == current_max - self._max_rowid
+        ):
+            new_rows = conn.execute(
+                "SELECT image_id, vector FROM embeddings"
+                " WHERE embedding_type = ? AND rowid > ?"
+                " ORDER BY image_id",
+                [embedding_type, self._max_rowid],
+            ).fetchall()
+            if new_rows:
+                new_ids = [r["image_id"] for r in new_rows]
+                new_vecs = [np.frombuffer(r["vector"], dtype=np.float32) for r in new_rows]
+                self.matrix = np.vstack([self.matrix, np.vstack(new_vecs)])
+                self.image_ids.extend(new_ids)
+            self._row_count = current_count
+            self._max_rowid = current_max
+            return self.matrix, self.image_ids
+
+        # Full rebuild
         rows = conn.execute(
             "SELECT image_id, vector FROM embeddings WHERE embedding_type = ? ORDER BY image_id",
             [embedding_type],
@@ -251,6 +281,7 @@ class _EmbeddingMatrix:
             self.matrix = empty
             self.image_ids = []
             self._row_count = 0
+            self._max_rowid = 0
             return empty, []
 
         ids: list[int] = []
@@ -262,19 +293,24 @@ class _EmbeddingMatrix:
         self.matrix = np.vstack(vecs)  # (N, dim)
         self.image_ids = ids
         self._row_count = current_count
+        self._max_rowid = current_max
         return self.matrix, self.image_ids
 
 
 class SearchEngine:
     """Hybrid search: FTS5 for text matching + CLIP embeddings for semantic."""
 
+    _RICH_DESC_TTL = 30.0  # seconds to cache _get_rich_desc_image_ids()
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
         self.repo = Repository(conn)
         # Cached embedding matrices -- rebuilt automatically when new
-        # embeddings are inserted (detected via row-count check).
+        # embeddings are inserted (detected via row-count + max-rowid check).
         self._image_clip_cache = _EmbeddingMatrix()
         self._desc_clip_cache = _EmbeddingMatrix()
+        self._rich_desc_ids: frozenset[int] | None = None
+        self._rich_desc_ts: float = 0.0
 
     def search(
         self,
@@ -1014,7 +1050,16 @@ class SearchEngine:
         We approximate this by checking the *current* stored descriptions.
         Cloud-AI descriptions are typically 200-500+ chars; local-only
         descriptions are always < 100 chars.
+
+        Results are cached with a short TTL to avoid repeating this expensive
+        query on back-to-back searches.
         """
+        import time as _time
+
+        now = _time.monotonic()
+        if self._rich_desc_ids is not None and (now - self._rich_desc_ts) < self._RICH_DESC_TTL:
+            return self._rich_desc_ids
+
         # Combine local AI description + cloud AI description lengths per image.
         # An image is "rich" if any stored description exceeds the threshold.
         rows = self.conn.execute(
@@ -1039,7 +1084,10 @@ class SearchEngine:
             """,
             [_DESC_QUALITY_THRESHOLD],
         ).fetchall()
-        return frozenset(r[0] for r in rows)
+        result = frozenset(r[0] for r in rows)
+        self._rich_desc_ids = result
+        self._rich_desc_ts = now
+        return result
 
     def _semantic_search(self, query: str, limit: int, semantic_profile: str | None = None) -> list[dict[str, Any]]:
         """CLIP embedding semantic search — two-tier strategy (vectorized).

@@ -163,6 +163,20 @@ def _get_db() -> sqlite3.Connection:
     return conn
 
 
+# Cached SearchEngine — avoids rebuilding embedding matrices on every RPC call.
+_cached_search_engine: Any = None
+
+
+def _get_search_engine(conn: sqlite3.Connection) -> Any:
+    """Return a cached SearchEngine instance, reusing embedding matrix caches."""
+    global _cached_search_engine
+    from imganalyzer.db.search import SearchEngine
+
+    if _cached_search_engine is None or _cached_search_engine.conn is not conn:
+        _cached_search_engine = SearchEngine(conn)
+    return _cached_search_engine
+
+
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
@@ -1957,7 +1971,7 @@ def _handle_search(params: dict) -> dict:
     from imganalyzer.db.search import SearchEngine
 
     conn = _get_db()
-    engine = SearchEngine(conn)
+    engine = _get_search_engine(conn)
 
     query = params.get("query", "")
     mode = params.get("mode", "hybrid")
@@ -2574,8 +2588,12 @@ def _handle_search(params: dict) -> dict:
     def _combine_face_and_text_terms(candidate_limit: int) -> tuple[list[dict[str, Any]], bool]:
         face_results = _search_face_terms(candidate_limit)
         text_results = _search_text_terms(candidate_limit)
+        face_exhausted = len(face_results) < candidate_limit
+        text_exhausted = len(text_results) < candidate_limit
         if not face_results or not text_results:
-            return [], len(face_results) < candidate_limit and len(text_results) < candidate_limit
+            # If face set is exhausted and intersection is empty, retrying
+            # with a larger candidate_limit will never produce results.
+            return [], face_exhausted or (face_exhausted and text_exhausted)
 
         face_scores = {
             int(result["image_id"]): float(result["score"])
@@ -2591,7 +2609,9 @@ def _handle_search(params: dict) -> dict:
                 "score": float(result["score"]) + face_scores[image_id],
             })
 
-        search_exhausted = len(face_results) < candidate_limit and len(text_results) < candidate_limit
+        # When the face set is fully known (exhausted), the intersection
+        # can't grow by fetching more text candidates — report exhausted.
+        search_exhausted = face_exhausted or (face_exhausted and text_exhausted)
         return combined_results, search_exhausted
 
     if similar_to_image_id is not None:
@@ -2607,6 +2627,7 @@ def _handle_search(params: dict) -> dict:
         max_candidate_limit = max(candidate_limit, 5000)
         search_exhausted = True
         records: list[dict[str, Any]] = []
+        _search_deadline = time.monotonic() + 30.0  # wall-clock timeout
 
         while True:
             if similar_to_image_id is not None:
@@ -2623,7 +2644,11 @@ def _handle_search(params: dict) -> dict:
 
             candidate_ids = [int(result["image_id"]) for result in search_results]
             if not candidate_ids:
-                if not search_exhausted and candidate_limit < max_candidate_limit:
+                if (
+                    not search_exhausted
+                    and candidate_limit < max_candidate_limit
+                    and time.monotonic() < _search_deadline
+                ):
                     candidate_limit = min(max_candidate_limit, candidate_limit * 2)
                     continue
                 return {"results": [], "total": 0, "hasMore": False}
@@ -2635,7 +2660,12 @@ def _handle_search(params: dict) -> dict:
             records = _fetch_records(candidate_ids, score_map)
             records = _sort_records(records)
             enough_for_page = len(records) > page_end
-            if search_exhausted or enough_for_page or candidate_limit >= max_candidate_limit:
+            if (
+                search_exhausted
+                or enough_for_page
+                or candidate_limit >= max_candidate_limit
+                or time.monotonic() >= _search_deadline
+            ):
                 break
             candidate_limit = min(max_candidate_limit, candidate_limit * 2)
 
@@ -2670,7 +2700,7 @@ def _handle_search_resolve_face_query(params: dict) -> dict[str, Any]:
         raise ValueError("query must be a string")
 
     conn = _get_db()
-    engine = SearchEngine(conn)
+    engine = _get_search_engine(conn)
     resolve_face_queries = getattr(engine, "resolve_face_queries", None)
     if callable(resolve_face_queries):
         faces, remaining_query, face_match = resolve_face_queries(query)
