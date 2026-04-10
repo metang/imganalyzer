@@ -75,6 +75,113 @@ function mergeThumbnailMap(thumbs: Record<string, string>): Record<number, strin
   return next
 }
 
+// ── Edit Album Dialog ─────────────────────────────────────────────────────────
+
+function EditAlbumDialog({
+  album,
+  onClose,
+  onSaved,
+}: {
+  album: SmartAlbumSummary
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const [name, setName] = useState(album.name)
+  const [description, setDescription] = useState(album.description ?? '')
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    if (!name.trim()) return
+    setSaving(true)
+    try {
+      await window.api.albumsUpdate({
+        album_id: album.id,
+        name: name.trim(),
+        description: description.trim() || undefined,
+      })
+      onSaved()
+      onClose()
+    } catch (err) {
+      console.error('Failed to update album:', err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div className="bg-neutral-800 rounded-lg shadow-xl w-[400px] p-5" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-semibold text-white mb-4">Edit Album</h2>
+
+        <label className="block text-sm text-neutral-400 mb-1">Name</label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600 focus:border-blue-500 outline-none mb-3"
+          autoFocus
+          onKeyDown={(e) => e.key === 'Enter' && handleSave()}
+        />
+
+        <label className="block text-sm text-neutral-400 mb-1">Description</label>
+        <textarea
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          rows={3}
+          className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600 focus:border-blue-500 outline-none mb-3 resize-none"
+        />
+
+        <div className="flex justify-end gap-2 mt-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm rounded bg-neutral-700 text-neutral-300 hover:bg-neutral-600">
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || !name.trim()}
+            className="px-3 py-1.5 text-sm rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Delete Confirm Dialog ────────────────────────────────────────────────────
+
+function DeleteConfirmDialog({
+  albumName,
+  onConfirm,
+  onCancel,
+}: {
+  albumName: string
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
+      <div className="bg-neutral-800 rounded-lg shadow-xl w-[360px] p-5" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-semibold text-white mb-2">Delete Album</h2>
+        <p className="text-sm text-neutral-400 mb-4">
+          Are you sure you want to delete <span className="text-white font-medium">"{albumName}"</span>?
+          This will remove all chapters, moments, and story data. Your original photos are not affected.
+        </p>
+        <div className="flex justify-end gap-2">
+          <button onClick={onCancel} className="px-3 py-1.5 text-sm rounded bg-neutral-700 text-neutral-300 hover:bg-neutral-600">
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="px-3 py-1.5 text-sm rounded bg-red-600 text-white hover:bg-red-500"
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Album List Panel ────────────────────────────────────────────────────────
 
 function AlbumListPanel({
@@ -84,6 +191,8 @@ function AlbumListPanel({
   onRefresh,
   onCreate,
   onCreatePreset,
+  onEdit,
+  onDelete,
 }: {
   albums: SmartAlbumSummary[]
   selectedId: string | null
@@ -91,6 +200,8 @@ function AlbumListPanel({
   onRefresh: () => void
   onCreate: () => void
   onCreatePreset: () => void
+  onEdit: (album: SmartAlbumSummary) => void
+  onDelete: (album: SmartAlbumSummary) => void
 }) {
   return (
     <div className="flex flex-col h-full border-r border-neutral-700">
@@ -126,23 +237,44 @@ function AlbumListPanel({
           </div>
         )}
         {albums.map((a) => (
-          <button
+          <div
             key={a.id}
-            onClick={() => onSelect(a.id)}
-            className={`w-full text-left px-3 py-2.5 border-b border-neutral-800 transition-colors ${
+            className={`group relative w-full text-left px-3 py-2.5 border-b border-neutral-800 transition-colors cursor-pointer ${
               selectedId === a.id
                 ? 'bg-neutral-700/60 text-white'
                 : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
             }`}
+            onClick={() => onSelect(a.id)}
           >
-            <div className="text-sm font-medium truncate">{a.name}</div>
+            <div className="text-sm font-medium truncate pr-12">{a.name}</div>
             <div className="text-xs text-neutral-500 mt-0.5">
               {a.item_count} images · {a.chapter_count} chapters
             </div>
             {a.description && (
               <div className="text-xs text-neutral-500 mt-0.5 truncate">{a.description}</div>
             )}
-          </button>
+            {/* Edit / Delete buttons — visible on hover */}
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button
+                onClick={(e) => { e.stopPropagation(); onEdit(a) }}
+                className="p-1 rounded text-neutral-400 hover:text-blue-400 hover:bg-neutral-700"
+                title="Edit album"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M11.5 1.5l3 3L5 14H2v-3L11.5 1.5z" />
+                </svg>
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onDelete(a) }}
+                className="p-1 rounded text-neutral-400 hover:text-red-400 hover:bg-neutral-700"
+                title="Delete album"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 10h8l1-10" />
+                </svg>
+              </button>
+            </div>
+          </div>
         ))}
       </div>
     </div>
@@ -987,6 +1119,7 @@ function QuildedGrid({
   momentImages,
   heroThumbs,
   toggleChapter,
+  colWidth,
 }: {
   yearGroups: Record<string, StoryChapter[]>
   years: string[]
@@ -995,6 +1128,7 @@ function QuildedGrid({
   momentImages: Record<string, MomentImage[]>
   heroThumbs: Record<number, string>
   toggleChapter: (id: string) => void
+  colWidth: number
 }) {
   // Measure container width to compute column count dynamically
   const containerRef = useRef<HTMLDivElement>(null)
@@ -1005,12 +1139,11 @@ function QuildedGrid({
     if (!el) return
     const observer = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? 900
-      // ~280px per column, minimum 2, no hard max
-      setColCount(Math.max(2, Math.floor(w / 280)))
+      setColCount(Math.max(2, Math.floor(w / colWidth)))
     })
     observer.observe(el)
     return () => observer.disconnect()
-  }, [])
+  }, [colWidth])
 
   return (
     <div ref={containerRef} className="py-6 px-5">
@@ -1343,6 +1476,7 @@ function StoryTimeline({
   exporting: boolean
 }) {
   const [viewMode, setViewMode] = useState<ViewMode>('quilted')
+  const [colWidth, setColWidth] = useState(280)  // px per column — slider controls this
   const [expandedChapter, setExpandedChapter] = useState<string | null>(null)
   const [moments, setMoments] = useState<StoryMoment[]>([])
   const [momentImages, setMomentImages] = useState<Record<string, MomentImage[]>>({})
@@ -1366,8 +1500,12 @@ function StoryTimeline({
 
     // Server caps at 50 per batch — chunk to avoid silent truncation
     const BATCH_SIZE = 50
+    const chunks: number[][] = []
     for (let i = 0; i < unique.length; i += BATCH_SIZE) {
-      const chunk = unique.slice(i, i + BATCH_SIZE)
+      chunks.push(unique.slice(i, i + BATCH_SIZE))
+    }
+
+    await Promise.all(chunks.map(async (chunk) => {
       try {
         const thumbs = await window.api.getThumbnailsBatch(chunk.map((imageId) => ({ image_id: imageId })))
         const mapped = mergeThumbnailMap(thumbs)
@@ -1375,7 +1513,7 @@ function StoryTimeline({
       } catch {
         chunk.forEach((id) => requestedThumbsRef.current.delete(id))
       }
-    }
+    }))
   }, [])
 
   useEffect(() => {
@@ -1482,6 +1620,23 @@ function StoryTimeline({
               </button>
             </div>
 
+            {/* Column size slider — only in quilted mode */}
+            {viewMode === 'quilted' && (
+              <div className="flex items-center gap-1.5 mr-1" title="Card size">
+                <span className="text-[10px] text-neutral-500">▪</span>
+                <input
+                  type="range"
+                  min={160}
+                  max={450}
+                  step={10}
+                  value={colWidth}
+                  onChange={(e) => setColWidth(Number(e.target.value))}
+                  className="w-20 h-1 accent-neutral-500 cursor-pointer"
+                />
+                <span className="text-[10px] text-neutral-500">▮</span>
+              </div>
+            )}
+
             <button
               onClick={onGenerateNarrative}
               disabled={narrating || chapters.length === 0}
@@ -1519,7 +1674,7 @@ function StoryTimeline({
             </p>
           </div>
         ) : viewMode === 'quilted' ? (
-          <QuildedGrid {...sharedProps} />
+          <QuildedGrid {...sharedProps} colWidth={colWidth} />
         ) : (
           <ZigzagTimeline {...sharedProps} />
         )}
@@ -1558,6 +1713,8 @@ export function AlbumsView() {
   const [evalReport, setEvalReport] = useState<StoryGenerateResult['evaluation'] | null>(null)
   const [status, setStatus] = useState<StatusBanner | null>(null)
   const [presetDefinitions, setPresetDefinitions] = useState<Record<string, PresetDefinition>>(FALLBACK_PRESETS)
+  const [editingAlbum, setEditingAlbum] = useState<SmartAlbumSummary | null>(null)
+  const [deletingAlbum, setDeletingAlbum] = useState<SmartAlbumSummary | null>(null)
 
   const loadAlbums = useCallback(async () => {
     try {
@@ -1681,19 +1838,28 @@ export function AlbumsView() {
   }, [loadAlbums, handleSelect])
 
   const handleDeleteAlbum = useCallback(async () => {
-    if (!selectedId) return
+    const target = deletingAlbum
+    if (!target) return
+    setDeletingAlbum(null)
     try {
-      await window.api.albumsDelete(selectedId)
-      setSelectedId(null)
-      setChapters([])
-      setEvalReport(null)
-      setStatus({ tone: 'success', text: 'Album deleted.' })
+      await window.api.albumsDelete(target.id)
+      if (selectedId === target.id) {
+        setSelectedId(null)
+        setChapters([])
+        setEvalReport(null)
+      }
+      setStatus({ tone: 'success', text: `"${target.name}" deleted.` })
       await loadAlbums()
     } catch (err) {
       console.error('Failed to delete album:', err)
       setStatus({ tone: 'error', text: 'Failed to delete album.' })
     }
-  }, [selectedId, loadAlbums])
+  }, [deletingAlbum, selectedId, loadAlbums])
+
+  const handleEditSaved = useCallback(async () => {
+    await loadAlbums()
+    setStatus({ tone: 'success', text: 'Album updated.' })
+  }, [loadAlbums])
 
   const selectedAlbum = albums.find((album) => album.id === selectedId)
 
@@ -1707,6 +1873,8 @@ export function AlbumsView() {
           onRefresh={() => void loadAlbums()}
           onCreate={() => setCreating(true)}
           onCreatePreset={() => setCreatingPreset(true)}
+          onEdit={(a) => setEditingAlbum(a)}
+          onDelete={(a) => setDeletingAlbum(a)}
         />
       </div>
 
@@ -1747,12 +1915,18 @@ export function AlbumsView() {
                 {status.text}
               </div>
             )}
-            <div className="px-4 py-2 border-t border-neutral-800 flex justify-end">
+            <div className="px-4 py-2 border-t border-neutral-800 flex justify-end gap-2">
               <button
-                onClick={() => void handleDeleteAlbum()}
+                onClick={() => setEditingAlbum(selectedAlbum)}
+                className="px-2 py-1 text-xs rounded bg-neutral-700 text-neutral-300 hover:bg-neutral-600"
+              >
+                ✏ Edit
+              </button>
+              <button
+                onClick={() => setDeletingAlbum(selectedAlbum)}
                 className="px-2 py-1 text-xs rounded bg-red-900/50 text-red-400 hover:bg-red-800/50"
               >
-                Delete Album
+                🗑 Delete
               </button>
             </div>
           </>
@@ -1782,6 +1956,22 @@ export function AlbumsView() {
         persons={persons}
         presets={presetDefinitions}
       />
+
+      {editingAlbum && (
+        <EditAlbumDialog
+          album={editingAlbum}
+          onClose={() => setEditingAlbum(null)}
+          onSaved={handleEditSaved}
+        />
+      )}
+
+      {deletingAlbum && (
+        <DeleteConfirmDialog
+          albumName={deletingAlbum.name}
+          onConfirm={() => void handleDeleteAlbum()}
+          onCancel={() => setDeletingAlbum(null)}
+        />
+      )}
     </div>
   )
 }
