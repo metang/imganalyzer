@@ -996,8 +996,24 @@ function QuildedGrid({
   heroThumbs: Record<number, string>
   toggleChapter: (id: string) => void
 }) {
+  // Measure container width to compute column count dynamically
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [colCount, setColCount] = useState(3)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 900
+      // ~280px per column, minimum 2, no hard max
+      setColCount(Math.max(2, Math.floor(w / 280)))
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
   return (
-    <div className="py-6 px-5">
+    <div ref={containerRef} className="py-6 px-5">
       {years.map((year) => {
         const yearChapters = yearGroups[year]
         return (
@@ -1013,22 +1029,33 @@ function QuildedGrid({
 
             <div
               className="grid gap-2"
-              style={{ gridTemplateColumns: 'repeat(3, 1fr)', gridAutoRows: '100px' }}
+              style={{
+                gridTemplateColumns: `repeat(${colCount}, 1fr)`,
+                gridAutoRows: '100px',
+              }}
             >
               {yearChapters.map((chapter, idx) => {
                 const isExpanded = expandedChapter === chapter.id
                 const coverThumb = chapter.cover_image_id ? heroThumbs[chapter.cover_image_id] : undefined
                 const dateRange = formatChapterDateRange(chapter.start_date, chapter.end_date)
 
+                /* Sizing pattern adapts to available columns.
+                 * Feature cards span 2 cols (capped to colCount).
+                 * Cycle length scales with colCount for variety. */
                 let colSpan = 1
                 let rowSpan = 2
                 if (isExpanded) {
-                  colSpan = 3; rowSpan = 0
+                  colSpan = colCount; rowSpan = 0
                 } else {
-                  const pos = idx % 7
-                  if (pos === 0) { colSpan = 2; rowSpan = 3 }
-                  else if (pos === 2) { colSpan = 1; rowSpan = 3 }
-                  else if (pos === 4) { colSpan = 2; rowSpan = 2 }
+                  const cycle = colCount + 4  // e.g. 3→7, 5→9, 7→11
+                  const pos = idx % cycle
+                  if (pos === 0) { colSpan = 2; rowSpan = 3 }           // feature
+                  else if (pos === 2) { colSpan = 1; rowSpan = 3 }      // tall
+                  else if (pos === Math.floor(cycle / 2)) { colSpan = 2; rowSpan = 2 }  // wide
+                  // Additional tall card for wider grids
+                  else if (colCount >= 5 && pos === colCount) { colSpan = 1; rowSpan = 3 }
+                  // rest → standard 1×2
+                  colSpan = Math.min(colSpan, colCount)
                 }
 
                 const gridStyle: React.CSSProperties = isExpanded
