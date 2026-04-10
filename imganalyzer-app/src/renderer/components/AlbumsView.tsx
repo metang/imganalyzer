@@ -901,6 +901,401 @@ function MomentCollage({
   )
 }
 
+type ViewMode = 'quilted' | 'zigzag'
+
+/** Shared expanded-chapter detail panel (used by both view modes). */
+function ExpandedChapterDetail({
+  chapter,
+  dateRange,
+  moments,
+  momentImages,
+  heroThumbs,
+}: {
+  chapter: StoryChapter
+  dateRange: string
+  moments: StoryMoment[]
+  momentImages: Record<string, MomentImage[]>
+  heroThumbs: Record<number, string>
+}) {
+  return (
+    <div className="p-5">
+      <div className="flex items-start justify-between mb-3">
+        <div className="flex-1 min-w-0">
+          <h3 className="text-lg font-semibold text-white leading-tight">
+            {chapter.title || 'Untitled Chapter'}
+          </h3>
+          <div className="flex items-center gap-2 mt-1 text-xs text-neutral-500">
+            {chapter.location && <span className="text-blue-400">📍 {chapter.location}</span>}
+            {dateRange && <span>{dateRange}</span>}
+            <span>{chapter.image_count} photos · {chapter.moment_count} moments</span>
+          </div>
+          {chapter.summary && (
+            <p className="text-sm text-neutral-400 italic leading-relaxed mt-2 max-w-2xl">
+              &ldquo;{chapter.summary}&rdquo;
+            </p>
+          )}
+        </div>
+        <span className="text-xs text-neutral-600 ml-3 shrink-0">▾ collapse</span>
+      </div>
+
+      {moments.length === 0 ? (
+        <div className="text-xs text-neutral-500 py-4">Loading moments…</div>
+      ) : (
+        <div className="space-y-4 mt-2">
+          {moments.map((moment) => (
+            <div key={moment.id}>
+              <div className="flex items-baseline gap-2 mb-1.5">
+                <span className="text-xs font-medium text-neutral-300">
+                  {moment.title || formatMomentTime(moment.start_time)}
+                </span>
+                <span className="text-[10px] text-neutral-600">
+                  {moment.image_count} photo{moment.image_count !== 1 ? 's' : ''}
+                </span>
+              </div>
+              {momentImages[moment.id] ? (
+                <MomentCollage
+                  images={momentImages[moment.id]}
+                  thumbs={heroThumbs}
+                  momentId={moment.id}
+                />
+              ) : moment.hero_image_id && heroThumbs[moment.hero_image_id] ? (
+                <div className="rounded-lg overflow-hidden">
+                  <img src={heroThumbs[moment.hero_image_id]} alt="" className="w-full h-44 object-cover object-top" />
+                </div>
+              ) : (
+                <div className="w-full h-32 rounded-lg bg-neutral-800 flex items-center justify-center">
+                  <span className="text-neutral-600 text-sm">Loading…</span>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  VIEW MODE 1 — Quilted / Patchwork Grid (Google Photos style)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+function QuildedGrid({
+  yearGroups,
+  years,
+  expandedChapter,
+  moments,
+  momentImages,
+  heroThumbs,
+  toggleChapter,
+}: {
+  yearGroups: Record<string, StoryChapter[]>
+  years: string[]
+  expandedChapter: string | null
+  moments: StoryMoment[]
+  momentImages: Record<string, MomentImage[]>
+  heroThumbs: Record<number, string>
+  toggleChapter: (id: string) => void
+}) {
+  return (
+    <div className="py-6 px-5">
+      {years.map((year) => {
+        const yearChapters = yearGroups[year]
+        return (
+          <div key={year} className="mb-8">
+            {/* Year divider */}
+            <div className="flex items-center gap-4 mb-5 px-1">
+              <span className="text-2xl font-black text-white tracking-tight">{year}</span>
+              <div className="flex-1 h-px bg-gradient-to-r from-neutral-700 to-transparent" />
+              <span className="text-xs text-neutral-600 tabular-nums">
+                {yearChapters.length} chapter{yearChapters.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+
+            <div
+              className="grid gap-2"
+              style={{ gridTemplateColumns: 'repeat(3, 1fr)', gridAutoRows: '100px' }}
+            >
+              {yearChapters.map((chapter, idx) => {
+                const isExpanded = expandedChapter === chapter.id
+                const coverThumb = chapter.cover_image_id ? heroThumbs[chapter.cover_image_id] : undefined
+                const dateRange = formatChapterDateRange(chapter.start_date, chapter.end_date)
+
+                let colSpan = 1
+                let rowSpan = 2
+                if (isExpanded) {
+                  colSpan = 3; rowSpan = 0
+                } else {
+                  const pos = idx % 7
+                  if (pos === 0) { colSpan = 2; rowSpan = 3 }
+                  else if (pos === 2) { colSpan = 1; rowSpan = 3 }
+                  else if (pos === 4) { colSpan = 2; rowSpan = 2 }
+                }
+
+                const gridStyle: React.CSSProperties = isExpanded
+                  ? { gridColumn: '1 / -1' }
+                  : { gridColumn: `span ${colSpan}`, gridRow: `span ${rowSpan}` }
+
+                return (
+                  <div key={chapter.id} style={gridStyle}>
+                    <div
+                      className={`group rounded-xl overflow-hidden transition-all duration-200 cursor-pointer h-full ${
+                        isExpanded
+                          ? 'bg-neutral-850 ring-1 ring-blue-500/20'
+                          : 'bg-neutral-900/70 hover:bg-neutral-800/60 hover:ring-1 hover:ring-neutral-700/50'
+                      }`}
+                      onClick={() => toggleChapter(chapter.id)}
+                    >
+                      {isExpanded ? (
+                        <ExpandedChapterDetail
+                          chapter={chapter}
+                          dateRange={dateRange}
+                          moments={moments}
+                          momentImages={momentImages}
+                          heroThumbs={heroThumbs}
+                        />
+                      ) : (
+                        <div className="relative w-full h-full overflow-hidden">
+                          {coverThumb ? (
+                            <>
+                              <img
+                                src={coverThumb}
+                                alt=""
+                                className="absolute inset-0 w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
+                              />
+                              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
+                            </>
+                          ) : (
+                            <div className="absolute inset-0 bg-neutral-800/60" />
+                          )}
+                          <div className="absolute bottom-0 left-0 right-0 p-3">
+                            <h3 className={`font-semibold text-white drop-shadow-lg leading-tight ${
+                              colSpan >= 2 ? 'text-base' : 'text-sm truncate'
+                            }`}>
+                              {chapter.title || 'Untitled Chapter'}
+                            </h3>
+                            <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-neutral-300/80">
+                              {chapter.location && <span className="text-blue-400/90">📍 {chapter.location}</span>}
+                              {dateRange && <span>{dateRange}</span>}
+                              <span className="opacity-60">{chapter.image_count} photos</span>
+                            </div>
+                            {chapter.summary && colSpan >= 2 && (
+                              <p className="text-xs text-neutral-400/80 italic line-clamp-2 leading-relaxed mt-1">
+                                {chapter.summary}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  VIEW MODE 2 — Alternating Zigzag Timeline (classic story timeline)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+function ZigzagTimeline({
+  yearGroups,
+  years,
+  expandedChapter,
+  moments,
+  momentImages,
+  heroThumbs,
+  toggleChapter,
+}: {
+  yearGroups: Record<string, StoryChapter[]>
+  years: string[]
+  expandedChapter: string | null
+  moments: StoryMoment[]
+  momentImages: Record<string, MomentImage[]>
+  heroThumbs: Record<number, string>
+  toggleChapter: (id: string) => void
+}) {
+  let globalIdx = 0
+
+  return (
+    <div className="py-8 px-6">
+      {years.map((year) => {
+        const yearChapters = yearGroups[year]
+        return (
+          <div key={year} className="mb-12">
+            {/* Year badge — centered on the timeline spine */}
+            <div className="flex justify-center mb-8">
+              <span className="px-5 py-1.5 rounded-full bg-blue-600 text-white text-sm font-bold tracking-wide shadow-lg shadow-blue-600/20">
+                {year}
+              </span>
+            </div>
+
+            {/* Chapters along the spine */}
+            <div className="relative">
+              {/* Central timeline line */}
+              <div className="absolute left-1/2 top-0 bottom-0 w-px bg-gradient-to-b from-blue-500/40 via-neutral-700/60 to-transparent -translate-x-px" />
+
+              {yearChapters.map((chapter) => {
+                const isExpanded = expandedChapter === chapter.id
+                const coverThumb = chapter.cover_image_id ? heroThumbs[chapter.cover_image_id] : undefined
+                const dateRange = formatChapterDateRange(chapter.start_date, chapter.end_date)
+                const side = globalIdx % 2 === 0 ? 'left' : 'right'
+                globalIdx++
+
+                if (isExpanded) {
+                  return (
+                    <div key={chapter.id} className="relative mb-8">
+                      {/* Dot on spine */}
+                      <div className="absolute left-1/2 top-6 w-3 h-3 rounded-full bg-blue-500 ring-4 ring-neutral-900 -translate-x-1.5 z-10" />
+                      {/* Full-width expanded card */}
+                      <div className="mx-auto max-w-4xl">
+                        <div
+                          className="bg-neutral-850 ring-1 ring-blue-500/30 rounded-xl overflow-hidden cursor-pointer transition-all duration-200"
+                          onClick={() => toggleChapter(chapter.id)}
+                        >
+                          <ExpandedChapterDetail
+                            chapter={chapter}
+                            dateRange={dateRange}
+                            moments={moments}
+                            momentImages={momentImages}
+                            heroThumbs={heroThumbs}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )
+                }
+
+                return (
+                  <div key={chapter.id} className="relative mb-8">
+                    {/* Dot on spine */}
+                    <div className="absolute left-1/2 top-6 w-3 h-3 rounded-full bg-neutral-600 ring-4 ring-neutral-900 -translate-x-1.5 z-10 group-hover:bg-blue-400 transition-colors" />
+
+                    {/* Card — alternates left / right of the spine */}
+                    <div className={`grid grid-cols-2 gap-8 ${side === 'right' ? '' : ''}`}>
+                      {/* Left side */}
+                      <div className={side === 'left' ? '' : 'flex items-center justify-end'}>
+                        {side === 'left' ? (
+                          <div
+                            className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 ring-1 ring-neutral-800/50 hover:ring-neutral-700/50 transition-all duration-200 ml-auto max-w-md"
+                            onClick={() => toggleChapter(chapter.id)}
+                          >
+                            {coverThumb ? (
+                              <div className="relative h-48 overflow-hidden">
+                                <img
+                                  src={coverThumb}
+                                  alt=""
+                                  className="w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
+                                />
+                                <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
+                                <div className="absolute bottom-0 left-0 right-0 p-3">
+                                  <h3 className="text-base font-semibold text-white drop-shadow-lg leading-tight">
+                                    {chapter.title || 'Untitled Chapter'}
+                                  </h3>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="h-32 bg-neutral-800/50 flex items-end p-3">
+                                <h3 className="text-base font-semibold text-neutral-200 leading-tight">
+                                  {chapter.title || 'Untitled Chapter'}
+                                </h3>
+                              </div>
+                            )}
+                            <div className="px-3 py-2.5">
+                              <div className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+                                {chapter.location && <span className="text-blue-400">📍 {chapter.location}</span>}
+                                {dateRange && <span>{dateRange}</span>}
+                                <span className="opacity-60">{chapter.image_count} photos</span>
+                              </div>
+                              {chapter.summary && (
+                                <p className="text-xs text-neutral-500 italic line-clamp-2 leading-relaxed mt-1">
+                                  {chapter.summary}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          /* Date label on the opposite side */
+                          <div className="text-right pr-4 pt-6">
+                            <div className="text-sm font-medium text-neutral-400">{dateRange}</div>
+                            <div className="text-[11px] text-neutral-600 mt-0.5">
+                              {chapter.image_count} photos
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Right side */}
+                      <div className={side === 'right' ? '' : 'flex items-center'}>
+                        {side === 'right' ? (
+                          <div
+                            className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 ring-1 ring-neutral-800/50 hover:ring-neutral-700/50 transition-all duration-200 mr-auto max-w-md"
+                            onClick={() => toggleChapter(chapter.id)}
+                          >
+                            {coverThumb ? (
+                              <div className="relative h-48 overflow-hidden">
+                                <img
+                                  src={coverThumb}
+                                  alt=""
+                                  className="w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
+                                />
+                                <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
+                                <div className="absolute bottom-0 left-0 right-0 p-3">
+                                  <h3 className="text-base font-semibold text-white drop-shadow-lg leading-tight">
+                                    {chapter.title || 'Untitled Chapter'}
+                                  </h3>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="h-32 bg-neutral-800/50 flex items-end p-3">
+                                <h3 className="text-base font-semibold text-neutral-200 leading-tight">
+                                  {chapter.title || 'Untitled Chapter'}
+                                </h3>
+                              </div>
+                            )}
+                            <div className="px-3 py-2.5">
+                              <div className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+                                {chapter.location && <span className="text-blue-400">📍 {chapter.location}</span>}
+                                {dateRange && <span>{dateRange}</span>}
+                                <span className="opacity-60">{chapter.image_count} photos</span>
+                              </div>
+                              {chapter.summary && (
+                                <p className="text-xs text-neutral-500 italic line-clamp-2 leading-relaxed mt-1">
+                                  {chapter.summary}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          /* Date label on the opposite side */
+                          <div className="pl-4 pt-6">
+                            <div className="text-sm font-medium text-neutral-400">{dateRange}</div>
+                            <div className="text-[11px] text-neutral-600 mt-0.5">
+                              {chapter.image_count} photos
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  StoryTimeline — top-level wrapper with view-mode switch
+ * ═══════════════════════════════════════════════════════════════════ */
+
 function StoryTimeline({
   album,
   chapters,
@@ -920,6 +1315,7 @@ function StoryTimeline({
   narrating: boolean
   exporting: boolean
 }) {
+  const [viewMode, setViewMode] = useState<ViewMode>('quilted')
   const [expandedChapter, setExpandedChapter] = useState<string | null>(null)
   const [moments, setMoments] = useState<StoryMoment[]>([])
   const [momentImages, setMomentImages] = useState<Record<string, MomentImage[]>>({})
@@ -968,7 +1364,6 @@ function StoryTimeline({
         .map((m) => m.hero_image_id)
         .filter((id): id is number => id != null)
       void loadThumbnailIds(heroIds)
-      // Auto-load moment images for the collage
       for (const m of nextMoments) {
         void loadMomentImagesInternal(m.id)
       }
@@ -1005,6 +1400,16 @@ function StoryTimeline({
   const yearGroups = groupChaptersByYear(chapters)
   const years = Object.keys(yearGroups).sort()
 
+  const sharedProps = {
+    yearGroups,
+    years,
+    expandedChapter,
+    moments,
+    momentImages,
+    heroThumbs,
+    toggleChapter,
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* ── Header bar ── */}
@@ -1018,6 +1423,32 @@ function StoryTimeline({
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {/* View mode toggle */}
+            <div className="flex items-center bg-neutral-800 rounded-full p-0.5 mr-1">
+              <button
+                onClick={() => setViewMode('quilted')}
+                className={`px-2.5 py-1 text-xs font-medium rounded-full transition-colors ${
+                  viewMode === 'quilted'
+                    ? 'bg-neutral-600 text-white'
+                    : 'text-neutral-400 hover:text-neutral-200'
+                }`}
+                title="Quilted grid view"
+              >
+                ▦ Grid
+              </button>
+              <button
+                onClick={() => setViewMode('zigzag')}
+                className={`px-2.5 py-1 text-xs font-medium rounded-full transition-colors ${
+                  viewMode === 'zigzag'
+                    ? 'bg-neutral-600 text-white'
+                    : 'text-neutral-400 hover:text-neutral-200'
+                }`}
+                title="Zigzag timeline view"
+              >
+                ⟡ Timeline
+              </button>
+            </div>
+
             <button
               onClick={onGenerateNarrative}
               disabled={narrating || chapters.length === 0}
@@ -1054,172 +1485,10 @@ function StoryTimeline({
               with chapters, moments, and hero images.
             </p>
           </div>
+        ) : viewMode === 'quilted' ? (
+          <QuildedGrid {...sharedProps} />
         ) : (
-          <div className="py-6 px-5">
-            {years.map((year) => {
-              const yearChapters = yearGroups[year]
-              return (
-                <div key={year} className="mb-8">
-                  {/* ── Year divider ── */}
-                  <div className="flex items-center gap-4 mb-5 px-1">
-                    <span className="text-2xl font-black text-white tracking-tight">{year}</span>
-                    <div className="flex-1 h-px bg-gradient-to-r from-neutral-700 to-transparent" />
-                    <span className="text-xs text-neutral-600 tabular-nums">
-                      {yearChapters.length} chapter{yearChapters.length !== 1 ? 's' : ''}
-                    </span>
-                  </div>
-
-                  {/* ── Chapter masonry: 3-col grid with varied card sizes ── */}
-                  <div
-                    className="grid gap-2"
-                    style={{
-                      gridTemplateColumns: 'repeat(3, 1fr)',
-                      gridAutoRows: '100px',
-                    }}
-                  >
-                    {yearChapters.map((chapter, idx) => {
-                      const isExpanded = expandedChapter === chapter.id
-                      const coverThumb = chapter.cover_image_id ? heroThumbs[chapter.cover_image_id] : undefined
-                      const dateRange = formatChapterDateRange(chapter.start_date, chapter.end_date)
-
-                      /* ── Card sizing: repeating pattern for visual variety ── */
-                      let colSpan = 1
-                      let rowSpan = 2
-                      if (isExpanded) {
-                        colSpan = 3
-                        rowSpan = 0 // auto height for expanded
-                      } else {
-                        const pos = idx % 7
-                        // Pattern: feature, small, tall, small, wide, small, small
-                        if (pos === 0) { colSpan = 2; rowSpan = 3 }         // feature — large
-                        else if (pos === 2) { colSpan = 1; rowSpan = 3 }    // tall portrait
-                        else if (pos === 4) { colSpan = 2; rowSpan = 2 }    // wide landscape
-                        // pos 1,3,5,6 default to 1×2 (standard)
-                      }
-
-                      const gridStyle: React.CSSProperties = isExpanded
-                        ? { gridColumn: '1 / -1' }
-                        : { gridColumn: `span ${colSpan}`, gridRow: `span ${rowSpan}` }
-
-                      return (
-                        <div key={chapter.id} style={gridStyle}>
-                          {/* Chapter card */}
-                          <div
-                            className={`group rounded-xl overflow-hidden transition-all duration-200 cursor-pointer h-full ${
-                              isExpanded
-                                ? 'bg-neutral-850 ring-1 ring-blue-500/20'
-                                : 'bg-neutral-900/70 hover:bg-neutral-800/60 hover:ring-1 hover:ring-neutral-700/50'
-                            }`}
-                            onClick={() => toggleChapter(chapter.id)}
-                          >
-                            {isExpanded ? (
-                              /* ── Expanded view ── */
-                              <div className="p-4">
-                                <div className="flex items-start justify-between mb-3">
-                                  <div className="flex-1 min-w-0">
-                                    <h3 className="text-lg font-semibold text-white leading-tight">
-                                      {chapter.title || 'Untitled Chapter'}
-                                    </h3>
-                                    <div className="flex items-center gap-2 mt-1 text-xs text-neutral-500">
-                                      {chapter.location && (
-                                        <span className="text-blue-400">📍 {chapter.location}</span>
-                                      )}
-                                      {dateRange && <span>{dateRange}</span>}
-                                      <span>{chapter.image_count} photos · {chapter.moment_count} moments</span>
-                                    </div>
-                                    {chapter.summary && (
-                                      <p className="text-sm text-neutral-400 italic leading-relaxed mt-2 max-w-2xl">
-                                        "{chapter.summary}"
-                                      </p>
-                                    )}
-                                  </div>
-                                  <span className="text-xs text-neutral-600 ml-3 shrink-0">▾ collapse</span>
-                                </div>
-
-                                {/* Moments as collages */}
-                                {moments.length === 0 ? (
-                                  <div className="text-xs text-neutral-500 py-4">Loading moments…</div>
-                                ) : (
-                                  <div className="space-y-4 mt-2">
-                                    {moments.map((moment) => (
-                                      <div key={moment.id}>
-                                        <div className="flex items-baseline gap-2 mb-1.5">
-                                          <span className="text-xs font-medium text-neutral-300">
-                                            {moment.title || formatMomentTime(moment.start_time)}
-                                          </span>
-                                          <span className="text-[10px] text-neutral-600">
-                                            {moment.image_count} photo{moment.image_count !== 1 ? 's' : ''}
-                                          </span>
-                                        </div>
-                                        {momentImages[moment.id] ? (
-                                          <MomentCollage
-                                            images={momentImages[moment.id]}
-                                            thumbs={heroThumbs}
-                                            momentId={moment.id}
-                                          />
-                                        ) : moment.hero_image_id && heroThumbs[moment.hero_image_id] ? (
-                                          <div className="rounded-lg overflow-hidden">
-                                            <img
-                                              src={heroThumbs[moment.hero_image_id]}
-                                              alt=""
-                                              className="w-full h-44 object-cover object-top"
-                                            />
-                                          </div>
-                                        ) : (
-                                          <div className="w-full h-32 rounded-lg bg-neutral-800 flex items-center justify-center">
-                                            <span className="text-neutral-600 text-sm">Loading…</span>
-                                          </div>
-                                        )}
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            ) : (
-                              /* ── Collapsed card: fill full height with image ── */
-                              <div className="relative w-full h-full overflow-hidden">
-                                {coverThumb ? (
-                                  <>
-                                    <img
-                                      src={coverThumb}
-                                      alt=""
-                                      className="absolute inset-0 w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
-                                    />
-                                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
-                                  </>
-                                ) : (
-                                  <div className="absolute inset-0 bg-neutral-800/60" />
-                                )}
-                                <div className="absolute bottom-0 left-0 right-0 p-3">
-                                  <h3 className={`font-semibold text-white drop-shadow-lg leading-tight ${
-                                    colSpan >= 2 ? 'text-base' : 'text-sm truncate'
-                                  }`}>
-                                    {chapter.title || 'Untitled Chapter'}
-                                  </h3>
-                                  <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-neutral-300/80">
-                                    {chapter.location && (
-                                      <span className="text-blue-400/90">📍 {chapter.location}</span>
-                                    )}
-                                    {dateRange && <span>{dateRange}</span>}
-                                    <span className="opacity-60">{chapter.image_count} photos</span>
-                                  </div>
-                                  {chapter.summary && colSpan >= 2 && (
-                                    <p className="text-xs text-neutral-400/80 italic line-clamp-2 leading-relaxed mt-1">
-                                      {chapter.summary}
-                                    </p>
-                                  )}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
+          <ZigzagTimeline {...sharedProps} />
         )}
       </div>
     </div>
