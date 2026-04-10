@@ -3214,7 +3214,7 @@ def _handle_thumbnails_batch(params: dict) -> dict:
     store = _get_decoded_store()
     conn = _get_db()
 
-    for item in raw_items[:50]:
+    for item in raw_items[:100]:
         file_path = item.get("file_path", "") if isinstance(item, dict) else str(item)
         image_id = item.get("image_id") if isinstance(item, dict) else None
         cache_key = file_path or (str(image_id) if image_id is not None else "")

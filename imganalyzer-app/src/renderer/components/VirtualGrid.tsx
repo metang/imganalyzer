@@ -7,8 +7,10 @@
  *  3. Compute total virtual height = Math.ceil(items/cols) * rowHeight.
  *  4. On scroll, compute which rows are in view (plus OVERSCAN).
  *  5. Only mount <GridCell> for visible rows — invisible rows are a spacer div.
- *  6. Each <GridCell> requests its thumbnail only when it enters the viewport
- *     (IntersectionObserver), providing a second layer of progressive loading.
+ *  6. Batch-prefetch thumbnails for all visible items via getThumbnailsBatch
+ *     (with image_id to hit the pre-decoded 5ms cache path).
+ *  7. Each <GridCell> reads from a shared thumbnail map, with a fallback to
+ *     individual getThumbnail on cache miss.
  */
 import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import type { SearchResult } from '../global'
@@ -18,6 +20,7 @@ import type { SearchResult } from '../global'
 const CELL_MIN = 160  // minimum cell width in px
 const CELL_MAX = 220  // maximum cell width — drives column count
 const OVERSCAN_ROWS = 3  // extra rows rendered above/below viewport
+const BATCH_DEBOUNCE_MS = 80  // debounce batch prefetch on scroll
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -34,17 +37,29 @@ interface GridCellProps {
   item: SearchResult
   selected: boolean
   onClick: () => void
+  /** Pre-fetched data URL from the batch loader, if available. */
+  prefetchedSrc: string | undefined
 }
 
-const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellProps) {
-  const [src, setSrc] = useState<string>('')
-  const [loading, setLoading] = useState(true)
+const GridCell = memo(function GridCell({ item, selected, onClick, prefetchedSrc }: GridCellProps) {
+  const [src, setSrc] = useState<string>(prefetchedSrc ?? '')
+  const [loading, setLoading] = useState(!prefetchedSrc)
   const [error, setError] = useState(false)
   const cellRef = useRef<HTMLButtonElement>(null)
-  const loadedRef = useRef(false)
+  const loadedRef = useRef(!!prefetchedSrc)
 
-  // Use IntersectionObserver to defer thumbnail loading until cell is visible
+  // If prefetchedSrc arrives after mount, pick it up
   useEffect(() => {
+    if (prefetchedSrc && !loadedRef.current) {
+      loadedRef.current = true
+      setSrc(prefetchedSrc)
+      setLoading(false)
+    }
+  }, [prefetchedSrc])
+
+  // Fallback: if batch prefetch hasn't resolved, load individually on visible
+  useEffect(() => {
+    if (loadedRef.current) return
     const el = cellRef.current
     if (!el) return
 
@@ -75,7 +90,7 @@ const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellPro
           })
         }
       },
-      { rootMargin: '200px' }  // start loading 200px before it enters view
+      { rootMargin: '200px' }
     )
 
     observer.observe(el)
@@ -187,6 +202,11 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
   const [viewportHeight, setViewportHeight] = useState(600)
   const endReachedLatchRef = useRef(false)
 
+  // Shared thumbnail cache: image_id → data URL
+  const [thumbMap, setThumbMap] = useState<Record<number, string>>({})
+  const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingBatchRef = useRef(new Set<number>())
+
   // ── Measure container ─────────────────────────────────────────────────────
   useEffect(() => {
     const el = containerRef.current
@@ -224,6 +244,47 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
     rowCount - 1,
     Math.ceil((scrollTop + viewportHeight - PADDING) / rowHeight) + OVERSCAN_ROWS
   )
+
+  // ── Batch thumbnail prefetch for visible items ────────────────────────────
+  useEffect(() => {
+    if (items.length === 0 || cols <= 0) return
+
+    if (batchTimerRef.current) clearTimeout(batchTimerRef.current)
+
+    batchTimerRef.current = setTimeout(() => {
+      const startIdx = firstVisibleRow * cols
+      const endIdx = Math.min(items.length, (lastVisibleRow + 1) * cols)
+      const visibleItems = items.slice(startIdx, endIdx)
+
+      const needed: Array<{ file_path: string; image_id: number }> = []
+      for (const item of visibleItems) {
+        if (!thumbMap[item.image_id] && !pendingBatchRef.current.has(item.image_id)) {
+          needed.push({ file_path: item.file_path, image_id: item.image_id })
+          pendingBatchRef.current.add(item.image_id)
+        }
+      }
+
+      if (needed.length === 0) return
+
+      window.api.getThumbnailsBatch(needed).then((result) => {
+        const newEntries: Record<number, string> = {}
+        for (const item of needed) {
+          const url = result[item.file_path] ?? result[String(item.image_id)]
+          if (url) newEntries[item.image_id] = url
+          pendingBatchRef.current.delete(item.image_id)
+        }
+        if (Object.keys(newEntries).length > 0) {
+          setThumbMap((prev) => ({ ...prev, ...newEntries }))
+        }
+      }).catch(() => {
+        for (const item of needed) pendingBatchRef.current.delete(item.image_id)
+      })
+    }, BATCH_DEBOUNCE_MS)
+
+    return () => {
+      if (batchTimerRef.current) clearTimeout(batchTimerRef.current)
+    }
+  }, [firstVisibleRow, lastVisibleRow, cols, items, thumbMap])
 
   useEffect(() => {
     if (!onEndReached || rowCount <= 0) return
@@ -292,6 +353,7 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
                     item={item}
                     selected={item.image_id === selectedId}
                     onClick={() => onSelect(item)}
+                    prefetchedSrc={thumbMap[item.image_id]}
                   />
                 </div>
               ))}

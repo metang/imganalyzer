@@ -304,10 +304,10 @@ export async function getThumbnailsBatch(
   items: ThumbnailBatchItem[],
 ): Promise<Record<string, string>> {
   const result: Record<string, string> = {}
-  const uncached: ThumbnailBatchItem[] = []
+  const needDisk: ThumbnailBatchItem[] = []
   const requestedByKey = new Map<string, ThumbnailBatchItem>()
 
-  // Resolve from memory and disk cache first
+  // Resolve from memory cache first (synchronous)
   for (const item of items) {
     const itemKey = thumbnailItemKey(item)
     if (!itemKey) continue
@@ -320,14 +320,32 @@ export async function getThumbnailsBatch(
         result[itemKey] = memCached
         continue
       }
-      const diskCached = await readThumbnailFromDisk(item.file_path)
-      if (diskCached) {
+    }
+    needDisk.push(item)
+  }
+
+  // Check disk cache in parallel
+  const uncached: ThumbnailBatchItem[] = []
+  if (needDisk.length > 0) {
+    const diskResults = await Promise.all(
+      needDisk.map(async (item) => {
+        if (item.file_path && item.file_path.length > 0) {
+          return readThumbnailFromDisk(item.file_path)
+        }
+        return null
+      })
+    )
+    for (let i = 0; i < needDisk.length; i++) {
+      const item = needDisk[i]
+      const itemKey = thumbnailItemKey(item)!
+      const diskCached = diskResults[i]
+      if (diskCached && item.file_path) {
         thumbCacheSet(item.file_path, diskCached)
         result[itemKey] = diskCached
-        continue
+      } else {
+        uncached.push(item)
       }
     }
-    uncached.push(item)
   }
 
   if (uncached.length === 0) return result
