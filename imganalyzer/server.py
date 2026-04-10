@@ -1973,6 +1973,19 @@ def _handle_search(params: dict) -> dict:
     conn = _get_db()
     engine = _get_search_engine(conn)
 
+    # Progress callback — sends JSON-RPC notifications during slow phases
+    _progress_sent: set[str] = set()
+
+    def _progress(phase: str, message: str, progress: float) -> None:
+        if phase in _progress_sent:
+            return
+        _progress_sent.add(phase)
+        _send_notification("search/progress", {
+            "phase": phase,
+            "message": message,
+            "progress": progress,
+        })
+
     query = params.get("query", "")
     mode = params.get("mode", "hybrid")
     semantic_weight = params.get("semanticWeight", 0.5)
@@ -2118,6 +2131,7 @@ def _handle_search(params: dict) -> dict:
     face_match = "all" if face_match is None else face_match
 
     if not faces and query:
+        _progress("resolving", "Resolving names…", 0.0)
         resolve_face_queries = getattr(engine, "resolve_face_queries", None)
         if callable(resolve_face_queries):
             resolved_faces, remaining_query, resolved_match = resolve_face_queries(str(query))
@@ -2497,6 +2511,7 @@ def _handle_search(params: dict) -> dict:
 
     def _search_text_terms(candidate_limit: int) -> list[dict[str, Any]]:
         search_supports_profile = "semantic_profile" in inspect.signature(engine.search).parameters
+        search_supports_progress = "progress_cb" in inspect.signature(engine.search).parameters
 
         def _run_search(term: str) -> list[dict[str, Any]]:
             kwargs: dict[str, Any] = {
@@ -2506,6 +2521,8 @@ def _handle_search(params: dict) -> dict:
             }
             if search_supports_profile:
                 kwargs["semantic_profile"] = semantic_profile
+            if search_supports_progress:
+                kwargs["progress_cb"] = _progress
             return engine.search(term, **kwargs)
 
         terms: list[str] = []
@@ -2657,6 +2674,7 @@ def _handle_search(params: dict) -> dict:
                 int(result["image_id"]): float(result["score"])
                 for result in search_results
             }
+            _progress("filtering", "Filtering results…", 0.85)
             records = _fetch_records(candidate_ids, score_map)
             records = _sort_records(records)
             enough_for_page = len(records) > page_end
@@ -2714,6 +2732,25 @@ def _handle_search_resolve_face_query(params: dict) -> dict[str, Any]:
         "faceMatch": face_match,
         "remainingQuery": remaining_query,
     }
+
+
+def _handle_search_warmup(_params: dict) -> dict:
+    """Pre-load search caches to speed up the first search query.
+
+    Loads embedding matrices and rich-description ID set eagerly so the
+    first user-initiated search doesn't pay the cold-start cost.
+    """
+    import sys
+
+    conn = _get_db()
+    engine = _get_search_engine(conn)
+    try:
+        engine._image_clip_cache.get(conn, "image_clip")
+        engine._desc_clip_cache.get(conn, "description_clip")
+        engine._get_rich_desc_image_ids()
+    except Exception as exc:
+        print(f"[search/warmup] partial failure: {exc}", file=sys.stderr)
+    return {"ok": True}
 
 
 def _processed_exists_clause(alias: str = "i") -> str:
@@ -5454,6 +5491,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "jobs/release-worker": _handle_jobs_release_worker,
     "rebuild": _handle_rebuild,
     "search": _handle_search,
+    "search/warmup": _handle_search_warmup,
     "search/resolveFaceQuery": _handle_search_resolve_face_query,
     "image/details": _handle_image_details,
     "gallery/listFolders": _handle_gallery_list_folders,

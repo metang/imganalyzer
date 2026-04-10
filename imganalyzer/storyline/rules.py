@@ -34,12 +34,25 @@ def _compile_person(rule: dict[str, Any], idx: int) -> CompiledFragment:
 
     mode='all' → image must contain ALL listed persons (co-occurrence).
     mode='any' → image must contain at least ONE listed person.
+
+    Filters out marginal detections: requires det_score >= 0.65 and a
+    minimum bounding-box area of 2500 px² (≈ 50×50) so that tiny,
+    barely-visible faces don't pull landscape photos into person albums.
     """
     person_ids: list[str] = rule.get("person_ids", [])
     mode = rule.get("mode", "any")
 
     if not person_ids:
         return CompiledFragment([], [], [])
+
+    min_det_score = 0.65
+    min_bbox_area = 2500  # 50×50 pixels
+
+    # Quality predicate applied to every face_occurrences join
+    quality = (
+        f"AND {{a}}.det_score >= {min_det_score} "
+        f"AND ({{a}}.bbox_x2 - {{a}}.bbox_x1) * ({{a}}.bbox_y2 - {{a}}.bbox_y1) >= {min_bbox_area}"
+    )
 
     joins: list[str] = []
     conditions: list[str] = []
@@ -50,7 +63,8 @@ def _compile_person(rule: dict[str, Any], idx: int) -> CompiledFragment:
             alias = f"fp{idx}_{j}"
             joins.append(
                 f"JOIN face_occurrences {alias} "
-                f"ON {alias}.image_id = i.id AND {alias}.person_id = ?"
+                f"ON {alias}.image_id = i.id AND {alias}.person_id = ? "
+                + quality.format(a=alias)
             )
             params.append(pid)
     else:
@@ -58,7 +72,8 @@ def _compile_person(rule: dict[str, Any], idx: int) -> CompiledFragment:
         placeholders = ",".join("?" for _ in person_ids)
         joins.append(
             f"JOIN face_occurrences {alias} "
-            f"ON {alias}.image_id = i.id AND {alias}.person_id IN ({placeholders})"
+            f"ON {alias}.image_id = i.id AND {alias}.person_id IN ({placeholders}) "
+            + quality.format(a=alias)
         )
         params.extend(person_ids)
 

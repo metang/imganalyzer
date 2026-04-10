@@ -93,16 +93,25 @@ def _insert_embedding(conn, image_id: int, clip_vec: list[float] | None = None) 
 
 
 def _insert_face_occurrence(
-    conn, image_id: int, person_id: int | None = None, cluster_id: int = 1
+    conn,
+    image_id: int,
+    person_id: int | None = None,
+    cluster_id: int = 1,
+    det_score: float = 0.9,
+    bbox: tuple[float, float, float, float] = (50.0, 50.0, 150.0, 150.0),
 ) -> None:
-    """Insert a face occurrence."""
+    """Insert a face occurrence with configurable quality data.
+
+    Default bbox is 100×100 pixels = 10000 px² (well above the 2500 px²
+    minimum required by the person rule compiler).
+    """
     emb = np.zeros(512, dtype=np.float32).tobytes()
     conn.execute(
         "INSERT INTO face_occurrences "
         "(image_id, face_idx, embedding, cluster_id, person_id, "
-        " bbox_x1, bbox_y1, bbox_x2, bbox_y2) "
-        "VALUES (?, 0, ?, ?, ?, 0.1, 0.1, 0.5, 0.5)",
-        [image_id, emb, cluster_id, person_id],
+        " bbox_x1, bbox_y1, bbox_x2, bbox_y2, det_score) "
+        "VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [image_id, emb, cluster_id, person_id, *bbox, det_score],
     )
 
 
@@ -297,6 +306,58 @@ class TestRuleCompiler:
         ]})
         sql, params = compile_rules(rules_json)
         assert "JP" in params
+
+    def test_person_rule_filters_tiny_faces(self, tmp_path):
+        """Images with tiny face detections should be excluded from person albums."""
+        from imganalyzer.storyline.rules import evaluate_rules
+
+        conn = _make_test_db(tmp_path)
+        pid = _create_person(conn, "Alice")
+
+        # Image 1: large face (100×100 = 10000 px²) — should be included
+        _insert_image(conn, 1)
+        _insert_face_occurrence(conn, 1, person_id=pid, bbox=(10, 10, 110, 110))
+
+        # Image 2: tiny face (20×20 = 400 px² < 2500) — should be excluded
+        _insert_image(conn, 2)
+        _insert_face_occurrence(conn, 2, person_id=pid, bbox=(10, 10, 30, 30))
+
+        # Image 3: medium face (60×60 = 3600 px²) — should be included
+        _insert_image(conn, 3)
+        _insert_face_occurrence(conn, 3, person_id=pid, bbox=(10, 10, 70, 70))
+
+        conn.commit()
+
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [pid]}
+        ]}
+        ids = evaluate_rules(conn, rules)
+        assert sorted(ids) == [1, 3]
+
+    def test_person_rule_filters_low_confidence(self, tmp_path):
+        """Images with low-confidence face detections should be excluded."""
+        from imganalyzer.storyline.rules import evaluate_rules
+
+        conn = _make_test_db(tmp_path)
+        pid = _create_person(conn, "Bob")
+
+        # Image 1: high confidence — included
+        _insert_image(conn, 1)
+        _insert_face_occurrence(conn, 1, person_id=pid, det_score=0.95,
+                                bbox=(10, 10, 110, 110))
+
+        # Image 2: low confidence — excluded
+        _insert_image(conn, 2)
+        _insert_face_occurrence(conn, 2, person_id=pid, det_score=0.3,
+                                bbox=(10, 10, 110, 110))
+
+        conn.commit()
+
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [pid]}
+        ]}
+        ids = evaluate_rules(conn, rules)
+        assert ids == [1]
 
 
 # ── Test: Album CRUD ─────────────────────────────────────────────────────────
@@ -674,6 +735,31 @@ class TestHeroSelection:
         conn = _make_test_db(tmp_path)
         assert select_moment_hero(conn, []) is None
 
+    def test_prefers_prominent_face(self, tmp_path):
+        """Hero should prefer images with large, prominent faces over landscapes."""
+        from imganalyzer.storyline.heroes import select_moment_hero
+
+        conn = _make_test_db(tmp_path)
+        # Image 1: landscape — high aesthetic, no face
+        _insert_image(conn, 1)
+        _insert_search_features(conn, 1, perception_iaa=0.95, sharpness=0.9)
+
+        # Image 2: portrait — moderate aesthetic, large face (200×200)
+        _insert_image(conn, 2)
+        _insert_search_features(conn, 2, perception_iaa=0.6, sharpness=0.6, face_count=1)
+        _insert_face_occurrence(conn, 2, bbox=(50, 50, 250, 250))
+
+        # Image 3: group shot — moderate aesthetic, small face (30×30)
+        _insert_image(conn, 3)
+        _insert_search_features(conn, 3, perception_iaa=0.7, sharpness=0.7, face_count=1)
+        _insert_face_occurrence(conn, 3, bbox=(100, 100, 130, 130))
+
+        conn.commit()
+
+        hero = select_moment_hero(conn, [1, 2, 3])
+        # Image 2 should win: large face prominence outweighs image 1's aesthetic
+        assert hero == 2
+
 
 # ── Test: Story Generator (end-to-end) ───────────────────────────────────────
 
@@ -940,8 +1026,8 @@ class TestPresets:
             conn.execute(
                 "INSERT INTO face_occurrences "
                 "(image_id, face_idx, embedding, cluster_id, person_id, "
-                " bbox_x1, bbox_y1, bbox_x2, bbox_y2) "
-                "VALUES (?, 1, ?, ?, ?, 0.5, 0.5, 0.9, 0.9)",
+                " bbox_x1, bbox_y1, bbox_x2, bbox_y2, det_score) "
+                "VALUES (?, 1, ?, ?, ?, 200.0, 50.0, 300.0, 150.0, 0.9)",
                 [i, emb, i * 10 + 1, pid_b],
             )
 

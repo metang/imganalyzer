@@ -65,6 +65,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -105,6 +106,9 @@ _SEMANTIC_PROFILE_WEIGHTS: dict[str, tuple[float, float]] = {
     "balanced": (1.0, _DESC_WEIGHT),
     "description_dominant": (0.60, 1.0),
 }
+
+# Callback type for search progress: (phase, message, progress_fraction)
+ProgressCallback = Callable[[str, str, float], None] | None
 
 
 def _rrf_score(rank: int, k: int = _RRF_K) -> float:
@@ -319,6 +323,7 @@ class SearchEngine:
         semantic_weight: float = 0.5,
         mode: str = "hybrid",
         semantic_profile: str | None = None,
+        progress_cb: ProgressCallback = None,
     ) -> list[dict[str, Any]]:
         """Search images by text query.
 
@@ -332,9 +337,9 @@ class SearchEngine:
         if mode == "text":
             return self._fts_search(query, limit)
         elif mode == "semantic":
-            return self._semantic_search(query, limit, semantic_profile)
+            return self._semantic_search(query, limit, semantic_profile, progress_cb=progress_cb)
         else:
-            return self._hybrid_search(query, limit, semantic_weight, semantic_profile)
+            return self._hybrid_search(query, limit, semantic_weight, semantic_profile, progress_cb=progress_cb)
 
     def _resolve_face_rows(self, name: str, limit: int | None = 50) -> list[dict[str, Any]]:
         """Resolve one face/person query into image rows without text fallback."""
@@ -1089,7 +1094,10 @@ class SearchEngine:
         self._rich_desc_ts = now
         return result
 
-    def _semantic_search(self, query: str, limit: int, semantic_profile: str | None = None) -> list[dict[str, Any]]:
+    def _semantic_search(
+        self, query: str, limit: int, semantic_profile: str | None = None,
+        *, progress_cb: ProgressCallback = None,
+    ) -> list[dict[str, Any]]:
         """CLIP embedding semantic search — two-tier strategy (vectorized).
 
         **Tier 1 — images with ``image_clip``** (primary visual signal):
@@ -1110,6 +1118,8 @@ class SearchEngine:
         """
         from imganalyzer.embeddings.clip_embedder import CLIPEmbedder, vector_from_bytes
 
+        if progress_cb:
+            progress_cb("loading_model", "Loading AI model…", 0.15)
         embedder = CLIPEmbedder()
         image_weight, desc_weight = _semantic_profile_weights(semantic_profile)
 
@@ -1119,11 +1129,15 @@ class SearchEngine:
         # Encode two query variants:
         # - visual query: prefixed for better text->image retrieval
         # - text query: verbatim for text->text description matching
+        if progress_cb:
+            progress_cb("encoding", "Encoding query…", 0.25)
         visual_query = query if query.lower().startswith("a photo of") else f"a photo of {query}"
         visual_query_vec = vector_from_bytes(embedder.embed_text(visual_query))
         text_query_vec   = vector_from_bytes(embedder.embed_text(query))
 
         # Load cached embedding matrices (rebuilt automatically if stale)
+        if progress_cb:
+            progress_cb("loading_embeddings", "Loading search index…", 0.35)
         img_matrix, img_ids = self._image_clip_cache.get(self.conn, "image_clip")
         desc_matrix, desc_ids = self._desc_clip_cache.get(self.conn, "description_clip")
 
@@ -1139,6 +1153,8 @@ class SearchEngine:
         # ── Vectorized scoring ────────────────────────────────────────────
         # CLIP embeddings are L2-normalised, so dot product == cosine similarity.
         # One BLAS call computes all N scores: scores = matrix @ query_vec
+        if progress_cb:
+            progress_cb("scoring", "Computing relevance…", 0.55)
 
         image_scored: list[tuple[int, float]] = []
         image_id_set: set[int] = set()
@@ -1232,7 +1248,9 @@ class SearchEngine:
         return results
 
     def _hybrid_search(
-        self, query: str, limit: int, semantic_weight: float, semantic_profile: str | None = None
+        self, query: str, limit: int, semantic_weight: float,
+        semantic_profile: str | None = None,
+        *, progress_cb: ProgressCallback = None,
     ) -> list[dict[str, Any]]:
         """Combine FTS5 and CLIP scores with weighted RRF fusion.
 
@@ -1253,9 +1271,11 @@ class SearchEngine:
           are included unrestricted (original union behaviour).
         """
         pool = limit * _POOL_FACTOR
+        if progress_cb:
+            progress_cb("text_search", "Searching text index…", 0.05)
         text_results     = self._fts_search(query, pool)
         try:
-            semantic_results = self._semantic_search(query, pool, semantic_profile)
+            semantic_results = self._semantic_search(query, pool, semantic_profile, progress_cb=progress_cb)
         except RuntimeError as exc:
             if "CUDA" in str(exc):
                 import sys
@@ -1266,6 +1286,9 @@ class SearchEngine:
                 )
                 return text_results[:limit]
             raise
+
+        if progress_cb:
+            progress_cb("ranking", "Ranking results…", 0.70)
 
         # Convert each result list to RRF scores (already sorted best-first)
         text_rrf: dict[int, float] = {

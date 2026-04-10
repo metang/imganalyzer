@@ -20,6 +20,7 @@ class ImageScore:
     aesthetic: float
     sharpness: float
     has_face: bool
+    face_prominence: float  # 0.0–1.0: largest face area relative to image
     embedding: list[float] | None
 
 
@@ -84,8 +85,28 @@ def _load_image_scores(
                 aesthetic=r["aesthetic"] or 0.0,
                 sharpness=r["sharpness"] or 0.0,
                 has_face=(r["face_count"] or 0) > 0,
+                face_prominence=0.0,
                 embedding=_decode_embedding(r["image_clip"]),
             )
+
+    # Compute face prominence: largest face bbox area per image
+    for start in range(0, len(image_ids), chunk_size):
+        chunk = image_ids[start : start + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"SELECT image_id, "
+            f"       MAX((bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1)) AS max_area "
+            f"FROM face_occurrences "
+            f"WHERE image_id IN ({placeholders}) "
+            f"GROUP BY image_id",
+            chunk,
+        ).fetchall()
+        for r in rows:
+            iid = r["image_id"]
+            if iid in scores:
+                area = r["max_area"] or 0.0
+                # Normalize: 10000 px² (100×100) → 0.5, 40000 px² (200×200) → ~1.0
+                scores[iid].face_prominence = min(1.0, area / 40000.0)
 
     # Fill in missing entries
     for iid in image_ids:
@@ -95,17 +116,23 @@ def _load_image_scores(
                 aesthetic=0.0,
                 sharpness=0.0,
                 has_face=False,
+                face_prominence=0.0,
                 embedding=None,
             )
     return scores
 
 
 def _compute_base_score(s: ImageScore) -> float:
-    """Weighted base score (without diversity)."""
+    """Weighted base score (without diversity).
+
+    Uses continuous face_prominence (0–1) instead of binary has_face
+    so images with large, clearly-visible faces score much higher than
+    images where the person is tiny or barely detected.
+    """
     return (
         s.aesthetic * WEIGHT_AESTHETIC
         + s.sharpness * WEIGHT_SHARPNESS
-        + (1.0 if s.has_face else 0.0) * WEIGHT_FACE
+        + s.face_prominence * WEIGHT_FACE
     )
 
 
