@@ -137,13 +137,17 @@ class MetadataExtractor:
             meta.update(parsed_exif)
 
         # 2. Try piexif from raw EXIF bytes (works without file access)
-        if not meta:
+        if not meta.get("date_time_original"):
             exif_bytes = self.image_data.get("exif_bytes")
             if exif_bytes:
                 try:
                     import piexif
                     exif_dict = piexif.load(exif_bytes)
-                    meta.update(self._parse_piexif(exif_dict))
+                    piexif_meta = self._parse_piexif(exif_dict)
+                    # Merge: only fill in keys not already present
+                    for k, v in piexif_meta.items():
+                        if k not in meta:
+                            meta[k] = v
                 except Exception as exc:
                     log.debug(
                         "metadata extraction failed stage=piexif path=%s "
@@ -154,12 +158,15 @@ class MetadataExtractor:
                     )
 
         # 3. Try exifread from the original file (master device path)
-        if not meta:
+        if not meta.get("date_time_original"):
             try:
                 import exifread
                 with open(self.path, "rb") as f:
                     tags = exifread.process_file(f, details=False, strict=False)
-                meta.update(self._parse_exifread_tags(tags))
+                exifread_meta = self._parse_exifread_tags(tags)
+                for k, v in exifread_meta.items():
+                    if k not in meta:
+                        meta[k] = v
             except Exception as exc:
                 log.debug(
                     "metadata extraction failed stage=exifread path=%s "
@@ -352,11 +359,95 @@ class MetadataExtractor:
                 return v.decode("utf-8", errors="replace").rstrip("\x00").strip()
             return str(v)
 
+        def rational_to_float(v: Any) -> float | None:
+            if isinstance(v, tuple) and len(v) == 2 and v[1]:
+                return v[0] / v[1]
+            return None
+
+        # Camera
         make = get_ifd("0th", piexif.ImageIFD.Make)
         model = get_ifd("0th", piexif.ImageIFD.Model)
         if make:
             m["camera_make"] = decode(make)
         if model:
             m["camera_model"] = decode(model)
+
+        sw = get_ifd("0th", piexif.ImageIFD.Software)
+        if sw:
+            m["software"] = decode(sw)
+
+        # Date/time
+        dt = get_ifd("Exif", piexif.ExifIFD.DateTimeOriginal)
+        if not dt:
+            dt = get_ifd("0th", piexif.ImageIFD.DateTime)
+        if dt:
+            m["date_time_original"] = decode(dt)
+
+        # Lens
+        lens = get_ifd("Exif", piexif.ExifIFD.LensModel)
+        if lens:
+            m["lens_model"] = decode(lens)
+        lens_make = get_ifd("Exif", piexif.ExifIFD.LensMake)
+        if lens_make:
+            m["lens_make"] = decode(lens_make)
+
+        # Exposure
+        fn = get_ifd("Exif", piexif.ExifIFD.FNumber)
+        if fn:
+            v = rational_to_float(fn)
+            if v:
+                m["f_number"] = round(v, 1)
+
+        iso = get_ifd("Exif", piexif.ExifIFD.ISOSpeedRatings)
+        if iso:
+            m["iso"] = int(iso)
+
+        exp = get_ifd("Exif", piexif.ExifIFD.ExposureTime)
+        if exp:
+            v = rational_to_float(exp)
+            if v:
+                m["exposure_time"] = f"1/{int(1/v)}" if v < 1 else str(round(v, 4))
+
+        fl = get_ifd("Exif", piexif.ExifIFD.FocalLength)
+        if fl:
+            v = rational_to_float(fl)
+            if v:
+                m["focal_length"] = round(v, 1)
+
+        fl35 = get_ifd("Exif", piexif.ExifIFD.FocalLengthIn35mmFilm)
+        if fl35:
+            m["focal_length_35mm"] = int(fl35)
+
+        # GPS
+        gps = exif_dict.get("GPS", {})
+        lat = gps.get(piexif.GPSIFD.GPSLatitude)
+        lat_ref = gps.get(piexif.GPSIFD.GPSLatitudeRef)
+        lon = gps.get(piexif.GPSIFD.GPSLongitude)
+        lon_ref = gps.get(piexif.GPSIFD.GPSLongitudeRef)
+        alt = gps.get(piexif.GPSIFD.GPSAltitude)
+
+        if lat and lon:
+            try:
+                def _piexif_dms(dms: list, ref: bytes) -> float | None:
+                    d = dms[0][0] / dms[0][1]
+                    mi = dms[1][0] / dms[1][1]
+                    s = dms[2][0] / dms[2][1]
+                    dec = d + mi / 60 + s / 3600
+                    if ref in (b"S", b"W"):
+                        dec = -dec
+                    return round(dec, 6)
+
+                lat_dec = _piexif_dms(lat, lat_ref or b"N")
+                lon_dec = _piexif_dms(lon, lon_ref or b"E")
+                if lat_dec is not None:
+                    m["gps_latitude"] = lat_dec
+                if lon_dec is not None:
+                    m["gps_longitude"] = lon_dec
+                if alt:
+                    alt_v = rational_to_float(alt)
+                    if alt_v is not None:
+                        m["gps_altitude"] = round(alt_v, 1)
+            except Exception:
+                pass
 
         return m
