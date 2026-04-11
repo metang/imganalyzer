@@ -1944,9 +1944,11 @@ function StoryTimeline({
   onGenerateStory,
   onGenerateNarrative,
   onExportStory,
+  onRefresh,
   generating,
   narrating,
   exporting,
+  refreshing,
   onImageClick,
 }: {
   album: SmartAlbumSummary
@@ -1954,9 +1956,11 @@ function StoryTimeline({
   onGenerateStory: () => void
   onGenerateNarrative: () => void
   onExportStory: () => void
+  onRefresh: () => void
   generating: boolean
   narrating: boolean
   exporting: boolean
+  refreshing: boolean
   onImageClick?: (img: MomentImage) => void
 }) {
   const [viewMode, setViewMode] = useState<ViewMode>('quilted')
@@ -2122,6 +2126,19 @@ function StoryTimeline({
               </div>
             )}
 
+            <button
+              onClick={onRefresh}
+              disabled={refreshing || generating}
+              className="px-3 py-1.5 text-xs font-medium rounded-full bg-neutral-800 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 transition-colors"
+              title="Refresh album data (picks up newly processed images)"
+            >
+              {refreshing ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-3 border border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
+                  Refreshing…
+                </span>
+              ) : '↻ Refresh'}
+            </button>
             <button
               onClick={onGenerateNarrative}
               disabled={narrating || chapters.length === 0}
@@ -2374,6 +2391,7 @@ export function AlbumsView() {
   const [generating, setGenerating] = useState(false)
   const [narrating, setNarrating] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [persons, setPersons] = useState<FacePerson[]>([])
   const [evalReport, setEvalReport] = useState<StoryGenerateResult['evaluation'] | null>(null)
   const [status, setStatus] = useState<StatusBanner | null>(null)
@@ -2455,6 +2473,20 @@ export function AlbumsView() {
     setStatus(null)
     void loadStory(albumId)
   }, [loadStory])
+
+  const handleRefresh = useCallback(async () => {
+    if (!selectedId) return
+    setRefreshing(true)
+    try {
+      await loadAlbums()
+      await loadStory(selectedId)
+      setStatus({ tone: 'success', text: 'Album data refreshed.' })
+    } catch {
+      setStatus({ tone: 'error', text: 'Failed to refresh.' })
+    } finally {
+      setRefreshing(false)
+    }
+  }, [selectedId, loadAlbums, loadStory])
 
   const handleGenerate = useCallback(async () => {
     if (!selectedId) return
@@ -2578,9 +2610,11 @@ export function AlbumsView() {
               onGenerateStory={() => void handleGenerate()}
               onGenerateNarrative={() => void handleGenerateNarrative()}
               onExportStory={() => void handleExportStory()}
+              onRefresh={() => void handleRefresh()}
               generating={generating}
               narrating={narrating}
               exporting={exporting}
+              refreshing={refreshing}
               onImageClick={handleImageClick}
             />
             {evalReport && (
