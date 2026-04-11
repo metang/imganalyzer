@@ -149,6 +149,188 @@ const RULE_TYPE_LABELS: Record<RuleEntry['type'], string> = {
   keyword: 'Keyword',
 }
 
+// ── Searchable Person Picker (multi-select with search + selected-first) ─────
+
+function PersonPickerMulti({
+  persons,
+  selectedIds,
+  onChange,
+}: {
+  persons: Array<{ id: number; name: string }>
+  selectedIds: number[]
+  onChange: (ids: number[]) => void
+}) {
+  const [search, setSearch] = useState('')
+  const query = search.toLowerCase().trim()
+
+  // Selected first, then alphabetical within each group
+  const sorted = [...persons].sort((a, b) => {
+    const aSelected = selectedIds.includes(a.id) ? 0 : 1
+    const bSelected = selectedIds.includes(b.id) ? 0 : 1
+    if (aSelected !== bSelected) return aSelected - bSelected
+    return a.name.localeCompare(b.name)
+  })
+
+  const filtered = query
+    ? sorted.filter((p) => p.name.toLowerCase().includes(query))
+    : sorted
+
+  return (
+    <div>
+      {/* Search input */}
+      <div className="relative mb-1.5">
+        <svg className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 115 11a6 6 0 0112 0z" />
+        </svg>
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={`Search ${persons.length} people…`}
+          className="w-full pl-7 pr-2 py-1.5 rounded bg-neutral-700 text-white text-xs border border-neutral-600 placeholder:text-neutral-500 focus:border-blue-500 focus:outline-none"
+        />
+        {selectedIds.length > 0 && (
+          <span className="absolute right-2 top-1/2 -translate-y-1/2 px-1.5 py-0.5 rounded-full bg-blue-600 text-[10px] text-white font-medium tabular-nums">
+            {selectedIds.length}
+          </span>
+        )}
+      </div>
+
+      {/* Scrollable list */}
+      <div className="max-h-40 overflow-y-auto bg-neutral-800 rounded p-1.5">
+        {persons.length === 0 && (
+          <span className="text-xs text-neutral-500 px-1">No persons found. Analyze faces first.</span>
+        )}
+        {filtered.length === 0 && persons.length > 0 && (
+          <span className="text-xs text-neutral-500 px-1">No match for &ldquo;{search}&rdquo;</span>
+        )}
+        {filtered.map((p) => {
+          const checked = selectedIds.includes(p.id)
+          return (
+            <label
+              key={p.id}
+              className={`flex items-center gap-2 px-1.5 py-1 rounded text-sm cursor-pointer transition-colors ${
+                checked
+                  ? 'text-white bg-blue-600/20'
+                  : 'text-neutral-300 hover:bg-neutral-700/60'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={(ev) => {
+                  const next = ev.target.checked
+                    ? [...selectedIds, p.id]
+                    : selectedIds.filter((x) => x !== p.id)
+                  onChange(next)
+                }}
+                className="accent-blue-500"
+              />
+              <span className="truncate">{p.name}</span>
+            </label>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ── Searchable Person Picker (single-select with search) ─────────────────────
+
+function PersonPickerSingle({
+  persons,
+  selectedId,
+  onChange,
+  placeholder,
+}: {
+  persons: Array<{ id: number; name: string }>
+  selectedId: number | ''
+  onChange: (id: number | '') => void
+  placeholder?: string
+}) {
+  const [search, setSearch] = useState('')
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const query = search.toLowerCase().trim()
+
+  const selected = persons.find((p) => p.id === selectedId)
+
+  const filtered = query
+    ? persons.filter((p) => p.name.toLowerCase().includes(query)).sort((a, b) => a.name.localeCompare(b.name))
+    : [...persons].sort((a, b) => a.name.localeCompare(b.name))
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return
+    const handleClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false)
+        setSearch('')
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [open])
+
+  return (
+    <div ref={containerRef} className="relative">
+      {/* Display / trigger */}
+      <div
+        className="flex items-center gap-1.5 w-full px-3 py-1.5 rounded bg-neutral-700 text-sm border border-neutral-600 cursor-pointer hover:border-neutral-500 transition-colors"
+        onClick={() => { setOpen(!open); setTimeout(() => inputRef.current?.focus(), 0) }}
+      >
+        {open ? (
+          <input
+            ref={inputRef}
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={`Search ${persons.length} people…`}
+            className="flex-1 bg-transparent text-white placeholder:text-neutral-500 outline-none text-sm min-w-0"
+            onClick={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <span className={`flex-1 truncate ${selected ? 'text-white' : 'text-neutral-500'}`}>
+            {selected ? selected.name : (placeholder ?? 'Select a person…')}
+          </span>
+        )}
+        <svg className={`w-3.5 h-3.5 text-neutral-500 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </div>
+
+      {/* Dropdown */}
+      {open && (
+        <div className="absolute z-20 left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-neutral-800 rounded border border-neutral-600 shadow-xl">
+          {filtered.length === 0 && (
+            <div className="px-3 py-2 text-xs text-neutral-500">
+              {query ? `No match for "${search}"` : 'No persons found'}
+            </div>
+          )}
+          {filtered.map((p) => (
+            <button
+              key={p.id}
+              className={`w-full text-left px-3 py-1.5 text-sm transition-colors ${
+                p.id === selectedId
+                  ? 'text-white bg-blue-600/30'
+                  : 'text-neutral-300 hover:bg-neutral-700'
+              }`}
+              onClick={() => {
+                onChange(p.id)
+                setOpen(false)
+                setSearch('')
+              }}
+            >
+              {p.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function RuleEditor({
   entry,
   index,
@@ -179,26 +361,11 @@ function RuleEditor({
 
       {entry.type === 'person' && (
         <>
-          <div className="max-h-28 overflow-y-auto bg-neutral-800 rounded p-2 mb-2">
-            {persons.length === 0 && (
-              <span className="text-xs text-neutral-500">No persons found. Analyze faces first.</span>
-            )}
-            {persons.map((p) => (
-              <label key={p.id} className="flex items-center gap-2 py-0.5 text-sm text-neutral-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={entry.person_ids.includes(p.id)}
-                  onChange={(ev) => {
-                    const next = ev.target.checked
-                      ? [...entry.person_ids, p.id]
-                      : entry.person_ids.filter((x) => x !== p.id)
-                    onChange(index, { ...entry, person_ids: next })
-                  }}
-                />
-                {p.name}
-              </label>
-            ))}
-          </div>
+          <PersonPickerMulti
+            persons={persons}
+            selectedIds={entry.person_ids}
+            onChange={(next) => onChange(index, { ...entry, person_ids: next })}
+          />
           <select
             value={entry.mode}
             onChange={(e) => onChange(index, { ...entry, mode: e.target.value as 'any' | 'all' })}
@@ -918,18 +1085,11 @@ function PresetAlbumDialog({
         {(preset === 'person_timeline' || preset === 'growth_story') && (
           <div className="mb-3">
             <label className="block text-sm text-neutral-400 mb-1">Person</label>
-            <select
-              value={personId}
-              onChange={(e) => setPersonId(Number(e.target.value) || '')}
-              className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
-            >
-              <option value="">Select a person...</option>
-              {persons.map((person) => (
-                <option key={person.id} value={person.id}>
-                  {person.name}
-                </option>
-              ))}
-            </select>
+            <PersonPickerSingle
+              persons={persons.map((p) => ({ id: p.id, name: p.name }))}
+              selectedId={personId}
+              onChange={(id) => setPersonId(id)}
+            />
           </div>
         )}
 
@@ -937,33 +1097,21 @@ function PresetAlbumDialog({
           <div className="grid grid-cols-2 gap-2 mb-3">
             <div>
               <label className="block text-sm text-neutral-400 mb-1">First person</label>
-              <select
-                value={personId}
-                onChange={(e) => setPersonId(Number(e.target.value) || '')}
-                className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
-              >
-                <option value="">Select...</option>
-                {persons.map((person) => (
-                  <option key={person.id} value={person.id}>
-                    {person.name}
-                  </option>
-                ))}
-              </select>
+              <PersonPickerSingle
+                persons={persons.map((p) => ({ id: p.id, name: p.name }))}
+                selectedId={personId}
+                onChange={(id) => setPersonId(id)}
+                placeholder="Select first…"
+              />
             </div>
             <div>
               <label className="block text-sm text-neutral-400 mb-1">Second person</label>
-              <select
-                value={secondPersonId}
-                onChange={(e) => setSecondPersonId(Number(e.target.value) || '')}
-                className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
-              >
-                <option value="">Select...</option>
-                {persons.map((person) => (
-                  <option key={person.id} value={person.id}>
-                    {person.name}
-                  </option>
-                ))}
-              </select>
+              <PersonPickerSingle
+                persons={persons.map((p) => ({ id: p.id, name: p.name }))}
+                selectedId={secondPersonId}
+                onChange={(id) => setSecondPersonId(id)}
+                placeholder="Select second…"
+              />
             </div>
           </div>
         )}
