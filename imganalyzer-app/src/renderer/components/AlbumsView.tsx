@@ -7,6 +7,7 @@
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type {
+  AlbumRules,
   FacePerson,
   SmartAlbumSummary,
   StoryChapter,
@@ -75,30 +76,284 @@ function mergeThumbnailMap(thumbs: Record<string, string>): Record<number, strin
   return next
 }
 
+// ── Rule Editor (shared between create and edit) ─────────────────────────────
+
+type RuleEntry =
+  | { type: 'person'; person_ids: number[]; mode: 'any' | 'all' }
+  | { type: 'date_range'; start?: string; end?: string }
+  | { type: 'location'; country: string; city?: string }
+  | { type: 'keyword'; values: string[] }
+
+function parseRulesFromAlbum(albumRules: AlbumRules): { match: 'all' | 'any'; entries: RuleEntry[] } {
+  const entries: RuleEntry[] = []
+  for (const raw of albumRules.rules) {
+    const t = raw.type as string
+    if (t === 'person') {
+      entries.push({
+        type: 'person',
+        person_ids: (raw.person_ids as number[]) ?? [],
+        mode: (raw.mode as 'any' | 'all') ?? 'any',
+      })
+    } else if (t === 'date_range') {
+      entries.push({
+        type: 'date_range',
+        start: (raw.start as string) ?? undefined,
+        end: (raw.end as string) ?? undefined,
+      })
+    } else if (t === 'location') {
+      entries.push({
+        type: 'location',
+        country: (raw.country as string) ?? '',
+        city: (raw.city as string) ?? undefined,
+      })
+    } else if (t === 'keyword') {
+      entries.push({
+        type: 'keyword',
+        values: (raw.values as string[]) ?? [],
+      })
+    }
+  }
+  return { match: albumRules.match, entries }
+}
+
+function rulesToAlbumRules(match: 'all' | 'any', entries: RuleEntry[]): AlbumRules {
+  const rules: Array<Record<string, unknown>> = []
+  for (const e of entries) {
+    if (e.type === 'person' && e.person_ids.length > 0) {
+      rules.push({ type: 'person', person_ids: e.person_ids, mode: e.mode })
+    } else if (e.type === 'date_range' && (e.start || e.end)) {
+      rules.push({
+        type: 'date_range',
+        ...(e.start && { start: e.start }),
+        ...(e.end && { end: e.end }),
+      })
+    } else if (e.type === 'location' && e.country.trim()) {
+      rules.push({
+        type: 'location',
+        country: e.country.trim(),
+        ...(e.city?.trim() && { city: e.city.trim() }),
+      })
+    } else if (e.type === 'keyword' && e.values.length > 0) {
+      rules.push({ type: 'keyword', values: e.values })
+    }
+  }
+  return { match, rules }
+}
+
+const RULE_TYPE_LABELS: Record<RuleEntry['type'], string> = {
+  person: 'Person',
+  date_range: 'Date Range',
+  location: 'Location',
+  keyword: 'Keyword',
+}
+
+function RuleEditor({
+  entry,
+  index,
+  persons,
+  onChange,
+  onRemove,
+}: {
+  entry: RuleEntry
+  index: number
+  persons: Array<{ id: number; name: string }>
+  onChange: (i: number, e: RuleEntry) => void
+  onRemove: (i: number) => void
+}) {
+  return (
+    <div className="bg-neutral-900 rounded p-3 relative group">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-medium text-blue-400 uppercase tracking-wide">
+          {RULE_TYPE_LABELS[entry.type]}
+        </span>
+        <button
+          onClick={() => onRemove(index)}
+          className="text-neutral-600 hover:text-red-400 text-xs px-1"
+          title="Remove rule"
+        >
+          ✕
+        </button>
+      </div>
+
+      {entry.type === 'person' && (
+        <>
+          <div className="max-h-28 overflow-y-auto bg-neutral-800 rounded p-2 mb-2">
+            {persons.length === 0 && (
+              <span className="text-xs text-neutral-500">No persons found. Analyze faces first.</span>
+            )}
+            {persons.map((p) => (
+              <label key={p.id} className="flex items-center gap-2 py-0.5 text-sm text-neutral-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={entry.person_ids.includes(p.id)}
+                  onChange={(ev) => {
+                    const next = ev.target.checked
+                      ? [...entry.person_ids, p.id]
+                      : entry.person_ids.filter((x) => x !== p.id)
+                    onChange(index, { ...entry, person_ids: next })
+                  }}
+                />
+                {p.name}
+              </label>
+            ))}
+          </div>
+          <select
+            value={entry.mode}
+            onChange={(e) => onChange(index, { ...entry, mode: e.target.value as 'any' | 'all' })}
+            className="px-2 py-0.5 rounded bg-neutral-700 text-white text-xs border border-neutral-600"
+          >
+            <option value="any">Any of the selected</option>
+            <option value="all">All together (co-occurrence)</option>
+          </select>
+        </>
+      )}
+
+      {entry.type === 'date_range' && (
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <label className="block text-xs text-neutral-500 mb-0.5">Start</label>
+            <input
+              type="date"
+              value={entry.start ?? ''}
+              onChange={(e) => onChange(index, { ...entry, start: e.target.value || undefined })}
+              className="w-full px-2 py-1 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
+            />
+          </div>
+          <div className="flex-1">
+            <label className="block text-xs text-neutral-500 mb-0.5">End</label>
+            <input
+              type="date"
+              value={entry.end ?? ''}
+              onChange={(e) => onChange(index, { ...entry, end: e.target.value || undefined })}
+              className="w-full px-2 py-1 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
+            />
+          </div>
+        </div>
+      )}
+
+      {entry.type === 'location' && (
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <label className="block text-xs text-neutral-500 mb-0.5">Country code</label>
+            <input
+              value={entry.country}
+              onChange={(e) => onChange(index, { ...entry, country: e.target.value })}
+              className="w-full px-2 py-1 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
+              placeholder="US"
+            />
+          </div>
+          <div className="flex-1">
+            <label className="block text-xs text-neutral-500 mb-0.5">City (optional)</label>
+            <input
+              value={entry.city ?? ''}
+              onChange={(e) => onChange(index, { ...entry, city: e.target.value || undefined })}
+              className="w-full px-2 py-1 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
+              placeholder="Tokyo"
+            />
+          </div>
+        </div>
+      )}
+
+      {entry.type === 'keyword' && (
+        <div>
+          <label className="block text-xs text-neutral-500 mb-0.5">Keywords (comma separated)</label>
+          <input
+            value={entry.values.join(', ')}
+            onChange={(e) => {
+              const vals = e.target.value
+                .split(',')
+                .map((v) => v.trim())
+                .filter(Boolean)
+              onChange(index, { ...entry, values: vals })
+            }}
+            className="w-full px-2 py-1 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
+            placeholder="beach, sunset"
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Edit Album Dialog ─────────────────────────────────────────────────────────
 
 function EditAlbumDialog({
   album,
   onClose,
   onSaved,
+  persons,
 }: {
   album: SmartAlbumSummary
   onClose: () => void
   onSaved: () => void
+  persons: Array<{ id: number; name: string }>
 }) {
   const [name, setName] = useState(album.name)
   const [description, setDescription] = useState(album.description ?? '')
+  const [matchMode, setMatchMode] = useState<'all' | 'any'>('all')
+  const [ruleEntries, setRuleEntries] = useState<RuleEntry[]>([])
+  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [rulesChanged, setRulesChanged] = useState(false)
+  const originalRulesRef = useRef<string>('')
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const full = await window.api.albumsGet(album.id)
+        if (cancelled) return
+        if (full.rules) {
+          const parsed = parseRulesFromAlbum(full.rules)
+          setMatchMode(parsed.match)
+          setRuleEntries(parsed.entries)
+          originalRulesRef.current = JSON.stringify(full.rules)
+        }
+      } catch (err) {
+        console.error('Failed to load album rules:', err)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [album.id])
+
+  const handleRuleChange = (i: number, entry: RuleEntry) => {
+    const next = [...ruleEntries]
+    next[i] = entry
+    setRuleEntries(next)
+    setRulesChanged(true)
+  }
+
+  const handleRuleRemove = (i: number) => {
+    setRuleEntries(ruleEntries.filter((_, idx) => idx !== i))
+    setRulesChanged(true)
+  }
+
+  const handleAddRule = (type: RuleEntry['type']) => {
+    const defaults: Record<RuleEntry['type'], RuleEntry> = {
+      person: { type: 'person', person_ids: [], mode: 'any' },
+      date_range: { type: 'date_range' },
+      location: { type: 'location', country: '' },
+      keyword: { type: 'keyword', values: [] },
+    }
+    setRuleEntries([...ruleEntries, defaults[type]])
+    setRulesChanged(true)
+  }
 
   const handleSave = async () => {
     if (!name.trim()) return
     setSaving(true)
     try {
-      await window.api.albumsUpdate({
+      const params: Parameters<typeof window.api.albumsUpdate>[0] = {
         album_id: album.id,
         name: name.trim(),
         description: description.trim() || undefined,
-      })
+      }
+      if (rulesChanged) {
+        params.rules = rulesToAlbumRules(matchMode, ruleEntries)
+      }
+      await window.api.albumsUpdate(params)
       onSaved()
       onClose()
     } catch (err) {
@@ -110,7 +365,10 @@ function EditAlbumDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
-      <div className="bg-neutral-800 rounded-lg shadow-xl w-[400px] p-5" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="bg-neutral-800 rounded-lg shadow-xl w-[500px] max-h-[85vh] overflow-y-auto p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
         <h2 className="text-lg font-semibold text-white mb-4">Edit Album</h2>
 
         <label className="block text-sm text-neutral-400 mb-1">Name</label>
@@ -119,18 +377,69 @@ function EditAlbumDialog({
           onChange={(e) => setName(e.target.value)}
           className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600 focus:border-blue-500 outline-none mb-3"
           autoFocus
-          onKeyDown={(e) => e.key === 'Enter' && handleSave()}
         />
 
         <label className="block text-sm text-neutral-400 mb-1">Description</label>
         <textarea
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          rows={3}
-          className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600 focus:border-blue-500 outline-none mb-3 resize-none"
+          rows={2}
+          className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600 focus:border-blue-500 outline-none mb-4 resize-none"
         />
 
-        <div className="flex justify-end gap-2 mt-2">
+        {/* ── Rules Section ── */}
+        <div className="border-t border-neutral-700 pt-3 mb-3">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-neutral-300">Search Criteria</h3>
+            <select
+              value={matchMode}
+              onChange={(e) => { setMatchMode(e.target.value as 'all' | 'any'); setRulesChanged(true) }}
+              className="px-2 py-0.5 rounded bg-neutral-700 text-white text-xs border border-neutral-600"
+            >
+              <option value="all">Match ALL rules</option>
+              <option value="any">Match ANY rule</option>
+            </select>
+          </div>
+
+          {loading ? (
+            <div className="text-xs text-neutral-500 py-4 text-center">Loading rules…</div>
+          ) : (
+            <div className="space-y-2 mb-3">
+              {ruleEntries.map((entry, i) => (
+                <RuleEditor
+                  key={i}
+                  entry={entry}
+                  index={i}
+                  persons={persons}
+                  onChange={handleRuleChange}
+                  onRemove={handleRuleRemove}
+                />
+              ))}
+
+              {ruleEntries.length === 0 && (
+                <div className="text-xs text-neutral-500 text-center py-2">
+                  No rules defined. Add criteria below.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Add rule buttons */}
+          <div className="flex flex-wrap gap-1.5">
+            <span className="text-xs text-neutral-500 leading-6">Add:</span>
+            {(['person', 'date_range', 'location', 'keyword'] as const).map((type) => (
+              <button
+                key={type}
+                onClick={() => handleAddRule(type)}
+                className="px-2 py-0.5 text-xs rounded bg-neutral-700 text-neutral-300 hover:bg-neutral-600 border border-neutral-600"
+              >
+                + {RULE_TYPE_LABELS[type]}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 mt-4 pt-3 border-t border-neutral-700">
           <button onClick={onClose} className="px-3 py-1.5 text-sm rounded bg-neutral-700 text-neutral-300 hover:bg-neutral-600">
             Cancel
           </button>
@@ -1962,6 +2271,7 @@ export function AlbumsView() {
           album={editingAlbum}
           onClose={() => setEditingAlbum(null)}
           onSaved={handleEditSaved}
+          persons={persons.map((p) => ({ id: p.id, name: p.name }))}
         />
       )}
 
