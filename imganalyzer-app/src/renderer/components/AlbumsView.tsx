@@ -14,7 +14,9 @@ import type {
   StoryMoment,
   MomentImage,
   StoryGenerateResult,
+  SearchResult,
 } from '../global'
+import { SearchLightbox } from './SearchLightbox'
 
 type PresetDefinition = {
   name: string
@@ -1052,13 +1054,19 @@ function CollageCell({
   img,
   thumb,
   style,
+  onClick,
 }: {
   img: MomentImage
   thumb: string | undefined
   style: React.CSSProperties
+  onClick?: (img: MomentImage) => void
 }) {
   return (
-    <div className="overflow-hidden relative" style={style}>
+    <div
+      className={`overflow-hidden relative${onClick ? ' cursor-pointer hover:brightness-110 transition-[filter]' : ''}`}
+      style={style}
+      onClick={onClick ? (e) => { e.stopPropagation(); onClick(img) } : undefined}
+    >
       {thumb ? (
         <img
           src={thumb}
@@ -1281,10 +1289,12 @@ function MomentCollage({
   images,
   thumbs,
   momentId,
+  onImageClick,
 }: {
   images: MomentImage[]
   thumbs: Record<number, string>
   momentId: number
+  onImageClick?: (img: MomentImage) => void
 }) {
   if (images.length === 0) return null
 
@@ -1313,7 +1323,12 @@ function MomentCollage({
         if (isLast) {
           // Last cell with +N overflow badge
           return (
-            <div key={img.image_id} className="overflow-hidden relative" style={slot}>
+            <div
+              key={img.image_id}
+              className={`overflow-hidden relative${onImageClick ? ' cursor-pointer hover:brightness-110 transition-[filter]' : ''}`}
+              style={slot}
+              onClick={onImageClick ? (e) => { e.stopPropagation(); onImageClick(img) } : undefined}
+            >
               {thumbs[img.image_id] ? (
                 <img
                   src={thumbs[img.image_id]}
@@ -1335,6 +1350,7 @@ function MomentCollage({
             img={img}
             thumb={thumbs[img.image_id]}
             style={slot}
+            onClick={onImageClick}
           />
         )
       })}
@@ -1351,12 +1367,14 @@ function ExpandedChapterDetail({
   moments,
   momentImages,
   heroThumbs,
+  onImageClick,
 }: {
   chapter: StoryChapter
   dateRange: string
   moments: StoryMoment[]
   momentImages: Record<string, MomentImage[]>
   heroThumbs: Record<number, string>
+  onImageClick?: (img: MomentImage) => void
 }) {
   return (
     <div className="p-5">
@@ -1398,6 +1416,7 @@ function ExpandedChapterDetail({
                   images={momentImages[moment.id]}
                   thumbs={heroThumbs}
                   momentId={moment.id}
+                  onImageClick={onImageClick}
                 />
               ) : moment.hero_image_id && heroThumbs[moment.hero_image_id] ? (
                 <div className="rounded-lg overflow-hidden">
@@ -1429,6 +1448,7 @@ function QuildedGrid({
   heroThumbs,
   toggleChapter,
   colWidth,
+  onImageClick,
 }: {
   yearGroups: Record<string, StoryChapter[]>
   years: string[]
@@ -1438,6 +1458,7 @@ function QuildedGrid({
   heroThumbs: Record<number, string>
   toggleChapter: (id: string) => void
   colWidth: number
+  onImageClick?: (img: MomentImage) => void
 }) {
   // Measure container width to compute column count dynamically
   const containerRef = useRef<HTMLDivElement>(null)
@@ -1521,6 +1542,7 @@ function QuildedGrid({
                           moments={moments}
                           momentImages={momentImages}
                           heroThumbs={heroThumbs}
+                          onImageClick={onImageClick}
                         />
                       ) : (
                         <div className="relative w-full h-full overflow-hidden">
@@ -1579,6 +1601,7 @@ function ZigzagTimeline({
   momentImages,
   heroThumbs,
   toggleChapter,
+  onImageClick,
 }: {
   yearGroups: Record<string, StoryChapter[]>
   years: string[]
@@ -1587,6 +1610,7 @@ function ZigzagTimeline({
   momentImages: Record<string, MomentImage[]>
   heroThumbs: Record<number, string>
   toggleChapter: (id: string) => void
+  onImageClick?: (img: MomentImage) => void
 }) {
   let globalIdx = 0
 
@@ -1632,6 +1656,7 @@ function ZigzagTimeline({
                             moments={moments}
                             momentImages={momentImages}
                             heroThumbs={heroThumbs}
+                            onImageClick={onImageClick}
                           />
                         </div>
                       </div>
@@ -1774,6 +1799,7 @@ function StoryTimeline({
   generating,
   narrating,
   exporting,
+  onImageClick,
 }: {
   album: SmartAlbumSummary
   chapters: StoryChapter[]
@@ -1783,6 +1809,7 @@ function StoryTimeline({
   generating: boolean
   narrating: boolean
   exporting: boolean
+  onImageClick?: (img: MomentImage) => void
 }) {
   const [viewMode, setViewMode] = useState<ViewMode>('quilted')
   const [colWidth, setColWidth] = useState(280)  // px per column — slider controls this
@@ -1888,6 +1915,7 @@ function StoryTimeline({
     momentImages,
     heroThumbs,
     toggleChapter,
+    onImageClick,
   }
 
   return (
@@ -2007,6 +2035,186 @@ function formatMomentTime(iso: string | null): string {
   }
 }
 
+// ── Day Popup — shows images from the same day in a mosaic grid ──────────────
+
+const DAY_POPUP_LIMIT = 50  // max images to fetch for performance
+
+/** Deterministic mosaic tile size based on index — creates visual variety. */
+function mosaicSpan(index: number, total: number): { col: number; row: number } {
+  if (total <= 4) return { col: 1, row: 1 }
+  // First image is large hero
+  if (index === 0) return { col: 2, row: 2 }
+  // Every 5th image is tall, every 7th is wide
+  if (index % 5 === 3) return { col: 1, row: 2 }
+  if (index % 7 === 4) return { col: 2, row: 1 }
+  return { col: 1, row: 1 }
+}
+
+function DayPopup({
+  date,
+  onClose,
+  onOpenLightbox,
+}: {
+  date: string
+  onClose: () => void
+  onOpenLightbox: (item: SearchResult, items: SearchResult[]) => void
+}) {
+  const [images, setImages] = useState<SearchResult[]>([])
+  const [thumbs, setThumbs] = useState<Record<number, string>>({})
+  const [loading, setLoading] = useState(true)
+  const [total, setTotal] = useState(0)
+
+  // Compute day boundaries from the ISO date
+  const dayLabel = (() => {
+    try {
+      const d = new Date(date)
+      return d.toLocaleDateString(undefined, {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      })
+    } catch {
+      return date
+    }
+  })()
+
+  const dateFrom = date.slice(0, 10)
+  const dateTo = dateFrom + 'T23:59:59'
+
+  // Fetch images for this day
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setImages([])
+    setThumbs({})
+
+    window.api.searchImages({
+      mode: 'browse',
+      dateFrom,
+      dateTo,
+      sortBy: 'best',
+      limit: DAY_POPUP_LIMIT,
+    }).then((response) => {
+      if (cancelled) return
+      const results = response.results ?? []
+      setImages(results)
+      setTotal(response.total ?? results.length)
+      setLoading(false)
+
+      // Load thumbnails in batches
+      const BATCH = 50
+      const ids = results.map((r) => r.image_id)
+      for (let i = 0; i < ids.length; i += BATCH) {
+        const chunk = ids.slice(i, i + BATCH)
+        void window.api.getThumbnailsBatch(
+          chunk.map((image_id) => ({ image_id }))
+        ).then((batch) => {
+          if (cancelled) return
+          const mapped: Record<number, string> = {}
+          for (const [key, value] of Object.entries(batch)) {
+            const id = Number(key)
+            if (Number.isFinite(id)) mapped[id] = value
+          }
+          setThumbs((prev) => ({ ...prev, ...mapped }))
+        }).catch(() => {})
+      }
+    }).catch(() => {
+      if (!cancelled) setLoading(false)
+    })
+
+    return () => { cancelled = true }
+  }, [dateFrom, dateTo])
+
+  // Close on Escape (skip if another handler already consumed the event, e.g. lightbox)
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented) onClose()
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose])
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="bg-neutral-900 rounded-2xl shadow-2xl w-[90vw] max-w-5xl max-h-[85vh] flex flex-col overflow-hidden ring-1 ring-neutral-700/50"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="shrink-0 flex items-center justify-between px-5 py-3.5 border-b border-neutral-800">
+          <div>
+            <h2 className="text-lg font-semibold text-white">{dayLabel}</h2>
+            <p className="text-xs text-neutral-500 mt-0.5">
+              {loading ? 'Loading…' : `${images.length}${total > images.length ? ` of ${total}` : ''} photos`}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 rounded-full hover:bg-neutral-800 text-neutral-400 hover:text-white transition-colors"
+            title="Close (Esc)"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Mosaic grid */}
+        <div className="flex-1 overflow-y-auto p-4">
+          {loading ? (
+            <div className="flex items-center justify-center h-48">
+              <div className="w-8 h-8 border-2 border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
+            </div>
+          ) : images.length === 0 ? (
+            <div className="flex items-center justify-center h-48 text-neutral-500 text-sm">
+              No photos found for this day.
+            </div>
+          ) : (
+            <div
+              className="grid gap-1.5"
+              style={{
+                gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
+                gridAutoRows: '140px',
+                gridAutoFlow: 'dense',
+              }}
+            >
+              {images.map((img, idx) => {
+                const span = mosaicSpan(idx, images.length)
+                return (
+                  <div
+                    key={img.image_id}
+                    className="relative overflow-hidden rounded-lg cursor-pointer group"
+                    style={{
+                      gridColumn: `span ${span.col}`,
+                      gridRow: `span ${span.row}`,
+                    }}
+                    onClick={() => onOpenLightbox(img, images)}
+                  >
+                    {thumbs[img.image_id] ? (
+                      <img
+                        src={thumbs[img.image_id]}
+                        alt=""
+                        className="absolute inset-0 w-full h-full object-cover transition-transform duration-200 group-hover:scale-105"
+                      />
+                    ) : (
+                      <div className="absolute inset-0 bg-neutral-800 animate-pulse" />
+                    )}
+                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors" />
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Main AlbumsView ─────────────────────────────────────────────────────────
 
 export function AlbumsView() {
@@ -2024,6 +2232,31 @@ export function AlbumsView() {
   const [presetDefinitions, setPresetDefinitions] = useState<Record<string, PresetDefinition>>(FALLBACK_PRESETS)
   const [editingAlbum, setEditingAlbum] = useState<SmartAlbumSummary | null>(null)
   const [deletingAlbum, setDeletingAlbum] = useState<SmartAlbumSummary | null>(null)
+
+  // Day popup + lightbox state
+  const [dayPopupDate, setDayPopupDate] = useState<string | null>(null)
+  const [lightboxItem, setLightboxItem] = useState<SearchResult | null>(null)
+  const [lightboxItems, setLightboxItems] = useState<SearchResult[]>([])
+
+  const handleImageClick = useCallback((img: MomentImage) => {
+    if (img.date_time_original) {
+      setDayPopupDate(img.date_time_original)
+    }
+  }, [])
+
+  const handleDayPopupLightbox = useCallback((item: SearchResult, items: SearchResult[]) => {
+    setLightboxItem(item)
+    setLightboxItems(items)
+  }, [])
+
+  const handleCloseLightbox = useCallback(() => {
+    setLightboxItem(null)
+    setLightboxItems([])
+  }, [])
+
+  const handleNavigateLightbox = useCallback((item: SearchResult) => {
+    setLightboxItem(item)
+  }, [])
 
   const loadAlbums = useCallback(async () => {
     try {
@@ -2200,6 +2433,7 @@ export function AlbumsView() {
               generating={generating}
               narrating={narrating}
               exporting={exporting}
+              onImageClick={handleImageClick}
             />
             {evalReport && (
               <div className={`px-4 py-2 border-t text-xs ${
@@ -2280,6 +2514,25 @@ export function AlbumsView() {
           albumName={deletingAlbum.name}
           onConfirm={() => void handleDeleteAlbum()}
           onCancel={() => setDeletingAlbum(null)}
+        />
+      )}
+
+      {/* Day popup: mosaic view of all images from the clicked image's day */}
+      {dayPopupDate && (
+        <DayPopup
+          date={dayPopupDate}
+          onClose={() => setDayPopupDate(null)}
+          onOpenLightbox={handleDayPopupLightbox}
+        />
+      )}
+
+      {/* Full lightbox opened from day popup */}
+      {lightboxItem && (
+        <SearchLightbox
+          item={lightboxItem}
+          items={lightboxItems}
+          onClose={handleCloseLightbox}
+          onNavigate={handleNavigateLightbox}
         />
       )}
     </div>
