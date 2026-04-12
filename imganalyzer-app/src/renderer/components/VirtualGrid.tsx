@@ -22,7 +22,7 @@ const CELL_MAX = 220  // maximum cell width — drives column count
 const OVERSCAN_ROWS = 3  // extra rows rendered above/below viewport
 const BATCH_DEBOUNCE_MS = 60  // debounce batch prefetch on scroll
 const CHUNK_SIZE = 8  // items per batch RPC call for progressive loading
-const FALLBACK_THUMB_DELAY_MS = 350
+const FALLBACK_THUMB_DELAY_MS = 1500
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

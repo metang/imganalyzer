@@ -148,18 +148,28 @@ function thumbnailCacheKey(imagePath: string, imageId?: number): string {
   return `path:${stablePath}`
 }
 
-async function legacyThumbnailCacheFilePath(imagePath: string): Promise<string> {
-  const cacheKey = `legacy:${thumbnailCacheKey(imagePath)}`
-  const cached = thumbPathCacheGet(cacheKey)
-  if (cached !== undefined) return cached
-
+async function legacyThumbnailCacheFilePaths(imagePath: string): Promise<string[]> {
   const sourceStat = await stat(imagePath)
   const cfg = await getThumbnailCacheConfig()
-  const material = `${imagePath}|${sourceStat.size}|${sourceStat.mtimeMs}|thumb-v1|400x300|q80`
-  const hash = createHash('sha1').update(material).digest('hex')
-  const resolvedPath = join(cfg.directory, hash.slice(0, 2), `${hash}.jpg`)
-  thumbPathCacheSet(cacheKey, resolvedPath)
-  return resolvedPath
+  const normalized = normalize(resolve(imagePath))
+  const pathVariants = new Set<string>([
+    imagePath,
+    normalized,
+    normalized.replace(/\//g, '\\'),
+    normalized.replace(/\\/g, '/'),
+  ])
+
+  if (process.platform === 'win32') {
+    for (const variant of [...pathVariants]) {
+      pathVariants.add(variant.toLowerCase())
+    }
+  }
+
+  return [...pathVariants].map((variant) => {
+    const material = `${variant}|${sourceStat.size}|${sourceStat.mtimeMs}|thumb-v1|400x300|q80`
+    const hash = createHash('sha1').update(material).digest('hex')
+    return join(cfg.directory, hash.slice(0, 2), `${hash}.jpg`)
+  })
 }
 
 async function readThumbDataUrl(cachePath: string): Promise<string | null> {
@@ -175,6 +185,25 @@ async function writeThumbBytesToPath(cachePath: string, jpegBytes: Buffer): Prom
 }
 // In-flight promises to deduplicate concurrent requests for the same image
 const inFlight = new Map<string, Promise<string>>()
+
+function getInFlight(keys: string[]): Promise<string> | null {
+  for (const key of keys) {
+    const pending = inFlight.get(key)
+    if (pending) return pending
+  }
+  return null
+}
+
+function setInFlight(keys: string[], promise: Promise<string>): void {
+  for (const key of keys) inFlight.set(key, promise)
+}
+
+function clearInFlight(keys: string[], promise: Promise<string>): void {
+  for (const key of keys) {
+    if (inFlight.get(key) === promise) inFlight.delete(key)
+  }
+}
+
 // Limit concurrent thumbnail RPC calls to avoid overwhelming the server
 const MAX_CONCURRENT = 8
 let activeCount = 0
@@ -226,31 +255,44 @@ async function thumbnailCacheFilePath(imagePath: string, imageId?: number): Prom
 
 async function readThumbnailFromDisk(imagePath: string, imageId?: number): Promise<string | null> {
   const hasPath = imagePath.length > 0
-  const candidates: Array<{ path: Promise<string>; migrate: boolean }> = [
-    { path: thumbnailCacheFilePath(imagePath, imageId), migrate: false },
-  ]
+
+  const primaryPaths = [await thumbnailCacheFilePath(imagePath, imageId)]
   if (hasPath && imageId !== undefined) {
-    candidates.push({ path: thumbnailCacheFilePath(imagePath), migrate: true })
-  }
-  if (hasPath) {
-    candidates.push({ path: legacyThumbnailCacheFilePath(imagePath), migrate: true })
+    primaryPaths.push(await thumbnailCacheFilePath(imagePath))
   }
 
-  for (const candidate of candidates) {
+  for (const cachePath of primaryPaths) {
     try {
-      const dataUrl = await readThumbDataUrl(await candidate.path)
-      if (candidate.migrate && dataUrl) {
-        const b64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '')
-        void writeThumbnailToDisk(imagePath, b64, imageId)
-      }
-      return dataUrl
+      return await readThumbDataUrl(cachePath)
     } catch (err) {
       if (isErrnoCode(err, 'ENOENT') || isErrnoCode(err, 'ENOTDIR')) {
         continue
       }
-      const label = candidate.migrate ? 'fallback' : 'primary'
-      console.warn(`Disk thumbnail cache ${label} read failed for`, imagePath, err)
+      console.warn('Disk thumbnail cache read failed for', imagePath, err)
       return null
+    }
+  }
+
+  if (!hasPath) return null
+
+  try {
+    for (const legacyPath of await legacyThumbnailCacheFilePaths(imagePath)) {
+      try {
+        const dataUrl = await readThumbDataUrl(legacyPath)
+        const b64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '')
+        void writeThumbnailToDisk(imagePath, b64, imageId)
+        return dataUrl
+      } catch (err) {
+        if (isErrnoCode(err, 'ENOENT') || isErrnoCode(err, 'ENOTDIR')) {
+          continue
+        }
+        console.warn('Legacy disk thumbnail cache read failed for', imagePath, err)
+        return null
+      }
+    }
+  } catch (err) {
+    if (!isErrnoCode(err, 'ENOENT') && !isErrnoCode(err, 'ENOTDIR')) {
+      console.warn('Legacy disk thumbnail cache lookup failed for', imagePath, err)
     }
   }
   return null
@@ -364,7 +406,7 @@ export async function getThumbnail(imagePath: string): Promise<string> {
     }
   })()
 
-  inFlight.set(imagePath, promise)
+  setInFlight([imagePath], promise)
   return promise
 }
 
@@ -400,6 +442,7 @@ export async function getThumbnailsBatch(
   const requestedByKey = new Map<string, ThumbnailBatchItem>()
 
   // Resolve from memory cache first (synchronous)
+  const waitingOnInFlight: Array<{ item: ThumbnailBatchItem; promise: Promise<string> }> = []
   for (const item of items) {
     const itemKey = thumbnailItemKey(item)
     if (!itemKey) continue
@@ -417,7 +460,32 @@ export async function getThumbnailsBatch(
       }
     }
     if (result[itemKey]) continue
+
+    const pending = getInFlight(thumbnailMemoryKeys(item))
+    if (pending) {
+      waitingOnInFlight.push({ item, promise: pending })
+      continue
+    }
+
     needDisk.push(item)
+  }
+
+  if (waitingOnInFlight.length > 0) {
+    const pendingResults = await Promise.all(
+      waitingOnInFlight.map(async ({ item, promise }) => ({ item, dataUrl: await promise }))
+    )
+    for (const { item, dataUrl } of pendingResults) {
+      const itemKey = thumbnailItemKey(item)
+      if (!itemKey) continue
+      if (dataUrl) {
+        for (const memoryKey of thumbnailMemoryKeys(item)) {
+          thumbCacheSet(memoryKey, dataUrl)
+        }
+        result[itemKey] = dataUrl
+      } else {
+        needDisk.push(item)
+      }
+    }
   }
 
   // Check disk cache in parallel
@@ -445,10 +513,25 @@ export async function getThumbnailsBatch(
 
   if (uncached.length === 0) return result
 
+  const registeredInflight: Array<{ keys: string[]; promise: Promise<string> }> = []
   try {
-    const resp = (await rpc.call('thumbnails/batch', {
+    const rpcPromise = rpc.call('thumbnails/batch', {
       items: uncached.map((i) => ({ file_path: i.file_path, image_id: i.image_id })),
-    })) as { thumbnails: Record<string, string>; errors: Record<string, string> }
+    }) as Promise<{ thumbnails: Record<string, string>; errors: Record<string, string> }>
+
+    for (const item of uncached) {
+      const itemKey = thumbnailItemKey(item)
+      if (!itemKey) continue
+      const keys = thumbnailMemoryKeys(item)
+      if (keys.length === 0) continue
+      const itemPromise = rpcPromise
+        .then((resp) => resp.thumbnails[itemKey] ?? '')
+        .catch(() => '')
+      setInFlight(keys, itemPromise)
+      registeredInflight.push({ keys, promise: itemPromise })
+    }
+
+    const resp = await rpcPromise
 
     for (const [key, dataUrl] of Object.entries(resp.thumbnails)) {
       const original = requestedByKey.get(key)
@@ -463,6 +546,10 @@ export async function getThumbnailsBatch(
     }
   } catch (err) {
     console.error('Batch thumbnail error', err)
+  } finally {
+    for (const entry of registeredInflight) {
+      clearInFlight(entry.keys, entry.promise)
+    }
   }
 
   return result
