@@ -5,7 +5,7 @@
  *   Left panel  — album list + create/preset dialogs
  *   Right panel — story timeline (chapters → moments → images)
  */
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type {
   AlbumRules,
   FacePerson,
@@ -63,7 +63,7 @@ const FALLBACK_PRESETS: Record<string, PresetDefinition> = {
 }
 
 function sanitizeFileName(value: string): string {
-  const cleaned = value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ').trim()
+  const cleaned = value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ').trim().replace(/^\.+|\.+$/g, '')
   return cleaned.length > 0 ? cleaned.replace(/\s+/g, ' ') : 'story-export'
 }
 
@@ -164,9 +164,10 @@ function PersonPickerMulti({
   const query = search.toLowerCase().trim()
 
   // Selected first, then alphabetical within each group
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds])
   const sorted = [...persons].sort((a, b) => {
-    const aSelected = selectedIds.includes(a.id) ? 0 : 1
-    const bSelected = selectedIds.includes(b.id) ? 0 : 1
+    const aSelected = selectedSet.has(a.id) ? 0 : 1
+    const bSelected = selectedSet.has(b.id) ? 0 : 1
     if (aSelected !== bSelected) return aSelected - bSelected
     return a.name.localeCompare(b.name)
   })
@@ -464,6 +465,7 @@ function EditAlbumDialog({
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [rulesChanged, setRulesChanged] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const originalRulesRef = useRef<string>('')
 
   useEffect(() => {
@@ -513,6 +515,7 @@ function EditAlbumDialog({
   const handleSave = async () => {
     if (!name.trim()) return
     setSaving(true)
+    setError(null)
     try {
       const params: Parameters<typeof window.api.albumsUpdate>[0] = {
         album_id: album.id,
@@ -522,18 +525,19 @@ function EditAlbumDialog({
       if (rulesChanged) {
         params.rules = rulesToAlbumRules(matchMode, ruleEntries)
       }
-      await window.api.albumsUpdate(params)
+      const result = await window.api.albumsUpdate(params)
+      if ('error' in result) throw new Error(result.error)
       onSaved()
       onClose()
     } catch (err) {
-      console.error('Failed to update album:', err)
+      setError(err instanceof Error ? err.message : 'Failed to save album.')
     } finally {
       setSaving(false)
     }
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="dialog" aria-modal="true" onClick={onClose}>
       <div
         className="bg-neutral-800 rounded-lg shadow-xl w-[500px] max-h-[85vh] overflow-y-auto p-5"
         onClick={(e) => e.stopPropagation()}
@@ -576,7 +580,7 @@ function EditAlbumDialog({
             <div className="space-y-2 mb-3">
               {ruleEntries.map((entry, i) => (
                 <RuleEditor
-                  key={i}
+                  key={`${entry.type}-${i}`}
                   entry={entry}
                   index={i}
                   persons={persons}
@@ -609,6 +613,9 @@ function EditAlbumDialog({
         </div>
 
         <div className="flex justify-end gap-2 mt-4 pt-3 border-t border-neutral-700">
+          {error && (
+            <p className="flex-1 text-xs text-red-400 self-center">{error}</p>
+          )}
           <button onClick={onClose} className="px-3 py-1.5 text-sm rounded bg-neutral-700 text-neutral-300 hover:bg-neutral-600">
             Cancel
           </button>
@@ -637,7 +644,7 @@ function DeleteConfirmDialog({
   onCancel: () => void
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="dialog" aria-modal="true" onClick={onCancel}>
       <div className="bg-neutral-800 rounded-lg shadow-xl w-[360px] p-5" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-lg font-semibold text-white mb-2">Delete Album</h2>
         <p className="text-sm text-neutral-400 mb-4">
@@ -774,59 +781,59 @@ function CreateAlbumDialog({
 }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [ruleType, setRuleType] = useState<'person' | 'date_range' | 'location'>('person')
-  const [selectedPersons, setSelectedPersons] = useState<number[]>([])
-  const [personMode, setPersonMode] = useState<'any' | 'all'>('any')
-  const [dateStart, setDateStart] = useState('')
-  const [dateEnd, setDateEnd] = useState('')
-  const [country, setCountry] = useState('')
+  const [matchMode, setMatchMode] = useState<'all' | 'any'>('all')
+  const [ruleEntries, setRuleEntries] = useState<RuleEntry[]>([])
   const [creating, setCreating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   if (!open) return null
+
+  const handleRuleChange = (i: number, entry: RuleEntry) => {
+    const next = [...ruleEntries]
+    next[i] = entry
+    setRuleEntries(next)
+  }
+
+  const handleRuleRemove = (i: number) => {
+    setRuleEntries(ruleEntries.filter((_, idx) => idx !== i))
+  }
+
+  const handleAddRule = (type: RuleEntry['type']) => {
+    const defaults: Record<RuleEntry['type'], RuleEntry> = {
+      person: { type: 'person', person_ids: [], mode: 'any' },
+      date_range: { type: 'date_range' },
+      location: { type: 'location', country: '' },
+      keyword: { type: 'keyword', values: [] },
+    }
+    setRuleEntries([...ruleEntries, defaults[type]])
+  }
 
   const handleCreate = async () => {
     if (!name.trim()) return
     setCreating(true)
+    setError(null)
     try {
-      const rules: Array<Record<string, unknown>> = []
-      if (ruleType === 'person' && selectedPersons.length > 0) {
-        rules.push({
-          type: 'person',
-          person_ids: selectedPersons,
-          mode: personMode,
-        })
-      }
-      if (ruleType === 'date_range' && (dateStart || dateEnd)) {
-        rules.push({
-          type: 'date_range',
-          ...(dateStart && { start: dateStart }),
-          ...(dateEnd && { end: dateEnd }),
-        })
-      }
-      if (ruleType === 'location' && country.trim()) {
-        rules.push({ type: 'location', country: country.trim() })
-      }
-
+      const albumRules = rulesToAlbumRules(matchMode, ruleEntries)
       const result = await window.api.albumsCreate({
         name: name.trim(),
-        rules: { match: 'all', rules },
+        rules: albumRules,
         description: description.trim() || undefined,
       })
       onCreated(result.id)
       setName('')
       setDescription('')
-      setSelectedPersons([])
+      setRuleEntries([])
       onClose()
     } catch (err) {
-      console.error('Failed to create album:', err)
+      setError(err instanceof Error ? err.message : 'Failed to create album.')
     } finally {
       setCreating(false)
     }
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-neutral-800 rounded-lg shadow-xl w-[460px] max-h-[80vh] overflow-y-auto p-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="dialog" aria-modal="true">
+      <div className="bg-neutral-800 rounded-lg shadow-xl w-[500px] max-h-[80vh] overflow-y-auto p-5">
         <h2 className="text-lg font-semibold text-white mb-4">Create Smart Album</h2>
 
         <label className="block text-sm text-neutral-400 mb-1">Name</label>
@@ -844,87 +851,58 @@ function CreateAlbumDialog({
           className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600 focus:border-blue-500 outline-none mb-3"
         />
 
-        <label className="block text-sm text-neutral-400 mb-1">Rule Type</label>
-        <select
-          value={ruleType}
-          onChange={(e) => setRuleType(e.target.value as typeof ruleType)}
-          className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600 mb-3"
-        >
-          <option value="person">Person</option>
-          <option value="date_range">Date Range</option>
-          <option value="location">Location (Country)</option>
-        </select>
+        {/* ── Rules Section ── */}
+        <div className="border-t border-neutral-700 pt-3 mb-3">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-neutral-300">Search Criteria</h3>
+            <select
+              value={matchMode}
+              onChange={(e) => setMatchMode(e.target.value as 'all' | 'any')}
+              className="px-2 py-0.5 rounded bg-neutral-700 text-white text-xs border border-neutral-600"
+            >
+              <option value="all">Match ALL rules</option>
+              <option value="any">Match ANY rule</option>
+            </select>
+          </div>
 
-        {ruleType === 'person' && (
-          <div className="mb-3">
-            <label className="block text-sm text-neutral-400 mb-1">People</label>
-            <div className="max-h-32 overflow-y-auto bg-neutral-900 rounded p-2 mb-2">
-              {persons.length === 0 && (
-                <span className="text-xs text-neutral-500">No persons found. Analyze faces first.</span>
-              )}
-              {persons.map((p) => (
-                <label key={p.id} className="flex items-center gap-2 py-0.5 text-sm text-neutral-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={selectedPersons.includes(p.id)}
-                    onChange={(e) => {
-                      if (e.target.checked) setSelectedPersons([...selectedPersons, p.id])
-                      else setSelectedPersons(selectedPersons.filter((x) => x !== p.id))
-                    }}
-                  />
-                  {p.name}
-                </label>
-              ))}
-            </div>
-            <label className="flex items-center gap-2 text-sm text-neutral-400">
-              <select
-                value={personMode}
-                onChange={(e) => setPersonMode(e.target.value as 'any' | 'all')}
-                className="px-2 py-0.5 rounded bg-neutral-700 text-white text-xs border border-neutral-600"
+          <div className="space-y-2 mb-3">
+            {ruleEntries.map((entry, i) => (
+              <RuleEditor
+                key={`${entry.type}-${i}`}
+                entry={entry}
+                index={i}
+                persons={persons}
+                onChange={handleRuleChange}
+                onRemove={handleRuleRemove}
+              />
+            ))}
+
+            {ruleEntries.length === 0 && (
+              <div className="text-xs text-neutral-500 text-center py-2">
+                No rules defined. Add criteria below.
+              </div>
+            )}
+          </div>
+
+          {/* Add rule buttons */}
+          <div className="flex flex-wrap gap-1.5">
+            <span className="text-xs text-neutral-500 leading-6">Add:</span>
+            {(['person', 'date_range', 'location', 'keyword'] as const).map((type) => (
+              <button
+                key={type}
+                onClick={() => handleAddRule(type)}
+                className="px-2 py-0.5 text-xs rounded bg-neutral-700 text-neutral-300 hover:bg-neutral-600 border border-neutral-600"
               >
-                <option value="any">Any of the selected</option>
-                <option value="all">All of the selected (co-occurrence)</option>
-              </select>
-            </label>
+                + {RULE_TYPE_LABELS[type]}
+              </button>
+            ))}
           </div>
-        )}
-
-        {ruleType === 'date_range' && (
-          <div className="flex gap-2 mb-3">
-            <div className="flex-1">
-              <label className="block text-xs text-neutral-500 mb-0.5">Start</label>
-              <input
-                type="date"
-                value={dateStart}
-                onChange={(e) => setDateStart(e.target.value)}
-                className="w-full px-2 py-1 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
-              />
-            </div>
-            <div className="flex-1">
-              <label className="block text-xs text-neutral-500 mb-0.5">End</label>
-              <input
-                type="date"
-                value={dateEnd}
-                onChange={(e) => setDateEnd(e.target.value)}
-                className="w-full px-2 py-1 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
-              />
-            </div>
-          </div>
-        )}
-
-        {ruleType === 'location' && (
-          <div className="mb-3">
-            <label className="block text-sm text-neutral-400 mb-1">Country code (e.g. US, FR, JP)</label>
-            <input
-              value={country}
-              onChange={(e) => setCountry(e.target.value)}
-              className="w-full px-3 py-1.5 rounded bg-neutral-700 text-white text-sm border border-neutral-600"
-              placeholder="US"
-            />
-          </div>
-        )}
+        </div>
 
         <div className="flex justify-end gap-2 mt-4">
+          {error && (
+            <p className="flex-1 text-xs text-red-400 self-center">{error}</p>
+          )}
           <button onClick={onClose} className="px-3 py-1.5 text-sm rounded bg-neutral-700 text-neutral-300 hover:bg-neutral-600">
             Cancel
           </button>
@@ -1022,7 +1000,7 @@ function PresetAlbumDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="dialog" aria-modal="true">
       <div className="bg-neutral-800 rounded-lg shadow-xl w-[460px] max-h-[80vh] overflow-y-auto p-5">
         <h2 className="text-lg font-semibold text-white mb-4">Create Preset Album</h2>
 
@@ -1193,7 +1171,6 @@ function formatChapterDateRange(start: string | null, end: string | null): strin
   }
 }
 
-/** Collage layout for moment images — 1 hero large + rest arranged around it. */
 /**
  * Collage cell — renders a thumbnail or placeholder at the given grid position.
  * Uses CSS grid placement so each cell can span different rows/columns.
@@ -1239,11 +1216,17 @@ type CollageLayout = {
 }
 
 /** Pick a deterministic layout variant from moment id to avoid re-shuffling on re-render. */
-function pickVariant(momentId: number, count: number): number {
-  return Math.abs(momentId) % count
+function pickVariant(momentId: string | number, count: number): number {
+  if (typeof momentId === 'number') return Math.abs(momentId) % count
+  // Hash string IDs (UUIDs) to a stable integer
+  let h = 0
+  for (let i = 0; i < momentId.length; i++) {
+    h = ((h << 5) - h + momentId.charCodeAt(i)) | 0
+  }
+  return Math.abs(h) % count
 }
 
-function getLayout(count: number, momentId: number): CollageLayout {
+function getLayout(count: number, momentId: string | number): CollageLayout {
   if (count === 1) {
     return {
       columns: '1fr',
@@ -1441,8 +1424,8 @@ function MomentCollage({
 }: {
   images: MomentImage[]
   thumbs: Record<number, string>
-  momentId: number
-  onImageClick?: (img: MomentImage) => void
+  momentId: string | number
+  onImageClick?: (img: MomentImage, siblings: MomentImage[]) => void
 }) {
   if (images.length === 0) return null
 
@@ -1454,6 +1437,11 @@ function MomentCollage({
   const overflow = ordered.length - displayCount
   const layout = getLayout(displayCount, momentId)
   const shown = ordered.slice(0, displayCount)
+
+  // Wrap click to include all images as siblings for lightbox navigation
+  const handleClick = onImageClick
+    ? (img: MomentImage) => onImageClick(img, images)
+    : undefined
 
   return (
     <div
@@ -1473,9 +1461,9 @@ function MomentCollage({
           return (
             <div
               key={img.image_id}
-              className={`overflow-hidden relative${onImageClick ? ' cursor-pointer hover:brightness-110 transition-[filter]' : ''}`}
+              className={`overflow-hidden relative${handleClick ? ' cursor-pointer hover:brightness-110 transition-[filter]' : ''}`}
               style={slot}
-              onClick={onImageClick ? (e) => { e.stopPropagation(); onImageClick(img) } : undefined}
+              onClick={handleClick ? (e) => { e.stopPropagation(); handleClick(img) } : undefined}
             >
               {thumbs[img.image_id] ? (
                 <img
@@ -1498,7 +1486,7 @@ function MomentCollage({
             img={img}
             thumb={thumbs[img.image_id]}
             style={slot}
-            onClick={onImageClick}
+            onClick={handleClick}
           />
         )
       })}
@@ -1516,16 +1504,20 @@ function ExpandedChapterDetail({
   momentImages,
   heroThumbs,
   onImageClick,
+  onCollapse,
+  colWidth = 350,
 }: {
   chapter: StoryChapter
   dateRange: string
   moments: StoryMoment[]
   momentImages: Record<string, MomentImage[]>
   heroThumbs: Record<number, string>
-  onImageClick?: (img: MomentImage) => void
-}) {
+  onImageClick?: (img: MomentImage, siblings: MomentImage[]) => void
+  onCollapse?: () => void
+  colWidth?: number
+}){
   return (
-    <div className="p-5">
+    <div className="p-5" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-start justify-between mb-3">
         <div className="flex-1 min-w-0">
           <h3 className="text-lg font-semibold text-white leading-tight">
@@ -1542,15 +1534,27 @@ function ExpandedChapterDetail({
             </p>
           )}
         </div>
-        <span className="text-xs text-neutral-600 ml-3 shrink-0">▾ collapse</span>
+        <button
+          className="text-xs text-neutral-500 hover:text-neutral-300 ml-3 shrink-0 transition-colors"
+          onClick={(e) => { e.stopPropagation(); onCollapse?.() }}
+        >
+          ▾ collapse
+        </button>
       </div>
 
       {moments.length === 0 ? (
         <div className="text-xs text-neutral-500 py-4">Loading moments…</div>
       ) : (
-        <div className="space-y-4 mt-2">
+        <div
+          className="mt-2"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: `repeat(auto-fill, minmax(min(${Math.max(300, colWidth)}px, 100%), 1fr))`,
+            gap: '16px',
+          }}
+        >
           {moments.map((moment) => (
-            <div key={moment.id}>
+            <div key={moment.id} className="min-w-0">
               <div className="flex items-baseline gap-2 mb-1.5">
                 <span className="text-xs font-medium text-neutral-300">
                   {moment.title || formatMomentTime(moment.start_time)}
@@ -1587,7 +1591,7 @@ function ExpandedChapterDetail({
  *  VIEW MODE 1 — Quilted / Patchwork Grid (Google Photos style)
  * ═══════════════════════════════════════════════════════════════════ */
 
-function QuildedGrid({
+function QuiltedGrid({
   yearGroups,
   years,
   expandedChapter,
@@ -1606,7 +1610,7 @@ function QuildedGrid({
   heroThumbs: Record<number, string>
   toggleChapter: (id: string) => void
   colWidth: number
-  onImageClick?: (img: MomentImage) => void
+  onImageClick?: (img: MomentImage, siblings: MomentImage[]) => void
 }) {
   // Measure container width to compute column count dynamically
   const containerRef = useRef<HTMLDivElement>(null)
@@ -1642,7 +1646,7 @@ function QuildedGrid({
               className="grid gap-2"
               style={{
                 gridTemplateColumns: `repeat(${colCount}, 1fr)`,
-                gridAutoRows: '100px',
+                gridAutoRows: 'minmax(100px, auto)',
               }}
             >
               {yearChapters.map((chapter, idx) => {
@@ -1670,18 +1674,18 @@ function QuildedGrid({
                 }
 
                 const gridStyle: React.CSSProperties = isExpanded
-                  ? { gridColumn: '1 / -1' }
+                  ? { gridColumn: '1 / -1', gridRow: 'span 1' }
                   : { gridColumn: `span ${colSpan}`, gridRow: `span ${rowSpan}` }
 
                 return (
                   <div key={chapter.id} style={gridStyle}>
                     <div
-                      className={`group rounded-xl overflow-hidden transition-all duration-200 cursor-pointer h-full ${
+                      className={`group rounded-xl overflow-hidden transition-all duration-200 h-full ${
                         isExpanded
                           ? 'bg-neutral-850 ring-1 ring-blue-500/20'
-                          : 'bg-neutral-900/70 hover:bg-neutral-800/60 hover:ring-1 hover:ring-neutral-700/50'
+                          : 'bg-neutral-900/70 hover:bg-neutral-800/60 hover:ring-1 hover:ring-neutral-700/50 cursor-pointer'
                       }`}
-                      onClick={() => toggleChapter(chapter.id)}
+                      onClick={isExpanded ? undefined : () => toggleChapter(chapter.id)}
                     >
                       {isExpanded ? (
                         <ExpandedChapterDetail
@@ -1691,6 +1695,8 @@ function QuildedGrid({
                           momentImages={momentImages}
                           heroThumbs={heroThumbs}
                           onImageClick={onImageClick}
+                          onCollapse={() => toggleChapter(chapter.id)}
+                          colWidth={colWidth}
                         />
                       ) : (
                         <div className="relative w-full h-full overflow-hidden">
@@ -1758,7 +1764,7 @@ function ZigzagTimeline({
   momentImages: Record<string, MomentImage[]>
   heroThumbs: Record<number, string>
   toggleChapter: (id: string) => void
-  onImageClick?: (img: MomentImage) => void
+  onImageClick?: (img: MomentImage, siblings: MomentImage[]) => void
 }) {
   let globalIdx = 0
 
@@ -1795,8 +1801,7 @@ function ZigzagTimeline({
                       {/* Full-width expanded card */}
                       <div className="mx-auto max-w-4xl">
                         <div
-                          className="bg-neutral-850 ring-1 ring-blue-500/30 rounded-xl overflow-hidden cursor-pointer transition-all duration-200"
-                          onClick={() => toggleChapter(chapter.id)}
+                          className="bg-neutral-850 ring-1 ring-blue-500/30 rounded-xl overflow-hidden transition-all duration-200"
                         >
                           <ExpandedChapterDetail
                             chapter={chapter}
@@ -1805,6 +1810,7 @@ function ZigzagTimeline({
                             momentImages={momentImages}
                             heroThumbs={heroThumbs}
                             onImageClick={onImageClick}
+                            onCollapse={() => toggleChapter(chapter.id)}
                           />
                         </div>
                       </div>
@@ -1961,7 +1967,7 @@ function StoryTimeline({
   narrating: boolean
   exporting: boolean
   refreshing: boolean
-  onImageClick?: (img: MomentImage) => void
+  onImageClick?: (img: MomentImage, siblings: MomentImage[]) => void
 }) {
   const [viewMode, setViewMode] = useState<ViewMode>('quilted')
   const [colWidth, setColWidth] = useState(280)  // px per column — slider controls this
@@ -1969,10 +1975,18 @@ function StoryTimeline({
   const [moments, setMoments] = useState<StoryMoment[]>([])
   const [momentImages, setMomentImages] = useState<Record<string, MomentImage[]>>({})
   const [heroThumbs, setHeroThumbs] = useState<Record<number, string>>({})
-  const loadingRef = useRef(false)
   const requestedThumbsRef = useRef<Set<number>>(new Set())
   const loadedMomentIdsRef = useRef<Set<string>>(new Set())
   const expandedChapterRef = useRef<string | null>(null)
+
+  // Preserve only cover thumbnails, clear moment-specific state
+  const coverIdsRef = useRef<Set<number>>(new Set())
+  useEffect(() => {
+    const ids = new Set(
+      chapters.map((ch) => ch.cover_image_id).filter((id): id is number => id != null)
+    )
+    coverIdsRef.current = ids
+  }, [chapters])
 
   useEffect(() => {
     requestedThumbsRef.current.clear()
@@ -1986,7 +2000,6 @@ function StoryTimeline({
     if (unique.length === 0) return
     unique.forEach((id) => requestedThumbsRef.current.add(id))
 
-    // Server caps at 50 per batch — chunk to avoid silent truncation
     const BATCH_SIZE = 50
     const chunks: number[][] = []
     for (let i = 0; i < unique.length; i += BATCH_SIZE) {
@@ -2011,53 +2024,70 @@ function StoryTimeline({
     void loadThumbnailIds(coverIds)
   }, [chapters, loadThumbnailIds])
 
+  const clearMomentState = useCallback(() => {
+    setMoments([])
+    setMomentImages({})
+    loadedMomentIdsRef.current.clear()
+    // Evict non-cover thumbnails to bound memory
+    const covers = coverIdsRef.current
+    setHeroThumbs((prev) => {
+      const next: Record<number, string> = {}
+      for (const [k, v] of Object.entries(prev)) {
+        const id = Number(k)
+        if (covers.has(id)) next[id] = v
+      }
+      return next
+    })
+    requestedThumbsRef.current = new Set(covers)
+  }, [])
+
   const loadMoments = useCallback(async (chapterId: string) => {
-    if (loadingRef.current) return
-    loadingRef.current = true
     try {
       const { moments: loaded } = await window.api.albumsChapterMoments(chapterId)
       if (expandedChapterRef.current !== chapterId) return
       const nextMoments = loaded as StoryMoment[]
       setMoments(nextMoments)
-      const heroIds = nextMoments
+
+      // Collect all image IDs from all moments in parallel, then batch-load thumbs once
+      const allImageIds: number[] = nextMoments
         .map((m) => m.hero_image_id)
         .filter((id): id is number => id != null)
-      void loadThumbnailIds(heroIds)
-      for (const m of nextMoments) {
-        void loadMomentImagesInternal(m.id)
-      }
-    } finally {
-      loadingRef.current = false
-    }
-  }, [loadThumbnailIds]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const loadMomentImagesInternal = useCallback(async (momentId: string) => {
-    if (loadedMomentIdsRef.current.has(momentId)) return
-    loadedMomentIdsRef.current.add(momentId)
-    try {
-      const { images } = await window.api.albumsMomentImages(momentId)
-      const nextImages = images as MomentImage[]
-      setMomentImages((prev) => ({ ...prev, [momentId]: nextImages }))
-      void loadThumbnailIds(nextImages.map((img) => img.image_id))
-    } catch {
-      loadedMomentIdsRef.current.delete(momentId)
-    }
+      await Promise.all(nextMoments.map(async (m) => {
+        if (loadedMomentIdsRef.current.has(m.id)) return
+        loadedMomentIdsRef.current.add(m.id)
+        try {
+          const { images } = await window.api.albumsMomentImages(m.id)
+          if (expandedChapterRef.current !== chapterId) return
+          const imgs = images as MomentImage[]
+          setMomentImages((prev) => ({ ...prev, [m.id]: imgs }))
+          allImageIds.push(...imgs.map((img) => img.image_id))
+        } catch {
+          loadedMomentIdsRef.current.delete(m.id)
+        }
+      }))
+
+      if (allImageIds.length > 0) {
+        void loadThumbnailIds(allImageIds)
+      }
+    } catch { /* chapter may have been collapsed */ }
   }, [loadThumbnailIds])
 
   const toggleChapter = useCallback((chapterId: string) => {
     if (expandedChapterRef.current === chapterId) {
       expandedChapterRef.current = null
       setExpandedChapter(null)
-      setMoments([])
+      clearMomentState()
     } else {
       expandedChapterRef.current = chapterId
       setExpandedChapter(chapterId)
+      clearMomentState()
       void loadMoments(chapterId)
     }
-  }, [loadMoments])
+  }, [loadMoments, clearMomentState])
 
-  const yearGroups = groupChaptersByYear(chapters)
-  const years = Object.keys(yearGroups).sort()
+  const yearGroups = useMemo(() => groupChaptersByYear(chapters), [chapters])
+  const years = useMemo(() => Object.keys(yearGroups).sort(), [yearGroups])
 
   const sharedProps = {
     yearGroups,
@@ -2176,7 +2206,7 @@ function StoryTimeline({
             </p>
           </div>
         ) : viewMode === 'quilted' ? (
-          <QuildedGrid {...sharedProps} colWidth={colWidth} />
+          <QuiltedGrid {...sharedProps} colWidth={colWidth} />
         ) : (
           <ZigzagTimeline {...sharedProps} />
         )}
@@ -2188,7 +2218,10 @@ function StoryTimeline({
 function formatMomentTime(iso: string | null): string {
   if (!iso) return 'Unknown time'
   try {
-    const d = new Date(iso)
+    // Append Z if no timezone indicator to ensure consistent UTC interpretation
+    const normalized = /[Zz+\-]/.test(iso.slice(10)) ? iso : iso + 'Z'
+    const d = new Date(normalized)
+    if (isNaN(d.getTime())) return iso
     return d.toLocaleString(undefined, {
       month: 'short',
       day: 'numeric',
@@ -2198,186 +2231,6 @@ function formatMomentTime(iso: string | null): string {
   } catch {
     return iso
   }
-}
-
-// ── Day Popup — shows images from the same day in a mosaic grid ──────────────
-
-const DAY_POPUP_LIMIT = 50  // max images to fetch for performance
-
-/** Deterministic mosaic tile size based on index — creates visual variety. */
-function mosaicSpan(index: number, total: number): { col: number; row: number } {
-  if (total <= 4) return { col: 1, row: 1 }
-  // First image is large hero
-  if (index === 0) return { col: 2, row: 2 }
-  // Every 5th image is tall, every 7th is wide
-  if (index % 5 === 3) return { col: 1, row: 2 }
-  if (index % 7 === 4) return { col: 2, row: 1 }
-  return { col: 1, row: 1 }
-}
-
-function DayPopup({
-  date,
-  onClose,
-  onOpenLightbox,
-}: {
-  date: string
-  onClose: () => void
-  onOpenLightbox: (item: SearchResult, items: SearchResult[]) => void
-}) {
-  const [images, setImages] = useState<SearchResult[]>([])
-  const [thumbs, setThumbs] = useState<Record<number, string>>({})
-  const [loading, setLoading] = useState(true)
-  const [total, setTotal] = useState(0)
-
-  // Compute day boundaries from the ISO date
-  const dayLabel = (() => {
-    try {
-      const d = new Date(date)
-      return d.toLocaleDateString(undefined, {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      })
-    } catch {
-      return date
-    }
-  })()
-
-  const dateFrom = date.slice(0, 10)
-  const dateTo = dateFrom + 'T23:59:59'
-
-  // Fetch images for this day
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setImages([])
-    setThumbs({})
-
-    window.api.searchImages({
-      mode: 'browse',
-      dateFrom,
-      dateTo,
-      sortBy: 'best',
-      limit: DAY_POPUP_LIMIT,
-    }).then((response) => {
-      if (cancelled) return
-      const results = response.results ?? []
-      setImages(results)
-      setTotal(response.total ?? results.length)
-      setLoading(false)
-
-      // Load thumbnails in batches
-      const BATCH = 50
-      const ids = results.map((r) => r.image_id)
-      for (let i = 0; i < ids.length; i += BATCH) {
-        const chunk = ids.slice(i, i + BATCH)
-        void window.api.getThumbnailsBatch(
-          chunk.map((image_id) => ({ image_id }))
-        ).then((batch) => {
-          if (cancelled) return
-          const mapped: Record<number, string> = {}
-          for (const [key, value] of Object.entries(batch)) {
-            const id = Number(key)
-            if (Number.isFinite(id)) mapped[id] = value
-          }
-          setThumbs((prev) => ({ ...prev, ...mapped }))
-        }).catch(() => {})
-      }
-    }).catch(() => {
-      if (!cancelled) setLoading(false)
-    })
-
-    return () => { cancelled = true }
-  }, [dateFrom, dateTo])
-
-  // Close on Escape (skip if another handler already consumed the event, e.g. lightbox)
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented) onClose()
-    }
-    window.addEventListener('keydown', handleKey)
-    return () => window.removeEventListener('keydown', handleKey)
-  }, [onClose])
-
-  return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="bg-neutral-900 rounded-2xl shadow-2xl w-[90vw] max-w-5xl max-h-[85vh] flex flex-col overflow-hidden ring-1 ring-neutral-700/50"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="shrink-0 flex items-center justify-between px-5 py-3.5 border-b border-neutral-800">
-          <div>
-            <h2 className="text-lg font-semibold text-white">{dayLabel}</h2>
-            <p className="text-xs text-neutral-500 mt-0.5">
-              {loading ? 'Loading…' : `${images.length}${total > images.length ? ` of ${total}` : ''} photos`}
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-full hover:bg-neutral-800 text-neutral-400 hover:text-white transition-colors"
-            title="Close (Esc)"
-          >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        {/* Mosaic grid */}
-        <div className="flex-1 overflow-y-auto p-4">
-          {loading ? (
-            <div className="flex items-center justify-center h-48">
-              <div className="w-8 h-8 border-2 border-neutral-600 border-t-neutral-300 rounded-full animate-spin" />
-            </div>
-          ) : images.length === 0 ? (
-            <div className="flex items-center justify-center h-48 text-neutral-500 text-sm">
-              No photos found for this day.
-            </div>
-          ) : (
-            <div
-              className="grid gap-1.5"
-              style={{
-                gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
-                gridAutoRows: '140px',
-                gridAutoFlow: 'dense',
-              }}
-            >
-              {images.map((img, idx) => {
-                const span = mosaicSpan(idx, images.length)
-                return (
-                  <div
-                    key={img.image_id}
-                    className="relative overflow-hidden rounded-lg cursor-pointer group"
-                    style={{
-                      gridColumn: `span ${span.col}`,
-                      gridRow: `span ${span.row}`,
-                    }}
-                    onClick={() => onOpenLightbox(img, images)}
-                  >
-                    {thumbs[img.image_id] ? (
-                      <img
-                        src={thumbs[img.image_id]}
-                        alt=""
-                        className="absolute inset-0 w-full h-full object-cover transition-transform duration-200 group-hover:scale-105"
-                      />
-                    ) : (
-                      <div className="absolute inset-0 bg-neutral-800 animate-pulse" />
-                    )}
-                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors" />
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
 }
 
 // ── Main AlbumsView ─────────────────────────────────────────────────────────
@@ -2395,24 +2248,38 @@ export function AlbumsView() {
   const [persons, setPersons] = useState<FacePerson[]>([])
   const [evalReport, setEvalReport] = useState<StoryGenerateResult['evaluation'] | null>(null)
   const [status, setStatus] = useState<StatusBanner | null>(null)
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const showStatus = useCallback((banner: StatusBanner) => {
+    setStatus(banner)
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current)
+    statusTimerRef.current = setTimeout(() => setStatus(null), banner.tone === 'error' ? 8000 : 5000)
+  }, [])
   const [presetDefinitions, setPresetDefinitions] = useState<Record<string, PresetDefinition>>(FALLBACK_PRESETS)
   const [editingAlbum, setEditingAlbum] = useState<SmartAlbumSummary | null>(null)
   const [deletingAlbum, setDeletingAlbum] = useState<SmartAlbumSummary | null>(null)
 
-  // Day popup + lightbox state
-  const [dayPopupDate, setDayPopupDate] = useState<string | null>(null)
+  // Lightbox state
   const [lightboxItem, setLightboxItem] = useState<SearchResult | null>(null)
   const [lightboxItems, setLightboxItems] = useState<SearchResult[]>([])
 
-  const handleImageClick = useCallback((img: MomentImage) => {
-    if (img.date_time_original) {
-      setDayPopupDate(img.date_time_original)
-    }
-  }, [])
+  const handleImageClick = useCallback(async (img: MomentImage, siblings: MomentImage[]) => {
+    try {
+      const { result } = await window.api.getImageDetails({ image_id: img.image_id })
+      if (!result) return
+      setLightboxItem(result)
 
-  const handleDayPopupLightbox = useCallback((item: SearchResult, items: SearchResult[]) => {
-    setLightboxItem(item)
-    setLightboxItems(items)
+      // Fetch sibling details in parallel for lightbox navigation
+      const details = await Promise.all(
+        siblings.map(async (s) => {
+          try {
+            const { result: r } = await window.api.getImageDetails({ image_id: s.image_id })
+            return r
+          } catch { return null }
+        })
+      )
+      const validItems = details.filter((r): r is SearchResult => r != null)
+      setLightboxItems(validItems.length > 0 ? validItems : [result])
+    } catch { /* ignore */ }
   }, [])
 
   const handleCloseLightbox = useCallback(() => {
@@ -2480,9 +2347,9 @@ export function AlbumsView() {
     try {
       await loadAlbums()
       await loadStory(selectedId)
-      setStatus({ tone: 'success', text: 'Album data refreshed.' })
+      showStatus({ tone: 'success', text: 'Album data refreshed.' })
     } catch {
-      setStatus({ tone: 'error', text: 'Failed to refresh.' })
+      showStatus({ tone: 'error', text: 'Failed to refresh.' })
     } finally {
       setRefreshing(false)
     }
@@ -2498,13 +2365,13 @@ export function AlbumsView() {
       setEvalReport(generation.evaluation)
       await loadStory(selectedId)
       await loadAlbums()
-      setStatus({
+      showStatus({
         tone: generation.evaluation.overall_pass ? 'success' : 'error',
         text: `Story generated in ${generation.generation_time_s}s.`,
       })
     } catch (err) {
       console.error('Failed to generate story:', err)
-      setStatus({ tone: 'error', text: 'Failed to generate story.' })
+      showStatus({ tone: 'error', text: 'Failed to generate story.' })
     } finally {
       setGenerating(false)
     }
@@ -2517,13 +2384,13 @@ export function AlbumsView() {
     try {
       const result = await window.api.albumsGenerateNarrative({ album_id: selectedId, use_ai: true })
       await loadStory(selectedId)
-      setStatus({
+      showStatus({
         tone: 'success',
         text: `Updated ${result.chapters_updated} chapter summaries.`,
       })
     } catch (err) {
       console.error('Failed to generate narratives:', err)
-      setStatus({ tone: 'error', text: 'Failed to generate chapter summaries.' })
+      showStatus({ tone: 'error', text: 'Failed to generate chapter summaries.' })
     } finally {
       setNarrating(false)
     }
@@ -2544,11 +2411,11 @@ export function AlbumsView() {
         output_path: outputPath,
         include_thumbnails: true,
       })
-      setStatus({ tone: 'success', text: `Exported story to ${result.path}` })
+      showStatus({ tone: 'success', text: `Exported story to ${result.path}` })
       await window.api.openPath(result.path)
     } catch (err) {
       console.error('Failed to export story:', err)
-      setStatus({ tone: 'error', text: 'Failed to export story.' })
+      showStatus({ tone: 'error', text: 'Failed to export story.' })
     } finally {
       setExporting(false)
     }
@@ -2570,17 +2437,17 @@ export function AlbumsView() {
         setChapters([])
         setEvalReport(null)
       }
-      setStatus({ tone: 'success', text: `"${target.name}" deleted.` })
+      showStatus({ tone: 'success', text: `"${target.name}" deleted.` })
       await loadAlbums()
     } catch (err) {
       console.error('Failed to delete album:', err)
-      setStatus({ tone: 'error', text: 'Failed to delete album.' })
+      showStatus({ tone: 'error', text: 'Failed to delete album.' })
     }
   }, [deletingAlbum, selectedId, loadAlbums])
 
   const handleEditSaved = useCallback(async () => {
     await loadAlbums()
-    setStatus({ tone: 'success', text: 'Album updated.' })
+    showStatus({ tone: 'success', text: 'Album updated.' })
   }, [loadAlbums])
 
   const selectedAlbum = albums.find((album) => album.id === selectedId)
@@ -2699,16 +2566,7 @@ export function AlbumsView() {
         />
       )}
 
-      {/* Day popup: mosaic view of all images from the clicked image's day */}
-      {dayPopupDate && (
-        <DayPopup
-          date={dayPopupDate}
-          onClose={() => setDayPopupDate(null)}
-          onOpenLightbox={handleDayPopupLightbox}
-        />
-      )}
-
-      {/* Full lightbox opened from day popup */}
+      {/* Full lightbox opened from image click */}
       {lightboxItem && (
         <SearchLightbox
           item={lightboxItem}

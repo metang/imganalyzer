@@ -151,6 +151,77 @@ async function flushBatch(): Promise<void> {
   }))
 }
 
+const IMAGE_THUMB_CACHE_MAX = 2000
+const imageThumbCache = new Map<string, string>()
+const pendingImageThumbs = new Map<string, { file_path: string; image_id?: number }>()
+const pendingImageCallbacks = new Map<string, Array<(src: string | null) => void>>()
+let imageThumbBatchTimer: ReturnType<typeof setTimeout> | null = null
+
+function requestImageThumbnail(
+  filePath: string,
+  imageId: number | null | undefined,
+  callback: (src: string | null) => void,
+): void {
+  const cached = imageThumbCache.get(filePath)
+  if (cached) {
+    callback(cached)
+    return
+  }
+
+  const callbacks = pendingImageCallbacks.get(filePath) ?? []
+  callbacks.push(callback)
+  pendingImageCallbacks.set(filePath, callbacks)
+  pendingImageThumbs.set(filePath, imageId != null
+    ? { file_path: filePath, image_id: imageId }
+    : { file_path: filePath })
+
+  if (imageThumbBatchTimer !== null) return
+  imageThumbBatchTimer = setTimeout(() => {
+    void flushImageThumbnailBatch()
+  }, 16)
+}
+
+async function flushImageThumbnailBatch(): Promise<void> {
+  imageThumbBatchTimer = null
+  if (pendingImageThumbs.size === 0) return
+
+  const items = [...pendingImageThumbs.values()]
+  pendingImageThumbs.clear()
+
+  const CHUNK = 24
+  const chunks: Array<typeof items> = []
+  for (let i = 0; i < items.length; i += CHUNK) {
+    chunks.push(items.slice(i, i + CHUNK))
+  }
+
+  await Promise.all(chunks.map(async (chunk) => {
+    try {
+      const result = await window.api.getThumbnailsBatch(chunk)
+      for (const item of chunk) {
+        const src = normalizeImageSrc(
+          result[item.file_path] ?? (item.image_id != null ? result[String(item.image_id)] : undefined)
+        )
+        if (src) {
+          if (imageThumbCache.size >= IMAGE_THUMB_CACHE_MAX) {
+            const oldest = imageThumbCache.keys().next().value
+            if (oldest !== undefined) imageThumbCache.delete(oldest)
+          }
+          imageThumbCache.set(item.file_path, src)
+        }
+        const callbacks = pendingImageCallbacks.get(item.file_path) ?? []
+        pendingImageCallbacks.delete(item.file_path)
+        for (const cb of callbacks) cb(src)
+      }
+    } catch {
+      for (const item of chunk) {
+        const callbacks = pendingImageCallbacks.get(item.file_path) ?? []
+        pendingImageCallbacks.delete(item.file_path)
+        for (const cb of callbacks) cb(null)
+      }
+    }
+  }))
+}
+
 // ── Face crop thumbnail (batch-loaded with LRU cache) ─────────────────────────
 
 const FaceCropThumbnail = memo(function FaceCropThumbnail({
@@ -266,23 +337,20 @@ const FaceCropThumbnail = memo(function FaceCropThumbnail({
 
 // ── Full image thumbnail (lazy-loaded, for legacy mode) ───────────────────────
 
-function ImageThumbnail({ filePath }: { filePath: string }) {
+function ImageThumbnail({ filePath, imageId }: { filePath: string; imageId?: number | null }) {
   const [src, setSrc] = useState<string | null>(null)
-  const requested = useRef(false)
 
   useEffect(() => {
-    requested.current = false
     setSrc(null)
-  }, [filePath])
+  }, [filePath, imageId])
 
   useEffect(() => {
-    if (requested.current) return
-    requested.current = true
-    window.api
-      .getThumbnail(filePath)
-      .then((data) => setSrc(normalizeImageSrc(data)))
-      .catch(() => setSrc(null))
-  }, [filePath])
+    let cancelled = false
+    requestImageThumbnail(filePath, imageId, (data) => {
+      if (!cancelled) setSrc(data)
+    })
+    return () => { cancelled = true }
+  }, [filePath, imageId])
 
   if (!src) {
     return (
@@ -315,31 +383,26 @@ const SimilarImageCard = memo(function SimilarImageCard({
 }) {
   const [thumb, setThumb] = useState<string | null>(null)
   const [faceCrop, setFaceCrop] = useState<string | null>(null)
-  const requested = useRef(false)
 
   useEffect(() => {
-    requested.current = false
     setThumb(null)
     setFaceCrop(null)
   }, [image.image_id, image.file_path, image.best_occurrence_id])
 
   useEffect(() => {
-    if (requested.current) return
-    requested.current = true
-    window.api.getThumbnail(image.file_path)
-      .then((t) => setThumb(normalizeImageSrc(t)))
-      .catch(() => { /* ignore */ })
-  }, [image.file_path])
+    let cancelled = false
+    requestImageThumbnail(image.file_path, image.image_id, (data) => {
+      if (!cancelled) setThumb(data)
+    })
+    return () => { cancelled = true }
+  }, [image.file_path, image.image_id])
 
   useEffect(() => {
     if (image.best_occurrence_id == null) return
     let cancelled = false
-    window.api.getFaceCropBatch([image.best_occurrence_id]).then((res) => {
-      if (!cancelled) {
-        const crop = res.thumbnails?.[image.best_occurrence_id]
-        setFaceCrop(normalizeImageSrc(crop))
-      }
-    }).catch(() => { /* ignore */ })
+    requestThumbnail(image.best_occurrence_id, (data) => {
+      if (!cancelled) setFaceCrop(data)
+    })
     return () => { cancelled = true }
   }, [image.best_occurrence_id])
 
@@ -413,20 +476,18 @@ const DirectLinkCard = memo(function DirectLinkCard({
   onOpenLightbox: () => void
 }) {
   const [thumb, setThumb] = useState<string | null>(null)
-  const requested = useRef(false)
 
   useEffect(() => {
-    requested.current = false
     setThumb(null)
   }, [link.occurrence_id, link.file_path])
 
   useEffect(() => {
-    if (requested.current) return
-    requested.current = true
-    window.api.getThumbnail(link.file_path)
-      .then((t) => setThumb(normalizeImageSrc(t)))
-      .catch(() => { /* ignore */ })
-  }, [link.file_path])
+    let cancelled = false
+    requestImageThumbnail(link.file_path, link.image_id, (data) => {
+      if (!cancelled) setThumb(data)
+    })
+    return () => { cancelled = true }
+  }, [link.file_path, link.image_id])
 
   return (
     <div
@@ -2233,7 +2294,7 @@ export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesVi
                 className="group relative"
                 title={img.file_path}
               >
-                <ImageThumbnail filePath={img.file_path} />
+                <ImageThumbnail filePath={img.file_path} imageId={img.image_id} />
                 <div className="absolute inset-x-0 bottom-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity px-1 py-0.5 rounded-b">
                   <p className="text-[10px] text-neutral-300 truncate">
                     {img.file_path.split(/[/\\]/).pop()}

@@ -120,7 +120,7 @@ function thumbCacheSet(key: string, value: string): void {
 // In-flight promises to deduplicate concurrent requests for the same image
 const inFlight = new Map<string, Promise<string>>()
 // Limit concurrent thumbnail RPC calls to avoid overwhelming the server
-const MAX_CONCURRENT = 4
+const MAX_CONCURRENT = 8
 let activeCount = 0
 const queue: Array<() => void> = []
 

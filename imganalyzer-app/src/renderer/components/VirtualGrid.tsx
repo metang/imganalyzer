@@ -22,6 +22,7 @@ const CELL_MAX = 220  // maximum cell width — drives column count
 const OVERSCAN_ROWS = 3  // extra rows rendered above/below viewport
 const BATCH_DEBOUNCE_MS = 60  // debounce batch prefetch on scroll
 const CHUNK_SIZE = 8  // items per batch RPC call for progressive loading
+const FALLBACK_THUMB_DELAY_MS = 1200
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -50,6 +51,25 @@ const GridCell = memo(function GridCell({ item, selected, onClick, prefetchedSrc
   useEffect(() => {
     if (prefetchedSrc && !src) setSrc(prefetchedSrc)
   }, [prefetchedSrc, src])
+
+  // Rescue path: if the batch request stalls, fall back to an individual
+  // thumbnail request after a short delay so cells don't spin forever.
+  useEffect(() => {
+    if (prefetchedSrc || src) return
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void window.api.getThumbnail(item.file_path).then((dataUrl) => {
+        if (!cancelled && dataUrl) setSrc(dataUrl)
+      }).catch(() => {
+        // Leave the placeholder in place if the fallback also fails.
+      })
+    }, FALLBACK_THUMB_DELAY_MS)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [item.file_path, prefetchedSrc, src])
 
   // Top-level badge uses IAA (Aesthetic Appeal)
   const scoreColor = item.perception_iaa !== null

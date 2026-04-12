@@ -69,6 +69,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import io
 import inspect
 import json
@@ -81,7 +82,7 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from imganalyzer.readers.raw import _suppress_c_stderr
 
@@ -2509,9 +2510,19 @@ def _handle_search(params: dict) -> dict:
             return " ORDER BY m.date_time_original DESC, i.id DESC"
         return ""
 
-    def _search_text_terms(candidate_limit: int) -> list[dict[str, Any]]:
-        search_supports_profile = "semantic_profile" in inspect.signature(engine.search).parameters
-        search_supports_progress = "progress_cb" in inspect.signature(engine.search).parameters
+    search_params = inspect.signature(engine.search).parameters
+    search_supports_profile = "semantic_profile" in search_params
+    search_supports_progress = "progress_cb" in search_params
+    search_supports_candidate_ids = "candidate_ids" in search_params
+    face_candidate_ids_cache: set[int] | None = None
+
+    def _search_text_terms(
+        candidate_limit: int,
+        *,
+        candidate_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        if candidate_ids is not None and not candidate_ids:
+            return []
 
         def _run_search(term: str) -> list[dict[str, Any]]:
             kwargs: dict[str, Any] = {
@@ -2523,6 +2534,8 @@ def _handle_search(params: dict) -> dict:
                 kwargs["semantic_profile"] = semantic_profile
             if search_supports_progress:
                 kwargs["progress_cb"] = _progress
+            if search_supports_candidate_ids and candidate_ids is not None:
+                kwargs["candidate_ids"] = candidate_ids
             return engine.search(term, **kwargs)
 
         terms: list[str] = []
@@ -2562,6 +2575,24 @@ def _handle_search(params: dict) -> dict:
                 key=lambda item: -item[1],
             )[:candidate_limit]
         ]
+
+    def _get_face_candidate_ids() -> set[int]:
+        nonlocal face_candidate_ids_cache
+        if face_candidate_ids_cache is not None:
+            return face_candidate_ids_cache
+        if not faces:
+            face_candidate_ids_cache = set()
+            return face_candidate_ids_cache
+        if len(faces) == 1:
+            face_rows = engine.search_face(faces[0], limit=None)
+        else:
+            search_faces = getattr(engine, "search_faces", None)
+            if callable(search_faces):
+                face_rows = search_faces(faces, limit=None, match_mode=face_match)
+            else:
+                face_rows = _search_face_terms(0)
+        face_candidate_ids_cache = {int(row["image_id"]) for row in face_rows}
+        return face_candidate_ids_cache
 
     def _search_face_terms(candidate_limit: int) -> list[dict[str, Any]]:
         if not faces:
@@ -2603,6 +2634,11 @@ def _handle_search(params: dict) -> dict:
         return combined[:candidate_limit]
 
     def _combine_face_and_text_terms(candidate_limit: int) -> tuple[list[dict[str, Any]], bool]:
+        if search_supports_candidate_ids:
+            face_candidate_ids = _get_face_candidate_ids()
+            text_results = _search_text_terms(candidate_limit, candidate_ids=face_candidate_ids)
+            return text_results, len(text_results) < candidate_limit
+
         face_results = _search_face_terms(candidate_limit)
         text_results = _search_text_terms(candidate_limit)
         face_exhausted = len(face_results) < candidate_limit
@@ -3214,7 +3250,8 @@ def _handle_thumbnails_batch(params: dict) -> dict:
     store = _get_decoded_store()
     conn = _get_db()
 
-    for item in raw_items[:100]:
+    slow_items: list[tuple[str, str]] = []
+    for item in raw_items[:50]:
         file_path = item.get("file_path", "") if isinstance(item, dict) else str(item)
         image_id = item.get("image_id") if isinstance(item, dict) else None
         cache_key = file_path or (str(image_id) if image_id is not None else "")
@@ -3243,12 +3280,26 @@ def _handle_thumbnails_batch(params: dict) -> dict:
             # Slow path: full decode from source file
             if not file_path:
                 raise ValueError("file_path or image_id is required")
-            result = _handle_thumbnail({"imagePath": file_path})
             if cache_key:
-                thumbnails[cache_key] = f"data:image/jpeg;base64,{result['data']}"
+                slow_items.append((cache_key, file_path))
         except Exception as exc:
             if cache_key:
                 errors[cache_key] = str(exc)
+
+    if slow_items:
+        max_workers = min(4, len(slow_items))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="thumb-batch") as pool:
+            future_map = {
+                pool.submit(_handle_thumbnail, {"imagePath": file_path}): cache_key
+                for cache_key, file_path in slow_items
+            }
+            for future in as_completed(future_map):
+                cache_key = future_map[future]
+                try:
+                    result = future.result()
+                    thumbnails[cache_key] = f"data:image/jpeg;base64,{result['data']}"
+                except Exception as exc:
+                    errors[cache_key] = str(exc)
 
     return {"thumbnails": thumbnails, "errors": errors}
 
@@ -3899,6 +3950,33 @@ def _handle_faces_crop_batch_async(req_id: int | str, params: dict) -> None:
         _send_result(req_id, result)
     except Exception as exc:
         _send_error(req_id, -1, str(exc))
+
+
+def _run_async_one_shot(
+    req_id: int | str,
+    params: dict,
+    handler: Callable[[dict], Any],
+) -> None:
+    try:
+        _send_result(req_id, handler(params))
+    except Exception as exc:
+        _send_error(req_id, -1, str(exc))
+
+
+def _handle_thumbnail_async(req_id: int | str, params: dict) -> None:
+    _run_async_one_shot(req_id, params, _handle_thumbnail)
+
+
+def _handle_thumbnails_batch_async(req_id: int | str, params: dict) -> None:
+    _run_async_one_shot(req_id, params, _handle_thumbnails_batch)
+
+
+def _handle_fullimage_async(req_id: int | str, params: dict) -> None:
+    _run_async_one_shot(req_id, params, _handle_fullimage)
+
+
+def _handle_gallery_list_images_chunk_async(req_id: int | str, params: dict) -> None:
+    _run_async_one_shot(req_id, params, _handle_gallery_list_images_chunk)
 
 
 def _handle_faces_crop_batch(params: dict) -> dict:
@@ -5409,12 +5487,21 @@ def _handle_albums_generate_narrative(params: dict) -> dict:
 def _handle_albums_export(params: dict) -> dict:
     """Export a story album as a standalone HTML file."""
     from imganalyzer.storyline.export import export_story_html
+    import os
+
+    output_path = params["output_path"]
+    # Validate the output path is absolute and within a writeable directory
+    if not os.path.isabs(output_path):
+        return {"error": "output_path must be an absolute path"}
+    parent = os.path.dirname(output_path)
+    if not os.path.isdir(parent):
+        return {"error": f"Parent directory does not exist: {parent}"}
 
     conn = _get_db()
     output = export_story_html(
         conn,
         params["album_id"],
-        params["output_path"],
+        output_path,
         include_thumbnails=params.get("include_thumbnails", True),
         max_heroes_per_chapter=params.get("max_heroes_per_chapter", 6),
     )
@@ -5567,6 +5654,15 @@ _ASYNC_METHODS: dict[str, Any] = {
     "analyze": _handle_analyze,
     "faces/run-clustering": _handle_faces_run_clustering,
     "faces/crop-batch": _handle_faces_crop_batch_async,
+}
+
+# StdIO-only async wrappers for expensive one-shot methods. They remain sync for
+# HTTP transport so the HTTP coordinator can still serve them directly.
+_STDIO_ASYNC_METHODS: dict[str, Any] = {
+    "gallery/listImagesChunk": _handle_gallery_list_images_chunk_async,
+    "thumbnail": _handle_thumbnail_async,
+    "thumbnails/batch": _handle_thumbnails_batch_async,
+    "fullimage": _handle_fullimage_async,
 }
 
 
@@ -5884,7 +5980,16 @@ def _dispatch(msg: dict) -> None:
         _send_result(req_id, {"ok": True})
         sys.exit(0)
 
-    if method in _SYNC_METHODS:
+    if method in _STDIO_ASYNC_METHODS:
+        def _run_async():
+            try:
+                _STDIO_ASYNC_METHODS[method](req_id, params)
+            except Exception as exc:
+                _send_error(req_id, -1, str(exc))
+
+        t = threading.Thread(target=_run_async, daemon=True, name=f"rpc-{method}")
+        t.start()
+    elif method in _SYNC_METHODS:
         try:
             result = _call_sync_handler(method, params)
             _send_result(req_id, result)

@@ -324,6 +324,7 @@ class SearchEngine:
         mode: str = "hybrid",
         semantic_profile: str | None = None,
         progress_cb: ProgressCallback = None,
+        candidate_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Search images by text query.
 
@@ -335,11 +336,20 @@ class SearchEngine:
         Returns list of {image_id, file_path, score, match_type, snippet}.
         """
         if mode == "text":
-            return self._fts_search(query, limit)
+            return self._fts_search(query, limit, candidate_ids=candidate_ids)
         elif mode == "semantic":
-            return self._semantic_search(query, limit, semantic_profile, progress_cb=progress_cb)
+            return self._semantic_search(
+                query, limit, semantic_profile, progress_cb=progress_cb, candidate_ids=candidate_ids
+            )
         else:
-            return self._hybrid_search(query, limit, semantic_weight, semantic_profile, progress_cb=progress_cb)
+            return self._hybrid_search(
+                query,
+                limit,
+                semantic_weight,
+                semantic_profile,
+                progress_cb=progress_cb,
+                candidate_ids=candidate_ids,
+            )
 
     def _resolve_face_rows(self, name: str, limit: int | None = 50) -> list[dict[str, Any]]:
         """Resolve one face/person query into image rows without text fallback."""
@@ -648,7 +658,7 @@ class SearchEngine:
 
     # ── Internal search methods ────────────────────────────────────────────
 
-    def _fts_search(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def _fts_search(self, query: str, limit: int, candidate_ids: set[int] | None = None) -> list[dict[str, Any]]:
         """Full-text search via blended lexical channels + weighted BM25.
 
         Channels:
@@ -1022,6 +1032,8 @@ class SearchEngine:
             ).fetchall()
             for rank, row in enumerate(rows):
                 image_id = int(row["image_id"])
+                if candidate_ids is not None and image_id not in candidate_ids:
+                    continue
                 if enforce_consistency_guard and not _passes_consistency_guard(image_id):
                     continue
                 fused_scores[image_id] = fused_scores.get(image_id, 0.0) + (weight * _rrf_score(rank))
@@ -1096,7 +1108,7 @@ class SearchEngine:
 
     def _semantic_search(
         self, query: str, limit: int, semantic_profile: str | None = None,
-        *, progress_cb: ProgressCallback = None,
+        *, progress_cb: ProgressCallback = None, candidate_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
         """CLIP embedding semantic search — two-tier strategy (vectorized).
 
@@ -1146,6 +1158,8 @@ class SearchEngine:
 
         if not has_image and not has_desc:
             return []
+        if candidate_ids is not None and not candidate_ids:
+            return []
 
         # Determine which images have rich-enough descriptions to trust.
         rich_desc_ids = self._get_rich_desc_image_ids() if has_desc else frozenset()
@@ -1162,6 +1176,8 @@ class SearchEngine:
             # (N,768) @ (768,) -> (N,)
             img_scores = img_matrix @ visual_query_vec
             for i, iid in enumerate(img_ids):
+                if candidate_ids is not None and iid not in candidate_ids:
+                    continue
                 image_scored.append((iid, float(img_scores[i])))
                 image_id_set.add(iid)
 
@@ -1170,6 +1186,8 @@ class SearchEngine:
         if has_desc:
             desc_scores = desc_matrix @ text_query_vec
             for i, iid in enumerate(desc_ids):
+                if candidate_ids is not None and iid not in candidate_ids:
+                    continue
                 if iid in rich_desc_ids:
                     desc_cosines[iid] = float(desc_scores[i])
 
@@ -1250,7 +1268,7 @@ class SearchEngine:
     def _hybrid_search(
         self, query: str, limit: int, semantic_weight: float,
         semantic_profile: str | None = None,
-        *, progress_cb: ProgressCallback = None,
+        *, progress_cb: ProgressCallback = None, candidate_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Combine FTS5 and CLIP scores with weighted RRF fusion.
 
@@ -1273,9 +1291,15 @@ class SearchEngine:
         pool = limit * _POOL_FACTOR
         if progress_cb:
             progress_cb("text_search", "Searching text index…", 0.05)
-        text_results     = self._fts_search(query, pool)
+        text_results     = self._fts_search(query, pool, candidate_ids=candidate_ids)
         try:
-            semantic_results = self._semantic_search(query, pool, semantic_profile, progress_cb=progress_cb)
+            semantic_results = self._semantic_search(
+                query,
+                pool,
+                semantic_profile,
+                progress_cb=progress_cb,
+                candidate_ids=candidate_ids,
+            )
         except RuntimeError as exc:
             if "CUDA" in str(exc):
                 import sys
@@ -1313,6 +1337,8 @@ class SearchEngine:
             all_ids = set(sem_rrf.keys()) | lexical_guarantee_ids
         else:
             all_ids = set(text_rrf.keys()) | set(sem_rrf.keys())
+        if candidate_ids is not None:
+            all_ids &= candidate_ids
 
         combined: list[tuple[int, float]] = []
         for iid in all_ids:

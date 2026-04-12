@@ -37,7 +37,7 @@ function statusDotClass(status: CoordinatorStatus | null): string {
   }
 }
 
-export function SettingsView() {
+export function SettingsView({ active = true }: { active?: boolean }) {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [workerSetup, setWorkerSetup] = useState<WorkerSetupInfo | null>(null)
   const [coordinatorStatus, setCoordinatorStatus] = useState<CoordinatorStatus | null>(null)
@@ -58,6 +58,7 @@ export function SettingsView() {
   }, [])
 
   useEffect(() => {
+    if (!active) return
     void loadSettings().catch((err) => {
       const msg = err instanceof Error ? err.message : String(err)
       setMessage(`Failed to load settings: ${msg}`)
@@ -66,16 +67,18 @@ export function SettingsView() {
       const msg = err instanceof Error ? err.message : String(err)
       setMessage(`Failed to load job server status: ${msg}`)
     })
-  }, [loadSettings, refreshCoordinatorStatus])
+  }, [active, loadSettings, refreshCoordinatorStatus])
 
   useEffect(() => {
+    if (!active) return
     const timer = setInterval(() => {
+      if (document.hidden) return
       void refreshCoordinatorStatus().catch(() => {
         // Keep the UI responsive even if a status poll fails once.
       })
-    }, 2000)
+    }, 5000)
     return () => clearInterval(timer)
-  }, [refreshCoordinatorStatus])
+  }, [active, refreshCoordinatorStatus])
 
   useEffect(() => {
     if (!copiedField) return

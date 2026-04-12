@@ -6,7 +6,7 @@ import type {
 import { SearchLightbox } from './SearchLightbox'
 import { VirtualGrid } from './VirtualGrid'
 
-const CHUNK_SIZE = 300
+const CHUNK_SIZE = 150
 
 interface FolderSidebarProps {
   folders: GalleryFolderNode[]

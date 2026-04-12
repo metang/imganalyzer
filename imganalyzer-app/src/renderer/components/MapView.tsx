@@ -365,9 +365,16 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
             file_path: r.file_path,
             image_id: r.image_id,
           }))
-          const thumbMap = await window.api.getThumbnailsBatch(items)
-          if (searchRequestRef.current === requestId) {
-            setThumbCache((prev) => ({ ...prev, ...thumbMap }))
+          const chunkSize = 40
+          for (let i = 0; i < items.length; i += chunkSize) {
+            const chunk = items.slice(i, i + chunkSize)
+            void window.api.getThumbnailsBatch(chunk).then((thumbMap) => {
+              if (searchRequestRef.current === requestId) {
+                setThumbCache((prev) => ({ ...prev, ...thumbMap }))
+              }
+            }).catch(() => {
+              // Ignore thumbnail chunk failures; markers still render without previews.
+            })
           }
         }
       }
@@ -589,8 +596,8 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
         {/* Map */}
         <div className="flex-1 min-h-0 relative">
           <MapContainer
-            center={[39.9, 116.4]}
-            zoom={6}
+            center={[39.9042, 116.4074]}
+            zoom={7}
             className="h-full w-full"
             style={{ background: theme === 'dark' ? '#1a1a1a' : '#e8e8e8' }}
             zoomControl={true}

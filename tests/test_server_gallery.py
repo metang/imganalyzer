@@ -769,6 +769,52 @@ def test_search_resolve_face_query_strips_picture_filler_phrase(
     }
 
 
+def test_search_resolve_face_query_allows_partial_person_names(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gallery_db.execute(
+        "INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)",
+        (1, "Sun Ting", None),
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search_resolve_face_query({"query": "ting at sunset"})
+
+    assert result == {
+        "face": "ting",
+        "faces": ["ting"],
+        "faceMatch": "any",
+        "remainingQuery": "at sunset",
+    }
+
+
+def test_search_partial_person_name_returns_face_results(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\people\sun-ting.jpg")
+    gallery_db.execute(
+        "INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)",
+        (1, "Sun Ting", None),
+    )
+    _insert_face_occurrence(
+        gallery_db,
+        occurrence_id=1,
+        image_id=1,
+        identity_name="sun_ting",
+        cluster_id=10,
+        person_id=1,
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search({"query": "ting", "mode": "hybrid", "limit": 10, "offset": 0})
+
+    assert result["total"] == 1
+    assert result["hasMore"] is False
+    assert [item["image_id"] for item in result["results"]] == [1]
+
+
 def test_fts_match_query_handles_periods_and_boolean_words() -> None:
     from imganalyzer.db.search import _build_fts_match_query
 
@@ -895,7 +941,7 @@ def test_hybrid_search_semantic_primary_keeps_lexical_candidates(
         monkeypatch.setattr(
             engine,
             "_fts_search",
-            lambda _query, _limit: [{"image_id": 101, "file_path": "/fts.jpg", "score": 0.9}],
+            lambda _query, _limit, **_kw: [{"image_id": 101, "file_path": "/fts.jpg", "score": 0.9}],
         )
         monkeypatch.setattr(
             engine,
@@ -1027,6 +1073,62 @@ def test_search_multi_face_prompt_combines_people_and_activity_terms(
     assert result["total"] == 2
     assert result["hasMore"] is False
     assert [item["image_id"] for item in result["results"]] == [1, 4]
+
+
+def test_search_face_and_text_queries_rerank_within_full_face_candidate_set(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for image_id in range(1, 251):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\people\img{image_id}.jpg")
+
+    seen_candidate_ids: list[set[int] | None] = []
+
+    class FakeSearchEngine:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+
+        def resolve_face_queries(self, query: str) -> tuple[list[str], str, str]:
+            if query == "banban at sunset":
+                return ["banban"], "at sunset", "all"
+            return [], query, "all"
+
+        def resolve_face_query(self, query: str) -> tuple[str | None, str]:
+            return None, query
+
+        def search_face(self, name: str, limit: int | None = 50) -> list[dict[str, object]]:
+            assert name == "banban"
+            upper = 250 if limit is None or limit <= 0 else min(int(limit), 250)
+            return [
+                {"image_id": image_id, "score": 1.0}
+                for image_id in range(1, upper + 1)
+            ]
+
+        def search(
+            self,
+            query: str,
+            limit: int,
+            semantic_weight: float = 0.5,
+            mode: str = "hybrid",
+            semantic_profile: str | None = None,
+            candidate_ids: set[int] | None = None,
+        ) -> list[dict[str, object]]:
+            assert query == "at sunset"
+            seen_candidate_ids.append(candidate_ids)
+            return [{"image_id": 250, "score": 0.99}]
+
+    import imganalyzer.db.search as search_module
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    monkeypatch.setattr(search_module, "SearchEngine", FakeSearchEngine)
+    result = server._handle_search(
+        {"query": "banban at sunset", "mode": "hybrid", "limit": 10, "offset": 0}
+    )
+
+    assert result["total"] == 1
+    assert result["hasMore"] is False
+    assert [item["image_id"] for item in result["results"]] == [250]
+    assert seen_candidate_ids == [set(range(1, 251))]
 
 
 def test_search_aesthetic_sort_uses_broader_candidate_pool(

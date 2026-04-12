@@ -1,6 +1,56 @@
 import { useState, useEffect } from 'react'
 import type { ImageFile } from '../global'
 
+const THUMB_BATCH_SIZE = 16
+const thumbCache = new Map<string, string>()
+const pendingThumbs = new Set<string>()
+const pendingCallbacks = new Map<string, Array<(src: string | null) => void>>()
+let thumbBatchTimer: ReturnType<typeof setTimeout> | null = null
+
+function requestThumbnail(
+  imagePath: string,
+  callback: (src: string | null) => void,
+): void {
+  const cached = thumbCache.get(imagePath)
+  if (cached) {
+    callback(cached)
+    return
+  }
+
+  const callbacks = pendingCallbacks.get(imagePath) ?? []
+  callbacks.push(callback)
+  pendingCallbacks.set(imagePath, callbacks)
+  pendingThumbs.add(imagePath)
+
+  if (thumbBatchTimer !== null) return
+  thumbBatchTimer = setTimeout(() => {
+    const paths = [...pendingThumbs]
+    pendingThumbs.clear()
+    thumbBatchTimer = null
+
+    for (let i = 0; i < paths.length; i += THUMB_BATCH_SIZE) {
+      const chunk = paths.slice(i, i + THUMB_BATCH_SIZE)
+      void window.api.getThumbnailsBatch(
+        chunk.map((file_path) => ({ file_path }))
+      ).then((result) => {
+        for (const filePath of chunk) {
+          const src = result[filePath] ?? null
+          if (src) thumbCache.set(filePath, src)
+          const chunkCallbacks = pendingCallbacks.get(filePath) ?? []
+          pendingCallbacks.delete(filePath)
+          for (const cb of chunkCallbacks) cb(src)
+        }
+      }).catch(() => {
+        for (const filePath of chunk) {
+          const chunkCallbacks = pendingCallbacks.get(filePath) ?? []
+          pendingCallbacks.delete(filePath)
+          for (const cb of chunkCallbacks) cb(null)
+        }
+      })
+    }
+  }, 16)
+}
+
 interface ThumbnailProps {
   image: ImageFile
   onClick: () => void
@@ -18,7 +68,7 @@ export function Thumbnail({ image, onClick, selected }: ThumbnailProps) {
     setError(false)
     setSrc('')
 
-    window.api.getThumbnail(image.path).then((dataUrl) => {
+    requestThumbnail(image.path, (dataUrl) => {
       if (cancelled) return
       if (dataUrl) {
         setSrc(dataUrl)
@@ -26,11 +76,6 @@ export function Thumbnail({ image, onClick, selected }: ThumbnailProps) {
         setError(true)
       }
       setLoading(false)
-    }).catch(() => {
-      if (!cancelled) {
-        setError(true)
-        setLoading(false)
-      }
     })
 
     return () => { cancelled = true }

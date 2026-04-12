@@ -7,15 +7,69 @@ the caller builds the full result dict in memory, then calls a single
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from imganalyzer.db.connection import begin_immediate as _begin_immediate
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+_NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def _name_match_score(candidate: str | None, query: str) -> int | None:
+    """Return a lower-is-better score for face-name matching."""
+    if candidate is None:
+        return None
+    candidate_norm = " ".join(str(candidate).split()).casefold()
+    query_norm = " ".join(str(query).split()).casefold()
+    if not candidate_norm or not query_norm:
+        return None
+    if candidate_norm == query_norm:
+        return 0
+
+    candidate_tokens = _NAME_TOKEN_RE.findall(candidate_norm)
+    query_tokens = _NAME_TOKEN_RE.findall(query_norm)
+    if not candidate_tokens or not query_tokens:
+        return None
+
+    joined_query = " ".join(query_tokens)
+    if joined_query in candidate_tokens:
+        return 1
+    if len(joined_query) < 3:
+        return None
+    if any(token.startswith(joined_query) for token in candidate_tokens):
+        return 2
+    if joined_query in candidate_norm:
+        return 3
+    return None
+
+
+def _best_name_matches(
+    rows: list[dict[str, Any]],
+    query: str,
+    values_for_row: Callable[[dict[str, Any]], list[str | None]],
+) -> list[dict[str, Any]]:
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for index, row in enumerate(rows):
+        best_score: int | None = None
+        for value in values_for_row(row):
+            score = _name_match_score(str(value) if value is not None else None, query)
+            if score is None:
+                continue
+            if best_score is None or score < best_score:
+                best_score = score
+        if best_score is not None:
+            scored.append((best_score, index, row))
+    if not scored:
+        return []
+    min_score = min(score for score, _, _ in scored)
+    return [row for score, _, row in scored if score == min_score]
 
 
 # ── Module → table mapping ────────────────────────────────────────────────────
@@ -1720,7 +1774,7 @@ class Repository:
         return dict(row) if row else None
 
     def find_face_identities_by_alias(self, name: str) -> list[dict[str, Any]]:
-        """Return all face identities matching *name* by canonical, display, or alias."""
+        """Return face identities matching *name* by exact or strong partial name/alias."""
         if not name:
             return []
 
@@ -1737,32 +1791,75 @@ class Repository:
                 """,
                 [name, name, name],
             ).fetchall()
-            return [dict(row) for row in rows]
+            exact_matches = [dict(row) for row in rows]
+            if exact_matches:
+                return exact_matches
 
-        rows = self.conn.execute("SELECT * FROM face_identities ORDER BY id").fetchall()
-        matches: list[dict[str, Any]] = []
-        for row in rows:
+            alias_rows = self.conn.execute(
+                "SELECT identity_id, alias FROM face_aliases ORDER BY identity_id, alias"
+            ).fetchall()
+            alias_map: dict[int, list[str]] = {}
+            for row in alias_rows:
+                alias_map.setdefault(int(row["identity_id"]), []).append(str(row["alias"]))
+            identity_rows = [
+                dict(row)
+                for row in self.conn.execute("SELECT * FROM face_identities ORDER BY id").fetchall()
+            ]
+            return _best_name_matches(
+                identity_rows,
+                name,
+                lambda row: [
+                    str(row.get("canonical_name") or ""),
+                    str(row.get("display_name") or ""),
+                    *alias_map.get(int(row["id"]), []),
+                    *json.loads(row.get("aliases") or "[]"),
+                ],
+            )
+
+        identity_rows = [
+            dict(row)
+            for row in self.conn.execute("SELECT * FROM face_identities ORDER BY id").fetchall()
+        ]
+        exact_matches: list[dict[str, Any]] = []
+        for row in identity_rows:
             aliases = json.loads(row["aliases"] or "[]")
             if (
                 row["canonical_name"].casefold() == name.casefold()
                 or (row["display_name"] and row["display_name"].casefold() == name.casefold())
                 or any(name.casefold() == alias.casefold() for alias in aliases)
             ):
-                matches.append(dict(row))
-        return matches
+                exact_matches.append(row)
+        if exact_matches:
+            return exact_matches
+        return _best_name_matches(
+            identity_rows,
+            name,
+            lambda row: [
+                str(row.get("canonical_name") or ""),
+                str(row.get("display_name") or ""),
+                *json.loads(row.get("aliases") or "[]"),
+            ],
+        )
 
     def find_persons_by_name(self, name: str) -> list[dict[str, Any]]:
-        """Return all person groups matching *name* case-insensitively."""
+        """Return person groups matching *name* case-insensitively, with partial fallback."""
         if not name or not self._table_exists("face_persons"):
             return []
         rows = self.conn.execute(
             "SELECT * FROM face_persons WHERE name = ? COLLATE NOCASE ORDER BY id",
             [name],
         ).fetchall()
-        return [dict(row) for row in rows]
+        exact_matches = [dict(row) for row in rows]
+        if exact_matches:
+            return exact_matches
+        person_rows = [
+            dict(row)
+            for row in self.conn.execute("SELECT * FROM face_persons ORDER BY id").fetchall()
+        ]
+        return _best_name_matches(person_rows, name, lambda row: [str(row.get("name") or "")])
 
     def find_clusters_by_label(self, name: str) -> list[dict[str, Any]]:
-        """Return all face clusters whose display label matches *name*."""
+        """Return face clusters whose display label matches *name*, with partial fallback."""
         if not name or not self._table_exists("face_cluster_labels"):
             return []
         rows = self.conn.execute(
@@ -1774,7 +1871,20 @@ class Repository:
             """,
             [name],
         ).fetchall()
-        return [dict(row) for row in rows]
+        exact_matches = [dict(row) for row in rows]
+        if exact_matches:
+            return exact_matches
+        cluster_rows = [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT cluster_id, display_name FROM face_cluster_labels ORDER BY cluster_id"
+            ).fetchall()
+        ]
+        return _best_name_matches(
+            cluster_rows,
+            name,
+            lambda row: [str(row.get("display_name") or "")],
+        )
 
     def find_face_by_alias(self, name: str) -> dict[str, Any] | None:
         """Find a face identity by canonical name, display name, or alias.

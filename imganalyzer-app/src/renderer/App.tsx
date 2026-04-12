@@ -86,21 +86,41 @@ export default function App() {
 
   useEffect(() => {
     if (batch.stats.status !== 'idle') return
-    const timer = window.setInterval(() => {
-      void batch.resumePending().then((resumed) => {
+    let cancelled = false
+    let inFlight = false
+
+    const poll = async () => {
+      if (cancelled || document.hidden || inFlight) return
+      inFlight = true
+      try {
+        const resumed = await batch.resumePending()
+        if (cancelled) return
         if (resumed) {
           setResumeBanner('Resuming unfinished jobs from queue…')
           setTab('running')
           return
         }
-        void batch.monitorExisting().then((monitoring) => {
-          if (!monitoring) return
-          setResumeBanner('Monitoring jobs already being processed by a distributed worker…')
-          setTab('running')
-        })
-      })
-    }, 5000)
-    return () => window.clearInterval(timer)
+        const monitoring = await batch.monitorExisting()
+        if (cancelled || !monitoring) return
+        setResumeBanner('Monitoring jobs already being processed by a distributed worker…')
+        setTab('running')
+      } finally {
+        inFlight = false
+      }
+    }
+
+    const timer = window.setInterval(() => {
+      void poll()
+    }, 15000)
+    const handleVisibility = () => {
+      if (!document.hidden) void poll()
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', handleVisibility)
+    }
   }, [batch.monitorExisting, batch.resumePending, batch.stats.status])
 
   // Auto-switch to Running tab whenever the batch transitions to running/paused/done/error
@@ -285,7 +305,7 @@ export default function App() {
 
       {/* ── Settings tab ─────────────────────────────────────────────────────── */}
       <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'settings' ? '' : ' hidden'}`}>
-        <SettingsView />
+        <SettingsView active={tab === 'settings'} />
       </div>
     </div>
     </ErrorBoundary>
