@@ -69,6 +69,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import defaultdict
+import hmac
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import io
 import inspect
@@ -261,8 +262,10 @@ def _is_transient_db_lock_error(exc: Exception) -> bool:
 # ── State for cancellable operations ─────────────────────────────────────────
 
 _run_cancel = threading.Event()
+_run_lock = threading.Lock()
 _run_thread: threading.Thread | None = None
 _active_worker: Any = None  # Worker | None — set while a run is active
+_ingest_lock = threading.Lock()
 
 _analyze_cancel: dict[str, threading.Event] = {}  # imagePath -> cancel event
 
@@ -424,34 +427,33 @@ def _replenish_decode_buffer() -> None:
 
         from imganalyzer.db.connection import create_connection
         conn2 = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
+        try:
+            # Get image IDs with pending jobs, ordered by number of pending
+            # modules descending (images needing more work are more valuable
+            # to decode first).
+            pending_rows = conn2.execute(
+                "SELECT image_id, COUNT(*) AS cnt "
+                "FROM job_queue WHERE status = 'pending' "
+                "GROUP BY image_id ORDER BY cnt DESC"
+            ).fetchall()
+            pending_ids = [int(r["image_id"]) for r in pending_rows]
 
-        # Get image IDs with pending jobs, ordered by number of pending
-        # modules descending (images needing more work are more valuable
-        # to decode first).
-        pending_rows = conn2.execute(
-            "SELECT image_id, COUNT(*) AS cnt "
-            "FROM job_queue WHERE status = 'pending' "
-            "GROUP BY image_id ORDER BY cnt DESC"
-        ).fetchall()
-        pending_ids = [int(r["image_id"]) for r in pending_rows]
+            if not pending_ids:
+                return
 
-        if not pending_ids:
+            uncached = [iid for iid in pending_ids if iid not in cached_ids][:need]
+
+            if not uncached:
+                return
+
+            # Fetch file paths for the batch
+            ph = ",".join("?" * len(uncached))
+            rows = conn2.execute(
+                f"SELECT id, file_path FROM images WHERE id IN ({ph})",
+                uncached,
+            ).fetchall()
+        finally:
             conn2.close()
-            return
-
-        uncached = [iid for iid in pending_ids if iid not in cached_ids][:need]
-
-        if not uncached:
-            conn2.close()
-            return
-
-        # Fetch file paths for the batch
-        ph = ",".join("?" * len(uncached))
-        rows = conn2.execute(
-            f"SELECT id, file_path FROM images WHERE id IN ({ph})",
-            uncached,
-        ).fetchall()
-        conn2.close()
 
         items = [(int(r["id"]), str(r["file_path"])) for r in rows]
         if items:
@@ -662,8 +664,9 @@ def _handle_status(params: dict) -> dict:
     # Chunk-level stats: pending counts per module within the current chunk.
     chunk_modules: dict[str, int] = {}
     chunk_info: dict[str, Any] | None = None
-    if _active_worker is not None and _active_worker.current_chunk_ids is not None:
-        chunk_ids = _active_worker.current_chunk_ids
+    w = _active_worker
+    if w is not None and w.current_chunk_ids is not None:
+        chunk_ids = w.current_chunk_ids
         for mod in modules_out:
             cp = queue.pending_count(module=mod, image_ids=chunk_ids)
             cr = queue.running_count(module=mod, image_ids=chunk_ids)
@@ -671,8 +674,8 @@ def _handle_status(params: dict) -> dict:
                 chunk_modules[mod] = cp + cr
         chunk_info = {
             "size": len(chunk_ids),
-            "index": _active_worker.current_chunk_index,
-            "total": _active_worker.total_chunks,
+            "index": w.current_chunk_index,
+            "total": w.total_chunks,
             "modules": chunk_modules,
         }
 
@@ -763,38 +766,42 @@ def _handle_ingest(req_id: int | str, params: dict) -> None:
 
     # Monkey-patch the print function to intercept [PROGRESS] lines
     # and forward them as JSON-RPC notifications instead.
+    # Serialised with _ingest_lock to prevent concurrent ingests from
+    # racing on the global builtins.print binding.
     import builtins
-    _orig_print = builtins.print
 
-    def _patched_print(*args, **kwargs):
-        text = " ".join(str(a) for a in args)
-        if text.startswith("[PROGRESS] "):
-            try:
-                payload = json.loads(text[len("[PROGRESS] "):])
-                _send_notification("ingest/progress", payload)
-                return
-            except Exception:
-                pass
-        # All other prints go to stderr (normal stdout is already redirected)
-        _orig_print(*args, **kwargs)
+    with _ingest_lock:
+        _orig_print = builtins.print
 
-    builtins.print = _patched_print
-    try:
-        ingest_stats = processor.ingest(
-            folders=folders,
-            modules=modules,
-            force=force,
-            recursive=recursive,
-            compute_hash=compute_hash,
-            verbose=verbose,
-        )
-    except Exception as exc:
-        builtins.print = _orig_print
-        conn.close()
-        _send_error(req_id, -1, f"Ingest failed: {exc}")
-        return
-    finally:
-        builtins.print = _orig_print
+        def _patched_print(*args, **kwargs):
+            text = " ".join(str(a) for a in args)
+            if text.startswith("[PROGRESS] "):
+                try:
+                    payload = json.loads(text[len("[PROGRESS] "):])
+                    _send_notification("ingest/progress", payload)
+                    return
+                except Exception:
+                    pass
+            # All other prints go to stderr (normal stdout is already redirected)
+            _orig_print(*args, **kwargs)
+
+        builtins.print = _patched_print
+        try:
+            ingest_stats = processor.ingest(
+                folders=folders,
+                modules=modules,
+                force=force,
+                recursive=recursive,
+                compute_hash=compute_hash,
+                verbose=verbose,
+            )
+        except Exception as exc:
+            builtins.print = _orig_print
+            conn.close()
+            _send_error(req_id, -1, f"Ingest failed: {exc}")
+            return
+        finally:
+            builtins.print = _orig_print
 
     conn.close()
 
@@ -819,93 +826,94 @@ def _handle_run(req_id: int | str, params: dict) -> None:
     global _run_thread
     from imganalyzer.pipeline.unified_scheduler import PAUSED_STATES, get_worker_control_state
 
-    if _run_thread is not None and _run_thread.is_alive():
-        # The previous worker may still be winding down after cancel_run.
-        # Wait briefly for it to finish before rejecting.
-        _run_thread.join(timeout=10)
-        if _run_thread.is_alive():
-            _send_error(req_id, -2, "A run is already in progress")
+    with _run_lock:
+        if _run_thread is not None and _run_thread.is_alive():
+            # The previous worker may still be winding down after cancel_run.
+            # Wait briefly for it to finish before rejecting.
+            _run_thread.join(timeout=10)
+            if _run_thread.is_alive():
+                _send_error(req_id, -2, "A run is already in progress")
+                return
+
+        conn = _get_db()
+        _sync_master_worker_node(conn)
+        desired_state, state_reason = get_worker_control_state(conn, _MASTER_WORKER_ID)
+        if desired_state in PAUSED_STATES:
+            reason_suffix = f" ({state_reason})" if state_reason else ""
+            _send_error(
+                req_id,
+                -3,
+                f"Master worker is {desired_state}{reason_suffix}; call workers/resume before run.",
+            )
             return
 
-    conn = _get_db()
-    _sync_master_worker_node(conn)
-    desired_state, state_reason = get_worker_control_state(conn, _MASTER_WORKER_ID)
-    if desired_state in PAUSED_STATES:
-        reason_suffix = f" ({state_reason})" if state_reason else ""
-        _send_error(
-            req_id,
-            -3,
-            f"Master worker is {desired_state}{reason_suffix}; call workers/resume before run.",
-        )
-        return
+        _run_cancel.clear()
 
-    _run_cancel.clear()
+        workers = params.get("workers", 1)
+        verbose = params.get("verbose", True)
+        write_xmp = not params.get("noXmp", True)
+        force = params.get("force", False)
+        batch_size = params.get("batchSize", 10)
+        chunk_size = params.get("chunkSize", 500)
+        detection_prompt = params.get("detectionPrompt")
+        detection_threshold = params.get("detectionThreshold")
+        face_threshold = params.get("faceThreshold")
+        # In Electron/JSON-RPC mode we run a single worker at a time, so any
+        # leftover `running` rows are stale from an interrupted previous run.
+        # Recover them immediately by default unless the caller overrides it.
+        stale_timeout = params.get("staleTimeout", 0)
+        profile = params.get("profile", False)
 
-    workers = params.get("workers", 1)
-    verbose = params.get("verbose", True)
-    write_xmp = not params.get("noXmp", True)
-    force = params.get("force", False)
-    batch_size = params.get("batchSize", 10)
-    chunk_size = params.get("chunkSize", 500)
-    detection_prompt = params.get("detectionPrompt")
-    detection_threshold = params.get("detectionThreshold")
-    face_threshold = params.get("faceThreshold")
-    # In Electron/JSON-RPC mode we run a single worker at a time, so any
-    # leftover `running` rows are stale from an interrupted previous run.
-    # Recover them immediately by default unless the caller overrides it.
-    stale_timeout = params.get("staleTimeout", 0)
-    profile = params.get("profile", False)
-
-    def _run_worker():
-        global _active_worker
-        try:
-            from imganalyzer.pipeline.worker import Worker
-            from imganalyzer.db.connection import create_connection
-
-            # Open a FRESH connection for this thread — SQLite connections
-            # cannot be shared across threads (check_same_thread=True by default).
-            conn = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
-            _upsert_master_worker_node(conn, status="online")
-            worker_kwargs = dict(
-                conn=conn,
-                workers=workers,
-                force=force,
-                detection_prompt=detection_prompt,
-                detection_threshold=detection_threshold,
-                face_match_threshold=face_threshold,
-                verbose=verbose,
-                write_xmp=write_xmp,
-                profile=profile,
-            )
-            if stale_timeout is not None:
-                worker_kwargs["stale_timeout_minutes"] = stale_timeout
-            worker = Worker(**worker_kwargs)
-            _active_worker = worker
-
-            # Wire up direct result-notification callback (bypasses print)
-            from imganalyzer.pipeline import worker as worker_mod
-            worker_mod._result_notify = lambda payload: _send_notification("run/result", payload)
-            worker_mod._chunk_notify = lambda payload: _send_notification("run/chunk_done", payload)
+        def _run_worker():
+            global _active_worker
             try:
-                result = worker.run(batch_size=batch_size, chunk_size=chunk_size)
-                _send_notification("run/done", result)
-            except Exception as exc:
-                _send_notification("run/error", {"error": str(exc)})
-            finally:
-                worker_mod._result_notify = None
-                worker_mod._chunk_notify = None
-                _active_worker = None
-                try:
-                    _upsert_master_worker_node(conn, status="offline")
-                except Exception:
-                    pass
-                conn.close()
-        except Exception as exc:
-            _active_worker = None
-            _send_notification("run/error", {"error": str(exc), "traceback": traceback.format_exc()})
+                from imganalyzer.pipeline.worker import Worker
+                from imganalyzer.db.connection import create_connection
 
-    _run_thread = threading.Thread(target=_run_worker, daemon=True, name="rpc-run")
-    _run_thread.start()
+                # Open a FRESH connection for this thread — SQLite connections
+                # cannot be shared across threads (check_same_thread=True by default).
+                conn = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
+                _upsert_master_worker_node(conn, status="online")
+                worker_kwargs = dict(
+                    conn=conn,
+                    workers=workers,
+                    force=force,
+                    detection_prompt=detection_prompt,
+                    detection_threshold=detection_threshold,
+                    face_match_threshold=face_threshold,
+                    verbose=verbose,
+                    write_xmp=write_xmp,
+                    profile=profile,
+                )
+                if stale_timeout is not None:
+                    worker_kwargs["stale_timeout_minutes"] = stale_timeout
+                worker = Worker(**worker_kwargs)
+                _active_worker = worker
+
+                # Wire up direct result-notification callback (bypasses print)
+                from imganalyzer.pipeline import worker as worker_mod
+                worker_mod._result_notify = lambda payload: _send_notification("run/result", payload)
+                worker_mod._chunk_notify = lambda payload: _send_notification("run/chunk_done", payload)
+                try:
+                    result = worker.run(batch_size=batch_size, chunk_size=chunk_size)
+                    _send_notification("run/done", result)
+                except Exception as exc:
+                    _send_notification("run/error", {"error": str(exc)})
+                finally:
+                    worker_mod._result_notify = None
+                    worker_mod._chunk_notify = None
+                    _active_worker = None
+                    try:
+                        _upsert_master_worker_node(conn, status="offline")
+                    except Exception:
+                        pass
+                    conn.close()
+            except Exception as exc:
+                _active_worker = None
+                _send_notification("run/error", {"error": str(exc), "traceback": traceback.format_exc()})
+
+        _run_thread = threading.Thread(target=_run_worker, daemon=True, name="rpc-run")
+        _run_thread.start()
     _send_result(req_id, {"started": True})
 
 
@@ -915,8 +923,9 @@ def _handle_cancel_run(params: dict) -> dict:
     # Directly signal the active worker to stop (graceful shutdown).
     # The worker checks _shutdown.is_set() between jobs and will finish
     # the current batch then exit.
-    if _active_worker is not None:
-        _active_worker._shutdown.set()
+    w = _active_worker
+    if w is not None:
+        w._shutdown.set()
     return {"cancelled": True}
 
 
@@ -1277,8 +1286,9 @@ def _handle_workers_pause(params: dict) -> dict:
         released_leases = queue.release_worker_leases(worker_id)
 
     # Master pause maps to run cancellation.
-    if worker_id == _MASTER_WORKER_ID and _active_worker is not None:
-        _active_worker._shutdown.set()
+    w = _active_worker
+    if worker_id == _MASTER_WORKER_ID and w is not None:
+        w._shutdown.set()
 
     result: dict[str, Any] = {
         "workerId": worker_id,
@@ -1434,9 +1444,10 @@ def _handle_jobs_claim(params: dict) -> dict:
     queue = JobQueue(conn)
     repo = Repository(conn)
 
+    w = _active_worker
     active_chunk_ids: set[int] | None = None
-    if _active_worker is not None:
-        active_chunk_ids = _active_worker.current_chunk_ids
+    if w is not None:
+        active_chunk_ids = w.current_chunk_ids
     policy = compute_claim_policy(
         conn,
         worker_id=worker_id,
@@ -1444,7 +1455,7 @@ def _handle_jobs_claim(params: dict) -> dict:
         module=module,
         modules_list=modules_list,
         active_chunk_ids=active_chunk_ids,
-        coordinator_run_active=_active_worker is not None,
+        coordinator_run_active=w is not None,
     )
     if not policy.allow_claims:
         return {"jobs": []}
@@ -2157,6 +2168,7 @@ def _handle_search(params: dict) -> dict:
             seen_resolved_faces: set[str] = set()
 
             def _consume_face_terms(terms: list[str]) -> list[str]:
+                nonlocal face_match
                 remaining_terms: list[str] = []
                 for raw_term in terms:
                     resolved_from_term, remaining_term, resolved_match = resolve_face_queries(raw_term)
@@ -2194,19 +2206,25 @@ def _handle_search(params: dict) -> dict:
     )
 
     if camera:
-        base_conditions.append("(m.camera_make LIKE ? OR m.camera_model LIKE ?)")
-        base_params.extend([f"%{camera}%", f"%{camera}%"])
-    if lens:
-        base_conditions.append("m.lens_model LIKE ?")
-        base_params.append(f"%{lens}%")
-    if country:
-        base_conditions.append("m.location_country LIKE ?")
-        base_params.append(f"%{country}%")
-    if location:
+        cam_esc = _escape_like(camera)
         base_conditions.append(
-            "(m.location_city LIKE ? OR m.location_state LIKE ? OR m.location_country LIKE ?)"
+            "(m.camera_make LIKE ? ESCAPE '\\' OR m.camera_model LIKE ? ESCAPE '\\')"
         )
-        base_params.extend([f"%{location}%", f"%{location}%", f"%{location}%"])
+        base_params.extend([f"%{cam_esc}%", f"%{cam_esc}%"])
+    if lens:
+        base_conditions.append("m.lens_model LIKE ? ESCAPE '\\'")
+        base_params.append(f"%{_escape_like(lens)}%")
+    if country:
+        base_conditions.append("m.location_country LIKE ? ESCAPE '\\'")
+        base_params.append(f"%{_escape_like(country)}%")
+    if location:
+        loc_esc = _escape_like(location)
+        base_conditions.append(
+            "(m.location_city LIKE ? ESCAPE '\\'"
+            " OR m.location_state LIKE ? ESCAPE '\\'"
+            " OR m.location_country LIKE ? ESCAPE '\\')"
+        )
+        base_params.extend([f"%{loc_esc}%", f"%{loc_esc}%", f"%{loc_esc}%"])
     if map_bounds and isinstance(map_bounds, dict) and _table_exists(conn, "geo_rtree"):
         mb_south = float(map_bounds.get("south", -90))
         mb_north = float(map_bounds.get("north", 90))
@@ -3366,7 +3384,7 @@ def _handle_cachedimage(params: dict) -> dict:
     image_path = params.get("imagePath")
 
     if image_id is None and image_path is not None:
-        db = get_db()
+        db = _get_db()
         repo = Repository(db)
         row = repo.get_image_by_path(str(image_path))
         if row is None:
@@ -5686,8 +5704,9 @@ def _call_sync_handler(method: str, params: dict[str, Any]) -> Any:
 def _graceful_shutdown() -> None:
     """Signal running workers to stop and wait briefly for shutdown."""
     _run_cancel.set()
-    if _active_worker is not None:
-        _active_worker._shutdown.set()
+    w = _active_worker
+    if w is not None:
+        w._shutdown.set()
     if _run_thread is not None and _run_thread.is_alive():
         _run_thread.join(timeout=5)
 
@@ -5789,7 +5808,7 @@ def _serve_http_jsonrpc(
                 return True
             auth_header = self.headers.get("Authorization", "")
             expected = f"Bearer {auth_token}"
-            if auth_header == expected:
+            if hmac.compare_digest(auth_header, expected):
                 return True
             self.send_response(401)
             self.send_header("WWW-Authenticate", "Bearer")

@@ -789,6 +789,30 @@ def test_search_resolve_face_query_allows_partial_person_names(
     }
 
 
+def test_search_resolve_face_query_ignores_connector_words(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gallery_db.executemany(
+        "INSERT INTO face_persons (id, name, notes) VALUES (?, ?, ?)",
+        [
+            (1, "Ting", None),
+            (2, "Meng", None),
+            (3, "Andrew", None),
+        ],
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search_resolve_face_query({"query": "ting and meng at sunset"})
+
+    assert result == {
+        "face": "ting",
+        "faces": ["ting", "meng"],
+        "faceMatch": "all",
+        "remainingQuery": "at sunset",
+    }
+
+
 def test_search_partial_person_name_returns_face_results(
     gallery_db: sqlite3.Connection,
     monkeypatch: pytest.MonkeyPatch,
