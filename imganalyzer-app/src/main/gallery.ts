@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import { ensureServerRunning, rpc } from './python-rpc'
 import type { SearchResult } from './search'
+import { registerApprovedPathsFromPayload } from './path-validation'
 
 export interface GalleryFolderNode {
   path: string
@@ -40,6 +41,7 @@ export function registerGalleryHandlers(): void {
         folders: GalleryFolderNode[]
         totalImages: number
       }
+      registerApprovedPathsFromPayload(result)
       return {
         folders: result.folders,
         totalImages: result.totalImages,
@@ -65,6 +67,7 @@ export function registerGalleryHandlers(): void {
           hasMore: boolean
           total: number | null
         }
+        registerApprovedPathsFromPayload(result)
 
         return {
           items: result.items,

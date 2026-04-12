@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron'
 import { ensureServerRunning, rpc } from './python-rpc'
+import { registerApprovedPathsFromPayload } from './path-validation'
 
 export interface GeoCluster {
   cell: string
@@ -176,6 +177,7 @@ export function registerGeoHandlers(): void {
       try {
         await ensureServerRunning()
         const result = (await rpc.call('geo/nearby', params)) as GeoNearbyResponse
+        registerApprovedPathsFromPayload(result)
         return result
       } catch (err) {
         return { images: [], total: 0, error: String(err) }
@@ -218,6 +220,7 @@ export function registerGeoHandlers(): void {
       try {
         await ensureServerRunning()
         const result = (await rpc.call('geo/cluster-preview', params)) as GeoClusterPreviewResponse
+        registerApprovedPathsFromPayload(result)
         return result
       } catch (err) {
         return { images: [], total: 0, error: String(err) }
@@ -234,6 +237,7 @@ export function registerGeoHandlers(): void {
       try {
         await ensureServerRunning()
         const result = (await rpc.call('geo/stats-extended', params ?? {})) as GeoStatsExtended
+        registerApprovedPathsFromPayload(result)
         return result
       } catch (err) {
         return {

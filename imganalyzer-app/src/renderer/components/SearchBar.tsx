@@ -59,7 +59,7 @@ interface SearchDraft {
 interface ChipDescriptor {
   id: string
   label: string
-  tone?: 'accent' | 'neutral'
+  tone?: 'accent' | 'neutral' | 'detected'
 }
 
 const SORT_LABELS: Record<SearchSortBy, string> = {
@@ -138,6 +138,18 @@ function dedupeStrings(values: string[]): string[] {
     results.push(clean)
   }
   return results
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function promptMentionsFace(prompt: string, face: string): boolean {
+  const normalizedPrompt = prompt.trim()
+  const normalizedFace = face.trim()
+  if (!normalizedPrompt || !normalizedFace) return false
+  const pattern = escapeRegExp(normalizedFace).replace(/\s+/g, '\\s+')
+  return new RegExp(`(^|[^A-Za-z0-9])${pattern}(?=[^A-Za-z0-9]|$)`, 'i').test(normalizedPrompt)
 }
 
 function splitFaceInput(value: string): string[] {
@@ -624,8 +636,13 @@ function ChoicePill({
 }
 
 function SearchChip({ chip, onRemove }: { chip: ChipDescriptor; onRemove: (chipId: string) => void }) {
+  const toneClass = chip.tone === 'accent'
+    ? 'border-blue-500/50 bg-blue-500/10 text-blue-100'
+    : chip.tone === 'detected'
+      ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-100'
+      : 'border-neutral-700 bg-neutral-900 text-neutral-200'
   return (
-    <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs ${chip.tone === 'accent' ? 'border-blue-500/50 bg-blue-500/10 text-blue-100' : 'border-neutral-700 bg-neutral-900 text-neutral-200'}`}>
+    <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs ${toneClass}`}>
       {chip.label}
       <button type="button" onClick={() => onRemove(chip.id)} className="text-neutral-400 transition-colors hover:text-white">
         ×
@@ -649,6 +666,10 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
   }, [])
 
   const derivedFilters = useMemo(() => buildFilters(draft), [draft])
+  const promptDetectedFaces = useMemo(
+    () => draft.faces.filter((face) => promptMentionsFace(draft.prompt, face)),
+    [draft.faces, draft.prompt],
+  )
 
   const chips = useMemo<ChipDescriptor[]>(() => {
     const items: ChipDescriptor[] = []
@@ -656,7 +677,12 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
     if (draft.activity.trim()) items.push({ id: 'activity', label: `Activity: ${draft.activity.trim()}` })
     if (draft.species.trim()) items.push({ id: 'species', label: `Species: ${draft.species.trim()}` })
     draft.faces.forEach((face, index) => {
-      items.push({ id: `face:${index}`, label: `Person: ${face}` })
+      const detectedFromPrompt = promptDetectedFaces.some((value) => value.toLowerCase() === face.toLowerCase())
+      items.push({
+        id: `face:${index}`,
+        label: detectedFromPrompt ? `Detected person: ${face}` : `Person: ${face}`,
+        tone: detectedFromPrompt ? 'detected' : 'neutral',
+      })
     })
     if (draft.faces.length > 1) {
       items.push({
@@ -696,17 +722,23 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
       items.push({ id: `shouldTerm:${index}`, label: `Should: ${term}` })
     })
     return items
-  }, [draft, derivedFilters])
+  }, [draft, derivedFilters, promptDetectedFaces])
 
-  const executeSearch = useCallback((nextDraft: SearchDraft) => {
-    const filters = buildFilters(nextDraft)
+  const executeSearch = useCallback((nextDraft: SearchDraft, promptOverride?: string) => {
+    const filters = buildFilters(
+      promptOverride === undefined
+        ? nextDraft
+        : { ...nextDraft, prompt: promptOverride },
+    )
     const contextLabel = buildContextLabel(nextDraft.intent, filters)
     onSearch(filters, contextLabel)
   }, [onSearch])
 
-  const resolvePromptFace = useCallback(async (sourceDraft: SearchDraft): Promise<SearchDraft> => {
-    if (sourceDraft.faces.length > 0 || !sourceDraft.prompt.trim()) {
-      return sourceDraft
+  const resolvePromptFace = useCallback(async (
+    sourceDraft: SearchDraft,
+  ): Promise<{ draft: SearchDraft; promptForSearch?: string }> => {
+    if (!sourceDraft.prompt.trim()) {
+      return { draft: sourceDraft }
     }
 
     setResolvingFace(true)
@@ -718,25 +750,25 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
           ? [resolution.face]
           : []
       if (resolution.error || resolvedFaces.length === 0) {
-        return sourceDraft
+        return { draft: sourceDraft }
       }
 
+      const mergedFaces = dedupeStrings([...sourceDraft.faces, ...resolvedFaces])
       const nextDraft: SearchDraft = {
         ...sourceDraft,
-        faces: resolvedFaces,
-        faceMatch: resolution.faceMatch ?? (resolvedFaces.length > 1 ? 'all' : sourceDraft.faceMatch),
-        prompt: resolution.remainingQuery,
+        faces: mergedFaces,
+        faceMatch: resolution.faceMatch ?? (mergedFaces.length > 1 ? 'all' : sourceDraft.faceMatch),
       }
       setDraft(nextDraft)
-      return nextDraft
+      return { draft: nextDraft, promptForSearch: resolution.remainingQuery }
     } finally {
       setResolvingFace(false)
     }
   }, [])
 
   const handleSearch = useCallback(async () => {
-    const nextDraft = await resolvePromptFace(draft)
-    executeSearch(nextDraft)
+    const resolved = await resolvePromptFace(draft)
+    executeSearch(resolved.draft, resolved.promptForSearch)
   }, [draft, executeSearch, resolvePromptFace])
 
   const handlePromptKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -855,6 +887,11 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                 className="min-h-28 w-full resize-y bg-transparent text-base text-neutral-100 placeholder-neutral-500 focus:outline-none"
               />
             </div>
+            {promptDetectedFaces.length > 0 && (
+              <p className="mt-2 text-xs text-emerald-300">
+                Detected as people filter: {promptDetectedFaces.join(', ')}
+              </p>
+            )}
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">

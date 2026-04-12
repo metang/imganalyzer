@@ -1,7 +1,7 @@
 import { access, mkdir, readdir, readFile, stat, unlink, utimes, writeFile } from 'fs/promises'
 import type { Dirent } from 'fs'
 import { createHash } from 'crypto'
-import { basename, dirname, extname, join } from 'path'
+import { basename, dirname, extname, join, normalize, resolve } from 'path'
 import { rpc } from './python-rpc'
 import type { ThumbnailCacheConfig, ThumbnailCacheConfigInput } from './settings'
 import { getAppSettings, updateAppSettings } from './settings'
@@ -95,6 +95,8 @@ export async function setThumbnailCacheConfig(config: ThumbnailCacheConfigInput)
 // re-inserting it.
 const MAX_THUMB_CACHE = 1000
 const thumbCache = new Map<string, string>()
+const MAX_THUMB_PATH_CACHE = 20000
+const thumbPathCache = new Map<string, string>()
 
 function thumbCacheGet(key: string): string | undefined {
   const val = thumbCache.get(key)
@@ -116,6 +118,60 @@ function thumbCacheSet(key: string, value: string): void {
     if (oldest !== undefined) thumbCache.delete(oldest)
     else break
   }
+}
+
+function thumbPathCacheGet(key: string): string | undefined {
+  const val = thumbPathCache.get(key)
+  if (val !== undefined) {
+    thumbPathCache.delete(key)
+    thumbPathCache.set(key, val)
+  }
+  return val
+}
+
+function thumbPathCacheSet(key: string, value: string): void {
+  if (thumbPathCache.has(key)) thumbPathCache.delete(key)
+  thumbPathCache.set(key, value)
+  while (thumbPathCache.size > MAX_THUMB_PATH_CACHE) {
+    const oldest = thumbPathCache.keys().next().value
+    if (oldest !== undefined) thumbPathCache.delete(oldest)
+    else break
+  }
+}
+
+function thumbnailCacheKey(imagePath: string, imageId?: number): string {
+  if (Number.isInteger(imageId) && Number(imageId) > 0) {
+    return `id:${Number(imageId)}`
+  }
+  const normalized = normalize(resolve(imagePath))
+  const stablePath = process.platform === 'win32' ? normalized.toLowerCase() : normalized
+  return `path:${stablePath}`
+}
+
+async function legacyThumbnailCacheFilePath(imagePath: string): Promise<string> {
+  const cacheKey = `legacy:${thumbnailCacheKey(imagePath)}`
+  const cached = thumbPathCacheGet(cacheKey)
+  if (cached !== undefined) return cached
+
+  const sourceStat = await stat(imagePath)
+  const cfg = await getThumbnailCacheConfig()
+  const material = `${imagePath}|${sourceStat.size}|${sourceStat.mtimeMs}|thumb-v1|400x300|q80`
+  const hash = createHash('sha1').update(material).digest('hex')
+  const resolvedPath = join(cfg.directory, hash.slice(0, 2), `${hash}.jpg`)
+  thumbPathCacheSet(cacheKey, resolvedPath)
+  return resolvedPath
+}
+
+async function readThumbDataUrl(cachePath: string): Promise<string | null> {
+  const buf = await readFile(cachePath)
+  const now = new Date()
+  void utimes(cachePath, now, now)
+  return `data:image/jpeg;base64,${buf.toString('base64')}`
+}
+
+async function writeThumbBytesToPath(cachePath: string, jpegBytes: Buffer): Promise<void> {
+  await mkdir(dirname(cachePath), { recursive: true })
+  await writeFile(cachePath, jpegBytes)
 }
 // In-flight promises to deduplicate concurrent requests for the same image
 const inFlight = new Map<string, Promise<string>>()
@@ -152,35 +208,64 @@ let writesSinceCleanup = 0
 let cleanupPromise: Promise<void> | null = null
 const CLEANUP_WRITE_INTERVAL = 64
 
-async function thumbnailCacheFilePath(imagePath: string): Promise<string> {
-  const sourceStat = await stat(imagePath)
+async function thumbnailCacheFilePath(imagePath: string, imageId?: number): Promise<string> {
+  const cacheKey = thumbnailCacheKey(imagePath, imageId)
+  const cached = thumbPathCacheGet(cacheKey)
+  if (cached !== undefined) return cached
+
   const cfg = await getThumbnailCacheConfig()
-  const material = `${imagePath}|${sourceStat.size}|${sourceStat.mtimeMs}|thumb-v1|400x300|q80`
+  // Never touch the original file just to locate its thumbnail cache entry.
+  // Using a stable key here keeps gallery browsing fast even when the source
+  // library lives on a slow HDD or network share.
+  const material = `${cacheKey}|thumb-v2|400x300|q80`
   const hash = createHash('sha1').update(material).digest('hex')
-  return join(cfg.directory, hash.slice(0, 2), `${hash}.jpg`)
+  const resolved = join(cfg.directory, hash.slice(0, 2), `${hash}.jpg`)
+  thumbPathCacheSet(cacheKey, resolved)
+  return resolved
 }
 
-async function readThumbnailFromDisk(imagePath: string): Promise<string | null> {
-  try {
-    const cachePath = await thumbnailCacheFilePath(imagePath)
-    const buf = await readFile(cachePath)
-    const now = new Date()
-    void utimes(cachePath, now, now)
-    return `data:image/jpeg;base64,${buf.toString('base64')}`
-  } catch (err) {
-    if (isErrnoCode(err, 'ENOENT') || isErrnoCode(err, 'ENOTDIR')) {
+async function readThumbnailFromDisk(imagePath: string, imageId?: number): Promise<string | null> {
+  const hasPath = imagePath.length > 0
+  const candidates: Array<{ path: Promise<string>; migrate: boolean }> = [
+    { path: thumbnailCacheFilePath(imagePath, imageId), migrate: false },
+  ]
+  if (hasPath && imageId !== undefined) {
+    candidates.push({ path: thumbnailCacheFilePath(imagePath), migrate: true })
+  }
+  if (hasPath) {
+    candidates.push({ path: legacyThumbnailCacheFilePath(imagePath), migrate: true })
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const dataUrl = await readThumbDataUrl(await candidate.path)
+      if (candidate.migrate && dataUrl) {
+        const b64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '')
+        void writeThumbnailToDisk(imagePath, b64, imageId)
+      }
+      return dataUrl
+    } catch (err) {
+      if (isErrnoCode(err, 'ENOENT') || isErrnoCode(err, 'ENOTDIR')) {
+        continue
+      }
+      const label = candidate.migrate ? 'fallback' : 'primary'
+      console.warn(`Disk thumbnail cache ${label} read failed for`, imagePath, err)
       return null
     }
-    console.warn('Disk thumbnail cache read failed for', imagePath, err)
-    return null
   }
+  return null
 }
 
-async function writeThumbnailToDisk(imagePath: string, base64Jpeg: string): Promise<void> {
+async function writeThumbnailToDisk(imagePath: string, base64Jpeg: string, imageId?: number): Promise<void> {
   try {
-    const cachePath = await thumbnailCacheFilePath(imagePath)
-    await mkdir(dirname(cachePath), { recursive: true })
-    await writeFile(cachePath, Buffer.from(base64Jpeg, 'base64'))
+    const jpegBytes = Buffer.from(base64Jpeg, 'base64')
+    const cachePaths = new Set<string>([await thumbnailCacheFilePath(imagePath, imageId)])
+    if (imageId !== undefined && imagePath.length > 0) {
+      cachePaths.add(await thumbnailCacheFilePath(imagePath))
+    }
+    for (const cachePath of cachePaths) {
+      await writeThumbBytesToPath(cachePath, jpegBytes)
+    }
     writesSinceCleanup += 1
     if (writesSinceCleanup >= CLEANUP_WRITE_INTERVAL) {
       writesSinceCleanup = 0
@@ -294,6 +379,13 @@ function thumbnailItemKey(item: ThumbnailBatchItem): string | null {
   return null
 }
 
+function thumbnailMemoryKeys(item: ThumbnailBatchItem): string[] {
+  const keys: string[] = []
+  if (item.file_path && item.file_path.length > 0) keys.push(item.file_path)
+  if (item.image_id != null) keys.push(String(item.image_id))
+  return keys
+}
+
 /**
  * Batch-load thumbnails for multiple images in a single RPC call.
  * When image_id is provided, the backend can use the pre-decoded 1024px
@@ -314,13 +406,17 @@ export async function getThumbnailsBatch(
 
     requestedByKey.set(itemKey, item)
 
-    if (item.file_path && item.file_path.length > 0) {
-      const memCached = thumbCacheGet(item.file_path)
+    for (const memoryKey of thumbnailMemoryKeys(item)) {
+      const memCached = thumbCacheGet(memoryKey)
       if (memCached !== undefined) {
+        for (const promoteKey of thumbnailMemoryKeys(item)) {
+          thumbCacheSet(promoteKey, memCached)
+        }
         result[itemKey] = memCached
-        continue
+        break
       }
     }
+    if (result[itemKey]) continue
     needDisk.push(item)
   }
 
@@ -329,18 +425,17 @@ export async function getThumbnailsBatch(
   if (needDisk.length > 0) {
     const diskResults = await Promise.all(
       needDisk.map(async (item) => {
-        if (item.file_path && item.file_path.length > 0) {
-          return readThumbnailFromDisk(item.file_path)
-        }
-        return null
+        return readThumbnailFromDisk(item.file_path ?? '', item.image_id)
       })
     )
     for (let i = 0; i < needDisk.length; i++) {
       const item = needDisk[i]
       const itemKey = thumbnailItemKey(item)!
       const diskCached = diskResults[i]
-      if (diskCached && item.file_path) {
-        thumbCacheSet(item.file_path, diskCached)
+      if (diskCached) {
+        for (const memoryKey of thumbnailMemoryKeys(item)) {
+          thumbCacheSet(memoryKey, diskCached)
+        }
         result[itemKey] = diskCached
       } else {
         uncached.push(item)
@@ -357,10 +452,12 @@ export async function getThumbnailsBatch(
 
     for (const [key, dataUrl] of Object.entries(resp.thumbnails)) {
       const original = requestedByKey.get(key)
-      if (original?.file_path && original.file_path.length > 0) {
-        thumbCacheSet(original.file_path, dataUrl)
+      if (original) {
+        for (const memoryKey of thumbnailMemoryKeys(original)) {
+          thumbCacheSet(memoryKey, dataUrl)
+        }
         const b64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '')
-        void writeThumbnailToDisk(original.file_path, b64)
+        void writeThumbnailToDisk(original.file_path ?? '', b64, original.image_id)
       }
       result[key] = dataUrl
     }

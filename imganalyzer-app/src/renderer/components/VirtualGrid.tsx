@@ -22,7 +22,7 @@ const CELL_MAX = 220  // maximum cell width — drives column count
 const OVERSCAN_ROWS = 3  // extra rows rendered above/below viewport
 const BATCH_DEBOUNCE_MS = 60  // debounce batch prefetch on scroll
 const CHUNK_SIZE = 8  // items per batch RPC call for progressive loading
-const FALLBACK_THUMB_DELAY_MS = 1200
+const FALLBACK_THUMB_DELAY_MS = 350
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -45,31 +45,50 @@ interface GridCellProps {
 
 const GridCell = memo(function GridCell({ item, selected, onClick, prefetchedSrc }: GridCellProps) {
   const [src, setSrc] = useState<string>(prefetchedSrc ?? '')
-  const loading = !src
+  const [loadFailed, setLoadFailed] = useState(false)
+  const loading = !src && !loadFailed
+
+  useEffect(() => {
+    setSrc(prefetchedSrc ?? '')
+    setLoadFailed(false)
+  }, [item.image_id, prefetchedSrc])
 
   // Pick up prefetchedSrc when it arrives after mount
   useEffect(() => {
-    if (prefetchedSrc && !src) setSrc(prefetchedSrc)
+    if (prefetchedSrc && !src) {
+      setSrc(prefetchedSrc)
+      setLoadFailed(false)
+    }
   }, [prefetchedSrc, src])
 
   // Rescue path: if the batch request stalls, fall back to an individual
-  // thumbnail request after a short delay so cells don't spin forever.
+  // single-item batch request so cells don't spin forever and still benefit
+  // from the faster image_id cache path.
   useEffect(() => {
     if (prefetchedSrc || src) return
     let cancelled = false
     const timer = window.setTimeout(() => {
-      void window.api.getThumbnail(item.file_path).then((dataUrl) => {
-        if (!cancelled && dataUrl) setSrc(dataUrl)
-      }).catch(() => {
-        // Leave the placeholder in place if the fallback also fails.
-      })
+      void window.api.getThumbnailsBatch([{ file_path: item.file_path, image_id: item.image_id }])
+        .then((result) => {
+          if (cancelled) return
+          const dataUrl = result[item.file_path] ?? result[String(item.image_id)] ?? ''
+          if (dataUrl) {
+            setSrc(dataUrl)
+            setLoadFailed(false)
+          } else {
+            setLoadFailed(true)
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setLoadFailed(true)
+        })
     }, FALLBACK_THUMB_DELAY_MS)
 
     return () => {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [item.file_path, prefetchedSrc, src])
+  }, [item.file_path, item.image_id, prefetchedSrc, src])
 
   // Top-level badge uses IAA (Aesthetic Appeal)
   const scoreColor = item.perception_iaa !== null
@@ -96,6 +115,12 @@ const GridCell = memo(function GridCell({ item, selected, onClick, prefetchedSrc
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="w-5 h-5 border-2 border-neutral-700 border-t-neutral-400 rounded-full animate-spin" />
+        </div>
+      )}
+
+      {loadFailed && !src && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-neutral-500">
+          <span className="text-[10px] uppercase tracking-wide">{ext || 'IMG'}</span>
         </div>
       )}
 
@@ -160,6 +185,7 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(600)
   const endReachedLatchRef = useRef(false)
+  const mountedRef = useRef(true)
 
   // Shared thumbnail cache: image_id → data URL
   const [thumbMap, setThumbMap] = useState<Record<number, string>>({})
@@ -168,6 +194,12 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
   // Ref mirror of thumbMap to avoid dependency cycle in batch effect
   const thumbMapRef = useRef<Record<number, string>>({})
   thumbMapRef.current = thumbMap
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   // ── Measure container ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -212,7 +244,6 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
     if (items.length === 0 || cols <= 0) return
 
     if (batchTimerRef.current) clearTimeout(batchTimerRef.current)
-    let cancelled = false
 
     batchTimerRef.current = setTimeout(() => {
       const startIdx = firstVisibleRow * cols
@@ -238,14 +269,13 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
 
       for (const chunk of chunks) {
         window.api.getThumbnailsBatch(chunk).then((result) => {
-          if (cancelled) return
           const newEntries: Record<number, string> = {}
           for (const item of chunk) {
             const url = result[item.file_path] ?? result[String(item.image_id)]
             if (url) newEntries[item.image_id] = url
             pendingBatchRef.current.delete(item.image_id)
           }
-          if (Object.keys(newEntries).length > 0) {
+          if (mountedRef.current && Object.keys(newEntries).length > 0) {
             setThumbMap((prev) => ({ ...prev, ...newEntries }))
           }
         }).catch(() => {
@@ -255,7 +285,6 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
     }, BATCH_DEBOUNCE_MS)
 
     return () => {
-      cancelled = true
       if (batchTimerRef.current) clearTimeout(batchTimerRef.current)
     }
   }, [firstVisibleRow, lastVisibleRow, cols, items])

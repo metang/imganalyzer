@@ -81,11 +81,17 @@ import sys
 import threading
 import time
 import traceback
+import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
 from imganalyzer.readers.raw import _suppress_c_stderr
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"urllib3 \([^)]+\) or chardet \([^)]+\)/charset_normalizer \([^)]+\) doesn't match a supported version!",
+)
 
 # Redirect stdout early so print() from library imports goes to stderr
 _real_stdout = sys.stdout

@@ -9,6 +9,7 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { rpc, ensureServerRunning } from './python-rpc'
 import { planSearchWithCopilot } from './search-planner'
+import { registerApprovedPathsFromPayload } from './path-validation'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -215,7 +216,8 @@ export function registerSearchHandlers(): void {
         }
       }) as { results: SearchResult[]; total: number | null; hasMore: boolean }
 
-        return { results: result.results, total: result.total, hasMore: result.hasMore }
+      registerApprovedPathsFromPayload(result)
+      return { results: result.results, total: result.total, hasMore: result.hasMore }
     } catch (err) {
       return { results: [], total: 0, hasMore: false, error: String(err) }
     }
@@ -229,6 +231,7 @@ export function registerSearchHandlers(): void {
     try {
       await ensureServerRunning()
       const result = await rpc.call('search/resolveFaceQuery', { query }) as SearchFaceResolution
+      registerApprovedPathsFromPayload(result)
       return result
     } catch (err) {
       return {
@@ -244,7 +247,9 @@ export function registerSearchHandlers(): void {
   ipcMain.handle('image:details', async (_evt, params: { image_id?: number; file_path?: string }): Promise<{ result: SearchResult | null; error?: string }> => {
     try {
       await ensureServerRunning()
-      return await rpc.call('image/details', params) as { result: SearchResult | null; error?: string }
+      const result = await rpc.call('image/details', params) as { result: SearchResult | null; error?: string }
+      registerApprovedPathsFromPayload(result)
+      return result
     } catch (err) {
       return { result: null, error: String(err) }
     }

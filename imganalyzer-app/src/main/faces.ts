@@ -12,6 +12,7 @@ import { mkdir, readFile, utimes, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { rpc, ensureServerRunning } from './python-rpc'
 import { getThumbnailCacheConfig, triggerThumbnailCacheCleanup } from './images'
+import { registerApprovedPathsFromPayload } from './path-validation'
 
 const MAX_FACE_CROP_CACHE = 2000
 const FACE_CROP_CACHE_WRITE_INTERVAL = 64
@@ -262,6 +263,7 @@ export function registerFaceHandlers(): void {
         const result = await rpc.call('faces/images', { name, limit: limit ?? 100 }) as {
           images: FaceImage[]
         }
+        registerApprovedPathsFromPayload(result)
         return { images: result.images }
       } catch (err) {
         return { images: [], error: String(err) }
@@ -336,6 +338,7 @@ export function registerFaceHandlers(): void {
           identity_name: identityName,
           limit: limit ?? 50,
         }) as { occurrences: FaceOccurrence[] }
+        registerApprovedPathsFromPayload(result)
         return { occurrences: result.occurrences }
       } catch (err) {
         return { occurrences: [], error: String(err) }
@@ -658,6 +661,7 @@ export function registerFaceHandlers(): void {
           limit: limit ?? 100,
           min_similarity: minSimilarity,
         }) as { images: PersonSimilarImage[] }
+        registerApprovedPathsFromPayload(result)
         return { images: result.images }
       } catch (err) {
         return { images: [], error: String(err) }
