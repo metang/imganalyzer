@@ -2,7 +2,17 @@ import { useState, useEffect } from 'react'
 import type { ImageFile } from '../global'
 
 const THUMB_BATCH_SIZE = 16
+const THUMB_CACHE_MAX = 1000
 const thumbCache = new Map<string, string>()
+
+function thumbCacheSet(key: string, value: string) {
+  thumbCache.delete(key) // move to end if exists
+  thumbCache.set(key, value)
+  if (thumbCache.size > THUMB_CACHE_MAX) {
+    const oldest = thumbCache.keys().next().value
+    if (oldest !== undefined) thumbCache.delete(oldest)
+  }
+}
 const pendingThumbs = new Set<string>()
 const pendingCallbacks = new Map<string, Array<(src: string | null) => void>>()
 let thumbBatchTimer: ReturnType<typeof setTimeout> | null = null
@@ -35,7 +45,7 @@ function requestThumbnail(
       ).then((result) => {
         for (const filePath of chunk) {
           const src = result[filePath] ?? null
-          if (src) thumbCache.set(filePath, src)
+          if (src) thumbCacheSet(filePath, src)
           const chunkCallbacks = pendingCallbacks.get(filePath) ?? []
           pendingCallbacks.delete(filePath)
           for (const cb of chunkCallbacks) cb(src)

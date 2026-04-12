@@ -202,7 +202,7 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
 
   const loadMore = useCallback(async () => {
     if (loading || !hasMore || !nextCursor) return
-    const token = chunkRequestTokenRef.current
+    const token = ++chunkRequestTokenRef.current
     setLoading(true)
     try {
       const resp = await window.api.galleryListImagesChunk({

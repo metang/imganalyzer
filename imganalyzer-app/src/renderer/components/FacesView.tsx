@@ -912,6 +912,13 @@ export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesVi
   }, [loadData])
 
   useEffect(() => {
+    return () => {
+      if (batchTimer) clearTimeout(batchTimer)
+      if (imageThumbBatchTimer) clearTimeout(imageThumbBatchTimer)
+    }
+  }, [])
+
+  useEffect(() => {
     setSelectedSuggestedClusterIds([])
     setExpandedKey(null)
     setInspectorCluster(null)
