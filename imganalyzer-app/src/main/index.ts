@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } from 'electron'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { listImages, getThumbnail, getThumbnailsBatch, getFullImage, getCachedImage, getThumbnailCacheConfig, setThumbnailCacheConfig } from './images'
@@ -16,6 +16,7 @@ import { registerGeoHandlers } from './geo'
 import { applyCoordinatorSettings, getCoordinatorStatus, startCoordinator, startCoordinatorOnLaunch, stopCoordinator } from './coordinator'
 import type { AppSettingsInput } from './settings'
 import { getAppSettings, getAppSettingsBundle, updateAppSettings } from './settings'
+import { registerApprovedDirectory, assertPathAllowed, validateFilePath } from './path-validation'
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -47,11 +48,23 @@ function createWindow(): BrowserWindow {
 }
 
 app.whenReady().then(async () => {
-  // Register a safe custom protocol for serving local files (e.g. images)
-  // without needing webSecurity:false. Usage: local-file:///C:/path/to/file.jpg
+  // ─── Seed approved directories for path validation ────────────────────────
+  registerApprovedDirectory(app.getPath('userData'))
+  try {
+    const settings = await getAppSettings()
+    registerApprovedDirectory(settings.thumbnailCache.directory)
+  } catch { /* settings not yet available — cache dir registered on first use */ }
+
+  // Register a safe custom protocol for serving local files (e.g. images).
+  // SEC-3: validate that the resolved path is inside an approved directory.
   protocol.handle('local-file', (request) => {
     const filePath = decodeURIComponent(request.url.replace('local-file://', ''))
-    return net.fetch(`file://${filePath}`)
+    const resolved = resolve(filePath)
+    if (!validateFilePath(resolved)) {
+      console.warn(`[SEC] local-file:// blocked for: ${resolved}`)
+      return new Response('Forbidden', { status: 403 })
+    }
+    return net.fetch(`file://${resolved}`)
   })
 
   const win = createWindow()
@@ -102,7 +115,10 @@ ipcMain.handle('dialog:openFolder', async () => {
     properties: ['openDirectory'],
     title: 'Select image folder'
   })
-  return result.canceled ? null : result.filePaths[0]
+  if (result.canceled) return null
+  const dir = result.filePaths[0]
+  registerApprovedDirectory(dir)
+  return dir
 })
 
 ipcMain.handle('dialog:saveStoryExport', async (_evt, defaultPath?: string) => {
@@ -116,15 +132,20 @@ ipcMain.handle('dialog:saveStoryExport', async (_evt, defaultPath?: string) => {
 
 // ─── IPC: List images in folder ───────────────────────────────────────────────
 ipcMain.handle('fs:listImages', async (_evt, folderPath: string) => {
+  assertPathAllowed(folderPath, 'fs:listImages')
   return listImages(folderPath)
 })
 
 // ─── IPC: Get thumbnail ───────────────────────────────────────────────────────
 ipcMain.handle('fs:getThumbnail', async (_evt, imagePath: string) => {
+  assertPathAllowed(imagePath, 'fs:getThumbnail')
   return getThumbnail(imagePath)
 })
 
 ipcMain.handle('fs:getThumbnailsBatch', async (_evt, items: ThumbnailBatchItem[]) => {
+  for (const item of items) {
+    if (item.file_path) assertPathAllowed(item.file_path, 'fs:getThumbnailsBatch')
+  }
   return getThumbnailsBatch(items)
 })
 
@@ -134,7 +155,9 @@ ipcMain.handle('cache:thumbnail:getConfig', async () => {
 })
 
 ipcMain.handle('cache:thumbnail:setConfig', async (_evt, config: { directory?: string; maxGB?: number }) => {
-  return setThumbnailCacheConfig(config)
+  const result = await setThumbnailCacheConfig(config)
+  if (result.directory) registerApprovedDirectory(result.directory)
+  return result
 })
 
 ipcMain.handle('settings:get', async () => {
@@ -167,21 +190,25 @@ ipcMain.handle('settings:stopCoordinator', async () => {
 
 // ─── IPC: Get full-resolution image for lightbox ──────────────────────────────
 ipcMain.handle('fs:getFullImage', async (_evt, imagePath: string) => {
+  assertPathAllowed(imagePath, 'fs:getFullImage')
   return getFullImage(imagePath)
 })
 
 // ─── IPC: Get cached 1024px decoded image (tier 2 lightbox) ──────────────────
 ipcMain.handle('fs:getCachedImage', async (_evt, imagePath: string) => {
+  assertPathAllowed(imagePath, 'fs:getCachedImage')
   return getCachedImage(imagePath)
 })
 
 // ─── IPC: Open file in default system viewer ─────────────────────────────────
 ipcMain.handle('shell:openPath', async (_evt, filePath: string) => {
+  assertPathAllowed(filePath, 'shell:openPath')
   return shell.openPath(filePath)
 })
 
 // ─── IPC: Read XMP sidecar ───────────────────────────────────────────────────
 ipcMain.handle('fs:readXmp', async (_evt, imagePath: string) => {
+  assertPathAllowed(imagePath, 'fs:readXmp')
   const xmpPath = imagePath.replace(/\.[^.]+$/, '.xmp')
   if (!existsSync(xmpPath)) return null
   try {
