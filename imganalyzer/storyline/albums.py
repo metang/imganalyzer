@@ -62,18 +62,11 @@ def create_album(
     )
     conn.commit()
 
-    # Select cover image (first image by date, or highest quality)
-    cover_row = conn.execute(
-        "SELECT ai.image_id FROM album_items ai "
-        "LEFT JOIN search_features sf ON sf.image_id = ai.image_id "
-        "WHERE ai.album_id = ? "
-        "ORDER BY sf.perception_iaa DESC NULLS LAST LIMIT 1",
-        [album_id],
-    ).fetchone()
-    if cover_row:
+    cover_image_id = _select_album_cover_image_id(conn, album_id)
+    if cover_image_id is not None:
         conn.execute(
             "UPDATE smart_albums SET cover_image_id = ? WHERE id = ?",
-            [cover_row[0], album_id],
+            [cover_image_id, album_id],
         )
         conn.commit()
 
@@ -178,9 +171,12 @@ def refresh_membership(
             "INSERT INTO album_items (album_id, image_id) VALUES (?, ?)",
             [(album_id, iid) for iid in image_ids],
         )
+    cover_image_id = _select_album_cover_image_id(conn, album_id)
     conn.execute(
-        "UPDATE smart_albums SET item_count = ?, updated_at = datetime('now') WHERE id = ?",
-        [len(image_ids), album_id],
+        "UPDATE smart_albums "
+        "SET item_count = ?, cover_image_id = ?, updated_at = datetime('now') "
+        "WHERE id = ?",
+        [len(image_ids), cover_image_id, album_id],
     )
     conn.commit()
     return len(image_ids)
@@ -214,6 +210,21 @@ def check_image_against_rules(
     )
     row = conn.execute(wrapped_sql, [*params, image_id]).fetchone()
     return row is not None
+
+
+def _select_album_cover_image_id(
+    conn: sqlite3.Connection,
+    album_id: str,
+) -> int | None:
+    """Pick the strongest candidate image to represent the album."""
+    row = conn.execute(
+        "SELECT ai.image_id FROM album_items ai "
+        "LEFT JOIN search_features sf ON sf.image_id = ai.image_id "
+        "WHERE ai.album_id = ? "
+        "ORDER BY sf.perception_iaa DESC NULLS LAST, ai.image_id DESC LIMIT 1",
+        [album_id],
+    ).fetchone()
+    return int(row[0]) if row is not None else None
 
 
 def _row_to_album(row: sqlite3.Row) -> SmartAlbum:

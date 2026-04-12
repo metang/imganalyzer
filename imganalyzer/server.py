@@ -3952,7 +3952,17 @@ def _handle_faces_run_clustering(req_id: int | str, params: dict) -> None:
         try:
             conn = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
             repo = Repository(conn)
-            num_clusters = repo.cluster_faces(threshold=threshold)
+
+            def _progress(phase: str, fraction: float, n_clusters: int) -> None:
+                _send_notification("faces/clustering-progress", {
+                    "phase": phase,
+                    "fraction": fraction,
+                    "numClusters": n_clusters,
+                })
+
+            num_clusters = repo.cluster_faces(
+                threshold=threshold, progress_cb=_progress,
+            )
             conn.close()
             _send_notification("faces/clustering-done", {"num_clusters": num_clusters})
         except Exception as exc:

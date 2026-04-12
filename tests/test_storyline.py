@@ -436,6 +436,39 @@ class TestAlbumCRUD:
         assert count == 4
         assert len(get_album_image_ids(conn, album.id)) == 4
 
+    def test_refresh_membership_updates_cover_image(self, tmp_path):
+        from imganalyzer.storyline.albums import (
+            create_album,
+            get_album,
+            refresh_membership,
+        )
+
+        conn = _make_test_db(tmp_path)
+        pid = _create_person(conn, "Alice")
+        for image_id, score in [(1, 0.55), (2, 0.60)]:
+            _insert_image(conn, image_id)
+            _insert_search_features(conn, image_id, perception_iaa=score)
+            _insert_face_occurrence(conn, image_id, person_id=pid)
+        conn.commit()
+
+        rules = {"match": "all", "rules": [
+            {"type": "person", "person_ids": [pid]}
+        ]}
+        album = create_album(conn, "Alice", rules)
+        assert album.cover_image_id == 2
+
+        _insert_image(conn, 3)
+        _insert_search_features(conn, 3, perception_iaa=0.98)
+        _insert_face_occurrence(conn, 3, person_id=pid)
+        conn.commit()
+
+        count = refresh_membership(conn, album.id)
+        refreshed = get_album(conn, album.id)
+
+        assert count == 3
+        assert refreshed is not None
+        assert refreshed.cover_image_id == 3
+
     def test_check_image_against_rules(self, tmp_path):
         from imganalyzer.storyline.albums import check_image_against_rules
 

@@ -724,6 +724,7 @@ declare global {
       getFaceCropBatch(ids: number[]): Promise<{ thumbnails: Record<string, string>; error?: string }>
       runFaceClustering(threshold?: number): Promise<{ started: boolean; error?: string }>
       onClusteringDone(cb: (result: { num_clusters?: number; error?: string }) => void): () => void
+      onClusteringProgress(cb: (progress: { phase: string; fraction: number; numClusters: number }) => void): () => void
       rebuildFaces(): Promise<{ enqueued: number; error?: string }>
 
       // Person (cross-age identity grouping)

@@ -678,6 +678,9 @@ export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesVi
 
   // Clustering state
   const [clustering, setClustering] = useState(false)
+  const [clusterProgress, setClusterProgress] = useState<{
+    phase: string; fraction: number; numClusters: number
+  } | null>(null)
 
   // Lightbox state (in-app image viewer)
   const [lightboxPath, setLightboxPath] = useState<string | null>(null)
@@ -937,9 +940,18 @@ export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesVi
         void loadData()
       }
       setClustering(false)
+      setClusterProgress(null)
     })
     return unsub
   }, [loadData])
+
+  // Listen for clustering progress
+  useEffect(() => {
+    const unsub = window.api.onClusteringProgress((progress) => {
+      setClusterProgress(progress)
+    })
+    return unsub
+  }, [])
 
   const handleCluster = useCallback(async () => {
     setClustering(true)
@@ -2364,22 +2376,43 @@ export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesVi
         <div className="flex items-center gap-2">
           {/* Cluster button — only if we have occurrences */}
           {hasOccurrences && (
-            <button
-              onClick={handleCluster}
-              disabled={clustering}
-              className="px-3 py-1 text-xs rounded-md bg-blue-900/50 text-blue-300 hover:bg-blue-800/60
-                         disabled:opacity-50 transition-colors border border-blue-700/40"
-              title="Group similar faces by embedding similarity"
-            >
-              {clustering ? (
-                <span className="flex items-center gap-1.5">
-                  <span className="w-3 h-3 border border-blue-600 border-t-blue-300 rounded-full animate-spin" />
-                  Clustering...
-                </span>
-              ) : (
-                'Cluster Faces'
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleCluster}
+                disabled={clustering}
+                className="px-3 py-1 text-xs rounded-md bg-blue-900/50 text-blue-300 hover:bg-blue-800/60
+                           disabled:opacity-50 transition-colors border border-blue-700/40"
+                title="Group similar faces by embedding similarity"
+              >
+                {clustering ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-3 h-3 border border-blue-600 border-t-blue-300 rounded-full animate-spin" />
+                    Clustering...
+                  </span>
+                ) : (
+                  'Cluster Faces'
+                )}
+              </button>
+              {clustering && clusterProgress && (
+                <div className="flex items-center gap-2 min-w-[180px]">
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
+                    <div
+                      className="h-full rounded-full bg-blue-600 transition-all duration-300"
+                      style={{ width: `${Math.round(clusterProgress.fraction * 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-neutral-500 whitespace-nowrap">
+                    {clusterProgress.phase === 'loading'
+                      ? 'Loading…'
+                      : clusterProgress.phase === 'saving'
+                        ? 'Saving…'
+                        : `${Math.round(clusterProgress.fraction * 100)}%`}
+                    {clusterProgress.numClusters > 0 &&
+                      ` · ${clusterProgress.numClusters} groups`}
+                  </span>
+                </div>
               )}
-            </button>
+            </div>
           )}
           <button
             onClick={loadData}

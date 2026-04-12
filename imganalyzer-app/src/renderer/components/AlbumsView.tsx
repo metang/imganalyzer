@@ -1215,6 +1215,9 @@ type CollageLayout = {
   slots: React.CSSProperties[]
 }
 
+const MAX_VISIBLE_MOMENT_IMAGES = 20
+const EXPANDED_MOMENT_MIN_WIDTH = 380
+
 /** Pick a deterministic layout variant from moment id to avoid re-shuffling on re-render. */
 function pickVariant(momentId: string | number, count: number): number {
   if (typeof momentId === 'number') return Math.abs(momentId) % count
@@ -1265,7 +1268,7 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
       // Big left, 2 stacked right
       return {
         columns: '3fr 2fr',
-        rows: '110px 110px',
+        rows: '125px 125px',
         slots: [
           { gridColumn: '1', gridRow: '1 / 3' },
           { gridColumn: '2', gridRow: '1' },
@@ -1277,7 +1280,7 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
       // 2 stacked left, big right
       return {
         columns: '2fr 3fr',
-        rows: '110px 110px',
+        rows: '125px 125px',
         slots: [
           { gridColumn: '1', gridRow: '1' },
           { gridColumn: '1', gridRow: '2' },
@@ -1288,7 +1291,7 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
     // Top wide, 2 bottom
     return {
       columns: '1fr 1fr',
-      rows: '140px 100px',
+      rows: '160px 115px',
       slots: [
         { gridColumn: '1 / 3', gridRow: '1' },
         { gridColumn: '1', gridRow: '2' },
@@ -1303,7 +1306,7 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
       // Big hero top-left spanning 2 rows, 2 small right, 1 bottom-left
       return {
         columns: '3fr 2fr',
-        rows: '100px 100px 80px',
+        rows: '120px 120px 96px',
         slots: [
           { gridColumn: '1', gridRow: '1 / 3' },
           { gridColumn: '2', gridRow: '1' },
@@ -1316,7 +1319,7 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
       // L-shape: hero top spanning full width, 3 across bottom
       return {
         columns: '1fr 1fr 1fr',
-        rows: '150px 90px',
+        rows: '170px 105px',
         slots: [
           { gridColumn: '1 / 4', gridRow: '1' },
           { gridColumn: '1', gridRow: '2' },
@@ -1328,7 +1331,7 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
     // 2×2 with uneven sizes
     return {
       columns: '2fr 3fr',
-      rows: '130px 110px',
+      rows: '150px 125px',
       slots: [
         { gridColumn: '1', gridRow: '1' },
         { gridColumn: '2', gridRow: '1' },
@@ -1344,7 +1347,7 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
       // Hero tall left, 4 in 2×2 grid right
       return {
         columns: '3fr 2fr 2fr',
-        rows: '110px 110px',
+        rows: '128px 128px',
         slots: [
           { gridColumn: '1', gridRow: '1 / 3' },
           { gridColumn: '2', gridRow: '1' },
@@ -1357,7 +1360,7 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
     // Top row: 2 images, bottom row: 3 images
     return {
       columns: '1fr 1fr 1fr',
-      rows: '130px 100px',
+      rows: '150px 118px',
       slots: [
         { gridColumn: '1 / 3', gridRow: '1' },
         { gridColumn: '3', gridRow: '1' },
@@ -1374,7 +1377,7 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
       // Hero left 2 rows, 2×2 right, 2 across bottom
       return {
         columns: '3fr 2fr 2fr',
-        rows: '95px 95px 80px',
+        rows: '115px 115px 96px',
         slots: [
           { gridColumn: '1', gridRow: '1 / 3' },
           { gridColumn: '2', gridRow: '1' },
@@ -1388,7 +1391,7 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
     // 3 columns, top 2 with big left, bottom row 3 equal
     return {
       columns: '2fr 1fr 1fr',
-      rows: '130px 100px',
+      rows: '150px 118px',
       slots: [
         { gridColumn: '1', gridRow: '1 / 3' },
         { gridColumn: '2', gridRow: '1' },
@@ -1400,19 +1403,41 @@ function getLayout(count: number, momentId: string | number): CollageLayout {
     }
   }
 
-  // 7+ images: show first 7 in a varied layout, +N badge on last cell
+  // 7+ images: keep the hero prominent, keep thumbnails larger, and avoid strip-like rows.
+  const rows = count <= 9
+    ? '125px 125px 100px'
+    : count <= 13
+      ? '125px 125px 100px 100px'
+      : count <= 17
+        ? '125px 125px 100px 100px 100px'
+        : '125px 125px 100px 100px 100px 100px'
+
   return {
-    columns: '2fr 1fr 1fr 1fr',
-    rows: '110px 90px 90px',
+    columns: '1.45fr 1.45fr 1fr 1fr',
+    rows,
     slots: [
-      { gridColumn: '1', gridRow: '1 / 3' },    // hero tall left
-      { gridColumn: '2', gridRow: '1' },
-      { gridColumn: '3 / 5', gridRow: '1' },     // wide top-right
-      { gridColumn: '2', gridRow: '2' },
+      { gridColumn: '1 / 3', gridRow: '1 / 3' },
+      { gridColumn: '3', gridRow: '1' },
+      { gridColumn: '4', gridRow: '1' },
       { gridColumn: '3', gridRow: '2' },
       { gridColumn: '4', gridRow: '2' },
-      { gridColumn: '1 / 5', gridRow: '3' },     // panoramic bottom strip
-    ],
+      { gridColumn: '1', gridRow: '3' },
+      { gridColumn: '2', gridRow: '3' },
+      { gridColumn: '3', gridRow: '3' },
+      { gridColumn: '4', gridRow: '3' },
+      { gridColumn: '1', gridRow: '4' },
+      { gridColumn: '2', gridRow: '4' },
+      { gridColumn: '3', gridRow: '4' },
+      { gridColumn: '4', gridRow: '4' },
+      { gridColumn: '1', gridRow: '5' },
+      { gridColumn: '2', gridRow: '5' },
+      { gridColumn: '3', gridRow: '5' },
+      { gridColumn: '4', gridRow: '5' },
+      { gridColumn: '1', gridRow: '6' },
+      { gridColumn: '2', gridRow: '6' },
+      { gridColumn: '3', gridRow: '6' },
+      { gridColumn: '4', gridRow: '6' },
+    ].slice(0, count),
   }
 }
 
@@ -1433,7 +1458,7 @@ function MomentCollage({
   // Put hero first, then the rest in original order
   const ordered = [hero, ...images.filter((img) => img.image_id !== hero.image_id)]
 
-  const displayCount = Math.min(ordered.length, 7)
+  const displayCount = Math.min(ordered.length, MAX_VISIBLE_MOMENT_IMAGES)
   const overflow = ordered.length - displayCount
   const layout = getLayout(displayCount, momentId)
   const shown = ordered.slice(0, displayCount)
@@ -1549,8 +1574,8 @@ function ExpandedChapterDetail({
           className="mt-2"
           style={{
             display: 'grid',
-            gridTemplateColumns: `repeat(auto-fill, minmax(min(${Math.max(300, colWidth)}px, 100%), 1fr))`,
-            gap: '16px',
+            gridTemplateColumns: `repeat(auto-fill, minmax(min(${Math.max(EXPANDED_MOMENT_MIN_WIDTH, colWidth + 40)}px, 100%), 1fr))`,
+            gap: '18px',
           }}
         >
           {moments.map((moment) => (
@@ -2160,7 +2185,7 @@ function StoryTimeline({
               onClick={onRefresh}
               disabled={refreshing || generating}
               className="px-3 py-1.5 text-xs font-medium rounded-full bg-neutral-800 text-neutral-300 hover:bg-neutral-700 disabled:opacity-40 transition-colors"
-              title="Refresh album data (picks up newly processed images)"
+              title="Refresh album membership and story with newly processed images"
             >
               {refreshing ? (
                 <span className="flex items-center gap-1.5">
@@ -2185,7 +2210,7 @@ function StoryTimeline({
             </button>
             <button
               onClick={onGenerateStory}
-              disabled={generating}
+              disabled={generating || refreshing}
               className="px-3 py-1.5 text-xs font-medium rounded-full bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 transition-colors"
             >
               {generating ? 'Generating…' : chapters.length > 0 ? '↻ Regenerate' : '▶ Generate Story'}
@@ -2343,17 +2368,33 @@ export function AlbumsView() {
 
   const handleRefresh = useCallback(async () => {
     if (!selectedId) return
+    const currentAlbum = albums.find((album) => album.id === selectedId)
+    const previousCount = currentAlbum?.item_count ?? 0
     setRefreshing(true)
+    setStatus(null)
     try {
+      const { item_count } = await window.api.albumsRefresh(selectedId)
+      const generation = await window.api.albumsStoryGenerate({ album_id: selectedId }) as StoryGenerateResult
+      setEvalReport(generation.evaluation)
       await loadAlbums()
       await loadStory(selectedId)
-      showStatus({ tone: 'success', text: 'Album data refreshed.' })
-    } catch {
-      showStatus({ tone: 'error', text: 'Failed to refresh.' })
+      const added = item_count - previousCount
+      showStatus({
+        tone: 'success',
+        text:
+          added > 0
+            ? `Album refreshed. Added ${added} new photo${added === 1 ? '' : 's'}.`
+            : item_count === 0
+              ? 'Album refreshed. No matching photos right now.'
+              : 'Album refreshed. No new matching photos.',
+      })
+    } catch (err) {
+      console.error('Failed to refresh album:', err)
+      showStatus({ tone: 'error', text: 'Failed to refresh album data.' })
     } finally {
       setRefreshing(false)
     }
-  }, [selectedId, loadAlbums, loadStory])
+  }, [selectedId, albums, loadAlbums, loadStory, showStatus])
 
   const handleGenerate = useCallback(async () => {
     if (!selectedId) return

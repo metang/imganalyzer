@@ -1019,6 +1019,10 @@ function setupNotificationListener(): void {
       case 'faces/clustering-done':
         mainWin?.webContents?.send('faces:clustering-done', p)
         break
+
+      case 'faces/clustering-progress':
+        mainWin?.webContents?.send('faces:clustering-progress', p)
+        break
     }
   })
 }

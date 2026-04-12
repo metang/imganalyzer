@@ -2435,12 +2435,19 @@ class Repository:
             [thumbnail, occurrence_id],
         )
 
-    def cluster_faces(self, threshold: float = 0.55) -> int:
+    def cluster_faces(
+        self,
+        threshold: float = 0.55,
+        progress_cb: Callable[[str, float, int], None] | None = None,
+    ) -> int:
         """Cluster all face occurrences by cosine similarity of embeddings.
 
         Uses greedy agglomerative clustering: iterate through occurrences
         sorted by id, assign each to the closest existing cluster within
         *threshold*, or create a new cluster.
+
+        *progress_cb(phase, fraction, n_clusters)* is called periodically
+        during clustering so callers can report progress.
 
         Returns the total number of clusters created.
         """
@@ -2467,6 +2474,9 @@ class Repository:
         occ_ids: list[int] = []
         identities: list[str] = []
 
+        if progress_cb:
+            progress_cb("loading", 0.0, 0)
+
         for idx, r in enumerate(rows):
             blob: bytes = r["embedding"]
             n_floats = len(blob) // 4
@@ -2478,6 +2488,9 @@ class Repository:
             occ_ids.append(r["id"])
             identities.append(r["identity_name"] or "Unknown")
 
+        if progress_cb:
+            progress_cb("clustering", 0.0, 0)
+
         # Pre-allocated centroid matrix — grows by doubling when full
         max_clusters = min(n_items, 1024)
         centroid_mat = _np.empty((max_clusters, dim), dtype=_np.float32)
@@ -2487,6 +2500,9 @@ class Repository:
         assignments = _np.empty(n_items, dtype=_np.int32)
         n_clusters = 0
         next_cluster_id = 1
+
+        # Report progress at most every 1% to avoid notification spam
+        progress_step = max(1, n_items // 100)
 
         for i in range(n_items):
             vec = all_vecs[i]
@@ -2535,6 +2551,12 @@ class Repository:
                 cluster_identity.append(identity)
                 assignments[i] = cid
                 n_clusters += 1
+
+            if progress_cb and i % progress_step == 0:
+                progress_cb("clustering", (i + 1) / n_items, n_clusters)
+
+        if progress_cb:
+            progress_cb("saving", 1.0, n_clusters)
 
         # Write cluster assignments back to DB (atomic transaction)
         _begin_immediate(self.conn)

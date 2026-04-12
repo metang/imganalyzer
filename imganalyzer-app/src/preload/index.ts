@@ -316,6 +316,12 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('faces:clustering-done', handler)
   },
 
+  onClusteringProgress: (cb: (progress: { phase: string; fraction: number; numClusters: number }) => void): (() => void) => {
+    const handler = (_event: unknown, progress: { phase: string; fraction: number; numClusters: number }): void => { cb(progress) }
+    ipcRenderer.on('faces:clustering-progress', handler)
+    return () => ipcRenderer.removeListener('faces:clustering-progress', handler)
+  },
+
   rebuildFaces: (): Promise<{ enqueued: number; error?: string }> =>
     ipcRenderer.invoke('faces:rebuild'),
 
