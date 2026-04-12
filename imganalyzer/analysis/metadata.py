@@ -79,6 +79,7 @@ def _reverse_geocode(lat: float, lon: float) -> dict[str, str]:
             headers={"User-Agent": f"imganalyzer/{__version__}"},
             timeout=5.0,
         )
+        resp.raise_for_status()
         data = resp.json()
         addr = data.get("address", {})
         result = {
@@ -429,6 +430,8 @@ class MetadataExtractor:
         if lat and lon:
             try:
                 def _piexif_dms(dms: list, ref: bytes) -> float | None:
+                    if dms[0][1] == 0 or dms[1][1] == 0 or dms[2][1] == 0:
+                        return None
                     d = dms[0][0] / dms[0][1]
                     mi = dms[1][0] / dms[1][1]
                     s = dms[2][0] / dms[2][1]

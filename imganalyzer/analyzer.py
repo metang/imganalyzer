@@ -176,14 +176,17 @@ class Analyzer:
             self._check_cancel(cancel_event)
             if self.ai_backend == "local":
                 from imganalyzer.analysis.ai.local_full import LocalAIFull
-                result.ai_analysis = LocalAIFull().analyze(
-                    image_data,
-                    detection_prompt=self.detection_prompt,
-                    detection_threshold=self.detection_threshold,
-                    face_match_threshold=self.face_match_threshold,
-                    cancel_event=cancel_event,
-                    progress_cb=progress_cb,
-                )
+                try:
+                    result.ai_analysis = LocalAIFull().analyze(
+                        image_data,
+                        detection_prompt=self.detection_prompt,
+                        detection_threshold=self.detection_threshold,
+                        face_match_threshold=self.face_match_threshold,
+                        cancel_event=cancel_event,
+                        progress_cb=progress_cb,
+                    )
+                except Exception as exc:
+                    _log.error("LocalAIFull analysis failed: %s", exc, exc_info=True)
                 self._check_cancel(cancel_event)
             elif self.ai_backend in ("openai", "anthropic", "google", "copilot"):
                 # People guard: do not send images containing recognisable faces to

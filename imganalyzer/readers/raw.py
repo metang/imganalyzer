@@ -21,20 +21,28 @@ def _suppress_c_stderr() -> Generator[None, None, None]:
     messages so they don't flood the Electron DevTools console.
     """
     with _STDERR_FD_LOCK:
+        devnull_fd = None
+        old_stderr_fd = None
         try:
             devnull_fd = os.open(os.devnull, os.O_WRONLY)
             old_stderr_fd = os.dup(2)
             os.dup2(devnull_fd, 2)
-            os.close(devnull_fd)
+            yield
         except OSError:
             # If fd manipulation fails (e.g. on some platforms), just proceed
             yield
-            return
-        try:
-            yield
         finally:
-            os.dup2(old_stderr_fd, 2)
-            os.close(old_stderr_fd)
+            if old_stderr_fd is not None:
+                try:
+                    os.dup2(old_stderr_fd, 2)
+                    os.close(old_stderr_fd)
+                except OSError:
+                    pass
+            if devnull_fd is not None:
+                try:
+                    os.close(devnull_fd)
+                except OSError:
+                    pass
 
 
 def read(path: Path, *, half_size: bool = True) -> dict[str, Any]:

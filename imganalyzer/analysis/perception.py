@@ -297,7 +297,7 @@ def analyze(
     MAX_DIM = 1280
     if max(img.size) > MAX_DIM:
         ratio = MAX_DIM / max(img.size)
-        new_size = (int(img.width * ratio), int(img.height * ratio))
+        new_size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
         img = img.resize(new_size, Image.LANCZOS)
 
     pixel_values = _holder.transform(img).unsqueeze(0)

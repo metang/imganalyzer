@@ -80,20 +80,23 @@ def _encode_image(path: Path, max_size_kb: int = 1024) -> tuple[str, str]:
     from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
 
     register_optional_pillow_opener(path)
-    with pillow_decode_guard(path):
-        img = Image.open(path)  # Path objects work on both Windows and macOS
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
+    try:
+        with pillow_decode_guard(path):
+            img = Image.open(path)  # Path objects work on both Windows and macOS
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
 
-        # Resize large images for API efficiency
-        w, h = img.size
-        max_dim = 1568  # Anthropic recommended max
-        if max(w, h) > max_dim:
-            ratio = max_dim / max(w, h)
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+            # Resize large images for API efficiency
+            w, h = img.size
+            max_dim = 1568  # Anthropic recommended max
+            if max(w, h) > max_dim:
+                ratio = max_dim / max(w, h)
+                img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
 
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+    except (OSError, SyntaxError, ValueError) as exc:
+        raise OSError(f"Failed to encode image {path}: {exc}") from exc
     return base64.standard_b64encode(buf.getvalue()).decode(), "image/jpeg"
 
 
@@ -360,6 +363,12 @@ def _convert_raw_to_jpeg(raw_path: Path) -> Path:
 
     tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     tmp.close()
-    img.save(tmp.name, format="JPEG", quality=85)
+    try:
+        img.save(tmp.name, format="JPEG", quality=85)
+    except Exception:
+        import os
+        if os.path.exists(tmp.name):
+            os.unlink(tmp.name)
+        raise
     log.debug("Converted %s to temp JPEG: %s", raw_path.suffix, tmp.name)
     return Path(tmp.name)
