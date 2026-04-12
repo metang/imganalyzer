@@ -65,6 +65,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -101,6 +102,35 @@ _DESC_WEIGHT = 0.25
 _DESC_ONLY_ZSCORE_MIN = 1.5
 _FTS_TOKEN_RE = re.compile(r"\w+", flags=re.UNICODE)
 _FTS_QUOTED_PHRASE_RE = re.compile(r'"([^"]+)"|\'([^\']+)\'')
+_FACE_QUERY_NOISE_WORDS = frozenset({
+    "a",
+    "an",
+    "and",
+    "any",
+    "are",
+    "at",
+    "by",
+    "find",
+    "for",
+    "from",
+    "image",
+    "in",
+    "is",
+    "me",
+    "of",
+    "on",
+    "or",
+    "people",
+    "person",
+    "photo",
+    "picture",
+    "plus",
+    "show",
+    "the",
+    "to",
+    "together",
+    "with",
+})
 _SEMANTIC_PROFILE_WEIGHTS: dict[str, tuple[float, float]] = {
     "image_dominant": (1.0, 0.10),
     "balanced": (1.0, _DESC_WEIGHT),
@@ -124,10 +154,16 @@ def _rank_results(
     return {image_id: rank for rank, (image_id, _) in enumerate(scored_sorted)}
 
 
+def _strip_fts_operators(token: str) -> str:
+    """Remove FTS5 operator characters that cause MATCH syntax errors."""
+    return token.translate(str.maketrans("", "", '^*:()+-'))
+
+
 def _build_fts_match_query(query: str) -> str:
     """Convert freeform user text into a safe FTS5 MATCH query."""
     tokens = [token.strip("_") for token in _FTS_TOKEN_RE.findall(query)]
-    quoted_tokens = [f'"{token.replace("\"", "\"\"")}"' for token in tokens if token]
+    sanitized = [_strip_fts_operators(t.replace('"', '""')) for t in tokens]
+    quoted_tokens = [f'"{t}"' for t in sanitized if t]
     return " AND ".join(quoted_tokens)
 
 
@@ -228,6 +264,7 @@ class _EmbeddingMatrix:
     """
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self.matrix: np.ndarray | None = None      # (N, dim) float32
         self.image_ids: list[int] = []              # aligned with matrix rows
         self._row_count: int = 0                    # last-known DB row count
@@ -236,69 +273,50 @@ class _EmbeddingMatrix:
     def get(
         self, conn: sqlite3.Connection, embedding_type: str
     ) -> tuple[np.ndarray, list[int]]:
-        """Return ``(matrix, image_ids)`` -- rebuilds or appends if stale."""
-        row = conn.execute(
-            "SELECT COUNT(*) AS cnt, MAX(rowid) AS max_rid FROM embeddings"
-            " WHERE embedding_type = ?",
-            [embedding_type],
-        ).fetchone()
-        current_count = row["cnt"] if row else 0
-        current_max = int(row["max_rid"]) if row and row["max_rid"] is not None else 0
+        """Return ``(matrix, image_ids)`` -- rebuilds if stale."""
+        with self._lock:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt, MAX(rowid) AS max_rid FROM embeddings"
+                " WHERE embedding_type = ?",
+                [embedding_type],
+            ).fetchone()
+            current_count = row["cnt"] if row else 0
+            current_max = int(row["max_rid"]) if row and row["max_rid"] is not None else 0
 
-        if (
-            self.matrix is not None
-            and current_count == self._row_count
-            and current_max == self._max_rowid
-        ):
-            return self.matrix, self.image_ids
+            if (
+                self.matrix is not None
+                and current_count == self._row_count
+                and current_max == self._max_rowid
+            ):
+                return self.matrix, self.image_ids
 
-        # Incremental append: only new rows were added (no deletes/updates)
-        if (
-            self.matrix is not None
-            and self.matrix.size > 0
-            and current_count > self._row_count
-            and current_count - self._row_count == current_max - self._max_rowid
-        ):
-            new_rows = conn.execute(
+            # Full rebuild (always rebuild when any change is detected to
+            # avoid incorrect incremental logic when deletes + inserts occur)
+            rows = conn.execute(
                 "SELECT image_id, vector FROM embeddings"
-                " WHERE embedding_type = ? AND rowid > ?"
-                " ORDER BY image_id",
-                [embedding_type, self._max_rowid],
+                " WHERE embedding_type = ? ORDER BY image_id",
+                [embedding_type],
             ).fetchall()
-            if new_rows:
-                new_ids = [r["image_id"] for r in new_rows]
-                new_vecs = [np.frombuffer(r["vector"], dtype=np.float32) for r in new_rows]
-                self.matrix = np.vstack([self.matrix, np.vstack(new_vecs)])
-                self.image_ids.extend(new_ids)
+
+            if not rows:
+                empty = np.empty((0, 0), dtype=np.float32)
+                self.matrix = empty
+                self.image_ids = []
+                self._row_count = 0
+                self._max_rowid = 0
+                return empty, []
+
+            ids: list[int] = []
+            vecs: list[np.ndarray] = []
+            for r in rows:
+                ids.append(r["image_id"])
+                vecs.append(np.frombuffer(r["vector"], dtype=np.float32))
+
+            self.matrix = np.vstack(vecs)  # (N, dim)
+            self.image_ids = ids
             self._row_count = current_count
             self._max_rowid = current_max
             return self.matrix, self.image_ids
-
-        # Full rebuild
-        rows = conn.execute(
-            "SELECT image_id, vector FROM embeddings WHERE embedding_type = ? ORDER BY image_id",
-            [embedding_type],
-        ).fetchall()
-
-        if not rows:
-            empty = np.empty((0, 0), dtype=np.float32)
-            self.matrix = empty
-            self.image_ids = []
-            self._row_count = 0
-            self._max_rowid = 0
-            return empty, []
-
-        ids: list[int] = []
-        vecs: list[np.ndarray] = []
-        for r in rows:
-            ids.append(r["image_id"])
-            vecs.append(np.frombuffer(r["vector"], dtype=np.float32))
-
-        self.matrix = np.vstack(vecs)  # (N, dim)
-        self.image_ids = ids
-        self._row_count = current_count
-        self._max_rowid = current_max
-        return self.matrix, self.image_ids
 
 
 class SearchEngine:
@@ -499,7 +517,7 @@ class SearchEngine:
         return (faces[0] if faces else None), remaining_query
 
     def _extract_face_query_span(self, normalized: str) -> tuple[str, int, int] | None:
-        if self._matches_face_query(normalized):
+        if not self._is_face_query_noise(normalized) and self._matches_face_query(normalized):
             return normalized, 0, len(normalized)
 
         tokens = list(re.finditer(r"\S+", normalized))
@@ -508,7 +526,7 @@ class SearchEngine:
                 start = tokens[start_idx].start()
                 end = tokens[start_idx + span_len - 1].end()
                 candidate = normalized[start:end].strip(" ,.;:!?()[]{}\"'")
-                if not candidate:
+                if not candidate or self._is_face_query_noise(candidate):
                     continue
                 if self._matches_face_query(candidate):
                     return candidate, start, end
@@ -516,7 +534,7 @@ class SearchEngine:
 
     def _cleanup_face_query_remainder(self, remainder: str) -> str:
         cleaned = re.sub(r"[,&]+", " ", remainder)
-        cleaned = re.sub(r"\b(with|and|together)\b", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b(with|and|plus|together)\b", " ", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(
             r"\b(?:is|are)\s+in\s+the\s+(?:picture|photo)\b",
             " ",
@@ -524,6 +542,12 @@ class SearchEngine:
             flags=re.IGNORECASE,
         )
         return " ".join(cleaned.split())
+
+    def _is_face_query_noise(self, candidate: str) -> bool:
+        tokens = [token.casefold() for token in _FTS_TOKEN_RE.findall(candidate)]
+        if not tokens:
+            return True
+        return all(token in _FACE_QUERY_NOISE_WORDS for token in tokens)
 
     def _matches_face_query(self, candidate: str) -> bool:
         return bool(
@@ -1018,18 +1042,21 @@ class SearchEngine:
 
         for match_type, match_query, weight, multiplier in channels:
             channel_limit = channel_limit_base * multiplier
-            rows = self.conn.execute(
-                """SELECT si.rowid AS image_id,
-                          i.file_path,
-                          bm25(search_index, 0.0, 3.8, 3.2, 2.2, 2.6, 0.6) AS bm25_score,
-                          snippet(search_index, 1, '<b>', '</b>', '...', 32) AS snippet
-                   FROM search_index si
-                   JOIN images i ON i.id = si.rowid
-                   WHERE search_index MATCH ?
-                   ORDER BY bm25_score
-                   LIMIT ?""",
-                [match_query, channel_limit],
-            ).fetchall()
+            try:
+                rows = self.conn.execute(
+                    """SELECT si.rowid AS image_id,
+                              i.file_path,
+                              bm25(search_index, 0.0, 3.8, 3.2, 2.2, 2.6, 0.6) AS bm25_score,
+                              snippet(search_index, 1, '<b>', '</b>', '...', 32) AS snippet
+                       FROM search_index si
+                       JOIN images i ON i.id = si.rowid
+                       WHERE search_index MATCH ?
+                       ORDER BY bm25_score
+                       LIMIT ?""",
+                    [match_query, channel_limit],
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
             for rank, row in enumerate(rows):
                 image_id = int(row["image_id"])
                 if candidate_ids is not None and image_id not in candidate_ids:

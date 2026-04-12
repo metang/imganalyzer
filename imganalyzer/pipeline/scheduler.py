@@ -32,6 +32,7 @@ IO_MODULES: frozenset[str] = LOCAL_IO_MODULES
 # Dependency graph: module -> prerequisite that must complete first.
 _PREREQUISITES: dict[str, str] = {
     "faces":     "objects",
+    "embedding": "objects",
 }
 
 # GPU modules that support batched forward passes.

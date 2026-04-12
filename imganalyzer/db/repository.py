@@ -246,7 +246,7 @@ class Repository:
         # Always remove old entry first (image may have lost GPS)
         try:
             self.conn.execute("DELETE FROM geo_rtree WHERE id = ?", [image_id])
-        except Exception:
+        except sqlite3.OperationalError:
             return  # table may not exist yet (pre-v30)
         if lat is not None and lng is not None:
             self.conn.execute(
@@ -267,18 +267,17 @@ class Repository:
         fmt: str | None = None,
     ) -> int:
         """Insert or return existing image row.  Returns image_id."""
-        row = self.conn.execute(
-            "SELECT id FROM images WHERE file_path = ?", [file_path]
-        ).fetchone()
-        if row:
-            return row["id"]
-        cur = self.conn.execute(
+        self.conn.execute(
             """INSERT INTO images (file_path, file_hash, file_size, width, height, format)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(file_path) DO NOTHING""",
             [file_path, file_hash, file_size, width, height, fmt],
         )
         self.conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
+        row = self.conn.execute(
+            "SELECT id FROM images WHERE file_path = ?", [file_path]
+        ).fetchone()
+        return row["id"]
 
     def get_image(self, image_id: int) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM images WHERE id = ?", [image_id]).fetchone()
@@ -291,6 +290,9 @@ class Repository:
         return dict(row) if row else None
 
     def update_image(self, image_id: int, *, commit: bool = True, **fields: Any) -> None:
+        if not fields:
+            return
+        fields = self._filter_to_known_columns("images", fields)
         if not fields:
             return
         sets = ", ".join(f"{k} = ?" for k in fields)
@@ -435,6 +437,7 @@ class Repository:
 
     def upsert_aesthetic(self, image_id: int, data: dict[str, Any]) -> None:
         """Atomic write of the aesthetic analysis result."""
+        data = self._filter_to_known_columns("analysis_aesthetic", data)
         data = self._apply_override_mask(image_id, "analysis_aesthetic", data)
         self.conn.execute("DELETE FROM analysis_aesthetic WHERE image_id = ?", [image_id])
         cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]
@@ -447,6 +450,7 @@ class Repository:
 
     def upsert_perception(self, image_id: int, data: dict[str, Any]) -> None:
         """Atomic write of the perception analysis result (IAA/IQA/ISTA)."""
+        data = self._filter_to_known_columns("analysis_perception", data)
         data = self._apply_override_mask(image_id, "analysis_perception", data)
         self.conn.execute("DELETE FROM analysis_perception WHERE image_id = ?", [image_id])
         cols = ["image_id"] + list(data.keys()) + ["analyzed_at"]

@@ -172,7 +172,7 @@ class TestResourceScheduler:
         s = self._make()
         assert s.prerequisite_for("faces") == "objects"
         assert s.prerequisite_for("objects") is None
-        assert s.prerequisite_for("embedding") is None
+        assert s.prerequisite_for("embedding") == "objects"
 
     def test_shutdown_flag(self):
         event = threading.Event()

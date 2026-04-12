@@ -51,39 +51,50 @@ class JobQueue:
         When *_auto_commit* is False, the caller is responsible for committing
         (used by batched ingest to avoid per-job fsync overhead).
         """
-        existing = self.conn.execute(
-            "SELECT id, status FROM job_queue WHERE image_id = ? AND module = ?",
-            [image_id, module],
-        ).fetchone()
+        if _auto_commit:
+            _begin_immediate(self.conn)
+        try:
+            existing = self.conn.execute(
+                "SELECT id, status FROM job_queue WHERE image_id = ? AND module = ?",
+                [image_id, module],
+            ).fetchone()
 
-        if existing:
-            if existing["status"] in ("pending", "running"):
-                return None  # already queued
-            if not force:
-                # done / failed / skipped — don't re-enqueue without explicit force
-                return None
-            # force=True: reset the row back to pending
-            self.conn.execute(
-                """UPDATE job_queue
-                   SET status = 'pending', attempts = 0, error_message = NULL,
-                        skip_reason = NULL, started_at = NULL, completed_at = NULL,
-                        queued_at = ?, priority = ?,
-                        last_node_id = NULL, last_node_role = 'force'
-                    WHERE id = ?""",
-                [_now(), priority, existing["id"]],
+            if existing:
+                if existing["status"] in ("pending", "running"):
+                    if _auto_commit:
+                        self.conn.rollback()
+                    return None  # already queued
+                if not force:
+                    # done / failed / skipped — don't re-enqueue without explicit force
+                    if _auto_commit:
+                        self.conn.rollback()
+                    return None
+                # force=True: reset the row back to pending
+                self.conn.execute(
+                    """UPDATE job_queue
+                       SET status = 'pending', attempts = 0, error_message = NULL,
+                            skip_reason = NULL, started_at = NULL, completed_at = NULL,
+                            queued_at = ?, priority = ?,
+                            last_node_id = NULL, last_node_role = 'force'
+                        WHERE id = ?""",
+                    [_now(), priority, existing["id"]],
+                )
+                if _auto_commit:
+                    self.conn.commit()
+                return existing["id"]
+
+            cur = self.conn.execute(
+                """INSERT INTO job_queue (image_id, module, priority, status, queued_at, last_node_role)
+                   VALUES (?, ?, ?, 'pending', ?, ?)""",
+                [image_id, module, priority, _now(), "force" if force else None],
             )
             if _auto_commit:
                 self.conn.commit()
-            return existing["id"]
-
-        cur = self.conn.execute(
-            """INSERT INTO job_queue (image_id, module, priority, status, queued_at, last_node_role)
-               VALUES (?, ?, ?, 'pending', ?, ?)""",
-            [image_id, module, priority, _now(), "force" if force else None],
-        )
-        if _auto_commit:
-            self.conn.commit()
-        return cur.lastrowid
+            return cur.lastrowid
+        except Exception:
+            if _auto_commit:
+                self.conn.rollback()
+            raise
 
     def enqueue_batch(
         self,
@@ -93,13 +104,22 @@ class JobQueue:
         force: bool = False,
     ) -> int:
         """Enqueue multiple (image, module) pairs.  Returns count enqueued."""
-        count = 0
-        for image_id in image_ids:
-            for module in modules:
-                job_id = self.enqueue(image_id, module, priority=priority, force=force)
-                if job_id is not None:
-                    count += 1
-        return count
+        _begin_immediate(self.conn)
+        try:
+            count = 0
+            for image_id in image_ids:
+                for module in modules:
+                    job_id = self.enqueue(
+                        image_id, module, priority=priority, force=force,
+                        _auto_commit=False,
+                    )
+                    if job_id is not None:
+                        count += 1
+            self.conn.commit()
+            return count
+        except Exception:
+            self.conn.rollback()
+            raise
 
     # ── Claim (atomic) ─────────────────────────────────────────────────────
 
@@ -344,7 +364,8 @@ class JobQueue:
         try:
             rows = self.conn.execute(
                 """SELECT job_id FROM job_leases
-                   WHERE lease_expires_at <= datetime('now')"""
+                   WHERE lease_expires_at <= ?""",
+                [_now()],
             ).fetchall()
             if not rows:
                 self.conn.rollback()
@@ -731,7 +752,7 @@ class JobQueue:
                SET status = 'failed',
                    error_message = 'Exceeded max attempts (exhausted pending)',
                    completed_at = ?
-               WHERE status = 'pending' AND attempts > max_attempts""",
+               WHERE status = 'pending' AND attempts >= max_attempts""",
             [_now()],
         )
         if cur.rowcount:
