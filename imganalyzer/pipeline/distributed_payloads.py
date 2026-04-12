@@ -229,6 +229,12 @@ def persist_result_payload(
             repo.upsert_face_occurrences(image_id, decoded)
         return
 
+    if module == "perception":
+        data = _clean_analysis_row(payload.get("data"))
+        if data:
+            repo.upsert_perception(image_id, data)
+        return
+
     if module == "embedding":
         embeddings = payload.get("embeddings", [])
         if not isinstance(embeddings, list):
