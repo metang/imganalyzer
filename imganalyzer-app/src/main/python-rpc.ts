@@ -303,9 +303,16 @@ export const rpc = {
 
       pendingCalls.set(id, { resolve, reject, notificationCb, timer })
 
+      if (!serverProcess?.stdin) {
+        pendingCalls.delete(id)
+        clearTimeout(timer)
+        reject(new Error('Python server process is not running'))
+        return
+      }
+
       const line = JSON.stringify(request) + '\n'
       try {
-        serverProcess?.stdin?.write(line)
+        serverProcess.stdin.write(line)
       } catch (err) {
         pendingCalls.delete(id)
         clearTimeout(timer)

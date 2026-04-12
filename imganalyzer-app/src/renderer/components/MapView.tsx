@@ -49,7 +49,7 @@ function clusterIcon(count: number): L.DivIcon {
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
     html: `<div class="flex items-center justify-center rounded-full ${bg} text-white font-semibold shadow-lg border-2 border-white/40"
-                style="width:${size}px;height:${size}px;font-size:${size < 44 ? 11 : 13}px">${label}</div>`,
+                style="width:${size}px;height:${size}px;font-size:${size < 44 ? 11 : 13}px">${String(Number(count) || 0)}</div>`,
   })
   _iconCache.set(key, icon)
   return icon

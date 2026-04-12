@@ -132,6 +132,7 @@ function attachLineReader(
  * Ignores errors silently — this is a best-effort cleanup.
  */
 function killOrphanedCoordinators(port: number, ownPid: number | undefined): void {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return
   try {
     if (process.platform === 'win32') {
       // Find PIDs listening on the target port
