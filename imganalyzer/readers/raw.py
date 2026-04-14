@@ -68,8 +68,6 @@ def read(path: Path, *, half_size: bool = True) -> dict[str, Any]:
         ) from exc
 
     with raw_ctx as raw:
-        # Get raw dimensions first to check size
-        raw_h, raw_w = raw.raw_image.shape[:2]
         try:
             rgb = raw.postprocess(
                 use_camera_wb=True,
@@ -152,7 +150,10 @@ def read_headers(path: Path) -> dict[str, Any]:
         ) from exc
 
     with raw_ctx as raw:
-        raw_h, raw_w = raw.raw_image.shape[:2]
+        # Use raw.sizes (header-only) instead of raw.raw_image (triggers unpack
+        # which fails for some DNG variants with LibRawDataError).
+        raw_h = raw.sizes.raw_height
+        raw_w = raw.sizes.raw_width
         try:
             raw_colors = raw.color_desc.decode()
             camera_wb = raw.camera_whitebalance
