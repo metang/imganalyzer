@@ -1216,240 +1216,42 @@ type CollageLayout = {
 }
 
 const MAX_VISIBLE_MOMENT_IMAGES = 20
-const EXPANDED_MOMENT_MIN_WIDTH = 380
+const EXPANDED_MOMENT_MIN_WIDTH = 400
 
-/** Pick a deterministic layout variant from moment id to avoid re-shuffling on re-render. */
-function pickVariant(momentId: string | number, count: number): number {
-  if (typeof momentId === 'number') return Math.abs(momentId) % count
-  // Hash string IDs (UUIDs) to a stable integer
-  let h = 0
-  for (let i = 0; i < momentId.length; i++) {
-    h = ((h << 5) - h + momentId.charCodeAt(i)) | 0
-  }
-  return Math.abs(h) % count
-}
-
-function getLayout(count: number, momentId: string | number): CollageLayout {
-  if (count === 1) {
-    return {
-      columns: '1fr',
-      rows: '200px',
-      slots: [{ gridColumn: '1', gridRow: '1' }],
-    }
-  }
-
-  if (count === 2) {
-    const variant = pickVariant(momentId, 2)
-    if (variant === 0) {
-      // Wide left, narrow right
-      return {
-        columns: '3fr 2fr',
-        rows: '180px',
-        slots: [
-          { gridColumn: '1', gridRow: '1' },
-          { gridColumn: '2', gridRow: '1' },
-        ],
-      }
-    }
-    // Narrow left, wide right
-    return {
-      columns: '2fr 3fr',
-      rows: '180px',
-      slots: [
-        { gridColumn: '1', gridRow: '1' },
-        { gridColumn: '2', gridRow: '1' },
-      ],
-    }
-  }
-
-  if (count === 3) {
-    const variant = pickVariant(momentId, 3)
-    if (variant === 0) {
-      // Big left, 2 stacked right
-      return {
-        columns: '3fr 2fr',
-        rows: '125px 125px',
-        slots: [
-          { gridColumn: '1', gridRow: '1 / 3' },
-          { gridColumn: '2', gridRow: '1' },
-          { gridColumn: '2', gridRow: '2' },
-        ],
-      }
-    }
-    if (variant === 1) {
-      // 2 stacked left, big right
-      return {
-        columns: '2fr 3fr',
-        rows: '125px 125px',
-        slots: [
-          { gridColumn: '1', gridRow: '1' },
-          { gridColumn: '1', gridRow: '2' },
-          { gridColumn: '2', gridRow: '1 / 3' },
-        ],
-      }
-    }
-    // Top wide, 2 bottom
-    return {
-      columns: '1fr 1fr',
-      rows: '160px 115px',
-      slots: [
-        { gridColumn: '1 / 3', gridRow: '1' },
-        { gridColumn: '1', gridRow: '2' },
-        { gridColumn: '2', gridRow: '2' },
-      ],
-    }
-  }
-
-  if (count === 4) {
-    const variant = pickVariant(momentId, 3)
-    if (variant === 0) {
-      // Big hero top-left spanning 2 rows, 2 small right, 1 bottom-left
-      return {
-        columns: '3fr 2fr',
-        rows: '120px 120px 96px',
-        slots: [
-          { gridColumn: '1', gridRow: '1 / 3' },
-          { gridColumn: '2', gridRow: '1' },
-          { gridColumn: '2', gridRow: '2' },
-          { gridColumn: '1 / 3', gridRow: '3' },
-        ],
-      }
-    }
-    if (variant === 1) {
-      // L-shape: hero top spanning full width, 3 across bottom
-      return {
-        columns: '1fr 1fr 1fr',
-        rows: '170px 105px',
-        slots: [
-          { gridColumn: '1 / 4', gridRow: '1' },
-          { gridColumn: '1', gridRow: '2' },
-          { gridColumn: '2', gridRow: '2' },
-          { gridColumn: '3', gridRow: '2' },
-        ],
-      }
-    }
-    // 2×2 with uneven sizes
-    return {
-      columns: '2fr 3fr',
-      rows: '150px 125px',
-      slots: [
-        { gridColumn: '1', gridRow: '1' },
-        { gridColumn: '2', gridRow: '1' },
-        { gridColumn: '1', gridRow: '2' },
-        { gridColumn: '2', gridRow: '2' },
-      ],
-    }
-  }
-
-  if (count === 5) {
-    const variant = pickVariant(momentId, 2)
-    if (variant === 0) {
-      // Hero tall left, 4 in 2×2 grid right
-      return {
-        columns: '3fr 2fr 2fr',
-        rows: '128px 128px',
-        slots: [
-          { gridColumn: '1', gridRow: '1 / 3' },
-          { gridColumn: '2', gridRow: '1' },
-          { gridColumn: '3', gridRow: '1' },
-          { gridColumn: '2', gridRow: '2' },
-          { gridColumn: '3', gridRow: '2' },
-        ],
-      }
-    }
-    // Top row: 2 images, bottom row: 3 images
-    return {
-      columns: '1fr 1fr 1fr',
-      rows: '150px 118px',
-      slots: [
-        { gridColumn: '1 / 3', gridRow: '1' },
-        { gridColumn: '3', gridRow: '1' },
-        { gridColumn: '1', gridRow: '2' },
-        { gridColumn: '2', gridRow: '2' },
-        { gridColumn: '3', gridRow: '2' },
-      ],
-    }
-  }
-
-  if (count === 6) {
-    const variant = pickVariant(momentId, 2)
-    if (variant === 0) {
-      // Hero left 2 rows, 2×2 right, 2 across bottom
-      return {
-        columns: '3fr 2fr 2fr',
-        rows: '115px 115px 96px',
-        slots: [
-          { gridColumn: '1', gridRow: '1 / 3' },
-          { gridColumn: '2', gridRow: '1' },
-          { gridColumn: '3', gridRow: '1' },
-          { gridColumn: '2', gridRow: '2' },
-          { gridColumn: '3', gridRow: '2' },
-          { gridColumn: '1 / 4', gridRow: '3' },
-        ],
-      }
-    }
-    // 3 columns, top 2 with big left, bottom row 3 equal
-    return {
-      columns: '2fr 1fr 1fr',
-      rows: '150px 118px',
-      slots: [
-        { gridColumn: '1', gridRow: '1 / 3' },
-        { gridColumn: '2', gridRow: '1' },
-        { gridColumn: '3', gridRow: '1' },
-        { gridColumn: '1', gridRow: '2' },    // under hero — hero col only
-        { gridColumn: '2', gridRow: '2' },
-        { gridColumn: '3', gridRow: '2' },
-      ],
-    }
-  }
-
-  // 7+ images: keep the hero prominent, keep thumbnails larger, and avoid strip-like rows.
-  const rows = count <= 9
-    ? '125px 125px 100px'
-    : count <= 13
-      ? '125px 125px 100px 100px'
-      : count <= 17
-        ? '125px 125px 100px 100px 100px'
-        : '125px 125px 100px 100px 100px 100px'
+function getLayout(count: number): CollageLayout {
+  const columns =
+    count <= 1 ? 1
+      : count === 2 ? 2
+        : count <= 4 ? 2
+          : count <= 8 ? 3
+            : count <= 14 ? 4
+              : 5
+  const rowHeight =
+    count === 1 ? 360
+      : count === 2 ? 220
+        : count <= 4 ? 180
+          : columns >= 5 ? 130
+            : columns === 4 ? 145
+              : 170
+  const rowCount = Math.ceil(count / columns)
 
   return {
-    columns: '1.45fr 1.45fr 1fr 1fr',
-    rows,
-    slots: [
-      { gridColumn: '1 / 3', gridRow: '1 / 3' },
-      { gridColumn: '3', gridRow: '1' },
-      { gridColumn: '4', gridRow: '1' },
-      { gridColumn: '3', gridRow: '2' },
-      { gridColumn: '4', gridRow: '2' },
-      { gridColumn: '1', gridRow: '3' },
-      { gridColumn: '2', gridRow: '3' },
-      { gridColumn: '3', gridRow: '3' },
-      { gridColumn: '4', gridRow: '3' },
-      { gridColumn: '1', gridRow: '4' },
-      { gridColumn: '2', gridRow: '4' },
-      { gridColumn: '3', gridRow: '4' },
-      { gridColumn: '4', gridRow: '4' },
-      { gridColumn: '1', gridRow: '5' },
-      { gridColumn: '2', gridRow: '5' },
-      { gridColumn: '3', gridRow: '5' },
-      { gridColumn: '4', gridRow: '5' },
-      { gridColumn: '1', gridRow: '6' },
-      { gridColumn: '2', gridRow: '6' },
-      { gridColumn: '3', gridRow: '6' },
-      { gridColumn: '4', gridRow: '6' },
-    ].slice(0, count),
+    columns: `repeat(${columns}, minmax(0, 1fr))`,
+    rows: `repeat(${rowCount}, ${rowHeight}px)`,
+    slots: Array.from({ length: count }, (_, index) => ({
+      gridColumn: `${(index % columns) + 1}`,
+      gridRow: `${Math.floor(index / columns) + 1}`,
+    })),
   }
 }
 
 function MomentCollage({
   images,
   thumbs,
-  momentId,
   onImageClick,
 }: {
   images: MomentImage[]
   thumbs: Record<number, string>
-  momentId: string | number
   onImageClick?: (img: MomentImage, siblings: MomentImage[]) => void
 }) {
   if (images.length === 0) return null
@@ -1460,7 +1262,7 @@ function MomentCollage({
 
   const displayCount = Math.min(ordered.length, MAX_VISIBLE_MOMENT_IMAGES)
   const overflow = ordered.length - displayCount
-  const layout = getLayout(displayCount, momentId)
+  const layout = getLayout(displayCount)
   const shown = ordered.slice(0, displayCount)
 
   // Wrap click to include all images as siblings for lightbox navigation
@@ -1470,12 +1272,12 @@ function MomentCollage({
 
   return (
     <div
-      className="rounded-lg overflow-hidden"
+      className="rounded-xl overflow-hidden border border-neutral-800/70 bg-neutral-950/40 p-1.5"
       style={{
         display: 'grid',
         gridTemplateColumns: layout.columns,
         gridTemplateRows: layout.rows,
-        gap: '3px',
+        gap: '6px',
       }}
     >
       {shown.map((img, i) => {
@@ -1541,6 +1343,18 @@ function ExpandedChapterDetail({
   onCollapse?: () => void
   colWidth?: number
 }){
+  const detailMinWidth = Math.max(EXPANDED_MOMENT_MIN_WIDTH, Math.min(520, colWidth + 80))
+  const detailMaxWidth = Math.max(detailMinWidth, Math.min(860, detailMinWidth + 220))
+  const isSingleMoment = moments.length === 1
+  const singleMomentImageCount = isSingleMoment ? moments[0]?.image_count ?? 0 : 0
+  const isSparseSingleMoment = isSingleMoment && singleMomentImageCount <= 3
+  const singleMomentWidth = isSparseSingleMoment
+    ? Math.min(760, detailMaxWidth + 80)
+    : Math.max(920, Math.min(1180, colWidth * 4 + 120))
+  const detailColumns = isSingleMoment
+    ? `minmax(0, min(${singleMomentWidth}px, 100%))`
+    : `repeat(auto-fit, minmax(min(${detailMinWidth}px, 100%), min(${detailMaxWidth}px, 100%)))`
+
   return (
     <div className="p-5" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-start justify-between mb-3">
@@ -1574,12 +1388,14 @@ function ExpandedChapterDetail({
           className="mt-2"
           style={{
             display: 'grid',
-            gridTemplateColumns: `repeat(auto-fill, minmax(min(${Math.max(EXPANDED_MOMENT_MIN_WIDTH, colWidth + 40)}px, 100%), 1fr))`,
-            gap: '18px',
+            gridTemplateColumns: detailColumns,
+            gap: '16px',
+            alignItems: 'start',
+            justifyContent: isSparseSingleMoment ? 'center' : 'start',
           }}
         >
           {moments.map((moment) => (
-            <div key={moment.id} className="min-w-0">
+            <div key={moment.id} className="min-w-0 w-full rounded-xl border border-neutral-800/70 bg-neutral-950/35 p-3">
               <div className="flex items-baseline gap-2 mb-1.5">
                 <span className="text-xs font-medium text-neutral-300">
                   {moment.title || formatMomentTime(moment.start_time)}
@@ -1592,7 +1408,6 @@ function ExpandedChapterDetail({
                 <MomentCollage
                   images={momentImages[moment.id]}
                   thumbs={heroThumbs}
-                  momentId={moment.id}
                   onImageClick={onImageClick}
                 />
               ) : moment.hero_image_id && heroThumbs[moment.hero_image_id] ? (
@@ -1656,6 +1471,7 @@ function QuiltedGrid({
     <div ref={containerRef} className="py-6 px-5">
       {years.map((year) => {
         const yearChapters = yearGroups[year]
+        const yearColCount = Math.max(1, Math.min(colCount, yearChapters.length))
         return (
           <div key={year} className="mb-8">
             {/* Year divider */}
@@ -1670,8 +1486,8 @@ function QuiltedGrid({
             <div
               className="grid gap-2"
               style={{
-                gridTemplateColumns: `repeat(${colCount}, 1fr)`,
-                gridAutoRows: 'minmax(100px, auto)',
+                gridTemplateColumns: `repeat(${yearColCount}, minmax(0, 1fr))`,
+                gridAutoRows: 'minmax(120px, auto)',
               }}
             >
               {yearChapters.map((chapter, idx) => {
@@ -1685,17 +1501,18 @@ function QuiltedGrid({
                 let colSpan = 1
                 let rowSpan = 2
                 if (isExpanded) {
-                  colSpan = colCount; rowSpan = 0
+                  colSpan = yearColCount; rowSpan = 0
                 } else {
-                  const cycle = colCount + 4  // e.g. 3→7, 5→9, 7→11
+                  const cycle = yearColCount + 4  // e.g. 3→7, 5→9, 7→11
                   const pos = idx % cycle
                   if (pos === 0) { colSpan = 2; rowSpan = 3 }           // feature
                   else if (pos === 2) { colSpan = 1; rowSpan = 3 }      // tall
                   else if (pos === Math.floor(cycle / 2)) { colSpan = 2; rowSpan = 2 }  // wide
                   // Additional tall card for wider grids
-                  else if (colCount >= 5 && pos === colCount) { colSpan = 1; rowSpan = 3 }
+                  else if (yearColCount >= 5 && pos === yearColCount) { colSpan = 1; rowSpan = 3 }
                   // rest → standard 1×2
-                  colSpan = Math.min(colSpan, colCount)
+                  // Cap so collapsed cards never span the full grid width (avoids wide strip look)
+                  colSpan = Math.min(colSpan, Math.max(1, yearColCount - 1))
                 }
 
                 const gridStyle: React.CSSProperties = isExpanded
@@ -1824,7 +1641,7 @@ function ZigzagTimeline({
                       {/* Dot on spine */}
                       <div className="absolute left-1/2 top-6 w-3 h-3 rounded-full bg-blue-500 ring-4 ring-neutral-900 -translate-x-1.5 z-10" />
                       {/* Full-width expanded card */}
-                      <div className="mx-auto max-w-4xl">
+                      <div className="mx-auto w-full max-w-6xl 2xl:max-w-[96rem]">
                         <div
                           className="bg-neutral-850 ring-1 ring-blue-500/30 rounded-xl overflow-hidden transition-all duration-200"
                         >
@@ -1854,7 +1671,7 @@ function ZigzagTimeline({
                       <div className={side === 'left' ? '' : 'flex items-center justify-end'}>
                         {side === 'left' ? (
                           <div
-                            className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 ring-1 ring-neutral-800/50 hover:ring-neutral-700/50 transition-all duration-200 ml-auto max-w-md"
+                            className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 ring-1 ring-neutral-800/50 hover:ring-neutral-700/50 transition-all duration-200 ml-auto w-full max-w-xl"
                             onClick={() => toggleChapter(chapter.id)}
                           >
                             {coverThumb ? (
@@ -1906,7 +1723,7 @@ function ZigzagTimeline({
                       <div className={side === 'right' ? '' : 'flex items-center'}>
                         {side === 'right' ? (
                           <div
-                            className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 ring-1 ring-neutral-800/50 hover:ring-neutral-700/50 transition-all duration-200 mr-auto max-w-md"
+                            className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 ring-1 ring-neutral-800/50 hover:ring-neutral-700/50 transition-all duration-200 mr-auto w-full max-w-xl"
                             onClick={() => toggleChapter(chapter.id)}
                           >
                             {coverThumb ? (
@@ -1995,7 +1812,7 @@ function StoryTimeline({
   onImageClick?: (img: MomentImage, siblings: MomentImage[]) => void
 }) {
   const [viewMode, setViewMode] = useState<ViewMode>('quilted')
-  const [colWidth, setColWidth] = useState(280)  // px per column — slider controls this
+  const [colWidth, setColWidth] = useState(240)  // px per column — slider controls this
   const [expandedChapter, setExpandedChapter] = useState<string | null>(null)
   const [moments, setMoments] = useState<StoryMoment[]>([])
   const [momentImages, setMomentImages] = useState<Record<string, MomentImage[]>>({})
@@ -2128,8 +1945,8 @@ function StoryTimeline({
   return (
     <div className="flex flex-col h-full">
       {/* ── Header bar ── */}
-      <div className="shrink-0 px-6 py-4 border-b border-neutral-800 bg-neutral-900/60 backdrop-blur-sm">
-        <div className="flex items-center justify-between">
+      <div className="shrink-0 border-b border-neutral-800 bg-neutral-900/60 px-5 py-4 backdrop-blur-sm xl:px-6 2xl:px-8">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="text-xl font-bold text-white tracking-tight">{album.name}</h2>
             <p className="text-xs text-neutral-500 mt-0.5">
@@ -2137,7 +1954,7 @@ function StoryTimeline({
               {years.length > 1 && ` · ${years[0]}–${years[years.length - 1]}`}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {/* View mode toggle */}
             <div className="flex items-center bg-neutral-800 rounded-full p-0.5 mr-1">
               <button
@@ -2494,8 +2311,8 @@ export function AlbumsView() {
   const selectedAlbum = albums.find((album) => album.id === selectedId)
 
   return (
-    <div className="flex h-full">
-      <div className="w-64 shrink-0">
+    <div className="flex h-full min-w-0">
+      <div className="w-56 shrink-0 xl:w-60 2xl:w-64">
         <AlbumListPanel
           albums={albums}
           selectedId={selectedId}
