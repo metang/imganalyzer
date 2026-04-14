@@ -177,6 +177,23 @@ class MetadataExtractor:
                     exc,
                 )
 
+        # 4. Try exiftool as last resort (handles MRW and other RAW formats
+        #    that exifread/piexif cannot parse)
+        if not meta.get("date_time_original"):
+            try:
+                exiftool_meta = self._run_exiftool()
+                for k, v in exiftool_meta.items():
+                    if k not in meta:
+                        meta[k] = v
+            except Exception as exc:
+                log.debug(
+                    "metadata extraction failed stage=exiftool path=%s "
+                    "error_type=%s error=%s",
+                    self.path,
+                    type(exc).__name__,
+                    exc,
+                )
+
         # DPI from Pillow
         if self.image_data.get("dpi"):
             dpi = self.image_data["dpi"]
@@ -452,5 +469,131 @@ class MetadataExtractor:
                         m["gps_altitude"] = round(alt_v, 1)
             except Exception:
                 pass
+
+        return m
+
+    def _run_exiftool(self) -> dict[str, Any]:
+        """Extract metadata via exiftool CLI (handles MRW and other formats)."""
+        import json
+        import shutil
+        import subprocess
+
+        exiftool = shutil.which("exiftool")
+        if not exiftool:
+            # Check common install locations on Windows
+            from pathlib import Path as P
+            for candidate in [
+                P.home() / "AppData/Local/Programs/ExifTool/exiftool.exe",
+                P("C:/Program Files/ExifTool/exiftool.exe"),
+            ]:
+                if candidate.exists():
+                    exiftool = str(candidate)
+                    break
+        if not exiftool:
+            return {}
+
+        result = subprocess.run(
+            [exiftool, "-json", "-n", str(self.path)],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace",
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return {}
+
+        data = json.loads(result.stdout)[0]
+        return self._parse_exiftool_json(data)
+
+    @staticmethod
+    def _parse_exiftool_json(data: dict[str, Any]) -> dict[str, Any]:
+        """Map exiftool -json -n output to our metadata schema."""
+        m: dict[str, Any] = {}
+
+        def g(key: str) -> Any:
+            return data.get(key)
+
+        # Camera
+        if g("Make"):
+            m["camera_make"] = str(g("Make")).strip()
+        if g("Model"):
+            m["camera_model"] = str(g("Model")).strip()
+        if g("LensModel"):
+            m["lens_model"] = str(g("LensModel")).strip()
+        if g("LensMake"):
+            m["lens_make"] = str(g("LensMake")).strip()
+        serial = g("SerialNumber") or g("BodySerialNumber")
+        if serial:
+            m["camera_serial"] = str(serial).strip()
+        if g("Software"):
+            m["software"] = str(g("Software")).strip()
+        if g("Artist"):
+            m["artist"] = str(g("Artist")).strip()
+        if g("Copyright"):
+            m["copyright"] = str(g("Copyright")).strip()
+
+        # Date/time
+        dt = g("DateTimeOriginal") or g("CreateDate") or g("ModifyDate")
+        if dt and str(dt).strip() and "0000" not in str(dt)[:4]:
+            m["date_time_original"] = str(dt).strip()
+
+        # Exposure
+        if g("FNumber"):
+            try:
+                m["f_number"] = round(float(g("FNumber")), 1)
+            except (ValueError, TypeError):
+                pass
+        if g("ISO"):
+            try:
+                m["iso"] = int(g("ISO"))
+            except (ValueError, TypeError):
+                pass
+        if g("ExposureTime"):
+            try:
+                v = float(g("ExposureTime"))
+                m["exposure_time"] = f"1/{int(1/v)}" if v < 1 else str(round(v, 4))
+            except (ValueError, TypeError, ZeroDivisionError):
+                pass
+        if g("FocalLength"):
+            try:
+                m["focal_length"] = round(float(g("FocalLength")), 1)
+            except (ValueError, TypeError):
+                pass
+        if g("FocalLengthIn35mmFormat"):
+            try:
+                m["focal_length_35mm"] = int(g("FocalLengthIn35mmFormat"))
+            except (ValueError, TypeError):
+                pass
+        if g("ExposureCompensation") is not None:
+            try:
+                m["exposure_bias"] = round(float(g("ExposureCompensation")), 2)
+            except (ValueError, TypeError):
+                pass
+        if g("MeteringMode"):
+            m["metering_mode"] = str(g("MeteringMode")).strip()
+        if g("Flash") is not None:
+            m["flash"] = str(g("Flash")).strip()
+        if g("WhiteBalance") is not None:
+            m["white_balance"] = str(g("WhiteBalance")).strip()
+
+        # Image properties
+        if g("Orientation") is not None:
+            m["orientation"] = str(g("Orientation")).strip()
+        if g("ColorSpace") is not None:
+            m["color_space"] = str(g("ColorSpace")).strip()
+
+        # GPS (-n flag gives numeric values directly)
+        lat = g("GPSLatitude")
+        lon = g("GPSLongitude")
+        if lat is not None and lon is not None:
+            try:
+                m["gps_latitude"] = round(float(lat), 6)
+                m["gps_longitude"] = round(float(lon), 6)
+            except (ValueError, TypeError):
+                pass
+            alt = g("GPSAltitude")
+            if alt is not None:
+                try:
+                    m["gps_altitude"] = round(float(alt), 1)
+                except (ValueError, TypeError):
+                    pass
 
         return m
