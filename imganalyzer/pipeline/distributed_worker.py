@@ -473,6 +473,7 @@ class DistributedWorker:
         self._registration_attempts = 0
         self._claim_attempts = 0
         self._empty_claim_polls = 0
+        self._last_claim_reason: str | None = None
         self._startup_lease_recovery_done = False
 
         # In-memory cache for pre-fetched decoded images from the coordinator.
@@ -724,10 +725,9 @@ class DistributedWorker:
                 path_mappings=self.path_mappings,
             )
 
-            # If coordinator signals a decoded cache is available, fetch the
-            # pre-decoded image and prime the runner's cache.  This removes
-            # the worker's dependency on NAS.
-            if job.get("hasDecodedCache"):
+            # Distributed jobs are expected to be coordinator-cache backed so
+            # the worker never needs direct access to the source path.
+            if job.get("hasDecodedCache") or job.get("requireDecodedCache"):
                 primed = self._prime_from_coordinator(runner, image_id, file_path)
                 if not primed:
                     raise FileNotFoundError(
@@ -1040,6 +1040,7 @@ class DistributedWorker:
         capabilities: dict[str, Any] = {
             "pid": os.getpid(),
             "moduleFilter": self.module_filter,
+            "requiresDecodedCache": True,
         }
         try:
             import torch
@@ -1156,6 +1157,8 @@ class DistributedWorker:
         elif self.supported_modules is not None:
             params["modules"] = self.supported_modules
         result = self._coordinator_call_with_lock_retry("jobs/claim", params)
+        raw_reason = result.get("reason")
+        self._last_claim_reason = str(raw_reason).strip() if raw_reason else None
         jobs = result.get("jobs", [])
         return jobs if isinstance(jobs, list) else []
 
@@ -1204,6 +1207,12 @@ class DistributedWorker:
                     break
 
         summary = f"queue pending={pending}, running={running}"
+        pre_decode = status.get("pre_decode", {})
+        if isinstance(pre_decode, dict):
+            cached = int(pre_decode.get("done", 0) or 0)
+            total = int(pre_decode.get("total", 0) or 0)
+            if total > 0:
+                summary += f"; cache={cached}/{total}"
         if active:
             summary += f"; active={', '.join(active)}"
         claimable_modules: set[str] | None = None
@@ -1356,21 +1365,14 @@ class DistributedWorker:
             try:
                 self._coordinator_call_with_lock_retry(
                     "jobs/release",
-                    {"jobId": job_id, "leaseToken": lease_token},
+                    {"jobId": job_id, "leaseToken": lease_token, "delaySeconds": 20},
                 )
             except Exception:
                 pass
-            self._safe_emit_result(
-                path=path,
-                module=module,
-                status="skipped",
-                elapsed_ms=elapsed,
-                error=f"decoded image unavailable: {exc}",
-            )
             console.print(
                 f"  [yellow]⊘[/yellow] [bold]{module}[/bold] released (image not cached) ← {short_path}"
             )
-            return "skipped"
+            return "deferred"
 
         except ImportError as exc:
             elapsed = int((time.monotonic() - started_monotonic) * 1000)
@@ -1530,11 +1532,17 @@ class DistributedWorker:
         if self._empty_claim_polls % idle_log_every == 0:
             queue_summary = self._coordinator_queue_summary()
             queue_hint = f", {queue_summary}" if queue_summary else ""
+            reason_hint = (
+                f", reason={self._last_claim_reason}"
+                if self._last_claim_reason
+                else ""
+            )
             console.print(
                 "[dim]No jobs claimed yet; "
                 f"still polling every {self.poll_interval_seconds:g}s "
                 f"(empty polls={self._empty_claim_polls}, "
-                f"active leases={len(self._snapshot_active())}{queue_hint})[/dim]"
+                f"active leases={len(self._snapshot_active())}"
+                f"{reason_hint}{queue_hint})[/dim]"
             )
         self._maybe_reprobe_modules()
         self._shutdown.wait(self.poll_interval_seconds)

@@ -4,6 +4,7 @@ import type { PassSelectorValue } from './PassSelector'
 import { ProgressDashboard } from './ProgressDashboard'
 import { LiveResultsFeed } from './LiveResultsFeed'
 import { ConfirmStopDialog } from './ConfirmStopDialog'
+import { SectionHeading, SurfaceCard, UiButton } from './ui'
 import type { UseBatchProcessReturn } from '../hooks/useBatchProcess'
 import type { BatchIngestProgress, BatchResult } from '../global'
 
@@ -46,80 +47,82 @@ function ConfigPanel({
   const canStart = folder.trim() !== '' && passSel.selectedKeys.size > 0
 
   return (
-    <div className="flex flex-col gap-5 max-w-2xl w-full mx-auto py-6 px-4">
-      <h2 className="text-base font-semibold text-neutral-200">Batch Processing</h2>
-
-      {/* Folder input */}
-      <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">
-          Source folder
-        </label>
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={folder}
-            onChange={(e) => onFolderChange(e.target.value)}
-            placeholder="C:\Photos\2024"
-            className="
-              flex-1 px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700
-              text-sm text-neutral-200 placeholder-neutral-600
-              focus:outline-none focus:border-blue-500
-            "
-          />
-          <button
-            onClick={async () => {
-              const picked = await window.api.openFolder()
-              if (picked) onFolderChange(picked)
-            }}
-            className="
-              px-3 py-2 rounded-lg bg-neutral-700 text-sm text-neutral-200
-              hover:bg-neutral-600 transition-colors shrink-0
-            "
-          >
-            Browse
-          </button>
-        </div>
-      </div>
-
-      {/* Pass selector */}
-      <PassSelector value={passSel} onChange={onPassSelChange} />
-
-      {nothingToRun && (
-        <p className="text-sm text-yellow-400 bg-yellow-900/20 border border-yellow-800 rounded-lg px-3 py-2">
-          All images in this folder have already been processed for the selected passes.
-          Nothing was enqueued.
-        </p>
-      )}
-
-      {error && (
-        <p className="text-sm text-red-400 bg-red-900/20 border border-red-800 rounded-lg px-3 py-2">
-          {error}
-        </p>
-      )}
-
-      {/* Profiler toggle */}
-      <label className="flex items-center gap-2 text-xs text-neutral-400 cursor-pointer select-none">
-        <input
-          type="checkbox"
-          checked={profile}
-          onChange={(e) => onProfileChange(e.target.checked)}
-          className="rounded border-neutral-600 bg-neutral-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+    <div className="flex flex-col gap-5 max-w-3xl w-full mx-auto py-6 px-4">
+      <SurfaceCard tone="accent">
+        <SectionHeading
+          eyebrow="Batch processing"
+          title="Queue up a focused analysis run"
+          description="Choose a folder, select the passes you care about, and let the workstation handle the heavy lifting."
         />
-        Enable profiler (performance analysis)
-      </label>
 
-      <button
-        onClick={onStart}
-        disabled={!canStart}
-        className="
-          self-start px-5 py-2 rounded-lg text-sm font-medium transition-colors
-          bg-blue-700 text-white
-          disabled:opacity-30 disabled:cursor-not-allowed
-          enabled:hover:bg-blue-600
-        "
-      >
-        Start batch
-      </button>
+        {/* Folder input */}
+        <div className="mt-4 flex flex-col gap-1.5">
+          <label className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">
+            Source folder
+          </label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={folder}
+              onChange={(e) => onFolderChange(e.target.value)}
+              placeholder="C:\Photos\2024"
+              className="
+                flex-1 rounded-xl border border-neutral-700 bg-black/20 px-3 py-2
+                text-sm text-neutral-200 placeholder-neutral-600
+                focus:border-cyan-500 focus:outline-none
+              "
+            />
+            <UiButton
+              onClick={async () => {
+                const picked = await window.api.openFolder()
+                if (picked) onFolderChange(picked)
+              }}
+              variant="secondary"
+            >
+              Browse
+            </UiButton>
+          </div>
+        </div>
+
+        {/* Pass selector */}
+        <div className="mt-4">
+          <PassSelector value={passSel} onChange={onPassSelChange} />
+        </div>
+
+        {nothingToRun && (
+          <p className="mt-4 text-sm text-yellow-300 bg-yellow-900/20 border border-yellow-800 rounded-xl px-3 py-2">
+            All images in this folder have already been processed for the selected passes.
+            Nothing was enqueued.
+          </p>
+        )}
+
+        {error && (
+          <p className="mt-4 text-sm text-red-300 bg-red-900/20 border border-red-800 rounded-xl px-3 py-2">
+            {error}
+          </p>
+        )}
+
+        {/* Profiler toggle */}
+        <label className="mt-4 flex items-center gap-2 text-xs text-neutral-400 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={profile}
+            onChange={(e) => onProfileChange(e.target.checked)}
+            className="rounded border-neutral-600 bg-neutral-800 text-cyan-500 focus:ring-cyan-500 focus:ring-offset-0"
+          />
+          Enable profiler (performance analysis)
+        </label>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <UiButton
+            onClick={onStart}
+            disabled={!canStart}
+            variant="primary"
+          >
+            Start batch
+          </UiButton>
+        </div>
+      </SurfaceCard>
     </div>
   )
 }
@@ -137,48 +140,54 @@ function IngestPanel({ progress }: { progress: BatchIngestProgress | null }) {
 
   return (
     <div className="flex flex-col gap-4 max-w-2xl w-full mx-auto py-6 px-4">
-      <h2 className="text-base font-semibold text-neutral-200">Scanning folder…</h2>
-
-      <div className="flex items-center gap-2 text-sm text-neutral-400">
-        <div className="w-3.5 h-3.5 border-2 border-neutral-600 border-t-blue-400 rounded-full animate-spin shrink-0" />
-        {progress
-          ? `Scanned ${progress.scanned.toLocaleString()} of ${progress.total.toLocaleString()} images`
-          : 'Registering images and queuing jobs…'
-        }
-      </div>
-
-      <div className="w-full bg-neutral-800 rounded-full h-2 overflow-hidden">
-        <div
-          className="h-2 bg-blue-500 rounded-full transition-all duration-200"
-          style={{ width: `${pct}%` }}
+      <SurfaceCard tone="accent">
+        <SectionHeading
+          eyebrow="Ingesting"
+          title="Scanning folder…"
+          description="Registering images and queueing passes for analysis."
         />
-      </div>
 
-      {progress && (
-        <div className="grid grid-cols-4 gap-2 text-center">
-          {(
-            [
-              ['Scanned',    progress.scanned],
-              ['Registered', progress.registered],
-              ['Enqueued',   progress.enqueued],
-              ['Skipped',    progress.skipped],
-            ] as [string, number][]
-          ).map(([label, value]) => (
-            <div key={label} className="bg-neutral-800 rounded-lg py-2 px-1">
-              <div className="text-base font-semibold text-neutral-100 tabular-nums">
-                {value.toLocaleString()}
-              </div>
-              <div className="text-xs text-neutral-500 mt-0.5">{label}</div>
-            </div>
-          ))}
+        <div className="mt-4 flex items-center gap-2 text-sm text-neutral-400">
+          <div className="w-3.5 h-3.5 border-2 border-neutral-600 border-t-cyan-400 rounded-full animate-spin shrink-0" />
+          {progress
+            ? `Scanned ${progress.scanned.toLocaleString()} of ${progress.total.toLocaleString()} images`
+            : 'Registering images and queueing jobs…'
+          }
         </div>
-      )}
 
-      {currentName && (
-        <p className="text-xs text-neutral-500 truncate" title={progress?.current}>
-          {currentName}
-        </p>
-      )}
+        <div className="mt-3 w-full bg-neutral-800 rounded-full h-2 overflow-hidden">
+          <div
+            className="h-2 bg-cyan-500 rounded-full transition-all duration-200"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+
+        {progress && (
+          <div className="mt-4 grid grid-cols-4 gap-2 text-center">
+            {(
+              [
+                ['Scanned',    progress.scanned],
+                ['Registered', progress.registered],
+                ['Enqueued',   progress.enqueued],
+                ['Skipped',    progress.skipped],
+              ] as [string, number][]
+            ).map(([label, value]) => (
+              <div key={label} className="rounded-xl border border-neutral-800 bg-black/15 py-2 px-1">
+                <div className="text-base font-semibold text-neutral-100 tabular-nums">
+                  {value.toLocaleString()}
+                </div>
+                <div className="text-xs text-neutral-500 mt-0.5">{label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {currentName && (
+          <p className="mt-3 text-xs text-neutral-500 truncate" title={progress?.current}>
+            {currentName}
+          </p>
+        )}
+      </SurfaceCard>
     </div>
   )
 }
@@ -189,7 +198,7 @@ function LiveErrorPanel({ error, results }: { error: string | null; results: Bat
   if (!error && failures.length === 0) return null
 
   return (
-    <section className="rounded-xl border border-red-800/80 bg-red-900/10 p-4">
+    <SurfaceCard tone="danger">
       <div className="text-sm font-semibold text-red-300">Live errors</div>
       <p className="mt-1 text-xs text-red-200/80">
         New failures appear here immediately so you can confirm what is breaking.
@@ -224,7 +233,7 @@ function LiveErrorPanel({ error, results }: { error: string | null; results: Bat
           ))}
         </div>
       )}
-    </section>
+    </SurfaceCard>
   )
 }
 

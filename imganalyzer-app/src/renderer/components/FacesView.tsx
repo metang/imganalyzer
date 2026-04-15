@@ -25,6 +25,8 @@ let batchTimer: ReturnType<typeof setTimeout> | null = null
 const CLUSTER_PAGE_SIZE = 200
 const DEFAULT_UNLINKED_CLUSTER_TARGET = 100
 const DEFAULT_SIMILARITY_THRESHOLD = 0.35
+const MAX_EAGER_CLUSTER_PAGES = 4
+const MAX_EAGER_CLUSTER_WARMUP_MS = 5000
 
 function normalizeImageSrc(value: string | null | undefined): string | null {
   if (!value) return null
@@ -779,29 +781,42 @@ export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesVi
         let loadedClusters = clusterResult.clusters
         let loadedTotalCount = clusterResult.total_count
         const deferredIds = new Set(clusterResult.deferred_cluster_ids ?? [])
-        setDeferredClusterIds(deferredIds)
         const shouldEnsureUnlinked = !personsResult.error && personsResult.persons.length > 0
 
         if (shouldEnsureUnlinked) {
           let offset = loadedClusters.length
           let unlinkedCount = countActiveUnlinkedClusters(loadedClusters, deferredIds)
+          let warmupPages = 0
+          const warmupDeadline = Date.now() + MAX_EAGER_CLUSTER_WARMUP_MS
 
-          while (unlinkedCount < unlinkedClusterTarget && offset < loadedTotalCount) {
+          // Best-effort warmup for the People view. Large libraries can require
+          // many pages before enough unlinked clusters appear, so keep this
+          // bounded and let the user load more on demand.
+          while (
+            unlinkedCount < unlinkedClusterTarget
+            && offset < loadedTotalCount
+            && warmupPages < MAX_EAGER_CLUSTER_PAGES
+            && Date.now() < warmupDeadline
+          ) {
             const nextPage = await window.api.listFaceClusters(CLUSTER_PAGE_SIZE, offset)
             if (nextPage.error) {
-              setError(nextPage.error)
               break
             }
             if (nextPage.clusters.length === 0) {
               break
             }
-            loadedClusters = [...loadedClusters, ...nextPage.clusters]
+            loadedClusters = appendUniqueClusters(loadedClusters, nextPage.clusters)
             loadedTotalCount = nextPage.total_count
+            for (const clusterId of nextPage.deferred_cluster_ids ?? []) {
+              deferredIds.add(clusterId)
+            }
             offset = loadedClusters.length
             unlinkedCount = countActiveUnlinkedClusters(loadedClusters, deferredIds)
+            warmupPages += 1
           }
         }
 
+        setDeferredClusterIds(new Set(deferredIds))
         setTotalClusterCount(loadedTotalCount)
         setHasOccurrences(true)
         setClusters(loadedClusters)
@@ -861,8 +876,11 @@ export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesVi
         setError(result.error)
         return
       }
-      setClusters((prev) => [...prev, ...result.clusters])
+      setClusters((prev) => appendUniqueClusters(prev, result.clusters))
       setTotalClusterCount(result.total_count)
+      if (result.deferred_cluster_ids) {
+        setDeferredClusterIds(new Set(result.deferred_cluster_ids))
+      }
     } catch (err) {
       setError(String(err))
     }
@@ -3553,6 +3571,20 @@ export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesVi
                             </button>
                           </div>
                         </div>
+
+                        {unlinkedSubFilter === 'active'
+                          && activeUnlinkedClusters.length < unlinkedClusterTarget
+                          && hasMoreClusters && (
+                            <div className="flex justify-start">
+                              <button
+                                type="button"
+                                onClick={() => { void loadMoreClusters() }}
+                                className="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-300 transition-colors hover:bg-neutral-800"
+                              >
+                                Load more clusters
+                              </button>
+                            </div>
+                          )}
 
                         {/* Bulk restore for deferred view */}
                         {unlinkedSubFilter === 'deferred' && deferredUnlinkedClusters.length > 0 && (

@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import contextlib
+import io
+import logging
 import os
 import threading
 from pathlib import Path
 from typing import Any, Generator
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 _STDERR_FD_LOCK = threading.Lock()
 
@@ -68,6 +72,8 @@ def read(path: Path, *, half_size: bool = True) -> dict[str, Any]:
         ) from exc
 
     with raw_ctx as raw:
+        rgb = None
+        postprocess_err = None
         try:
             rgb = raw.postprocess(
                 use_camera_wb=True,
@@ -76,9 +82,26 @@ def read(path: Path, *, half_size: bool = True) -> dict[str, Any]:
                 half_size=half_size,
             )
         except Exception as exc:
+            postprocess_err = exc
+
+        if rgb is None:
+            # Fallback 1: extract embedded thumbnail (most DNG/RAW files have one)
+            rgb = _try_extract_thumb(raw, path)
+
+        if rgb is None:
+            # Fallback 2: try Pillow (works for DNG since it's TIFF-based)
+            rgb = _try_pillow_fallback(path)
+
+        if rgb is None:
             raise ValueError(
-                f"LibRaw postprocess failed for {path.name}: {exc}"
-            ) from exc
+                f"LibRaw postprocess failed for {path.name}: {postprocess_err}"
+            ) from postprocess_err
+
+        if postprocess_err is not None:
+            log.info(
+                "Decoded %s via fallback (postprocess failed: %s)",
+                path.name, postprocess_err,
+            )
 
         # Also expose the raw Bayer data for technical analysis
         try:
@@ -115,6 +138,50 @@ def read(path: Path, *, half_size: bool = True) -> dict[str, Any]:
             "daylight_wb": daylight_wb,
             "color_desc": raw_colors,
         }
+
+
+def _try_extract_thumb(raw: Any, path: Path) -> np.ndarray | None:
+    """Try to extract the embedded thumbnail/preview from a RAW file.
+
+    Most DNG and RAW files embed a JPEG preview that can be used when full
+    demosaic fails.  Returns an RGB uint8 numpy array or None.
+    """
+    try:
+        thumb = raw.extract_thumb()
+    except Exception:
+        return None
+
+    try:
+        import rawpy
+
+        if thumb.format == rawpy.ThumbFormat.JPEG:
+            from PIL import Image
+
+            img = Image.open(io.BytesIO(thumb.data))
+            img = img.convert("RGB")
+            return np.array(img, dtype=np.uint8)
+        elif thumb.format == rawpy.ThumbFormat.BITMAP:
+            arr = np.asarray(thumb.data, dtype=np.uint8)
+            if arr.ndim == 3 and arr.shape[2] == 3:
+                return arr
+    except Exception:
+        pass
+    return None
+
+
+def _try_pillow_fallback(path: Path) -> np.ndarray | None:
+    """Try opening the file with Pillow as a last resort.
+
+    Works for DNG files (TIFF-based) and some other formats Pillow supports.
+    """
+    try:
+        from PIL import Image
+
+        img = Image.open(path)
+        img = img.convert("RGB")
+        return np.array(img, dtype=np.uint8)
+    except Exception:
+        return None
 
 
 class RawReader:

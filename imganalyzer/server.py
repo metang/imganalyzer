@@ -384,7 +384,7 @@ def _replenish_decode_buffer() -> None:
     :class:`~imganalyzer.cache.pre_decode.ResourceSampler` to check
     system utilisation before deciding whether (and how much) to feed.
 
-    * **High capacity** (CPU < 40 %, disk < 50 %): feed up to
+    * **High capacity** (CPU < 65 %, disk < 50 %): feed up to
       ``_DECODE_BUFFER_SIZE`` images.
     * **Medium capacity** (CPU < 70 %, disk < 80 %): feed half the
       buffer.
@@ -869,6 +869,11 @@ def _handle_run(req_id: int | str, params: dict) -> None:
         # Recover them immediately by default unless the caller overrides it.
         stale_timeout = params.get("staleTimeout", 0)
         profile = params.get("profile", False)
+
+        try:
+            _replenish_decode_buffer()
+        except Exception as exc:
+            sys.stderr.write(f"[server] pre-decode warmup failed: {exc}\n")
 
         def _run_worker():
             global _active_worker
@@ -1416,6 +1421,54 @@ _DISTRIBUTED_CONTEXT_MODULES: dict[str, tuple[str, ...]] = {
     "embedding": ("caption",),
 }
 _DISTRIBUTED_SEARCH_MODULES = {"metadata", "caption", "faces"}
+_DISTRIBUTED_MASTER_ONLY_MODULES = frozenset({"metadata", "technical", "faces"})
+_DISTRIBUTED_CACHE_OPTIONAL_MODULES = frozenset({"embedding"})
+_LEASE_TTL_FLOORS_SECONDS: dict[str, int] = {
+    "caption": 300,
+    "perception": 300,
+}
+
+
+def _claim_lease_ttl_seconds(
+    requested_ttl_seconds: int,
+    *,
+    module_filter: str | None,
+    modules_filter: list[str] | None,
+    prefer_module: str | None,
+) -> int:
+    """Return a safe lease TTL for the current claim mix.
+
+    Slow modules like caption/perception should tolerate a few transient
+    heartbeat misses without immediate reclaim churn.
+    """
+    ttl = max(5, int(requested_ttl_seconds))
+    candidates = [module_filter, prefer_module]
+    if modules_filter:
+        candidates.extend(modules_filter)
+    for module_name in candidates:
+        if not module_name:
+            continue
+        ttl = max(ttl, _LEASE_TTL_FLOORS_SECONDS.get(str(module_name), 0))
+    return ttl
+
+
+def _request_requires_decoded_cache(
+    worker_id: str,
+    *,
+    module_filter: str | None,
+    modules_filter: list[str] | None,
+    worker_caps: dict[str, Any],
+) -> bool:
+    """Whether this distributed claim must be backed by coordinator decode cache."""
+    if worker_id == _MASTER_WORKER_ID:
+        return False
+    if "requiresDecodedCache" in worker_caps:
+        return bool(worker_caps.get("requiresDecodedCache"))
+    if module_filter is not None:
+        return module_filter not in _DISTRIBUTED_CACHE_OPTIONAL_MODULES
+    if modules_filter is not None:
+        return any(m not in _DISTRIBUTED_CACHE_OPTIONAL_MODULES for m in modules_filter)
+    return True
 
 
 def _build_distributed_job_context(repo: Any, image_id: int, module: str) -> dict[str, Any]:
@@ -1433,6 +1486,7 @@ def _handle_jobs_claim(params: dict) -> dict:
     from imganalyzer.db.repository import Repository
     from imganalyzer.pipeline.unified_scheduler import (
         compute_claim_policy,
+        get_worker_capabilities,
         record_worker_affinity,
     )
     from imganalyzer.pipeline.worker import _PREREQUISITES
@@ -1464,7 +1518,7 @@ def _handle_jobs_claim(params: dict) -> dict:
         coordinator_run_active=w is not None,
     )
     if not policy.allow_claims:
-        return {"jobs": []}
+        return {"jobs": [], "reason": policy.reason}
 
     requested = policy.requested
     scan_size = policy.scan_size
@@ -1472,18 +1526,24 @@ def _handle_jobs_claim(params: dict) -> dict:
     modules_filter = policy.modules_filter
     prefer_module = policy.prefer_module
     prefer_image_ids = policy.prefer_image_ids
+    worker_caps = get_worker_capabilities(conn, worker_id)
+    requires_decoded_cache = _request_requires_decoded_cache(
+        worker_id,
+        module_filter=module_filter,
+        modules_filter=modules_filter,
+        worker_caps=worker_caps,
+    )
 
-    # Enforce master-only modules: these need the original file on disk
-    # for accurate results. metadata needs exifread on the raw file,
-    # technical needs full-res for noise/sharpness, faces needs full-res
-    # for small face detection and embedding quality.
-    _MASTER_ONLY = {"metadata", "technical", "faces"}
-    if module_filter and module_filter in _MASTER_ONLY:
-        return {"jobs": []}
+    # Defense in depth: the scheduler should already exclude these for
+    # distributed workers, but keep the coordinator-side guard here too.
+    if module_filter and module_filter in _DISTRIBUTED_MASTER_ONLY_MODULES:
+        return {"jobs": [], "reason": "master_only_modules"}
     if modules_filter:
-        modules_filter = [m for m in modules_filter if m not in _MASTER_ONLY]
+        modules_filter = [
+            m for m in modules_filter if m not in _DISTRIBUTED_MASTER_ONLY_MODULES
+        ]
         if not modules_filter:
-            return {"jobs": []}
+            return {"jobs": [], "reason": "master_only_modules"}
 
     pending_eligible = queue.pending_count(module_filter, modules=modules_filter)
     pending_candidates = max(requested, pending_eligible)
@@ -1496,37 +1556,50 @@ def _handle_jobs_claim(params: dict) -> dict:
     )
     jobs: list[dict[str, Any]] = []
     scanned_candidates = 0
-    # Cache-gated dispatch: only activate when the decoded store has been
-    # initialised (by server startup or status poll).  Jobs are restricted
-    # to cached images so workers never need NAS access.  When the cache is
-    # empty the gate returns an empty set → no jobs dispatched → workers
-    # keep polling until the pre-decoder populates the cache.
+    total_defers = 0
+    total_skips = 0
+    # Some distributed workers are coordinator-cache backed and cannot reach
+    # the source image path directly. Those workers must only receive jobs for
+    # images already decoded on the coordinator.
     cache_gate_ids: set[int] | None = None
-    if _decoded_store is not None:
-        try:
-            cache_gate_ids = _decoded_store.cached_image_ids()
-            _auto_trigger_pre_decode()
-        except Exception:
-            pass
+    try:
+        _auto_trigger_pre_decode()
+        cache_gate_ids = _get_decoded_store().cached_image_ids()
+    except Exception as exc:
+        if requires_decoded_cache:
+            sys.stderr.write(f"[server] decoded-cache claim gating failed: {exc}\n")
+            return {"jobs": [], "reason": "decoded_cache_unavailable"}
+
+    if requires_decoded_cache and pending_eligible > 0 and not cache_gate_ids:
+        return {"jobs": [], "reason": "waiting_for_decoded_cache"}
     # When a module yields only invalid jobs for several consecutive batches,
     # exclude it so lower-priority modules (e.g. embedding) can be reached.
     exhausted_modules: set[str] = set()
     module_miss_streak: dict[str, int] = {}
     _MISS_THRESHOLD = scan_size * 2  # skip module after this many consecutive misses
+    safe_lease_ttl_seconds = _claim_lease_ttl_seconds(
+        lease_ttl_seconds,
+        module_filter=module_filter,
+        modules_filter=modules_filter,
+        prefer_module=prefer_module,
+    )
     while len(jobs) < requested and scanned_candidates < max_scan_candidates:
         claim_size = min(scan_size, max_scan_candidates - scanned_candidates)
         excl = sorted(exhausted_modules) if exhausted_modules else None
+        claim_kwargs = {
+            "worker_id": worker_id,
+            "lease_ttl_seconds": safe_lease_ttl_seconds,
+            "batch_size": claim_size,
+            "module": module_filter,
+            "modules": modules_filter,
+            "exclude_modules": excl,
+            "prefer_module": prefer_module,
+            "prefer_image_ids": prefer_image_ids,
+            "master_reserve": policy.master_reserve,
+        }
         claimed = queue.claim_leased(
-            worker_id=worker_id,
-            lease_ttl_seconds=max(5, lease_ttl_seconds),
-            batch_size=claim_size,
-            module=module_filter,
-            modules=modules_filter,
-            exclude_modules=excl,
-            prefer_module=prefer_module,
-            prefer_image_ids=prefer_image_ids,
-            restrict_image_ids=cache_gate_ids,
-            master_reserve=policy.master_reserve,
+            **claim_kwargs,
+            restrict_image_ids=cache_gate_ids if requires_decoded_cache else None,
         )
         if not claimed:
             break
@@ -1535,6 +1608,7 @@ def _handle_jobs_claim(params: dict) -> dict:
         batch_valid_modules: set[str] = set()
         pending_skips: list[tuple[int, str, str]] = []
         pending_releases: list[tuple[int, str]] = []
+        pending_defers: list[tuple[int, str, int]] = []
 
         for job in claimed:
             if len(jobs) >= requested:
@@ -1566,7 +1640,8 @@ def _handle_jobs_claim(params: dict) -> dict:
                         f"prerequisite_{prereq}_{prereq_status}",
                     ))
                 else:
-                    pending_releases.append((job["id"], job["lease_token"]))
+                    delay_seconds = 30 if prereq_status == "running" else 15
+                    pending_defers.append((job["id"], job["lease_token"], delay_seconds))
                 continue
 
             batch_valid_modules.add(module_name)
@@ -1585,13 +1660,18 @@ def _handle_jobs_claim(params: dict) -> dict:
                 },
                 "context": _build_distributed_job_context(repo, image_id, module_name),
             }
-            if cache_gate_ids is not None:
+            if cache_gate_ids is not None and image_id in cache_gate_ids:
                 job_entry["hasDecodedCache"] = True
+                job_entry["requireDecodedCache"] = True
+            else:
+                job_entry["requireDecodedCache"] = requires_decoded_cache
             jobs.append(job_entry)
 
         # Batch all skip/release ops into a single transaction to reduce
         # write contention when multiple workers poll simultaneously.
-        queue.batch_skip_release_leased(pending_skips, pending_releases)
+        total_skips += len(pending_skips)
+        total_defers += len(pending_defers)
+        queue.batch_skip_release_leased(pending_skips, pending_releases, pending_defers)
 
         # Track per-module miss streaks to detect exhausted modules.
         # Only in multi-module mode — single-module filter is explicit.
@@ -1619,6 +1699,13 @@ def _handle_jobs_claim(params: dict) -> dict:
             )
         except Exception:
             pass  # non-critical
+
+    if not jobs:
+        if requires_decoded_cache and pending_eligible > 0 and scanned_candidates == 0:
+            reason = "waiting_for_decoded_cache"
+        else:
+            reason = "deferred_prerequisites" if total_defers else "no_eligible_jobs"
+        return {"jobs": [], "reason": reason, "deferred": total_defers, "skipped": total_skips}
 
     return {"jobs": jobs}
 
@@ -1655,12 +1742,13 @@ def _handle_jobs_release(params: dict) -> dict:
 
     job_id = int(params.get("jobId", 0))
     lease_token = str(params.get("leaseToken", "")).strip()
+    delay_seconds = int(params.get("delaySeconds", 0))
     if job_id <= 0 or not lease_token:
         raise ValueError("jobId and leaseToken are required")
 
     conn = _get_db()
     queue = JobQueue(conn)
-    ok = queue.release_leased(job_id, lease_token)
+    ok = queue.release_leased(job_id, lease_token, delay_seconds=delay_seconds)
     return {"ok": ok}
 
 
@@ -5982,6 +6070,15 @@ def _serve_http_jsonrpc(
 
     server = _WatchdogHTTPServer((host, port), _JsonRpcHandler)
 
+    # Emit the ready signal as soon as the socket is bound so the
+    # Electron coordinator doesn't time out waiting for it while we do
+    # slower one-time init (decoded-store scan, etc.).
+    sys.stderr.write(
+        f"[server.http] listening on http://{host}:{port}{normalized_path} "
+        f"(auth={'on' if auth_token else 'off'})\n"
+    )
+    sys.stderr.flush()
+
     # Eagerly initialise the decoded image store so the cache gate is
     # active from the very first jobs/claim request.  Without this,
     # workers could receive jobs before any status poll triggers lazy init
@@ -5993,10 +6090,6 @@ def _serve_http_jsonrpc(
             f"[server.http] decoded store init failed (will retry lazily): {exc}\n"
         )
 
-    sys.stderr.write(
-        f"[server.http] listening on http://{host}:{port}{normalized_path} "
-        f"(auth={'on' if auth_token else 'off'})\n"
-    )
     try:
         server.serve_forever()
     finally:

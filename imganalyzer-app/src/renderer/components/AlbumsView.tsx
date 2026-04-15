@@ -1226,21 +1226,22 @@ function getLayout(count: number): CollageLayout {
           : count <= 8 ? 3
             : count <= 14 ? 4
               : 5
-  const rowHeight =
-    count === 1 ? 360
-      : count === 2 ? 220
-        : count <= 4 ? 180
-          : columns >= 5 ? 130
-            : columns === 4 ? 145
-              : 170
+  // Use aspect-ratio instead of fixed pixel heights so cells scale
+  // proportionally with container width and never become overly wide/short.
+  const cellAspect =
+    count === 1 ? '3/2'
+      : count === 2 ? '3/2'
+        : count <= 4 ? '4/3'
+          : '1/1'
   const rowCount = Math.ceil(count / columns)
 
   return {
     columns: `repeat(${columns}, minmax(0, 1fr))`,
-    rows: `repeat(${rowCount}, ${rowHeight}px)`,
+    rows: `repeat(${rowCount}, auto)`,
     slots: Array.from({ length: count }, (_, index) => ({
       gridColumn: `${(index % columns) + 1}`,
       gridRow: `${Math.floor(index / columns) + 1}`,
+      aspectRatio: cellAspect,
     })),
   }
 }
@@ -1412,7 +1413,7 @@ function ExpandedChapterDetail({
                 />
               ) : moment.hero_image_id && heroThumbs[moment.hero_image_id] ? (
                 <div className="rounded-lg overflow-hidden">
-                  <img src={heroThumbs[moment.hero_image_id]} alt="" className="w-full h-44 object-cover object-top" />
+                  <img src={heroThumbs[moment.hero_image_id]} alt="" className="w-full aspect-[3/2] object-cover object-top" />
                 </div>
               ) : (
                 <div className="w-full h-32 rounded-lg bg-neutral-800 flex items-center justify-center">
@@ -1441,6 +1442,8 @@ function QuiltedGrid({
   toggleChapter,
   colWidth,
   onImageClick,
+  coverAspects,
+  maxImageSize,
 }: {
   yearGroups: Record<string, StoryChapter[]>
   years: string[]
@@ -1451,9 +1454,12 @@ function QuiltedGrid({
   toggleChapter: (id: string) => void
   colWidth: number
   onImageClick?: (img: MomentImage, siblings: MomentImage[]) => void
+  coverAspects: Record<number, number>
+  maxImageSize: number
 }) {
   // Measure container width to compute column count dynamically
   const containerRef = useRef<HTMLDivElement>(null)
+  const [containerWidth, setContainerWidth] = useState(900)
   const [colCount, setColCount] = useState(3)
 
   useEffect(() => {
@@ -1461,6 +1467,7 @@ function QuiltedGrid({
     if (!el) return
     const observer = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? 900
+      setContainerWidth(w)
       setColCount(Math.max(2, Math.floor(w / colWidth)))
     })
     observer.observe(el)
@@ -1471,7 +1478,7 @@ function QuiltedGrid({
     <div ref={containerRef} className="py-6 px-5">
       {years.map((year) => {
         const yearChapters = yearGroups[year]
-        const yearColCount = Math.max(1, Math.min(colCount, yearChapters.length))
+        const yearColCount = Math.max(2, Math.min(colCount, Math.max(2, yearChapters.length)))
         return (
           <div key={year} className="mb-8">
             {/* Year divider */}
@@ -1487,7 +1494,8 @@ function QuiltedGrid({
               className="grid gap-2"
               style={{
                 gridTemplateColumns: `repeat(${yearColCount}, minmax(0, 1fr))`,
-                gridAutoRows: 'minmax(120px, auto)',
+                gridAutoRows: 'auto',
+                alignItems: 'start',
               }}
             >
               {yearChapters.map((chapter, idx) => {
@@ -1496,28 +1504,40 @@ function QuiltedGrid({
                 const dateRange = formatChapterDateRange(chapter.start_date, chapter.end_date)
 
                 /* Sizing pattern adapts to available columns.
-                 * Feature cards span 2 cols (capped to colCount).
-                 * Cycle length scales with colCount for variety. */
+                 * Cards use aspect-ratio CSS constrained to ±30% of the cover
+                 * image's natural AR, preventing distorted wide strips. */
                 let colSpan = 1
-                let rowSpan = 2
+                let arMultiplier = 1.0
                 if (isExpanded) {
-                  colSpan = yearColCount; rowSpan = 0
+                  colSpan = yearColCount
                 } else {
-                  const cycle = yearColCount + 4  // e.g. 3→7, 5→9, 7→11
+                  const cycle = yearColCount + 4
                   const pos = idx % cycle
-                  if (pos === 0) { colSpan = 2; rowSpan = 3 }           // feature
-                  else if (pos === 2) { colSpan = 1; rowSpan = 3 }      // tall
-                  else if (pos === Math.floor(cycle / 2)) { colSpan = 2; rowSpan = 2 }  // wide
-                  // Additional tall card for wider grids
-                  else if (yearColCount >= 5 && pos === yearColCount) { colSpan = 1; rowSpan = 3 }
-                  // rest → standard 1×2
-                  // Cap so collapsed cards never span the full grid width (avoids wide strip look)
+                  if (pos === 0) { colSpan = 2; arMultiplier = 1.2 }           // feature: wider
+                  else if (pos === 2) { colSpan = 1; arMultiplier = 0.8 }      // tall
+                  else if (pos === Math.floor(cycle / 2)) { colSpan = 2; arMultiplier = 1.15 }  // wide
+                  else if (yearColCount >= 5 && pos === yearColCount) { colSpan = 1; arMultiplier = 0.85 }
+                  // Cap so collapsed cards never span the full grid width
                   colSpan = Math.min(colSpan, Math.max(1, yearColCount - 1))
                 }
 
+                const DEFAULT_AR = 4 / 3
+                const imgAR = chapter.cover_image_id != null
+                  ? (coverAspects[chapter.cover_image_id] ?? DEFAULT_AR)
+                  : DEFAULT_AR
+                const minAR = imgAR * 0.7
+                const maxAR = imgAR * 1.3
+                const clampedAR = Math.max(minAR, Math.min(maxAR, imgAR * arMultiplier))
+
                 const gridStyle: React.CSSProperties = isExpanded
-                  ? { gridColumn: '1 / -1', gridRow: 'span 1' }
-                  : { gridColumn: `span ${colSpan}`, gridRow: `span ${rowSpan}` }
+                  ? { gridColumn: '1 / -1' }
+                  : {
+                      gridColumn: `span ${colSpan}`,
+                      aspectRatio: `${clampedAR}`,
+                      minHeight: '160px',
+                      maxWidth: `${maxImageSize}px`,
+                      maxHeight: `${maxImageSize}px`,
+                    }
 
                 return (
                   <div key={chapter.id} style={gridStyle}>
@@ -1598,6 +1618,7 @@ function ZigzagTimeline({
   heroThumbs,
   toggleChapter,
   onImageClick,
+  maxImageSize,
 }: {
   yearGroups: Record<string, StoryChapter[]>
   years: string[]
@@ -1607,6 +1628,8 @@ function ZigzagTimeline({
   heroThumbs: Record<number, string>
   toggleChapter: (id: string) => void
   onImageClick?: (img: MomentImage, siblings: MomentImage[]) => void
+  coverAspects?: Record<number, number>
+  maxImageSize: number
 }) {
   let globalIdx = 0
 
@@ -1671,11 +1694,12 @@ function ZigzagTimeline({
                       <div className={side === 'left' ? '' : 'flex items-center justify-end'}>
                         {side === 'left' ? (
                           <div
-                            className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 ring-1 ring-neutral-800/50 hover:ring-neutral-700/50 transition-all duration-200 ml-auto w-full max-w-xl"
+                            className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 ring-1 ring-neutral-800/50 hover:ring-neutral-700/50 transition-all duration-200 ml-auto w-full"
+                            style={{ maxWidth: `${maxImageSize}px` }}
                             onClick={() => toggleChapter(chapter.id)}
                           >
                             {coverThumb ? (
-                              <div className="relative h-48 overflow-hidden">
+                              <div className="relative aspect-[3/2] overflow-hidden">
                                 <img
                                   src={coverThumb}
                                   alt=""
@@ -1723,11 +1747,12 @@ function ZigzagTimeline({
                       <div className={side === 'right' ? '' : 'flex items-center'}>
                         {side === 'right' ? (
                           <div
-                            className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 ring-1 ring-neutral-800/50 hover:ring-neutral-700/50 transition-all duration-200 mr-auto w-full max-w-xl"
+                            className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 ring-1 ring-neutral-800/50 hover:ring-neutral-700/50 transition-all duration-200 mr-auto w-full"
+                            style={{ maxWidth: `${maxImageSize}px` }}
                             onClick={() => toggleChapter(chapter.id)}
                           >
                             {coverThumb ? (
-                              <div className="relative h-48 overflow-hidden">
+                              <div className="relative aspect-[3/2] overflow-hidden">
                                 <img
                                   src={coverThumb}
                                   alt=""
@@ -1813,6 +1838,8 @@ function StoryTimeline({
 }) {
   const [viewMode, setViewMode] = useState<ViewMode>('quilted')
   const [colWidth, setColWidth] = useState(240)  // px per column — slider controls this
+  // Map slider range [160..450] → max image size [256..768]
+  const maxImageSize = Math.round(256 + (colWidth - 160) / (450 - 160) * (768 - 256))
   const [expandedChapter, setExpandedChapter] = useState<string | null>(null)
   const [moments, setMoments] = useState<StoryMoment[]>([])
   const [momentImages, setMomentImages] = useState<Record<string, MomentImage[]>>({})
@@ -1820,6 +1847,8 @@ function StoryTimeline({
   const requestedThumbsRef = useRef<Set<number>>(new Set())
   const loadedMomentIdsRef = useRef<Set<string>>(new Set())
   const expandedChapterRef = useRef<string | null>(null)
+  const [coverAspects, setCoverAspects] = useState<Record<number, number>>({})
+  const measuredAspectsRef = useRef<Set<number>>(new Set())
 
   // Preserve only cover thumbnails, clear moment-specific state
   const coverIdsRef = useRef<Set<number>>(new Set())
@@ -1833,8 +1862,10 @@ function StoryTimeline({
   useEffect(() => {
     requestedThumbsRef.current.clear()
     loadedMomentIdsRef.current.clear()
+    measuredAspectsRef.current.clear()
     setMomentImages({})
     setHeroThumbs({})
+    setCoverAspects({})
   }, [album.id])
 
   const loadThumbnailIds = useCallback(async (imageIds: number[]) => {
@@ -1865,6 +1896,22 @@ function StoryTimeline({
       .filter((id): id is number => id != null)
     void loadThumbnailIds(coverIds)
   }, [chapters, loadThumbnailIds])
+
+  // Measure cover image aspect ratios from loaded thumbnails
+  useEffect(() => {
+    for (const [idStr, dataUrl] of Object.entries(heroThumbs)) {
+      const id = Number(idStr)
+      if (!coverIdsRef.current.has(id) || measuredAspectsRef.current.has(id)) continue
+      measuredAspectsRef.current.add(id)
+      const img = new Image()
+      img.onload = () => {
+        if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+          setCoverAspects(prev => ({ ...prev, [id]: img.naturalWidth / img.naturalHeight }))
+        }
+      }
+      img.src = dataUrl
+    }
+  }, [heroThumbs])
 
   const clearMomentState = useCallback(() => {
     setMoments([])
@@ -1940,6 +1987,8 @@ function StoryTimeline({
     heroThumbs,
     toggleChapter,
     onImageClick,
+    coverAspects,
+    maxImageSize,
   }
 
   return (
@@ -1981,22 +2030,20 @@ function StoryTimeline({
               </button>
             </div>
 
-            {/* Column size slider — only in quilted mode */}
-            {viewMode === 'quilted' && (
-              <div className="flex items-center gap-1.5 mr-1" title="Card size">
-                <span className="text-[10px] text-neutral-500">▪</span>
-                <input
-                  type="range"
-                  min={160}
-                  max={450}
-                  step={10}
-                  value={colWidth}
-                  onChange={(e) => setColWidth(Number(e.target.value))}
-                  className="w-20 h-1 accent-neutral-500 cursor-pointer"
-                />
-                <span className="text-[10px] text-neutral-500">▮</span>
-              </div>
-            )}
+            {/* Column / image size slider */}
+            <div className="flex items-center gap-1.5 mr-1" title="Card size">
+              <span className="text-[10px] text-neutral-500">▪</span>
+              <input
+                type="range"
+                min={160}
+                max={450}
+                step={10}
+                value={colWidth}
+                onChange={(e) => setColWidth(Number(e.target.value))}
+                className="w-20 h-1 accent-neutral-500 cursor-pointer"
+              />
+              <span className="text-[10px] text-neutral-500">▮</span>
+            </div>
 
             <button
               onClick={onRefresh}

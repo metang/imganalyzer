@@ -184,7 +184,10 @@ export default function App() {
     <div className="h-full flex flex-col">
 
       {/* ── Tab bar ──────────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-1 px-3 pt-2 pb-0 border-b border-neutral-800 shrink-0">
+      <div className="flex items-center gap-1.5 px-3 py-2 border-b border-neutral-800/80 bg-neutral-950/30 shrink-0 backdrop-blur-sm">
+        <div className="mr-2 rounded-full border border-cyan-500/20 bg-cyan-500/5 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-cyan-200">
+          imganalyzer
+        </div>
 
         {/* Gallery */}
         <TabButton active={tab === 'gallery'} onClick={() => setTab('gallery')}>
@@ -327,10 +330,10 @@ function TabButton({
     <button
       onClick={onClick}
       className={`
-        px-4 py-1.5 text-sm rounded-t-md transition-colors
+        px-4 py-1.5 text-sm rounded-xl border transition-colors
         ${active
-          ? 'bg-neutral-800 text-neutral-100 border border-b-transparent border-neutral-700'
-          : 'text-neutral-500 hover:text-neutral-300'}
+          ? 'bg-cyan-500/10 text-cyan-100 border-cyan-500/30'
+          : 'text-neutral-400 border-transparent hover:text-neutral-200 hover:border-neutral-700 hover:bg-neutral-900/70'}
       `}
     >
       {children}
@@ -356,10 +359,10 @@ function IconButton({
       aria-label={title}
       onClick={onClick}
       className={`
-        p-2 rounded-md transition-colors border
+        p-2 rounded-xl transition-colors border
         ${active
-          ? 'bg-neutral-800 text-neutral-100 border-neutral-700'
-          : 'text-neutral-500 border-transparent hover:text-neutral-300 hover:bg-neutral-900'}
+          ? 'bg-cyan-500/10 text-cyan-100 border-cyan-500/30'
+          : 'text-neutral-400 border-transparent hover:text-neutral-200 hover:bg-neutral-900 hover:border-neutral-700'}
       `}
     >
       {children}

@@ -4,7 +4,7 @@ import { spawnPythonModule, killProcessTree } from './python-runtime'
 import type { CoordinatorStatus, DistributedCoordinatorSettings } from './settings'
 import { getDistributedCoordinatorUrl } from './settings'
 
-const STARTUP_TIMEOUT_MS = 30_000
+const STARTUP_TIMEOUT_MS = 60_000
 const READY_PATTERN = /\[server\.http\] listening on http:/i
 const STARTUP_DIAGNOSTIC_LINE_LIMIT = 25
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])

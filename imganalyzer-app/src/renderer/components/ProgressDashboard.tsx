@@ -6,6 +6,7 @@ import type {
   BatchPauseMode,
   BatchStats,
 } from '../global'
+import { MetricCard, SectionHeading, StatusBadge, SurfaceCard, UiButton } from './ui'
 
 interface Props {
   stats: BatchStats
@@ -55,6 +56,22 @@ function statusTone(status: string): string {
   }
 }
 
+function statusSummary(status: string, monitorOnly: boolean): { title: string; tone: 'info' | 'success' | 'warning' | 'danger' | 'default' } {
+  if (monitorOnly) return { title: 'Monitoring distributed work', tone: 'info' }
+  switch (status) {
+    case 'running':
+      return { title: 'Processing is active', tone: 'info' }
+    case 'paused':
+      return { title: 'Processing is paused', tone: 'warning' }
+    case 'done':
+      return { title: 'Batch complete', tone: 'success' }
+    case 'error':
+      return { title: 'Processing needs attention', tone: 'danger' }
+    default:
+      return { title: 'Waiting for work', tone: 'default' }
+  }
+}
+
 const MODULE_LABELS: Record<string, string> = {
   metadata: 'Metadata',
   technical: 'Technical',
@@ -77,13 +94,7 @@ function formatModuleLabel(module: string): string {
 }
 
 function SummaryCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
-  return (
-    <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 px-3 py-3">
-      <div className="text-[11px] uppercase tracking-wider text-neutral-500">{label}</div>
-      <div className="mt-1 font-mono text-base text-neutral-100">{value}</div>
-      {hint && <div className="mt-1 text-xs text-neutral-500">{hint}</div>}
-    </div>
-  )
+  return <MetricCard label={label} value={value} hint={hint} tone="subtle" />
 }
 
 function QueuePill({
@@ -385,9 +396,6 @@ export function ProgressDashboard({
     modules,
     estimatedMs,
     elapsedMs,
-    chunkAvgCompletionMs,
-    chunkElapsedMs,
-    chunkEstimatedMs,
     nodes,
   } = stats
 
@@ -419,6 +427,8 @@ export function ProgressDashboard({
   const coordinatorCanPause = coordinatorState === 'running' || coordinatorState === 'starting'
   const masterNode = nodes.find((node) => node.role === 'master') ?? null
   const workerNodes = nodes.filter((node) => node.role === 'worker')
+  const totalRate = nodes.reduce((sum, node) => sum + (node.imagesPerSec ?? 0), 0)
+  const statusInfo = statusSummary(status, monitorOnly)
 
   const isNodePaused = (node: BatchNode): boolean => {
     const desired = node.desiredState ?? 'active'
@@ -427,64 +437,116 @@ export function ProgressDashboard({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1.5">
-        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-neutral-400">
-          <span>
-            {complete.toLocaleString()} / {totalPasses.toLocaleString()} passes complete
-          </span>
-          <span>{overallPct}%</span>
+      <SurfaceCard tone={status === 'error' ? 'danger' : 'accent'}>
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusBadge tone={statusInfo.tone}>{statusInfo.title}</StatusBadge>
+              {totals.running > 0 && <StatusBadge tone="success">{totals.running.toLocaleString()} running</StatusBadge>}
+              {totals.failed > 0 && <StatusBadge tone="danger">{totals.failed.toLocaleString()} failed</StatusBadge>}
+              {totals.pending > 0 && <StatusBadge tone="warning">{totals.pending.toLocaleString()} pending</StatusBadge>}
+            </div>
+            <h3 className="mt-3 text-lg font-semibold text-white">
+              {complete.toLocaleString()} / {totalPasses.toLocaleString()} passes complete
+            </h3>
+            <p className="mt-1 text-sm text-neutral-400">
+              {status === 'error'
+                ? 'Some work failed. Inspect the live errors below and retry when ready.'
+                : monitorOnly
+                  ? 'This view is tracking work being processed elsewhere.'
+                  : showResume
+                    ? 'You can safely resume work from this screen.'
+                    : 'This view highlights the current job health, speed, and any intervention points.'}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {!monitorOnly && isRunning && (
+              <UiButton onClick={onPause} variant="secondary">Pause all</UiButton>
+            )}
+            {!monitorOnly && showResume && (
+              <UiButton onClick={onResume} variant="primary">Resume</UiButton>
+            )}
+            {(isRunning || isPaused) && (
+              <UiButton onClick={onStop} variant="danger">Stop</UiButton>
+            )}
+            {canRetry && (
+              <UiButton
+                onClick={() => onRetryFailed(failedModules)}
+                variant="secondary"
+                title={`Retry ${totals.failed} failed pass${totals.failed !== 1 ? 'es' : ''} across: ${failedModules.join(', ')}`}
+              >
+                Retry failed ({totals.failed})
+              </UiButton>
+            )}
+            {canClearQueue && (
+              <UiButton
+                onClick={onClearQueue}
+                variant="ghost"
+                title="Delete all jobs from the queue and reset to idle"
+              >
+                Clear queue
+              </UiButton>
+            )}
+            {canClearCompleted && (
+              <UiButton
+                onClick={onClearCompleted}
+                variant="ghost"
+                title={`Remove ${totals.done + totals.skipped} completed pass${totals.done + totals.skipped !== 1 ? 'es' : ''} from the queue`}
+              >
+                Clear completed ({totals.done + totals.skipped})
+              </UiButton>
+            )}
+          </div>
         </div>
-        <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
-          <div
-            className={`h-full rounded-full transition-all duration-300 ${
-              status === 'error'
-                ? 'bg-red-600'
-                : status === 'done'
-                  ? 'bg-emerald-600'
-                  : 'bg-blue-600'
-            }`}
-            style={{ width: `${overallPct}%` }}
+
+        <div className="mt-4">
+          <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-xs text-neutral-400">
+            <span>Overall progress</span>
+            <span>{overallPct}%</span>
+          </div>
+          <div className="h-2.5 overflow-hidden rounded-full bg-neutral-800">
+            <div
+              className={`h-full rounded-full transition-all duration-300 ${
+                status === 'error'
+                  ? 'bg-red-600'
+                  : status === 'done'
+                    ? 'bg-emerald-500'
+                    : 'bg-cyan-500'
+              }`}
+              style={{ width: `${overallPct}%` }}
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <MetricCard label="Progress" value={`${overallPct}%`} hint={`${complete.toLocaleString()} completed`} tone="accent" />
+          <SummaryCard
+            label="ETA"
+            value={fmtMs(estimatedMs)}
+            hint={estimatedMs > 0 ? 'Based on recent throughput' : 'Waiting for enough samples'}
+          />
+          <SummaryCard label="Elapsed" value={fmtMs(elapsedMs)} hint="Wall-clock runtime" />
+          <SummaryCard
+            label="Throughput"
+            value={fmtRate(totalRate)}
+            hint={totalRate > 0 ? 'Combined across active nodes' : 'No active workers yet'}
+          />
+          <MetricCard
+            label="Queue health"
+            value={`${totals.pending.toLocaleString()} pending`}
+            hint={totals.failed > 0 ? `${totals.failed.toLocaleString()} failed need review` : 'No failures currently'}
+            tone={totals.failed > 0 ? 'danger' : 'subtle'}
           />
         </div>
-      </div>
+      </SurfaceCard>
 
-      {monitorOnly && (
-        <p className="rounded-lg border border-blue-800 bg-blue-900/20 px-3 py-2 text-xs text-blue-300">
-          Monitoring distributed worker progress. Use target controls below to pause/resume nodes.
-        </p>
-      )}
-
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        <SummaryCard
-          label="Avg chunk completion"
-          value={fmtMs(chunkAvgCompletionMs)}
-          hint={
-            chunkAvgCompletionMs > 0
-              ? 'Average of recent completed chunks'
-              : 'Waiting for first chunk completion'
-          }
+      <SurfaceCard tone="subtle">
+        <SectionHeading
+          title="Queue health"
+          description="At a glance: what is waiting, running, or already finished."
         />
-        <SummaryCard
-          label="Current chunk runtime"
-          value={fmtMs(chunkElapsedMs)}
-          hint={stats.chunk ? `Chunk ${stats.chunk.index + 1} in progress` : 'No active chunk'}
-        />
-        <SummaryCard
-          label="Chunk ETA"
-          value={fmtMs(chunkEstimatedMs)}
-          hint={chunkEstimatedMs > 0 ? 'Based on chunk throughput' : 'Waiting for enough samples'}
-        />
-        <SummaryCard
-          label="ETA"
-          value={fmtMs(estimatedMs)}
-          hint={estimatedMs > 0 ? 'Based on recent throughput' : 'Waiting for enough samples'}
-        />
-        <SummaryCard label="Elapsed" value={fmtMs(elapsedMs)} />
-      </div>
-
-      <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
-        <div className="mb-3 text-sm font-semibold text-neutral-100">Queue status</div>
-        <div className="flex flex-wrap gap-2">
+        <div className="mt-3 flex flex-wrap gap-2">
           <QueuePill label="Pending" value={totals.pending} />
           <QueuePill label="Running" value={totals.running} />
           <QueuePill label="Done" value={totals.done} />
@@ -494,7 +556,7 @@ export function ProgressDashboard({
             <CachePill preDecode={stats.preDecode} />
           )}
         </div>
-      </section>
+      </SurfaceCard>
 
       {stats.preDecode && stats.preDecode.total > 0 && (
         <PreDecodeProgress preDecode={stats.preDecode} />
@@ -508,8 +570,11 @@ export function ProgressDashboard({
       </div>
 
       {moduleEntries.length > 0 && (
-        <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
-          <div className="mb-3 text-sm font-semibold text-neutral-100">Remaining passes by module</div>
+        <SurfaceCard tone="subtle">
+          <SectionHeading
+            title="Operational detail by module"
+            description="Useful when you need to diagnose a bottleneck or understand where work is still queued."
+          />
           <div className="overflow-x-auto">
             <table className="min-w-full border-collapse">
               <thead>
@@ -531,16 +596,16 @@ export function ProgressDashboard({
               </tbody>
             </table>
           </div>
-        </section>
+        </SurfaceCard>
       )}
 
-      <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="text-sm font-semibold text-neutral-100">Pause targets</div>
-          <div className="text-[11px] text-neutral-500">Fine control for coordinator, master worker, and remotes</div>
-        </div>
+      <SurfaceCard tone="subtle">
+        <SectionHeading
+          title="Node control"
+          description="Pause or resume the coordinator, local master, and remote workers without leaving the screen."
+        />
 
-        <div className="space-y-2">
+        <div className="mt-3 space-y-2">
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-neutral-800/80 bg-black/20 px-3 py-2 text-xs">
             <span className="min-w-[120px] text-neutral-200">Coordinator</span>
             <span className={`rounded-full border px-2 py-0.5 text-[11px] ${statusTone(coordinatorState)}`}>
@@ -549,20 +614,18 @@ export function ProgressDashboard({
             <span className="text-neutral-500">
               {stats.coordinator?.lastError ? `Error: ${stats.coordinator.lastError}` : 'Distributed job router'}
             </span>
-            <button
+            <UiButton
               onClick={() =>
                 coordinatorCanPause
                   ? onPauseTarget({ scope: 'coordinator' }, 'pause-drain')
                   : onResumeTarget({ scope: 'coordinator' })
               }
-              className={`ml-auto rounded-md px-3 py-1 text-[11px] transition-colors ${
-                coordinatorCanPause
-                  ? 'bg-neutral-700 text-neutral-200 hover:bg-neutral-600'
-                  : 'bg-blue-700 text-neutral-100 hover:bg-blue-600'
-              }`}
+              className="ml-auto"
+              variant={coordinatorCanPause ? 'secondary' : 'primary'}
+              size="sm"
             >
               {coordinatorCanPause ? 'Pause' : 'Resume'}
-            </button>
+            </UiButton>
           </div>
 
           {masterNode && (
@@ -575,20 +638,18 @@ export function ProgressDashboard({
                 desired: {masterNode.desiredState ?? 'active'}
                 {masterNode.stateReason ? ` (${masterNode.stateReason})` : ''}
               </span>
-              <button
+              <UiButton
                 onClick={() =>
                   isNodePaused(masterNode)
                     ? onResumeTarget({ scope: 'master' })
                     : onPauseTarget({ scope: 'master' }, 'pause-drain')
                 }
-                className={`ml-auto rounded-md px-3 py-1 text-[11px] transition-colors ${
-                  isNodePaused(masterNode)
-                    ? 'bg-blue-700 text-neutral-100 hover:bg-blue-600'
-                    : 'bg-neutral-700 text-neutral-200 hover:bg-neutral-600'
-                }`}
+                className="ml-auto"
+                variant={isNodePaused(masterNode) ? 'primary' : 'secondary'}
+                size="sm"
               >
                 {isNodePaused(masterNode) ? 'Resume' : 'Pause'}
-              </button>
+              </UiButton>
             </div>
           )}
 
@@ -605,85 +666,30 @@ export function ProgressDashboard({
                 desired: {node.desiredState ?? 'active'}
                 {node.stateReason ? ` (${node.stateReason})` : ''}
               </span>
-              <button
+              <UiButton
                 onClick={() =>
                   isNodePaused(node)
                     ? onResumeTarget({ scope: 'worker', workerId: node.id })
                     : onPauseTarget({ scope: 'worker', workerId: node.id }, 'pause-drain')
                 }
-                className={`ml-auto rounded-md px-3 py-1 text-[11px] transition-colors ${
-                  isNodePaused(node)
-                    ? 'bg-blue-700 text-neutral-100 hover:bg-blue-600'
-                    : 'bg-neutral-700 text-neutral-200 hover:bg-neutral-600'
-                }`}
+                className="ml-auto"
+                variant={isNodePaused(node) ? 'primary' : 'secondary'}
+                size="sm"
               >
                 {isNodePaused(node) ? 'Resume' : 'Pause'}
-              </button>
-              <button
+              </UiButton>
+              <UiButton
                 onClick={() => onRemoveWorker(node.id)}
-                className="rounded-md px-2 py-1 text-[11px] text-red-400 transition-colors hover:bg-red-900/40 hover:text-red-300"
+                variant="danger"
+                size="sm"
                 title="Remove this worker"
               >
-                ✕
-              </button>
+                Remove
+              </UiButton>
             </div>
           ))}
         </div>
-      </section>
-
-      <div className="flex flex-wrap gap-2">
-        {!monitorOnly && isRunning && (
-          <button
-            onClick={onPause}
-            className="rounded-lg bg-neutral-700 px-4 py-1.5 text-sm text-neutral-200 transition-colors hover:bg-neutral-600"
-          >
-            Pause all
-          </button>
-        )}
-        {!monitorOnly && showResume && (
-          <button
-            onClick={onResume}
-            className="rounded-lg bg-blue-700 px-4 py-1.5 text-sm text-neutral-200 transition-colors hover:bg-blue-600"
-          >
-            Resume
-          </button>
-        )}
-        {(isRunning || isPaused) && (
-          <button
-            onClick={onStop}
-            className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-1.5 text-sm text-red-300 transition-colors hover:border-red-700 hover:bg-red-900/40"
-          >
-            Stop
-          </button>
-        )}
-        {canRetry && (
-          <button
-            onClick={() => onRetryFailed(failedModules)}
-            className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-1.5 text-sm text-orange-300 transition-colors hover:border-orange-700 hover:bg-orange-900/30"
-            title={`Retry ${totals.failed} failed pass${totals.failed !== 1 ? 'es' : ''} across: ${failedModules.join(', ')}`}
-          >
-            Retry failed ({totals.failed})
-          </button>
-        )}
-        {canClearQueue && (
-          <button
-            onClick={onClearQueue}
-            className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-1.5 text-sm text-neutral-400 transition-colors hover:border-red-800 hover:bg-red-900/30 hover:text-red-300"
-            title="Delete all jobs from the queue and reset to idle"
-          >
-            Clear queue
-          </button>
-        )}
-        {canClearCompleted && (
-          <button
-            onClick={onClearCompleted}
-            className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-1.5 text-sm text-neutral-400 transition-colors hover:border-neutral-600 hover:bg-neutral-700/50 hover:text-neutral-200"
-            title={`Remove ${totals.done + totals.skipped} completed pass${totals.done + totals.skipped !== 1 ? 'es' : ''} from the queue`}
-          >
-            Clear completed ({totals.done + totals.skipped})
-          </button>
-        )}
-      </div>
+      </SurfaceCard>
     </div>
   )
 }

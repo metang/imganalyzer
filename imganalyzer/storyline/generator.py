@@ -211,9 +211,11 @@ def get_moment_images(
     """Return all images in a moment with ordering."""
     rows = conn.execute(
         "SELECT mi.image_id, mi.sort_order, mi.is_hero, "
-        "       sf.date_time_original, sf.perception_iaa "
+        "       COALESCE(sf.date_time_original, am.date_time_original) AS date_time_original, "
+        "       sf.perception_iaa "
         "FROM moment_images mi "
         "LEFT JOIN search_features sf ON sf.image_id = mi.image_id "
+        "LEFT JOIN analysis_metadata am ON am.image_id = mi.image_id "
         "WHERE mi.moment_id = ? ORDER BY mi.sort_order",
         [moment_id],
     ).fetchall()

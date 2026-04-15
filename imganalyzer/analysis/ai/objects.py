@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from .hf_cache import load_pretrained
+
 CACHE_DIR = os.getenv("IMGANALYZER_MODEL_CACHE", str(Path.home() / ".cache" / "imganalyzer"))
 
 # Default detection prompt — common photography subjects.
@@ -270,19 +272,25 @@ class ObjectDetector:
         # GroundingDinoImageProcessorFast can falsely report "PyTorch not
         # found" in some environments even when torch is importable.
         try:
-            cls._processor = AutoProcessor.from_pretrained(
-                model_id, cache_dir=CACHE_DIR,
+            cls._processor = load_pretrained(
+                AutoProcessor.from_pretrained,
+                model_id,
+                cache_dir=CACHE_DIR,
             )
         except ImportError:
-            cls._processor = AutoProcessor.from_pretrained(
-                model_id, cache_dir=CACHE_DIR, use_fast=False,
+            cls._processor = load_pretrained(
+                AutoProcessor.from_pretrained,
+                model_id,
+                cache_dir=CACHE_DIR,
+                use_fast=False,
             )
         # Load in float32 first — GroundingDINO's text enhancer layers
         # have internal operations that fail with fp16 weights.
-        cls._model = AutoModelForZeroShotObjectDetection.from_pretrained(
+        cls._model = load_pretrained(
+            AutoModelForZeroShotObjectDetection.from_pretrained,
             model_id,
-            torch_dtype=torch.float32,
             cache_dir=CACHE_DIR,
+            torch_dtype=torch.float32,
         ).to(device)
         cls._model.eval()
 

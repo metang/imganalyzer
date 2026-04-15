@@ -1165,6 +1165,43 @@ class TestObjectDetector:
             ObjectDetector._model = None
 
 
+class TestHuggingFaceCache:
+    def test_load_pretrained_prefers_local_cache(self):
+        from imganalyzer.analysis.ai.hf_cache import load_pretrained
+
+        calls: list[dict[str, object]] = []
+
+        def fake_loader(model_id: str, **kwargs):
+            calls.append({"model_id": model_id, **kwargs})
+            return "loaded"
+
+        with patch("imganalyzer.analysis.ai.hf_cache.has_local_snapshot", return_value=True):
+            result = load_pretrained(fake_loader, "repo/model", cache_dir="cache-dir")
+
+        assert result == "loaded"
+        assert len(calls) == 1
+        assert calls[0]["local_files_only"] is True
+
+    def test_load_pretrained_falls_back_to_network_when_cache_is_incomplete(self):
+        from imganalyzer.analysis.ai.hf_cache import load_pretrained
+
+        calls: list[dict[str, object]] = []
+
+        def fake_loader(model_id: str, **kwargs):
+            calls.append({"model_id": model_id, **kwargs})
+            if kwargs.get("local_files_only"):
+                raise OSError("missing local shard")
+            return "loaded"
+
+        with patch("imganalyzer.analysis.ai.hf_cache.has_local_snapshot", return_value=True):
+            result = load_pretrained(fake_loader, "repo/model", cache_dir="cache-dir")
+
+        assert result == "loaded"
+        assert len(calls) == 2
+        assert calls[0]["local_files_only"] is True
+        assert "local_files_only" not in calls[1]
+
+
 # ── Batch Processing DB Integration ──────────────────────────────────────────
 
 def _make_test_db(tmp_path):
@@ -1774,6 +1811,136 @@ class TestJobQueue:
         assert skip_row["status"] == "skipped"
         assert skip_row["skip_reason"] == "has_people"
 
+    def test_release_leased_does_not_consume_attempts(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["macbook-pro", "MacBook Pro", "darwin", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/soft-release.jpg")
+        job_id = queue.enqueue(img_id, "caption")
+        assert job_id is not None
+
+        claimed = queue.claim_leased(worker_id="macbook-pro", lease_ttl_seconds=60, batch_size=1)
+        token = claimed[0]["lease_token"]
+
+        assert queue.release_leased(job_id, token) is True
+
+        row = conn.execute(
+            "SELECT status, attempts FROM job_queue WHERE id = ?",
+            [job_id],
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "pending"
+        assert row["attempts"] == 0
+
+    def test_release_leased_with_delay_requeues_into_the_future(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["worker-1", "Worker 1", "linux", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/delayed-release.jpg")
+        job_id = queue.enqueue(img_id, "caption")
+        assert job_id is not None
+
+        before = conn.execute("SELECT queued_at FROM job_queue WHERE id = ?", [job_id]).fetchone()
+        assert before is not None
+
+        claimed = queue.claim_leased(worker_id="worker-1", lease_ttl_seconds=60, batch_size=1)
+        token = claimed[0]["lease_token"]
+
+        assert queue.release_leased(job_id, token, delay_seconds=15) is True
+
+        row = conn.execute(
+            "SELECT status, attempts, queued_at FROM job_queue WHERE id = ?",
+            [job_id],
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "pending"
+        assert row["attempts"] == 0
+        assert row["queued_at"] > before["queued_at"]
+
+    def test_retry_failed_recovers_exhausted_pending_jobs(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        img_id = repo.register_image(file_path="/photos/exhausted-pending.jpg")
+        job_id = queue.enqueue(img_id, "caption")
+        assert job_id is not None
+
+        conn.execute(
+            """UPDATE job_queue
+               SET status = 'failed',
+                   attempts = 9,
+                   error_message = 'Exceeded max attempts (exhausted pending)',
+                   completed_at = datetime('now')
+               WHERE id = ?""",
+            [job_id],
+        )
+        conn.commit()
+
+        retried = queue.retry_failed()
+        assert retried == 1
+
+        row = conn.execute(
+            "SELECT status, attempts, error_message, completed_at FROM job_queue WHERE id = ?",
+            [job_id],
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "pending"
+        assert row["attempts"] == 0
+        assert row["error_message"] is None
+        assert row["completed_at"] is None
+
+    def test_batch_skip_release_leased_does_not_consume_attempts(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        conn.execute(
+            """INSERT INTO worker_nodes (id, display_name, platform, status)
+               VALUES (?, ?, ?, ?)""",
+            ["worker-1", "Worker 1", "linux", "online"],
+        )
+        img_id = repo.register_image(file_path="/photos/batch-soft-release.jpg")
+        job_id = queue.enqueue(img_id, "caption")
+        assert job_id is not None
+
+        claimed = queue.claim_leased(worker_id="worker-1", lease_ttl_seconds=60, batch_size=1)
+        token = claimed[0]["lease_token"]
+
+        queue.batch_skip_release_leased([], [(job_id, token)])
+
+        row = conn.execute(
+            "SELECT status, attempts FROM job_queue WHERE id = ?",
+            [job_id],
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "pending"
+        assert row["attempts"] == 0
+
     def test_release_worker_leases_requeues_claimed_jobs(self, tmp_path):
         from imganalyzer.db.repository import Repository
         from imganalyzer.db.queue import JobQueue
@@ -1796,9 +1963,13 @@ class TestJobQueue:
         released = queue.release_worker_leases("macbook-pro")
         assert released == 1
 
-        row = conn.execute("SELECT status FROM job_queue WHERE id = ?", [job_id]).fetchone()
+        row = conn.execute(
+            "SELECT status, attempts FROM job_queue WHERE id = ?",
+            [job_id],
+        ).fetchone()
         assert row is not None
         assert row["status"] == "pending"
+        assert row["attempts"] == 0
 
     def test_reconcile_runtime_state_recovers_orphans_and_dangling_leases(self, tmp_path):
         from imganalyzer.db.repository import Repository

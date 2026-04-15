@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 
 # Thresholds for resource-aware scheduling
 _CPU_HIGH_PCT = 70.0    # CPU% above which we reduce decode throughput
-_CPU_LOW_PCT = 40.0     # CPU% below which we can ramp up aggressively
+_CPU_LOW_PCT = 65.0     # CPU% below which we can ramp up aggressively
 _DISK_BUSY_PCT = 80.0   # disk busy% above which we throttle feeding
 
 

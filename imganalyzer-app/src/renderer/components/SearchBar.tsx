@@ -10,10 +10,12 @@ import type {
   SearchSortBy,
   SearchTimeOfDay,
 } from '../global'
+import { SectionHeading, StatusBadge, SurfaceCard, UiButton } from './ui'
 
 interface SearchBarProps {
   onSearch: (filters: SearchFilters, contextLabel: string | null) => void
   loading: boolean
+  seededPrompt?: { text: string; token: number; autoSearch?: boolean } | null
 }
 
 interface ParsedQuery {
@@ -113,6 +115,29 @@ const INTENT_COPY: Record<SearchIntent, { title: string; placeholder: string }> 
     title: 'Best Shot',
     placeholder: 'best photo of the sunset scene from Yosemite',
   },
+}
+
+const EXAMPLE_PROMPTS: Record<SearchIntent, string[]> = {
+  general: [
+    'sunset reflections on the water',
+    'best candid portrait with soft light',
+    'quiet city street at night',
+  ],
+  people: [
+    'Alice smiling outdoors in golden hour',
+    'family picnic with grandparents and kids',
+    'wyy playing basketball in the morning',
+  ],
+  wildlife: [
+    'ducks landing on the water',
+    'snowy owl perched on a fence',
+    'birds in flight over the marsh',
+  ],
+  'best-shot': [
+    'best photo of the Yosemite sunset scene',
+    'strongest frame from the concert stage',
+    'top portrait from the studio session',
+  ],
 }
 
 const WILDLIFE_EXPANSIONS: Record<string, string[]> = {
@@ -611,6 +636,26 @@ function RangeInput({
   )
 }
 
+function AdvancedSection({
+  title,
+  description,
+  children,
+}: {
+  title: string
+  description?: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="rounded-2xl border border-neutral-800/80 bg-black/15 p-4">
+      <div className="mb-3">
+        <p className="text-sm font-medium text-white">{title}</p>
+        {description && <p className="mt-1 text-sm text-neutral-400">{description}</p>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
 function ChoicePill({
   active,
   label,
@@ -624,10 +669,10 @@ function ChoicePill({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-full px-3 py-1.5 text-sm transition-colors ${
+      className={`rounded-full border px-3 py-1.5 text-sm transition-colors ${
         active
-          ? 'bg-blue-600 text-white'
-          : 'bg-neutral-900 text-neutral-300 hover:bg-neutral-800'
+          ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100'
+          : 'border-neutral-800 bg-neutral-900 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-800'
       }`}
     >
       {label}
@@ -637,7 +682,7 @@ function ChoicePill({
 
 function SearchChip({ chip, onRemove }: { chip: ChipDescriptor; onRemove: (chipId: string) => void }) {
   const toneClass = chip.tone === 'accent'
-    ? 'border-blue-500/50 bg-blue-500/10 text-blue-100'
+    ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-100'
     : chip.tone === 'detected'
       ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-100'
       : 'border-neutral-700 bg-neutral-900 text-neutral-200'
@@ -651,11 +696,12 @@ function SearchChip({ chip, onRemove }: { chip: ChipDescriptor; onRemove: (chipI
   )
 }
 
-export function SearchBar({ onSearch, loading }: SearchBarProps) {
+export function SearchBar({ onSearch, loading, seededPrompt }: SearchBarProps) {
   const [draft, setDraft] = useState<SearchDraft>(defaultDraft())
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [resolvingFace, setResolvingFace] = useState(false)
   const promptRef = useRef<HTMLTextAreaElement>(null)
+  const draftRef = useRef<SearchDraft>(defaultDraft())
 
   useEffect(() => {
     promptRef.current?.focus()
@@ -664,6 +710,10 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
   const setDraftValue = useCallback(<K extends keyof SearchDraft>(key: K, value: SearchDraft[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }))
   }, [])
+
+  useEffect(() => {
+    draftRef.current = draft
+  }, [draft])
 
   const derivedFilters = useMemo(() => buildFilters(draft), [draft])
   const promptDetectedFaces = useMemo(
@@ -695,7 +745,11 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
     if (draft.recurringDate) items.push({ id: 'recurringDate', label: `Every ${formatRecurringLabel(draft.recurringDate)}` })
     if (draft.timeOfDay !== 'any') items.push({ id: 'timeOfDay', label: TIME_LABELS[draft.timeOfDay] })
     if (derivedFilters.sortBy && derivedFilters.sortBy !== 'relevance') items.push({ id: 'sortBy', label: `Sort: ${SORT_LABELS[derivedFilters.sortBy]}` })
-    if (draft.mode !== 'text') {
+    if (draft.mode !== 'hybrid') items.push({ id: 'mode', label: `Mode: ${draft.mode}` })
+    if (draft.mode === 'hybrid' && draft.semanticWeight !== '0.5') {
+      items.push({ id: 'semanticWeight', label: `Semantic weight: ${draft.semanticWeight}` })
+    }
+    if (draft.mode !== 'text' && draft.semanticProfile !== 'balanced') {
       items.push({ id: 'semanticProfile', label: `Semantic profile: ${SEMANTIC_PROFILE_LABELS[draft.semanticProfile]}` })
     }
     if (draft.includeRelatedSpecies && derivedFilters.expandedTerms && derivedFilters.expandedTerms.length > 0) {
@@ -723,6 +777,8 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
     })
     return items
   }, [draft, derivedFilters, promptDetectedFaces])
+  const activeRefinementCount = chips.filter((chip) => chip.id !== 'prompt').length
+  const examplePrompts = EXAMPLE_PROMPTS[draft.intent]
 
   const executeSearch = useCallback((nextDraft: SearchDraft, promptOverride?: string) => {
     const filters = buildFilters(
@@ -771,6 +827,21 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
     executeSearch(resolved.draft, resolved.promptForSearch)
   }, [draft, executeSearch, resolvePromptFace])
 
+  useEffect(() => {
+    if (!seededPrompt?.text) return
+    const nextDraft = { ...draftRef.current, prompt: seededPrompt.text }
+    setDraft(nextDraft)
+    window.setTimeout(() => {
+      promptRef.current?.focus()
+    }, 0)
+    if (seededPrompt.autoSearch) {
+      void (async () => {
+        const resolved = await resolvePromptFace(nextDraft)
+        executeSearch(resolved.draft, resolved.promptForSearch)
+      })()
+    }
+  }, [executeSearch, resolvePromptFace, seededPrompt])
+
   const handlePromptKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
@@ -782,6 +853,12 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
     setDraft(defaultDraft())
     setShowAdvanced(false)
   }, [])
+
+  const handleBrowseAll = useCallback(() => {
+    const nextDraft = defaultDraft()
+    setDraft(nextDraft)
+    executeSearch(nextDraft)
+  }, [executeSearch])
 
   const handleRemoveChip = useCallback((chipId: string) => {
     setDraft((prev) => {
@@ -804,6 +881,10 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
           return { ...prev, timeOfDay: 'any' }
         case 'sortBy':
           return { ...prev, sortBy: 'relevance' }
+        case 'mode':
+          return { ...prev, mode: 'hybrid' }
+        case 'semanticWeight':
+          return { ...prev, semanticWeight: '0.5' }
         case 'semanticProfile':
           return { ...prev, semanticProfile: 'balanced' }
         case 'expandedTerms':
@@ -853,30 +934,46 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
   }, [])
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-neutral-950">
-      <div className="border-b border-neutral-800 px-4 py-4">
-        <div className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
-          <FieldLabel>Search type</FieldLabel>
-          <div className="flex flex-wrap gap-2">
-            {(Object.keys(INTENT_COPY) as SearchIntent[]).map((intent) => (
-              <ChoicePill
-                key={intent}
-                active={draft.intent === intent}
-                label={INTENT_COPY[intent].title}
-                onClick={() => {
-                  setDraft((prev) => ({
-                    ...prev,
-                    intent,
-                    sortBy: intent === 'best-shot' ? 'best' : prev.sortBy,
-                  }))
-                }}
-              />
-            ))}
+    <div className="flex h-full min-h-0 flex-col bg-transparent">
+      <div className="border-b border-neutral-800/80 px-4 py-4">
+        <SurfaceCard tone="accent">
+          <SectionHeading
+            eyebrow="Natural-language search"
+            title="Start broad, then refine only if needed"
+            description="Describe the photo you want in plain English. Add structured filters when you need extra precision."
+            actions={(
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge tone="info">{INTENT_COPY[draft.intent].title}</StatusBadge>
+                <StatusBadge tone="default">
+                  {draft.mode === 'hybrid' ? 'Hybrid search' : draft.mode === 'semantic' ? 'Semantic search' : 'Text search'}
+                </StatusBadge>
+              </div>
+            )}
+          />
+
+          <div className="mt-4">
+            <FieldLabel>Search focus</FieldLabel>
+            <div className="flex flex-wrap gap-2">
+              {(Object.keys(INTENT_COPY) as SearchIntent[]).map((intent) => (
+                <ChoicePill
+                  key={intent}
+                  active={draft.intent === intent}
+                  label={INTENT_COPY[intent].title}
+                  onClick={() => {
+                    setDraft((prev) => ({
+                      ...prev,
+                      intent,
+                      sortBy: intent === 'best-shot' ? 'best' : prev.sortBy,
+                    }))
+                  }}
+                />
+              ))}
+            </div>
           </div>
 
           <div className="mt-4">
-            <FieldLabel>Search</FieldLabel>
-            <div className="rounded-2xl border border-neutral-800 bg-neutral-900 px-3 py-3">
+            <FieldLabel>Prompt</FieldLabel>
+            <div className="rounded-2xl border border-neutral-700/80 bg-black/20 px-3 py-3">
               <textarea
                 ref={promptRef}
                 value={draft.prompt}
@@ -887,46 +984,66 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                 className="min-h-28 w-full resize-y bg-transparent text-base text-neutral-100 placeholder-neutral-500 focus:outline-none"
               />
             </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {examplePrompts.map((example) => (
+                <button
+                  key={example}
+                  type="button"
+                  onClick={() => setDraftValue('prompt', example)}
+                  className="rounded-full border border-neutral-700/80 bg-neutral-950/70 px-3 py-1.5 text-xs text-neutral-300 transition-colors hover:border-cyan-500/50 hover:text-white"
+                >
+                  {example}
+                </button>
+              ))}
+            </div>
             {promptDetectedFaces.length > 0 && (
               <p className="mt-2 text-xs text-emerald-300">
-                Detected as people filter: {promptDetectedFaces.join(', ')}
+                Detected people filter: {promptDetectedFaces.join(', ')}
               </p>
             )}
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">
-            <button
+            <UiButton
               type="button"
               onClick={handleSearch}
               disabled={loading || resolvingFace}
-              className="inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60"
+              variant="primary"
             >
-              {loading || resolvingFace ? 'Searching…' : 'Search'}
-            </button>
-            <button
-              type="button"
-              onClick={handleClear}
-              className="rounded-full border border-neutral-700 px-4 py-2 text-sm text-neutral-300 transition-colors hover:border-neutral-500 hover:text-white"
-            >
+              {loading || resolvingFace ? 'Searching…' : 'Find images'}
+            </UiButton>
+            <UiButton type="button" onClick={handleBrowseAll} variant="secondary">
+              Browse all
+            </UiButton>
+            <UiButton type="button" onClick={handleClear} variant="ghost">
               Reset
-            </button>
+            </UiButton>
           </div>
 
           {chips.length > 0 && (
-            <div className="mt-4 flex flex-wrap gap-2">
-              {chips.map((chip) => (
-                <SearchChip key={chip.id} chip={chip} onRemove={handleRemoveChip} />
-              ))}
+            <div className="mt-4">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <FieldLabel>Current refinements</FieldLabel>
+                <span className="text-[11px] text-neutral-500">{chips.length} active</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {chips.map((chip) => (
+                  <SearchChip key={chip.id} chip={chip} onRemove={handleRemoveChip} />
+                ))}
+              </div>
             </div>
           )}
-        </div>
+        </SurfaceCard>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         <div className="space-y-4">
           {draft.intent === 'people' && (
-            <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
-              <p className="text-sm font-medium text-white">People filters</p>
+            <SurfaceCard tone="subtle">
+              <SectionHeading
+                title="People refinements"
+                description="Narrow by person, scene, location, or recurring date without leaving natural language behind."
+              />
               <div className="mt-4 grid gap-4">
                 <TextField
                   label="People or aliases"
@@ -978,7 +1095,7 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                     placeholder=""
                     onChange={(value) => setDraftValue('recurringDate', value)}
                   />
-                  <p className="mt-1 text-xs text-neutral-500">The year is ignored; only the month and day are used.</p>
+                  <p className="mt-1 text-xs text-neutral-500">Only the month and day are used.</p>
                 </div>
                 <div>
                   <FieldLabel>Time of day</FieldLabel>
@@ -995,12 +1112,15 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                   </div>
                 </div>
               </div>
-            </section>
+            </SurfaceCard>
           )}
 
           {draft.intent === 'wildlife' && (
-            <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
-              <p className="text-sm font-medium text-white">Wildlife filters</p>
+            <SurfaceCard tone="subtle">
+              <SectionHeading
+                title="Wildlife refinements"
+                description="Keep the query simple, then optionally expand to related bird species for better recall."
+              />
               <div className="mt-4 grid gap-4">
                 <TextField
                   label="Species or group"
@@ -1008,33 +1128,39 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                   placeholder="duck, mallard, snowy owl…"
                   onChange={(value) => setDraftValue('species', value)}
                 />
-                <div className="rounded-2xl border border-neutral-800 bg-neutral-900 p-4">
+                <AdvancedSection
+                  title="Related species expansion"
+                  description="Useful for broad terms like duck, goose, owl, or hawk."
+                >
                   <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium text-white">Related species</p>
-                      <p className="text-sm text-neutral-400">Expand broad bird terms like duck, goose, owl, or hawk.</p>
-                    </div>
-                    <button
+                    <p className="text-sm text-neutral-300">
+                      Automatically widen the search to likely related labels.
+                    </p>
+                    <UiButton
                       type="button"
                       onClick={() => setDraftValue('includeRelatedSpecies', !draft.includeRelatedSpecies)}
-                      className={`rounded-full px-3 py-1.5 text-sm transition-colors ${draft.includeRelatedSpecies ? 'bg-blue-600 text-white' : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'}`}
+                      variant={draft.includeRelatedSpecies ? 'primary' : 'secondary'}
+                      size="sm"
                     >
                       {draft.includeRelatedSpecies ? 'On' : 'Off'}
-                    </button>
+                    </UiButton>
                   </div>
                   {draft.includeRelatedSpecies && derivedFilters.expandedTerms && derivedFilters.expandedTerms.length > 0 && (
                     <p className="mt-3 text-sm text-neutral-300">
                       Expanding to: <span className="text-white">{derivedFilters.expandedTerms.join(', ')}</span>
                     </p>
                   )}
-                </div>
+                </AdvancedSection>
               </div>
-            </section>
+            </SurfaceCard>
           )}
 
           {draft.intent === 'best-shot' && (
-            <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
-              <p className="text-sm font-medium text-white">Ranking</p>
+            <SurfaceCard tone="subtle">
+              <SectionHeading
+                title="Ranking emphasis"
+                description="Best overall blends scene match with aesthetic quality, sharpness, and noise."
+              />
               <div className="mt-4 flex flex-wrap gap-2">
                 {(Object.keys(SORT_LABELS) as SearchSortBy[]).map((sortBy) => (
                   <ChoicePill
@@ -1045,176 +1171,205 @@ export function SearchBar({ onSearch, loading }: SearchBarProps) {
                   />
                 ))}
               </div>
-              <p className="mt-3 text-sm text-neutral-400">
-                Best overall combines aesthetic score, sharpness, and noise to surface the strongest frame after the scene matches.
-              </p>
-            </section>
+            </SurfaceCard>
           )}
 
-          <section className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-medium text-white">Advanced filters</p>
-                <p className="text-sm text-neutral-400">Use these only when you need to narrow the result set.</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowAdvanced((prev) => !prev)}
-                className="rounded-full border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-500 hover:text-white"
-              >
-                {showAdvanced ? 'Hide' : 'Show'}
-              </button>
-            </div>
+          <SurfaceCard tone="subtle">
+            <SectionHeading
+              title="Advanced refinements"
+              description="Only open this when the natural-language result set still needs extra narrowing."
+              actions={(
+                <div className="flex items-center gap-2">
+                  {activeRefinementCount > 0 && (
+                    <StatusBadge tone="warning">{activeRefinementCount} refinements active</StatusBadge>
+                  )}
+                  <UiButton
+                    type="button"
+                    onClick={() => setShowAdvanced((prev) => !prev)}
+                    variant="ghost"
+                    size="sm"
+                  >
+                    {showAdvanced ? 'Hide details' : 'Open refinements'}
+                  </UiButton>
+                </div>
+              )}
+            />
 
             {showAdvanced && (
-              <div className="mt-4 grid gap-4 border-t border-neutral-800 pt-4">
-                <div>
-                  <FieldLabel>Search mode</FieldLabel>
-                  <div className="flex flex-wrap gap-2">
-                    {(['hybrid', 'semantic', 'text'] as const).map((mode) => (
-                      <ChoicePill
-                        key={mode}
-                        active={draft.mode === mode}
-                        label={mode}
-                        onClick={() => setDraftValue('mode', mode)}
-                      />
-                    ))}
-                  </div>
-                  {draft.mode === 'hybrid' && (
-                    <div className="mt-3">
-                      <FieldLabel>Semantic weight ({draft.semanticWeight})</FieldLabel>
-                      <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.05"
-                        value={draft.semanticWeight}
-                        onChange={(event) => setDraftValue('semanticWeight', event.target.value)}
-                        className="w-full accent-blue-500"
-                      />
+              <div className="mt-4 space-y-4 border-t border-neutral-800/70 pt-4">
+                <AdvancedSection
+                  title="Retrieval strategy"
+                  description="Control how much the search leans on text, image embeddings, or a blend of both."
+                >
+                  <div>
+                    <FieldLabel>Search mode</FieldLabel>
+                    <div className="flex flex-wrap gap-2">
+                      {(['hybrid', 'semantic', 'text'] as const).map((mode) => (
+                        <ChoicePill
+                          key={mode}
+                          active={draft.mode === mode}
+                          label={mode}
+                          onClick={() => setDraftValue('mode', mode)}
+                        />
+                      ))}
                     </div>
-                  )}
-                  {draft.mode !== 'text' && (
-                    <div className="mt-3 rounded-xl border border-neutral-800 bg-neutral-900 p-3">
-                      <FieldLabel>Image vs description semantic balance</FieldLabel>
-                      <input
-                        type="range"
-                        min="0"
-                        max="2"
-                        step="1"
-                        value={SEMANTIC_PROFILE_KEY_TO_VALUE[draft.semanticProfile]}
-                        onChange={(event) => {
-                          const value = event.target.value as '0' | '1' | '2'
-                          setDraftValue('semanticProfile', SEMANTIC_PROFILE_VALUE_TO_KEY[value] ?? 'balanced')
-                        }}
-                        className="w-full accent-blue-500"
+                    {draft.mode === 'hybrid' && (
+                      <div className="mt-3">
+                        <FieldLabel>Semantic weight ({draft.semanticWeight})</FieldLabel>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                          value={draft.semanticWeight}
+                          onChange={(event) => setDraftValue('semanticWeight', event.target.value)}
+                          className="w-full accent-cyan-500"
+                        />
+                      </div>
+                    )}
+                    {draft.mode !== 'text' && (
+                      <div className="mt-3 rounded-xl border border-neutral-800 bg-neutral-900/60 p-3">
+                        <FieldLabel>Image vs description balance</FieldLabel>
+                        <input
+                          type="range"
+                          min="0"
+                          max="2"
+                          step="1"
+                          value={SEMANTIC_PROFILE_KEY_TO_VALUE[draft.semanticProfile]}
+                          onChange={(event) => {
+                            const value = event.target.value as '0' | '1' | '2'
+                            setDraftValue('semanticProfile', SEMANTIC_PROFILE_VALUE_TO_KEY[value] ?? 'balanced')
+                          }}
+                          className="w-full accent-cyan-500"
+                        />
+                        <div className="mt-2 flex justify-between text-xs text-neutral-400">
+                          <span>{SEMANTIC_PROFILE_LABELS.image_dominant}</span>
+                          <span>{SEMANTIC_PROFILE_LABELS.balanced}</span>
+                          <span>{SEMANTIC_PROFILE_LABELS.description_dominant}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </AdvancedSection>
+
+                <div className="grid gap-4 xl:grid-cols-2">
+                  <AdvancedSection
+                    title="Where & when"
+                    description="Use these when you already know the setting, timeframe, or recurring pattern."
+                  >
+                    <div className="grid gap-4">
+                      <TextField label="Location" value={draft.location} placeholder="Yosemite, Paris…" onChange={(value) => setDraftValue('location', value)} />
+                      <TextField label="Date from" value={draft.dateFrom} type="date" placeholder="" onChange={(value) => setDraftValue('dateFrom', value)} />
+                      <TextField label="Date to" value={draft.dateTo} type="date" placeholder="" onChange={(value) => setDraftValue('dateTo', value)} />
+                    </div>
+                  </AdvancedSection>
+
+                  <AdvancedSection
+                    title="Camera & image quality"
+                    description="Helpful when choosing the cleanest or strongest frame from a known shoot."
+                  >
+                    <div className="grid gap-4">
+                      <TextField label="Camera" value={draft.camera} placeholder="Sony, Canon R5…" onChange={(value) => setDraftValue('camera', value)} />
+                      <TextField label="Lens" value={draft.lens} placeholder="85mm, Sigma…" onChange={(value) => setDraftValue('lens', value)} />
+                      <RangeInput
+                        label="Aesthetic score"
+                        minVal={draft.aestheticMin}
+                        maxVal={draft.aestheticMax}
+                        onMin={(value) => setDraftValue('aestheticMin', value)}
+                        onMax={(value) => setDraftValue('aestheticMax', value)}
+                        minPlaceholder="min"
+                        maxPlaceholder="max"
+                        step={0.5}
+                        min={0}
+                        max={10}
                       />
-                      <div className="mt-2 flex justify-between text-xs text-neutral-400">
-                        <span>{SEMANTIC_PROFILE_LABELS.image_dominant}</span>
-                        <span>{SEMANTIC_PROFILE_LABELS.balanced}</span>
-                        <span>{SEMANTIC_PROFILE_LABELS.description_dominant}</span>
+                      <RangeInput
+                        label="Sharpness"
+                        minVal={draft.sharpnessMin}
+                        maxVal={draft.sharpnessMax}
+                        onMin={(value) => setDraftValue('sharpnessMin', value)}
+                        onMax={(value) => setDraftValue('sharpnessMax', value)}
+                        minPlaceholder="min"
+                        maxPlaceholder="max"
+                        step={1}
+                        min={0}
+                        max={100}
+                      />
+                      <RangeInput
+                        label="ISO range"
+                        minVal={draft.isoMin}
+                        maxVal={draft.isoMax}
+                        onMin={(value) => setDraftValue('isoMin', value)}
+                        onMax={(value) => setDraftValue('isoMax', value)}
+                        minPlaceholder="min"
+                        maxPlaceholder="max"
+                        step={100}
+                        min={50}
+                        max={204800}
+                      />
+                      <RangeInput
+                        label="Face count"
+                        minVal={draft.facesMin}
+                        maxVal={draft.facesMax}
+                        onMin={(value) => setDraftValue('facesMin', value)}
+                        onMax={(value) => setDraftValue('facesMax', value)}
+                        minPlaceholder="min"
+                        maxPlaceholder="max"
+                        step={1}
+                        min={0}
+                        max={100}
+                      />
+                      <div>
+                        <FieldLabel>Max noise level</FieldLabel>
+                        <input
+                          type="number"
+                          value={draft.noiseMax}
+                          onChange={(event) => setDraftValue('noiseMax', event.target.value)}
+                          placeholder="e.g. 0.05"
+                          step="0.01"
+                          min="0"
+                          className="w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 focus:border-cyan-500 focus:outline-none"
+                        />
                       </div>
                     </div>
-                  )}
+                  </AdvancedSection>
                 </div>
 
-                <TextField label="Camera" value={draft.camera} placeholder="Sony, Canon R5…" onChange={(value) => setDraftValue('camera', value)} />
-                <TextField label="Lens" value={draft.lens} placeholder="85mm, Sigma…" onChange={(value) => setDraftValue('lens', value)} />
-                <TextField label="Location" value={draft.location} placeholder="Yosemite, Paris…" onChange={(value) => setDraftValue('location', value)} />
-                <TextField label="Date from" value={draft.dateFrom} type="date" placeholder="" onChange={(value) => setDraftValue('dateFrom', value)} />
-                <TextField label="Date to" value={draft.dateTo} type="date" placeholder="" onChange={(value) => setDraftValue('dateTo', value)} />
-
-                <RangeInput
-                  label="Aesthetic score"
-                  minVal={draft.aestheticMin}
-                  maxVal={draft.aestheticMax}
-                  onMin={(value) => setDraftValue('aestheticMin', value)}
-                  onMax={(value) => setDraftValue('aestheticMax', value)}
-                  minPlaceholder="min"
-                  maxPlaceholder="max"
-                  step={0.5}
-                  min={0}
-                  max={10}
-                />
-                <RangeInput
-                  label="Sharpness"
-                  minVal={draft.sharpnessMin}
-                  maxVal={draft.sharpnessMax}
-                  onMin={(value) => setDraftValue('sharpnessMin', value)}
-                  onMax={(value) => setDraftValue('sharpnessMax', value)}
-                  minPlaceholder="min"
-                  maxPlaceholder="max"
-                  step={1}
-                  min={0}
-                  max={100}
-                />
-                <RangeInput
-                  label="ISO range"
-                  minVal={draft.isoMin}
-                  maxVal={draft.isoMax}
-                  onMin={(value) => setDraftValue('isoMin', value)}
-                  onMax={(value) => setDraftValue('isoMax', value)}
-                  minPlaceholder="min"
-                  maxPlaceholder="max"
-                  step={100}
-                  min={50}
-                  max={204800}
-                />
-                <RangeInput
-                  label="Face count"
-                  minVal={draft.facesMin}
-                  maxVal={draft.facesMax}
-                  onMin={(value) => setDraftValue('facesMin', value)}
-                  onMax={(value) => setDraftValue('facesMax', value)}
-                  minPlaceholder="min"
-                  maxPlaceholder="max"
-                  step={1}
-                  min={0}
-                  max={100}
-                />
-
-                <div>
-                  <FieldLabel>Max noise level</FieldLabel>
-                  <input
-                    type="number"
-                    value={draft.noiseMax}
-                    onChange={(event) => setDraftValue('noiseMax', event.target.value)}
-                    placeholder="e.g. 0.05"
-                    step="0.01"
-                    min="0"
-                    className="w-full rounded-xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 focus:border-blue-500 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <FieldLabel>People filter</FieldLabel>
-                  <div className="flex flex-wrap gap-2">
-                    {(['any', 'yes', 'no'] as const).map((value) => (
-                      <ChoicePill
-                        key={value}
-                        active={draft.hasPeople === value}
-                        label={value === 'any' ? 'Any people state' : value === 'yes' ? 'Only with people' : 'Only without people'}
-                        onClick={() => setDraftValue('hasPeople', value)}
-                      />
-                    ))}
+                <AdvancedSection
+                  title="Boolean terms & people state"
+                  description="Use these to tighten the result set without rewriting the main prompt."
+                >
+                  <div className="grid gap-4 xl:grid-cols-2">
+                    <div>
+                      <FieldLabel>People filter</FieldLabel>
+                      <div className="flex flex-wrap gap-2">
+                        {(['any', 'yes', 'no'] as const).map((value) => (
+                          <ChoicePill
+                            key={value}
+                            active={draft.hasPeople === value}
+                            label={value === 'any' ? 'Any people state' : value === 'yes' ? 'Only with people' : 'Only without people'}
+                            onClick={() => setDraftValue('hasPeople', value)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <TextField
+                      label="Must include terms"
+                      value={draft.mustTerms.join(', ')}
+                      placeholder="basketball, sunset..."
+                      onChange={(value) => setDraftValue('mustTerms', splitTermInput(value))}
+                    />
+                    <TextField
+                      label="Should include terms"
+                      value={draft.shouldTerms.join(', ')}
+                      placeholder="court, hoop..."
+                      onChange={(value) => setDraftValue('shouldTerms', splitTermInput(value))}
+                    />
                   </div>
-                </div>
-
-                <TextField
-                  label="Must include terms"
-                  value={draft.mustTerms.join(', ')}
-                  placeholder="basketball, sunset..."
-                  onChange={(value) => setDraftValue('mustTerms', splitTermInput(value))}
-                />
-                <TextField
-                  label="Should include terms"
-                  value={draft.shouldTerms.join(', ')}
-                  placeholder="court, hoop..."
-                  onChange={(value) => setDraftValue('shouldTerms', splitTermInput(value))}
-                />
+                </AdvancedSection>
               </div>
             )}
-          </section>
+          </SurfaceCard>
         </div>
       </div>
     </div>

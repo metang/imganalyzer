@@ -33,6 +33,8 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from .hf_cache import load_pretrained
+
 CACHE_DIR = os.getenv("IMGANALYZER_MODEL_CACHE", str(Path.home() / ".cache" / "imganalyzer"))
 
 _MODEL_ID = "microsoft/trocr-large-printed"
@@ -237,13 +239,16 @@ class OCRAnalyzer:
         # and also halves activation/beam-search tensors during inference.
         load_dtype = torch.float16 if supports_fp16() else torch.float32
 
-        cls._processor = TrOCRProcessor.from_pretrained(
-            _MODEL_ID, cache_dir=CACHE_DIR
-        )
-        cls._model = VisionEncoderDecoderModel.from_pretrained(
+        cls._processor = load_pretrained(
+            TrOCRProcessor.from_pretrained,
             _MODEL_ID,
-            torch_dtype=load_dtype,
             cache_dir=CACHE_DIR,
+        )
+        cls._model = load_pretrained(
+            VisionEncoderDecoderModel.from_pretrained,
+            _MODEL_ID,
+            cache_dir=CACHE_DIR,
+            torch_dtype=load_dtype,
         ).to(device)  # type: ignore[union-attr]
 
         # Workaround: when accelerate is installed and another model (e.g.

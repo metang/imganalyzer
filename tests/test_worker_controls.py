@@ -34,7 +34,11 @@ def test_server_worker_pause_resume_controls_claim(tmp_path, monkeypatch):
         {
             "workerId": "worker-1",
             "displayName": "Worker 1",
-            "capabilities": {"supportedModules": ["caption"], "cuda": False},
+            "capabilities": {
+                "supportedModules": ["caption"],
+                "cuda": False,
+                "requiresDecodedCache": False,
+            },
         }
     )
     paused = server._handle_workers_pause(
@@ -81,7 +85,13 @@ def test_server_worker_pause_immediate_releases_leases(tmp_path, monkeypatch):
     server._db_local = threading.local()
     server._decoded_store = None
     server._active_worker = None
-    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    server._handle_workers_register(
+        {
+            "workerId": "worker-1",
+            "displayName": "Worker 1",
+            "capabilities": {"requiresDecodedCache": False},
+        }
+    )
 
     claimed = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1})
     assert len(claimed["jobs"]) == 1
@@ -192,6 +202,140 @@ def test_server_master_worker_lifecycle_visible_in_status_and_workers_list(tmp_p
 
     idle_again = server._handle_workers_list({})
     assert idle_again["master"]["status"] == "offline"
+
+
+def test_server_jobs_claim_waits_for_decoded_cache_when_pending_image_is_not_cached(tmp_path, monkeypatch):
+    db_path = tmp_path / "worker-cache-gate.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/photos/cache-fallback.jpg")
+    queue.enqueue(image_id, "caption")
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    server._active_worker = None
+
+    class _StoreStub:
+        def cached_image_ids(self) -> set[int]:
+            return {999999}
+
+    server._decoded_store = _StoreStub()
+    monkeypatch.setattr(server, "_auto_trigger_pre_decode", lambda: None)
+
+    server._handle_workers_register(
+        {
+            "workerId": "worker-1",
+            "displayName": "Worker 1",
+            "capabilities": {"supportedModules": ["caption"], "cuda": False},
+        }
+    )
+
+    claimed = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1})
+
+    assert claimed["jobs"] == []
+    assert claimed["reason"] == "waiting_for_decoded_cache"
+
+
+def test_server_jobs_claim_marks_cache_backed_jobs_for_remote_fetch(tmp_path, monkeypatch):
+    db_path = tmp_path / "worker-cache-ready.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/photos/cache-ready.jpg")
+    queue.enqueue(image_id, "caption")
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    server._active_worker = None
+
+    class _StoreStub:
+        def cached_image_ids(self) -> set[int]:
+            return {image_id}
+
+    server._decoded_store = _StoreStub()
+    monkeypatch.setattr(server, "_auto_trigger_pre_decode", lambda: None)
+
+    server._handle_workers_register(
+        {
+            "workerId": "worker-1",
+            "displayName": "Worker 1",
+            "capabilities": {"supportedModules": ["caption"], "cuda": False},
+        }
+    )
+
+    claimed = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1})
+
+    assert len(claimed["jobs"]) == 1
+    assert claimed["jobs"][0]["imageId"] == image_id
+    assert claimed["jobs"][0]["hasDecodedCache"] is True
+    assert claimed["jobs"][0]["requireDecodedCache"] is True
+
+
+def test_server_jobs_claim_defers_prerequisite_blocked_jobs_without_burning_attempts(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "worker-prereq-deferral.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_id = repo.register_image(file_path="/photos/prereq-blocked.jpg")
+    objects_job = queue.enqueue(image_id, "objects")
+    embedding_job = queue.enqueue(image_id, "embedding")
+    assert objects_job is not None
+    assert embedding_job is not None
+    before = conn.execute(
+        "SELECT queued_at FROM job_queue WHERE id = ?",
+        [embedding_job],
+    ).fetchone()
+    assert before is not None
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    server._db_local = threading.local()
+    server._decoded_store = None
+    server._active_worker = None
+
+    server._handle_workers_register(
+        {
+            "workerId": "worker-1",
+            "displayName": "Worker 1",
+            "capabilities": {"supportedModules": ["embedding"], "cuda": False},
+        }
+    )
+
+    claimed = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "embedding"})
+    assert claimed["jobs"] == []
+
+    check = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    check.row_factory = sqlite3.Row
+    row = check.execute(
+        "SELECT status, attempts, queued_at FROM job_queue WHERE id = ?",
+        [embedding_job],
+    ).fetchone()
+    check.close()
+
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["attempts"] == 0
+    assert row["queued_at"] > before["queued_at"]
 
 
 def test_server_master_pause_blocks_new_runs_until_resumed(tmp_path, monkeypatch):

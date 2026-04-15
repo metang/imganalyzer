@@ -21,7 +21,6 @@ VALID_CONTROL_STATES: frozenset[str] = frozenset({ACTIVE_STATE, *PAUSED_STATES})
 MAX_ACTIVE_LEASES_PER_WORKER = 3
 DEFAULT_EPOCH_SECONDS = 90
 EMA_ALPHA = 0.20
-
 # Conservative fallbacks when no per-worker timing history exists yet.
 _DEFAULT_MODULE_MS: dict[str, float] = {
     "metadata": 250.0,
@@ -174,7 +173,7 @@ def _pending_count(
     module_filter: str | None,
     modules_filter: list[str] | None,
 ) -> int:
-    where = "WHERE status = 'pending'"
+    where = "WHERE status = 'pending' AND attempts <= max_attempts"
     params: list[Any] = []
     if module_filter:
         where += " AND module = ?"
@@ -195,7 +194,7 @@ def _pending_count_by_module(
     modules_filter: list[str] | None,
     prefer_image_ids: set[int] | None,
 ) -> dict[str, int]:
-    where = "WHERE status = 'pending'"
+    where = "WHERE status = 'pending' AND attempts <= max_attempts"
     params: list[Any] = []
     if modules_filter:
         placeholders = ",".join("?" * len(modules_filter))

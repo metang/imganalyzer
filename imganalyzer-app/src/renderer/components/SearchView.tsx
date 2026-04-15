@@ -6,6 +6,7 @@ import type { SearchFilters, SearchProgress, SearchResult } from '../global'
 import { SearchBar } from './SearchBar'
 import { VirtualGrid } from './VirtualGrid'
 import { SearchLightbox } from './SearchLightbox'
+import { SectionHeading, StatusBadge, SurfaceCard } from './ui'
 
 const SEARCH_PAGE_SIZE = 200
 
@@ -36,6 +37,7 @@ export function SearchView({ onOpenFaceCluster, onViewOnMap, pendingSearch, onCl
   const [selectedItem, setSelectedItem] = useState<SearchResult | null>(null)
   const [searchContextLabel, setSearchContextLabel] = useState<string | null>(null)
   const [searchProgress, setSearchProgress] = useState<SearchProgress | null>(null)
+  const [seededPrompt, setSeededPrompt] = useState<{ text: string; token: number; autoSearch?: boolean } | null>(null)
   const activeFiltersRef = useRef<SearchFilters | null>(null)
   const requestIdRef = useRef(0)
   const resultsRef = useRef<SearchResult[]>([])
@@ -128,6 +130,10 @@ export function SearchView({ onOpenFaceCluster, onViewOnMap, pendingSearch, onCl
     await runSearch(filters, contextLabel)
   }, [runSearch])
 
+  const handleGuidedSearch = useCallback((text: string) => {
+    setSeededPrompt({ text, token: Date.now(), autoSearch: true })
+  }, [])
+
   const handleFindSimilar = useCallback(async (item: SearchResult) => {
     const filename = item.file_path.split(/[/\\]/).pop() ?? `image ${item.image_id}`
     await runSearch(
@@ -173,37 +179,43 @@ export function SearchView({ onOpenFaceCluster, onViewOnMap, pendingSearch, onCl
 
   return (
     <div className="flex flex-1 min-h-0 overflow-hidden">
-      <div className="w-[420px] min-w-[360px] shrink-0 border-r border-neutral-800 bg-neutral-950/80">
+      <div className="w-[460px] min-w-[380px] shrink-0 border-r border-neutral-800/80 bg-neutral-950/40">
         <SearchBar
           onSearch={handleSearch}
           loading={loading}
+          seededPrompt={seededPrompt}
         />
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {(hasSearched || loading || resultSummary || searchContextLabel || error) && (
-          <div className="shrink-0 border-b border-neutral-800 bg-neutral-950/40 px-4 py-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="min-w-0 truncate text-sm text-neutral-300">
-                {searchContextLabel ?? (loading ? 'Searching…' : hasSearched ? 'Search results' : 'Results')}
-              </p>
-              {resultSummary && (
+          <div className="shrink-0 border-b border-neutral-800/80 px-4 py-3">
+            <SurfaceCard tone="subtle" className="p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="min-w-0 truncate text-sm text-neutral-200">
+                    {searchContextLabel ?? (loading ? 'Searching…' : hasSearched ? 'Search results' : 'Results')}
+                  </p>
+                  {!loading && hasSearched && (
+                    <p className="mt-1 text-xs text-neutral-500">
+                      Natural language first, structured filters only where needed.
+                    </p>
+                  )}
+                </div>
                 <div className="flex items-center gap-2">
-                  <div className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-300">
-                    {resultSummary}
-                  </div>
+                  {resultSummary && <StatusBadge>{resultSummary}</StatusBadge>}
                   {onViewOnMap && activeFiltersRef.current && (
                     <button
                       onClick={() => onViewOnMap(activeFiltersRef.current!)}
-                      className="rounded-full border border-neutral-700 hover:border-neutral-500 bg-neutral-900 px-3 py-1 text-xs text-neutral-400 hover:text-neutral-200 transition-colors"
+                      className="rounded-full border border-neutral-700 bg-neutral-900 px-3 py-1 text-xs text-neutral-300 transition-colors hover:border-cyan-500/40 hover:text-white"
                       title="View search results on map"
                     >
-                      🗺️ View on Map
+                      View on Map
                     </button>
                   )}
                 </div>
-              )}
-            </div>
+              </div>
+            </SurfaceCard>
             {error && results.length > 0 && (
               <div className="mt-3 rounded-xl border border-red-900/40 bg-red-950/40 px-3 py-2 text-xs text-red-300">
                 {error}
@@ -242,17 +254,37 @@ export function SearchView({ onOpenFaceCluster, onViewOnMap, pendingSearch, onCl
         )}
 
         {!loading && !error && !hasSearched && (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-neutral-600">
-            <svg className="h-16 w-16 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
-              <path strokeLinecap="round" strokeLinejoin="round"
-                d="M21 21l-4.35-4.35M17 11A6 6 0 115 11a6 6 0 0112 0z" />
-            </svg>
-            <p className="text-sm">Use the search panel to find images in your library.</p>
-            <p className="text-xs text-neutral-700">
-              Try: <code className="text-neutral-600">Alice in the US every Feb 1 morning</code>,{' '}
-              <code className="text-neutral-600">duck on water</code>,{' '}
-              <code className="text-neutral-600">best photo of the sunset scene</code>
-            </p>
+          <div className="flex flex-1 items-center justify-center px-6 py-8">
+            <SurfaceCard tone="subtle" className="max-w-2xl">
+              <SectionHeading
+                eyebrow="Guided search"
+                title="Describe the frame you want"
+                description="This works best when you begin with a scene or moment in plain English, then refine if the result set is still too broad."
+              />
+              <div className="mt-4 grid gap-2 text-sm text-neutral-300">
+                <button
+                  type="button"
+                  onClick={() => handleGuidedSearch('Alice in the US every Feb 1 morning')}
+                  className="rounded-xl border border-neutral-800 bg-black/15 px-3 py-2 text-left transition-colors hover:border-cyan-500/40 hover:bg-cyan-500/5 hover:text-white"
+                >
+                  Alice in the US every Feb 1 morning
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleGuidedSearch('duck on water with wings open')}
+                  className="rounded-xl border border-neutral-800 bg-black/15 px-3 py-2 text-left transition-colors hover:border-cyan-500/40 hover:bg-cyan-500/5 hover:text-white"
+                >
+                  duck on water with wings open
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleGuidedSearch('best photo of the sunset scene')}
+                  className="rounded-xl border border-neutral-800 bg-black/15 px-3 py-2 text-left transition-colors hover:border-cyan-500/40 hover:bg-cyan-500/5 hover:text-white"
+                >
+                  best photo of the sunset scene
+                </button>
+              </div>
+            </SurfaceCard>
           </div>
         )}
 

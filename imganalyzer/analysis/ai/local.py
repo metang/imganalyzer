@@ -13,6 +13,8 @@ from typing import Any
 
 import numpy as np
 
+from .hf_cache import load_pretrained
+
 
 CACHE_DIR = os.getenv("IMGANALYZER_MODEL_CACHE", str(Path.home() / ".cache" / "imganalyzer"))
 
@@ -62,16 +64,19 @@ class LocalAI:
         if LocalAI._processor is None:
             from rich.console import Console
             Console().print(f"[dim]Loading BLIP-2 model {_MODEL_ID} (first run downloads ~8 GB)...[/dim]")
-            LocalAI._processor = Blip2Processor.from_pretrained(
-                _MODEL_ID, cache_dir=CACHE_DIR
+            LocalAI._processor = load_pretrained(
+                Blip2Processor.from_pretrained,
+                _MODEL_ID,
+                cache_dir=CACHE_DIR,
             )
             from imganalyzer.device import get_device, supports_fp16
             device = get_device()
-            LocalAI._model = Blip2ForConditionalGeneration.from_pretrained(
+            LocalAI._model = load_pretrained(
+                Blip2ForConditionalGeneration.from_pretrained,
                 _MODEL_ID,
+                cache_dir=CACHE_DIR,
                 torch_dtype=torch.float16 if supports_fp16() else torch.float32,
                 low_cpu_mem_usage=True,
-                cache_dir=CACHE_DIR,
             ).to(device)
 
         processor = LocalAI._processor
@@ -166,16 +171,19 @@ class LocalAI:
         if LocalAI._processor is None:
             from rich.console import Console
             Console().print(f"[dim]Loading BLIP-2 model {_MODEL_ID} (first run downloads ~8 GB)...[/dim]")
-            LocalAI._processor = Blip2Processor.from_pretrained(
-                _MODEL_ID, cache_dir=CACHE_DIR
+            LocalAI._processor = load_pretrained(
+                Blip2Processor.from_pretrained,
+                _MODEL_ID,
+                cache_dir=CACHE_DIR,
             )
             from imganalyzer.device import get_device, supports_fp16
             device = get_device()
-            LocalAI._model = Blip2ForConditionalGeneration.from_pretrained(
+            LocalAI._model = load_pretrained(
+                Blip2ForConditionalGeneration.from_pretrained,
                 _MODEL_ID,
+                cache_dir=CACHE_DIR,
                 torch_dtype=torch.float16 if supports_fp16() else torch.float32,
                 low_cpu_mem_usage=True,
-                cache_dir=CACHE_DIR,
             ).to(device)
 
         processor = LocalAI._processor

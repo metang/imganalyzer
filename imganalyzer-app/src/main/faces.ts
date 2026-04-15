@@ -16,6 +16,7 @@ import { registerApprovedPathsFromPayload } from './path-validation'
 
 const MAX_FACE_CROP_CACHE = 2000
 const FACE_CROP_CACHE_WRITE_INTERVAL = 64
+const FACE_CLUSTERS_TIMEOUT_MS = 120_000
 const faceCropCache = new Map<number, string>()
 let faceCropWritesSinceCleanup = 0
 
@@ -305,7 +306,7 @@ export function registerFaceHandlers(): void {
           params.limit = limit
           params.offset = offset ?? 0
         }
-        const result = await rpc.call('faces/clusters', params) as {
+        const result = await rpc.call('faces/clusters', params, undefined, FACE_CLUSTERS_TIMEOUT_MS) as {
           clusters: FaceCluster[]
           has_occurrences: boolean
           total_count: number

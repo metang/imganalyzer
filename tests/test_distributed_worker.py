@@ -693,7 +693,13 @@ def test_server_jobs_claim_packages_embedding_context(tmp_path, monkeypatch):
 
     server._db_local = threading.local()
     server._decoded_store = None
-    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    server._handle_workers_register(
+        {
+            "workerId": "worker-1",
+            "displayName": "Worker 1",
+            "capabilities": {"requiresDecodedCache": False},
+        }
+    )
     result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1})
 
     assert len(result["jobs"]) == 1
@@ -726,7 +732,13 @@ def test_server_jobs_claim_reserves_work_for_idle_master(tmp_path, monkeypatch):
     server._decoded_store = None
     server._active_worker = ActiveWorkerStub()
     try:
-        server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+        server._handle_workers_register(
+            {
+                "workerId": "worker-1",
+                "displayName": "Worker 1",
+                "capabilities": {"requiresDecodedCache": False},
+            }
+        )
         result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "caption"})
     finally:
         server._active_worker = None
@@ -771,7 +783,13 @@ def test_server_jobs_claim_allows_worker_when_master_is_busy(tmp_path, monkeypat
     server._decoded_store = None
     server._active_worker = ActiveWorkerStub()
     try:
-        server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+        server._handle_workers_register(
+            {
+                "workerId": "worker-1",
+                "displayName": "Worker 1",
+                "capabilities": {"requiresDecodedCache": False},
+            }
+        )
         result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "caption"})
     finally:
         server._active_worker = None
@@ -869,7 +887,13 @@ def test_server_jobs_claim_scans_past_prereq_blocked_jobs(tmp_path, monkeypatch)
 
     server._db_local = threading.local()
     server._decoded_store = None
-    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    server._handle_workers_register(
+        {
+            "workerId": "worker-1",
+            "displayName": "Worker 1",
+            "capabilities": {"requiresDecodedCache": False},
+        }
+    )
     result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "embedding"})
 
     assert len(result["jobs"]) == 1
@@ -899,7 +923,13 @@ def test_server_jobs_claim_skips_when_prerequisite_failed(tmp_path, monkeypatch)
 
     server._db_local = threading.local()
     server._decoded_store = None
-    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    server._handle_workers_register(
+        {
+            "workerId": "worker-1",
+            "displayName": "Worker 1",
+            "capabilities": {"requiresDecodedCache": False},
+        }
+    )
     result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "embedding"})
     assert result["jobs"] == []
 
@@ -941,7 +971,13 @@ def test_server_jobs_claim_skips_already_analyzed_without_force_marker(tmp_path,
 
     server._db_local = threading.local()
     server._decoded_store = None
-    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    server._handle_workers_register(
+        {
+            "workerId": "worker-1",
+            "displayName": "Worker 1",
+            "capabilities": {"requiresDecodedCache": False},
+        }
+    )
     result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "perception"})
     assert result["jobs"] == []
 
@@ -983,7 +1019,13 @@ def test_server_jobs_claim_honors_force_marker_from_queue(tmp_path, monkeypatch)
 
     server._db_local = threading.local()
     server._decoded_store = None
-    server._handle_workers_register({"workerId": "worker-1", "displayName": "Worker 1"})
+    server._handle_workers_register(
+        {
+            "workerId": "worker-1",
+            "displayName": "Worker 1",
+            "capabilities": {"requiresDecodedCache": False},
+        }
+    )
     result = server._handle_jobs_claim({"workerId": "worker-1", "batchSize": 1, "module": "aesthetic"})
     assert len(result["jobs"]) == 1
     assert result["jobs"][0]["id"] == job_id

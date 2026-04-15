@@ -258,6 +258,7 @@ class JobQueue:
             rid_ph = ",".join("?" * len(restrict_image_ids))
             where += f" AND image_id IN ({rid_ph})"
             params.extend(restrict_image_ids)
+        where_params = list(params)
 
         # Build ORDER BY with optional chunk and module affinity
         order_parts: list[str] = []
@@ -287,18 +288,9 @@ class JobQueue:
                 # the reservation atomically.  Without this, multiple workers
                 # checking concurrently can each think there are enough pending
                 # jobs and collectively drain past the reservation.
-                count_where = "WHERE status = 'pending'"
-                count_params: list[Any] = []
-                if module:
-                    count_where += " AND module = ?"
-                    count_params.append(module)
-                elif modules:
-                    m_ph = ",".join("?" * len(modules))
-                    count_where += f" AND module IN ({m_ph})"
-                    count_params.extend(modules)
                 pending_now = self.conn.execute(
-                    f"SELECT COUNT(*) AS cnt FROM job_queue {count_where}",
-                    count_params,
+                    f"SELECT COUNT(*) AS cnt FROM job_queue {where}",
+                    where_params,
                 ).fetchone()["cnt"]
                 claimable = max(0, pending_now - master_reserve)
                 if claimable <= 0:
@@ -408,10 +400,12 @@ class JobQueue:
             self.conn.rollback()
             raise
 
-    def release_worker_leases(self, worker_id: str) -> int:
+    def release_worker_leases(self, worker_id: str, delay_seconds: int = 0) -> int:
         """Return all leases held by a worker to pending state.
 
-        Jobs that have exceeded ``max_attempts`` are permanently failed.
+        This is used for graceful worker shutdown / drain, so it does *not*
+        consume retry attempts. Hard failures are handled separately by
+        ``mark_failed_leased()`` and ``release_expired_leases()``.
         """
         _begin_immediate(self.conn)
         try:
@@ -424,27 +418,14 @@ class JobQueue:
                 return 0
             job_ids = [r["job_id"] for r in rows]
             placeholders = ",".join("?" * len(job_ids))
-            # Fail jobs that exceeded max_attempts (before re-queue to
-            # avoid double-update on boundary cases)
+            queued_at = _now_plus(max(0, int(delay_seconds))) if delay_seconds > 0 else _now()
             self.conn.execute(
                 f"""UPDATE job_queue
-                    SET status = 'failed', attempts = attempts + 1,
-                        error_message = 'Exceeded max attempts (worker release)',
-                        completed_at = ?
-                    WHERE id IN ({placeholders})
-                      AND status = 'running'
-                      AND attempts >= max_attempts""",
-                [_now()] + job_ids,
-            )
-            # Re-queue jobs with retries left
-            self.conn.execute(
-                f"""UPDATE job_queue
-                    SET status = 'pending', started_at = NULL, attempts = attempts + 1,
+                    SET status = 'pending', started_at = NULL, queued_at = ?,
                         last_node_id = NULL, last_node_role = NULL
                     WHERE id IN ({placeholders})
-                      AND status = 'running'
-                      AND attempts < max_attempts""",
-                job_ids,
+                      AND status = 'running'""",
+                [queued_at] + job_ids,
             )
             self.conn.execute(
                 f"DELETE FROM job_leases WHERE job_id IN ({placeholders})",
@@ -486,8 +467,14 @@ class JobQueue:
             self.conn.rollback()
             raise
 
-    def release_leased(self, job_id: int, lease_token: str) -> bool:
-        """Return a claimed leased job to pending if the token matches."""
+    def release_leased(self, job_id: int, lease_token: str, delay_seconds: int = 0) -> bool:
+        """Return a claimed leased job to pending if the token matches.
+
+        ``delay_seconds`` can be used to defer immediate re-claim of a
+        temporarily unrunnable job (for example, waiting on prerequisites or
+        decoded-cache warmup). This is a soft release and does not consume a
+        retry attempt.
+        """
         _begin_immediate(self.conn)
         try:
             row = self.conn.execute(
@@ -502,11 +489,10 @@ class JobQueue:
                    SET status = 'pending',
                        started_at = NULL,
                        queued_at = ?,
-                       attempts = attempts + 1,
                        last_node_id = NULL,
                        last_node_role = NULL
-                    WHERE id = ?""",
-                [_now(), job_id],
+                     WHERE id = ?""",
+                [_now_plus(max(0, int(delay_seconds))) if delay_seconds > 0 else _now(), job_id],
             )
             self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
             self.conn.commit()
@@ -593,13 +579,15 @@ class JobQueue:
         self,
         skips: list[tuple[int, str, str]],
         releases: list[tuple[int, str]],
+        defers: list[tuple[int, str, int]] | None = None,
     ) -> None:
         """Batch skip and release multiple leased jobs in a single transaction.
 
         *skips* is a list of ``(job_id, lease_token, reason)`` tuples.
         *releases* is a list of ``(job_id, lease_token)`` tuples.
+        *defers* is a list of ``(job_id, lease_token, delay_seconds)`` tuples.
         """
-        if not skips and not releases:
+        if not skips and not releases and not defers:
             return
         _begin_immediate(self.conn)
         try:
@@ -617,6 +605,21 @@ class JobQueue:
                     [reason, now, job_id],
                 )
                 self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
+            for job_id, lease_token, delay_seconds in defers or []:
+                row = self.conn.execute(
+                    "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
+                    [job_id, lease_token],
+                ).fetchone()
+                if row is None:
+                    continue
+                defer_until = _now_plus(max(0, int(delay_seconds)))
+                self.conn.execute(
+                    "UPDATE job_queue SET status = 'pending', started_at = NULL, queued_at = ?, "
+                    "last_node_id = NULL, last_node_role = NULL "
+                    "WHERE id = ?",
+                    [defer_until, job_id],
+                )
+                self.conn.execute("DELETE FROM job_leases WHERE job_id = ?", [job_id])
             for job_id, lease_token in releases:
                 row = self.conn.execute(
                     "SELECT 1 FROM job_leases WHERE job_id = ? AND lease_token = ?",
@@ -624,9 +627,12 @@ class JobQueue:
                 ).fetchone()
                 if row is None:
                     continue
+                # A coordinator-side release here means "not dispatched after
+                # claim scan" or "defer until ready", not a real processing
+                # failure. Do not burn retry attempts for these soft releases.
                 self.conn.execute(
                     "UPDATE job_queue SET status = 'pending', started_at = NULL, queued_at = ?, "
-                    "attempts = attempts + 1, last_node_id = NULL, last_node_role = NULL "
+                    "last_node_id = NULL, last_node_role = NULL "
                     "WHERE id = ?",
                     [now, job_id],
                 )
@@ -760,13 +766,28 @@ class JobQueue:
         return cur.rowcount
 
     def retry_failed(self, max_attempts: int = 3) -> int:
-        """Re-enqueue failed jobs that haven't exceeded max_attempts."""
+        """Re-enqueue retryable failed jobs.
+
+        Jobs failed with ``Exceeded max attempts (exhausted pending)`` are
+        synthetic queue-management failures rather than real processing
+        failures, so they are safe to restore and get their attempt count
+        reset.
+        """
         cur = self.conn.execute(
             """UPDATE job_queue
-               SET status = 'pending', error_message = NULL,
-                   started_at = NULL, completed_at = NULL,
-                   last_node_id = NULL, last_node_role = NULL
-                WHERE status = 'failed' AND attempts < ?""",
+                SET status = 'pending', error_message = NULL,
+                    skip_reason = NULL,
+                    started_at = NULL, completed_at = NULL,
+                    last_node_id = NULL, last_node_role = NULL,
+                    attempts = CASE
+                        WHEN error_message = 'Exceeded max attempts (exhausted pending)' THEN 0
+                        ELSE attempts
+                    END
+                 WHERE status = 'failed'
+                   AND (
+                       attempts < ?
+                       OR error_message = 'Exceeded max attempts (exhausted pending)'
+                   )""",
             [max_attempts],
         )
         self.conn.commit()

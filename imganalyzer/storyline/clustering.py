@@ -101,13 +101,14 @@ def load_album_points(
 ) -> list[ImagePoint]:
     """Load images from album_items with timestamps and GPS data."""
     rows = conn.execute(
-        "SELECT ai.image_id, sf.date_time_original, "
+        "SELECT ai.image_id, "
+        "       COALESCE(sf.date_time_original, am.date_time_original) AS date_time_original, "
         "       am.gps_latitude, am.gps_longitude, am.geohash "
         "FROM album_items ai "
         "LEFT JOIN search_features sf ON sf.image_id = ai.image_id "
         "LEFT JOIN analysis_metadata am ON am.image_id = ai.image_id "
         "WHERE ai.album_id = ? "
-        "ORDER BY sf.date_time_original ASC NULLS LAST",
+        "ORDER BY COALESCE(sf.date_time_original, am.date_time_original) ASC NULLS LAST",
         [album_id],
     ).fetchall()
 
