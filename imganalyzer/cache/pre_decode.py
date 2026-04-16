@@ -24,7 +24,7 @@ import logging
 import os
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +208,7 @@ class PreDecoder:
         self._resource_sampler = resource_sampler or ResourceSampler()
         self._executor: ThreadPoolExecutor | None = None
         self._futures: list[Future[bool]] = []
+        self._monitor_thread: threading.Thread | None = None
 
         # Track which IDs have been submitted to avoid duplicates
         self._queued_ids: set[int] = set()
@@ -280,13 +281,7 @@ class PreDecoder:
             self._executor.submit(self._decode_one, iid, fp)
             for iid, fp in pending
         ]
-
-        # Monitor completion in a background thread
-        threading.Thread(
-            target=self._monitor,
-            daemon=True,
-            name="predecode-monitor",
-        ).start()
+        self._ensure_monitor()
 
     def feed(
         self,
@@ -333,9 +328,12 @@ class PreDecoder:
             self._running = True
 
         for iid, fp in new:
-            self._executor.submit(self._decode_one, iid, fp)
+            future = self._executor.submit(self._decode_one, iid, fp)
+            with self._lock:
+                self._futures.append(future)
 
         log.info("Fed %d images to pre-decoder (total queued: %d)", len(new), self._total)
+        self._ensure_monitor()
         return len(new)
 
     def stop(self) -> None:
@@ -378,6 +376,18 @@ class PreDecoder:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _ensure_monitor(self) -> None:
+        """Ensure the background completion monitor is running."""
+        with self._lock:
+            if self._monitor_thread is not None and self._monitor_thread.is_alive():
+                return
+            self._monitor_thread = threading.Thread(
+                target=self._monitor,
+                daemon=True,
+                name="predecode-monitor",
+            )
+            self._monitor_thread.start()
 
     def _prioritize(
         self,
@@ -448,20 +458,20 @@ class PreDecoder:
 
         lock = self._store.get_decode_lock(image_id)
         with lock:
-            # Re-check after acquiring lock
-            if self._store.has(image_id):
-                with self._lock:
-                    self._done += 1
-                return True
-
-            path = Path(file_path)
-            if not path.exists():
-                log.warning("File not found for pre-decode: %s", file_path)
-                with self._lock:
-                    self._failed += 1
-                return False
-
             try:
+                # Re-check after acquiring lock
+                if self._store.has(image_id):
+                    with self._lock:
+                        self._done += 1
+                    return True
+
+                path = Path(file_path)
+                if not path.exists():
+                    log.warning("File not found for pre-decode: %s", file_path)
+                    with self._lock:
+                        self._failed += 1
+                    return False
+
                 t0 = time.monotonic()
                 image_data = self._read_image(path)
                 rgb = image_data.get("rgb_array")
@@ -527,6 +537,9 @@ class PreDecoder:
                 with self._lock:
                     self._failed += 1
                 return False
+            finally:
+                with self._lock:
+                    self._queued_ids.discard(image_id)
 
     def _read_image(self, path: Path) -> dict[str, Any]:
         """Read full image data (pixels + metadata)."""
@@ -554,17 +567,23 @@ class PreDecoder:
 
     def _monitor(self) -> None:
         """Wait for all futures to complete and update running state."""
-        for fut in self._futures:
-            try:
-                fut.result()
-            except Exception:
-                pass  # Already handled in _decode_one
-
-        # Only mark not-running if no new work was fed while we waited.
-        # feed() may have added items after start()'s initial batch.
-        with self._lock:
-            if self._done + self._failed >= self._total:
-                self._running = False
+        while True:
+            with self._lock:
+                pending = [fut for fut in self._futures if not fut.done()]
+                self._futures = pending
+                if not pending and self._done + self._failed >= self._total:
+                    self._running = False
+                    self._monitor_thread = None
+                    break
+            if not pending:
+                time.sleep(0.05)
+                continue
+            done, _pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+            for fut in done:
+                try:
+                    fut.result()
+                except Exception:
+                    pass  # Already handled in _decode_one
 
         log.info(
             "Pre-decode batch complete: %d done, %d failed, %d total",

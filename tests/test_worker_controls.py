@@ -284,6 +284,59 @@ def test_server_jobs_claim_marks_cache_backed_jobs_for_remote_fetch(tmp_path, mo
     assert claimed["jobs"][0]["requireDecodedCache"] is True
 
 
+def test_server_jobs_claim_handles_large_cache_gating_sets(tmp_path, monkeypatch):
+    db_path = tmp_path / "worker-cache-large-gating.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    repo = Repository(conn)
+    queue = JobQueue(conn)
+
+    image_ids = [
+        repo.register_image(file_path=f"/photos/cache-large-{idx}.jpg")
+        for idx in range(1100)
+    ]
+    image_id_set = set(image_ids)
+    for image_id in image_ids:
+        queue.enqueue(image_id, "caption")
+    conn.close()
+
+    monkeypatch.setenv("IMGANALYZER_DB_PATH", str(db_path))
+    import imganalyzer.server as server
+
+    class _StoreStub:
+        def cached_image_ids(self) -> set[int]:
+            return image_id_set
+
+    class _ActiveWorkerStub:
+        current_chunk_ids = image_id_set
+        current_chunk_index = 0
+        total_chunks = 1
+
+    server._db_local = threading.local()
+    server._decoded_store = _StoreStub()
+    server._active_worker = _ActiveWorkerStub()
+    monkeypatch.setattr(server, "_auto_trigger_pre_decode", lambda: None)
+
+    try:
+        server._handle_workers_register(
+            {
+                "workerId": "worker-1",
+                "displayName": "Worker 1",
+                "capabilities": {"supportedModules": ["caption"], "cuda": False},
+            }
+        )
+        claimed = server._handle_jobs_claim(
+            {"workerId": "worker-1", "batchSize": 1, "module": "caption"}
+        )
+    finally:
+        server._active_worker = None
+
+    assert len(claimed["jobs"]) == 1
+    assert claimed["jobs"][0]["imageId"] in image_id_set
+    assert claimed["jobs"][0]["hasDecodedCache"] is True
+
+
 def test_server_jobs_claim_defers_prerequisite_blocked_jobs_without_burning_attempts(
     tmp_path, monkeypatch
 ):

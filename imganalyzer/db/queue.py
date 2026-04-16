@@ -21,6 +21,24 @@ def _now_plus(seconds: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _format_int_in_clause(values: set[int] | list[int] | tuple[int, ...] | None) -> str | None:
+    """Return a sanitized integer list for SQL ``IN (...)`` clauses.
+
+    Some scheduler filters (decoded-cache gating, active chunk affinity) can
+    legitimately contain thousands of image IDs. Inlining validated integers
+    avoids SQLite's host-parameter limit without relaxing the filter.
+    """
+    if not values:
+        return None
+    try:
+        normalized = sorted({int(value) for value in values})
+    except (TypeError, ValueError) as exc:
+        raise ValueError("image ID filters must contain integers") from exc
+    if not normalized:
+        return None
+    return ",".join(str(value) for value in normalized)
+
+
 class JobQueue:
     """Priority queue backed by the ``job_queue`` table."""
 
@@ -173,9 +191,10 @@ class JobQueue:
             where += " AND module = ?"
             params.append(module)
         if image_ids is not None:
-            placeholders = ",".join("?" * len(image_ids))
-            where += f" AND image_id IN ({placeholders})"
-            params.extend(image_ids)
+            image_ids_sql = _format_int_in_clause(image_ids)
+            if image_ids_sql is None:
+                return []
+            where += f" AND image_id IN ({image_ids_sql})"
         params.append(batch_size)
 
         # Use BEGIN IMMEDIATE to prevent concurrent claims from selecting
@@ -253,11 +272,10 @@ class JobQueue:
             where += f" AND module NOT IN ({excl_ph})"
             params.extend(exclude_modules)
         if restrict_image_ids is not None:
-            if not restrict_image_ids:
+            restrict_ids_sql = _format_int_in_clause(restrict_image_ids)
+            if restrict_ids_sql is None:
                 return []  # empty set — nothing eligible
-            rid_ph = ",".join("?" * len(restrict_image_ids))
-            where += f" AND image_id IN ({rid_ph})"
-            params.extend(restrict_image_ids)
+            where += f" AND image_id IN ({restrict_ids_sql})"
         where_params = list(params)
 
         # Build ORDER BY with optional chunk and module affinity
@@ -265,9 +283,9 @@ class JobQueue:
 
         # Chunk affinity: prefer images from coordinator's current chunk
         if prefer_image_ids:
-            chunk_ph = ",".join("?" * len(prefer_image_ids))
-            order_parts.append(f"(CASE WHEN image_id IN ({chunk_ph}) THEN 0 ELSE 1 END)")
-            params.extend(prefer_image_ids)
+            chunk_ids_sql = _format_int_in_clause(prefer_image_ids)
+            if chunk_ids_sql is not None:
+                order_parts.append(f"(CASE WHEN image_id IN ({chunk_ids_sql}) THEN 0 ELSE 1 END)")
 
         # Module affinity: prefer same module to minimize model switching
         if prefer_module and not module:
@@ -1049,9 +1067,10 @@ class JobQueue:
             where += f" AND module IN ({placeholders})"
             params.extend(modules)
         if image_ids is not None:
-            id_ph = ",".join("?" * len(image_ids))
-            where += f" AND image_id IN ({id_ph})"
-            params.extend(image_ids)
+            image_ids_sql = _format_int_in_clause(image_ids)
+            if image_ids_sql is None:
+                return 0
+            where += f" AND image_id IN ({image_ids_sql})"
         row = self.conn.execute(
             f"SELECT COUNT(*) as cnt FROM job_queue {where}", params
         ).fetchone()
@@ -1068,9 +1087,10 @@ class JobQueue:
             where += " AND module = ?"
             params.append(module)
         if image_ids is not None:
-            id_ph = ",".join("?" * len(image_ids))
-            where += f" AND image_id IN ({id_ph})"
-            params.extend(image_ids)
+            image_ids_sql = _format_int_in_clause(image_ids)
+            if image_ids_sql is None:
+                return 0
+            where += f" AND image_id IN ({image_ids_sql})"
         row = self.conn.execute(
             f"SELECT COUNT(*) as cnt FROM job_queue {where}", params
         ).fetchone()
@@ -1088,9 +1108,10 @@ class JobQueue:
             where += " AND jq.module = ?"
             params.append(module)
         if image_ids is not None:
-            id_ph = ",".join("?" * len(image_ids))
-            where += f" AND jq.image_id IN ({id_ph})"
-            params.extend(image_ids)
+            image_ids_sql = _format_int_in_clause(image_ids)
+            if image_ids_sql is None:
+                return 0
+            where += f" AND jq.image_id IN ({image_ids_sql})"
         row = self.conn.execute(
             f"""SELECT COUNT(*) AS cnt
                 FROM job_queue jq

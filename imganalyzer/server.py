@@ -370,6 +370,7 @@ _DECODE_BUFFER_SIZE = int(os.getenv("IMGANALYZER_DECODE_BUFFER_SIZE", "10"))
 _MIN_DECODE_BUFFER = 5  # never let in-flight drop below this
 _last_replenish_time: float = 0.0
 _REPLENISH_INTERVAL: float = 5.0  # seconds between buffer checks
+_REMOTE_DECODE_PRIORITY_MODULES = ("caption", "objects", "embedding", "perception")
 
 
 def _auto_trigger_pre_decode() -> None:
@@ -434,18 +435,50 @@ def _replenish_decode_buffer() -> None:
         from imganalyzer.db.connection import create_connection
         conn2 = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
         try:
-            # Get image IDs with pending jobs, ordered by number of pending
-            # modules descending (images needing more work are more valuable
-            # to decode first).
+            # Prioritize images that can immediately unblock distributed
+            # workers (caption / objects / embedding / perception) before
+            # master-only backlog. Within that, older and higher-fanout jobs
+            # go first.
+            remote_ph = ",".join("?" * len(_REMOTE_DECODE_PRIORITY_MODULES))
             pending_rows = conn2.execute(
-                "SELECT image_id, COUNT(*) AS cnt "
-                "FROM job_queue WHERE status = 'pending' "
-                "GROUP BY image_id ORDER BY cnt DESC"
+                f"""SELECT image_id,
+                           COUNT(*) AS cnt,
+                           SUM(CASE WHEN module IN ({remote_ph}) THEN 1 ELSE 0 END) AS remote_cnt,
+                           MIN(queued_at) AS oldest_queued_at
+                    FROM job_queue
+                    WHERE status = 'pending'
+                      AND attempts <= max_attempts
+                    GROUP BY image_id
+                    ORDER BY remote_cnt DESC, cnt DESC, oldest_queued_at ASC, image_id ASC"""
+                ,
+                list(_REMOTE_DECODE_PRIORITY_MODULES),
             ).fetchall()
+            online_workers_row = conn2.execute(
+                """SELECT COUNT(*) AS cnt
+                   FROM worker_nodes
+                   WHERE id != 'master'
+                     AND status IN ('online', 'active')
+                     AND last_heartbeat > datetime('now', '-5 minutes')"""
+            ).fetchall()
+            online_workers = int(online_workers_row[0]["cnt"]) if online_workers_row else 0
             pending_ids = [int(r["image_id"]) for r in pending_rows]
 
             if not pending_ids:
                 return
+
+            remote_ready = sum(
+                1
+                for r in pending_rows
+                if int(r["remote_cnt"] or 0) > 0 and int(r["image_id"]) in cached_ids
+            )
+            if online_workers > 0 and remote_ready < max(_MIN_DECODE_BUFFER, online_workers * 2):
+                batch_size = max(
+                    batch_size,
+                    min(max(_DECODE_BUFFER_SIZE * 4, online_workers * 25), 100),
+                )
+                need = batch_size - max(in_flight, 0)
+                if need <= 0:
+                    return
 
             uncached = [iid for iid in pending_ids if iid not in cached_ids][:need]
 

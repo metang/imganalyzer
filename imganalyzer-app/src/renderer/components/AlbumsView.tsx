@@ -1457,28 +1457,102 @@ function QuiltedGrid({
   coverAspects: Record<number, number>
   maxImageSize: number
 }) {
-  // Measure container width to compute column count dynamically
   const containerRef = useRef<HTMLDivElement>(null)
   const [containerWidth, setContainerWidth] = useState(900)
-  const [colCount, setColCount] = useState(3)
 
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
     const observer = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? 900
-      setContainerWidth(w)
-      setColCount(Math.max(2, Math.floor(w / colWidth)))
+      setContainerWidth(entries[0]?.contentRect.width ?? 900)
     })
     observer.observe(el)
     return () => observer.disconnect()
-  }, [colWidth])
+  }, [])
+
+  const colCount = Math.max(2, Math.floor(containerWidth / colWidth))
+  const GAP = 8
+
+  function renderCard(chapter: StoryChapter) {
+    const coverThumb = chapter.cover_image_id ? heroThumbs[chapter.cover_image_id] : undefined
+    const dateRange = formatChapterDateRange(chapter.start_date, chapter.end_date)
+    const DEFAULT_AR = 4 / 3
+    const rawAR = chapter.cover_image_id != null
+      ? (coverAspects[chapter.cover_image_id] ?? DEFAULT_AR)
+      : DEFAULT_AR
+    // Clamp to avoid wide strips (max 2:1) or overly tall cards (min 1:2)
+    const imgAR = Math.max(0.5, Math.min(2.0, rawAR))
+
+    return (
+      <div
+        key={chapter.id}
+        style={{ breakInside: 'avoid', marginBottom: `${GAP}px`, maxWidth: `${maxImageSize}px` }}
+      >
+        <div
+          className="group rounded-xl overflow-hidden cursor-pointer bg-neutral-900/70 hover:bg-neutral-800/60 hover:ring-1 hover:ring-neutral-700/50 transition-all duration-200"
+          onClick={() => toggleChapter(chapter.id)}
+        >
+          <div
+            className="relative w-full overflow-hidden"
+            style={{ aspectRatio: `${imgAR}`, maxHeight: `${maxImageSize}px` }}
+          >
+            {coverThumb ? (
+              <>
+                <img
+                  src={coverThumb}
+                  alt=""
+                  className="absolute inset-0 w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
+              </>
+            ) : (
+              <div className="absolute inset-0 bg-neutral-800/60" />
+            )}
+            <div className="absolute bottom-0 left-0 right-0 p-3">
+              <h3 className="text-sm font-semibold text-white drop-shadow-lg leading-tight truncate">
+                {chapter.title || 'Untitled Chapter'}
+              </h3>
+            </div>
+          </div>
+          <div className="px-3 py-2">
+            <div className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+              {chapter.location && <span className="text-blue-400">📍 {chapter.location}</span>}
+              {dateRange && <span>{dateRange}</span>}
+              <span className="opacity-60">{chapter.image_count} photos</span>
+            </div>
+            {chapter.summary && (
+              <p className="text-xs text-neutral-500 italic line-clamp-2 leading-relaxed mt-1">
+                {chapter.summary}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  function renderMasonry(chapters: StoryChapter[]) {
+    return (
+      <div
+        style={{
+          columnCount: Math.min(colCount, chapters.length),
+          columnGap: `${GAP}px`,
+        }}
+      >
+        {chapters.map((ch) => renderCard(ch))}
+      </div>
+    )
+  }
 
   return (
     <div ref={containerRef} className="py-6 px-5">
       {years.map((year) => {
         const yearChapters = yearGroups[year]
-        const yearColCount = Math.max(2, Math.min(colCount, Math.max(2, yearChapters.length)))
+        const expandedIdx = yearChapters.findIndex((ch) => ch.id === expandedChapter)
+        const before = expandedIdx >= 0 ? yearChapters.slice(0, expandedIdx) : yearChapters
+        const expandedCh = expandedIdx >= 0 ? yearChapters[expandedIdx] : null
+        const after = expandedIdx >= 0 ? yearChapters.slice(expandedIdx + 1) : []
+
         return (
           <div key={year} className="mb-8">
             {/* Year divider */}
@@ -1490,114 +1564,29 @@ function QuiltedGrid({
               </span>
             </div>
 
-            <div
-              className="grid gap-2"
-              style={{
-                gridTemplateColumns: `repeat(${yearColCount}, minmax(0, 1fr))`,
-                gridAutoRows: 'auto',
-                alignItems: 'start',
-              }}
-            >
-              {yearChapters.map((chapter, idx) => {
-                const isExpanded = expandedChapter === chapter.id
-                const coverThumb = chapter.cover_image_id ? heroThumbs[chapter.cover_image_id] : undefined
-                const dateRange = formatChapterDateRange(chapter.start_date, chapter.end_date)
+            {before.length > 0 && renderMasonry(before)}
 
-                /* Sizing pattern adapts to available columns.
-                 * Cards use aspect-ratio CSS constrained to ±30% of the cover
-                 * image's natural AR, preventing distorted wide strips. */
-                let colSpan = 1
-                let arMultiplier = 1.0
-                if (isExpanded) {
-                  colSpan = yearColCount
-                } else {
-                  const cycle = yearColCount + 4
-                  const pos = idx % cycle
-                  if (pos === 0) { colSpan = 2; arMultiplier = 1.2 }           // feature: wider
-                  else if (pos === 2) { colSpan = 1; arMultiplier = 0.8 }      // tall
-                  else if (pos === Math.floor(cycle / 2)) { colSpan = 2; arMultiplier = 1.15 }  // wide
-                  else if (yearColCount >= 5 && pos === yearColCount) { colSpan = 1; arMultiplier = 0.85 }
-                  // Cap so collapsed cards never span the full grid width
-                  colSpan = Math.min(colSpan, Math.max(1, yearColCount - 1))
-                }
-
-                const DEFAULT_AR = 4 / 3
-                const imgAR = chapter.cover_image_id != null
-                  ? (coverAspects[chapter.cover_image_id] ?? DEFAULT_AR)
-                  : DEFAULT_AR
-                const minAR = imgAR * 0.7
-                const maxAR = imgAR * 1.3
-                const clampedAR = Math.max(minAR, Math.min(maxAR, imgAR * arMultiplier))
-
-                const gridStyle: React.CSSProperties = isExpanded
-                  ? { gridColumn: '1 / -1' }
-                  : {
-                      gridColumn: `span ${colSpan}`,
-                      aspectRatio: `${clampedAR}`,
-                      minHeight: '160px',
-                      maxWidth: `${maxImageSize}px`,
-                      maxHeight: `${maxImageSize}px`,
-                    }
-
-                return (
-                  <div key={chapter.id} style={gridStyle}>
-                    <div
-                      className={`group rounded-xl overflow-hidden transition-all duration-200 h-full ${
-                        isExpanded
-                          ? 'bg-neutral-850 ring-1 ring-blue-500/20'
-                          : 'bg-neutral-900/70 hover:bg-neutral-800/60 hover:ring-1 hover:ring-neutral-700/50 cursor-pointer'
-                      }`}
-                      onClick={isExpanded ? undefined : () => toggleChapter(chapter.id)}
-                    >
-                      {isExpanded ? (
-                        <ExpandedChapterDetail
-                          chapter={chapter}
-                          dateRange={dateRange}
-                          moments={moments}
-                          momentImages={momentImages}
-                          heroThumbs={heroThumbs}
-                          onImageClick={onImageClick}
-                          onCollapse={() => toggleChapter(chapter.id)}
-                          colWidth={colWidth}
-                        />
-                      ) : (
-                        <div className="relative w-full h-full overflow-hidden">
-                          {coverThumb ? (
-                            <>
-                              <img
-                                src={coverThumb}
-                                alt=""
-                                className="absolute inset-0 w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
-                              />
-                              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
-                            </>
-                          ) : (
-                            <div className="absolute inset-0 bg-neutral-800/60" />
-                          )}
-                          <div className="absolute bottom-0 left-0 right-0 p-3">
-                            <h3 className={`font-semibold text-white drop-shadow-lg leading-tight ${
-                              colSpan >= 2 ? 'text-base' : 'text-sm truncate'
-                            }`}>
-                              {chapter.title || 'Untitled Chapter'}
-                            </h3>
-                            <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-neutral-300/80">
-                              {chapter.location && <span className="text-blue-400/90">📍 {chapter.location}</span>}
-                              {dateRange && <span>{dateRange}</span>}
-                              <span className="opacity-60">{chapter.image_count} photos</span>
-                            </div>
-                            {chapter.summary && colSpan >= 2 && (
-                              <p className="text-xs text-neutral-400/80 italic line-clamp-2 leading-relaxed mt-1">
-                                {chapter.summary}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+            {expandedCh && (() => {
+              const dateRange = formatChapterDateRange(expandedCh.start_date, expandedCh.end_date)
+              return (
+                <div className="mb-2">
+                  <div className="bg-neutral-850 ring-1 ring-blue-500/20 rounded-xl overflow-hidden transition-all duration-200">
+                    <ExpandedChapterDetail
+                      chapter={expandedCh}
+                      dateRange={dateRange}
+                      moments={moments}
+                      momentImages={momentImages}
+                      heroThumbs={heroThumbs}
+                      onImageClick={onImageClick}
+                      onCollapse={() => toggleChapter(expandedCh.id)}
+                      colWidth={colWidth}
+                    />
                   </div>
-                )
-              })}
-            </div>
+                </div>
+              )
+            })()}
+
+            {after.length > 0 && renderMasonry(after)}
           </div>
         )
       })}

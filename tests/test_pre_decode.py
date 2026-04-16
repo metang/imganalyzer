@@ -184,6 +184,50 @@ class TestPreDecoder:
         # Should complete immediately (nothing to do)
         assert not decoder.is_running
 
+    def test_feed_marks_not_running_after_completion(
+        self, store: DecodedImageStore, image_dir: Path
+    ) -> None:
+        items = [(0, str(image_dir / "img_0.jpg"))]
+        decoder = PreDecoder(store, max_workers=1)
+
+        assert decoder.feed(items) == 1
+
+        timeout = 10.0
+        t0 = time.time()
+        while decoder.is_running and time.time() - t0 < timeout:
+            time.sleep(0.1)
+
+        assert not decoder.is_running
+        assert store.has(0)
+
+    def test_feed_retries_after_transient_missing_file(
+        self, store: DecodedImageStore, tmp_path: Path
+    ) -> None:
+        late_path = tmp_path / "late-arrival.jpg"
+        decoder = PreDecoder(store, max_workers=1)
+
+        assert decoder.feed([(1, str(late_path))]) == 1
+
+        timeout = 5.0
+        t0 = time.time()
+        while (
+            (decoder.progress()["failed"] < 1 or decoder.is_running)
+            and time.time() - t0 < timeout
+        ):
+            time.sleep(0.1)
+
+        assert not store.has(1)
+
+        Image.new("RGB", (64, 64), color=(10, 20, 30)).save(late_path, "JPEG")
+        assert decoder.feed([(1, str(late_path))]) == 1
+
+        timeout = 10.0
+        t0 = time.time()
+        while not store.has(1) and time.time() - t0 < timeout:
+            time.sleep(0.1)
+
+        assert store.has(1)
+
     def test_duplicate_start_ignored(
         self, store: DecodedImageStore, image_dir: Path
     ) -> None:

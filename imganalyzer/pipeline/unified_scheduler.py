@@ -12,7 +12,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
-from imganalyzer.db.queue import _now, _now_plus
+from imganalyzer.db.queue import _format_int_in_clause, _now, _now_plus
 
 ACTIVE_STATE = "active"
 PAUSED_STATES: frozenset[str] = frozenset({"pause-drain", "pause-immediate", "paused"})
@@ -201,9 +201,10 @@ def _pending_count_by_module(
         where += f" AND module IN ({placeholders})"
         params.extend(modules_filter)
     if prefer_image_ids:
-        id_ph = ",".join("?" * len(prefer_image_ids))
-        where += f" AND image_id IN ({id_ph})"
-        params.extend(prefer_image_ids)
+        image_ids_sql = _format_int_in_clause(prefer_image_ids)
+        if image_ids_sql is None:
+            return {}
+        where += f" AND image_id IN ({image_ids_sql})"
     rows = conn.execute(
         f"""SELECT module, COUNT(*) AS cnt
             FROM job_queue

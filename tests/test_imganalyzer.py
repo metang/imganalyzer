@@ -2068,6 +2068,27 @@ class TestJobQueue:
         assert len(jobs2) == 1
         assert jobs2[0]["image_id"] == id2
 
+    def test_claim_with_large_image_ids_filter(self, tmp_path):
+        from imganalyzer.db.repository import Repository
+        from imganalyzer.db.queue import JobQueue
+
+        conn = _make_test_db(tmp_path)
+        repo = Repository(conn)
+        queue = JobQueue(conn)
+
+        image_ids = [
+            repo.register_image(file_path=f"/photos/large-claim-{idx}.jpg")
+            for idx in range(1100)
+        ]
+        image_id_set = set(image_ids)
+        for image_id in image_ids:
+            queue.enqueue(image_id, "metadata")
+
+        jobs = queue.claim(batch_size=5, image_ids=image_id_set)
+
+        assert len(jobs) == 5
+        assert {int(job["image_id"]) for job in jobs}.issubset(image_id_set)
+
     def test_pending_count_with_image_ids_filter(self, tmp_path):
         from imganalyzer.db.repository import Repository
         from imganalyzer.db.queue import JobQueue
