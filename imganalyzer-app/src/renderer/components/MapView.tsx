@@ -21,6 +21,32 @@ interface GeoStats {
   top_cities: Array<{ city: string; state: string; country: string; count: number }>
 }
 
+const DEFAULT_MAP_CENTER: [number, number] = [39.9042, 116.4074]
+const DEFAULT_MAP_ZOOM = 6
+const DEFAULT_MAP_THEME: 'dark' | 'light' = 'light'
+const MIN_CLUSTER_DETAIL = -1
+const MAX_CLUSTER_DETAIL = 3
+const DEFAULT_CLUSTER_DETAIL = 2
+
+function clampClusterDetail(value: number): number {
+  return Math.max(MIN_CLUSTER_DETAIL, Math.min(MAX_CLUSTER_DETAIL, Math.round(value)))
+}
+
+function describeClusterDetail(value: number): string {
+  switch (value) {
+    case -1:
+      return 'Merged'
+    case 0:
+      return 'Dense'
+    case 1:
+      return 'Balanced'
+    case 2:
+      return 'Detailed'
+    default:
+      return 'Split'
+  }
+}
+
 // Icon cache to avoid recreating DOM elements on every render
 const _iconCache = new Map<string, L.DivIcon>()
 
@@ -94,6 +120,19 @@ function MapEventHandler({
       }, 300)
     },
   })
+
+  useEffect(() => {
+    const b = map.getBounds()
+    cbRef.current({
+      north: b.getNorth(),
+      south: b.getSouth(),
+      east: b.getEast(),
+      west: b.getWest(),
+      zoom: map.getZoom(),
+    })
+    return () => clearTimeout(timerRef.current)
+  }, [map])
+
   return null
 }
 
@@ -114,27 +153,6 @@ function InvalidateSize() {
       clearTimeout(timer)
     }
   }, [map])
-  return null
-}
-
-/** Fits the map to show all clusters on initial load. */
-function FitBounds({ clusters }: { clusters: GeoCluster[] }) {
-  const map = useMap()
-  const fitted = useRef(false)
-  useEffect(() => {
-    if (fitted.current || clusters.length === 0) return
-    let minLat = Infinity, maxLat = -Infinity
-    let minLng = Infinity, maxLng = -Infinity
-    for (const c of clusters) {
-      if (c.center_lat < minLat) minLat = c.center_lat
-      if (c.center_lat > maxLat) maxLat = c.center_lat
-      if (c.center_lng < minLng) minLng = c.center_lng
-      if (c.center_lng > maxLng) maxLng = c.center_lng
-    }
-    const bounds = L.latLngBounds([minLat, minLng], [maxLat, maxLng])
-    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 })
-    fitted.current = true
-  }, [clusters, map])
   return null
 }
 
@@ -270,7 +288,13 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
   const [stats, setStats] = useState<GeoStats | null>(null)
   const [loading, setLoading] = useState(false)
   const [totalInView, setTotalInView] = useState(0)
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark')
+  const [theme, setTheme] = useState<'dark' | 'light'>(DEFAULT_MAP_THEME)
+  const [clusterDetail, setClusterDetail] = useState<number>(() => {
+    if (typeof window === 'undefined') return DEFAULT_CLUSTER_DETAIL
+    const raw = window.localStorage.getItem('imganalyzer.map.clusterDetail')
+    const parsed = raw == null ? DEFAULT_CLUSTER_DETAIL : Number(raw)
+    return Number.isFinite(parsed) ? clampClusterDetail(parsed) : DEFAULT_CLUSTER_DETAIL
+  })
 
   // Pinned preview state
   const [pinnedCluster, setPinnedCluster] = useState<GeoCluster | null>(null)
@@ -316,20 +340,11 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
     })
   }, [])
 
-  // Load initial clusters (world view) — only when no search active
   useEffect(() => {
-    if (searchFilters) return
-    setLoading(true)
-    window.api
-      .geoClusters({ north: 85, south: -85, east: 180, west: -180, zoom: 2 })
-      .then((res) => {
-        if (!res.error) {
-          setClusters(res.clusters)
-          setTotalInView(res.total)
-        }
-      })
-      .finally(() => setLoading(false))
-  }, [searchFilters])
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('imganalyzer.map.clusterDetail', String(clusterDetail))
+    }
+  }, [clusterDetail])
 
   // When search filters change or viewport moves, run search with mapBounds
   const runMapSearch = useCallback(async (
@@ -400,7 +415,7 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
         // Browse-all mode: load clusters
         setLoading(true)
         window.api
-          .geoClusters(bounds)
+          .geoClusters({ ...bounds, detail: clusterDetail, limit: 1500 })
           .then((res) => {
             if (!res.error) {
               setClusters(res.clusters)
@@ -410,8 +425,14 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
           .finally(() => setLoading(false))
       }
     },
-    [searchFilters, runMapSearch],
+    [clusterDetail, searchFilters, runMapSearch],
   )
+
+  useEffect(() => {
+    if (!searchFilters && boundsRef.current) {
+      handleBoundsChange(boundsRef.current)
+    }
+  }, [clusterDetail, searchFilters, handleBoundsChange])
 
   // SearchBar callback
   const handleSearch = useCallback(async (filters: SearchFilters, contextLabel: string | null) => {
@@ -478,6 +499,7 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
   )
 
   const isSearchActive = searchFilters != null
+  const clusterDetailLabel = describeClusterDetail(clusterDetail)
 
   return (
     <div className="flex flex-col h-full">
@@ -549,6 +571,26 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
           >
             🔍 Search
           </button>
+          {!isSearchActive && (
+            <label
+              className="flex items-center gap-2 rounded border border-neutral-700 bg-neutral-950/70 px-2 py-1"
+              title="Adjust how aggressively nearby photos are grouped into clusters"
+            >
+              <span className="text-neutral-400">Clusters</span>
+              <span className="text-neutral-500">Merge</span>
+              <input
+                type="range"
+                min={MIN_CLUSTER_DETAIL}
+                max={MAX_CLUSTER_DETAIL}
+                step={1}
+                value={clusterDetail}
+                onChange={(e) => setClusterDetail(clampClusterDetail(Number(e.target.value)))}
+                className="w-20 accent-blue-500"
+              />
+              <span className="text-neutral-500">Split</span>
+              <span className="min-w-[52px] text-right text-neutral-200">{clusterDetailLabel}</span>
+            </label>
+          )}
           <button
             onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
             className="px-2 py-0.5 rounded border border-neutral-700 hover:border-neutral-500 text-neutral-300 hover:text-neutral-100 transition-colors"
@@ -596,8 +638,8 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
         {/* Map */}
         <div className="flex-1 min-h-0 relative">
           <MapContainer
-            center={[39.9042, 116.4074]}
-            zoom={7}
+            center={DEFAULT_MAP_CENTER}
+            zoom={DEFAULT_MAP_ZOOM}
             className="h-full w-full"
             style={{ background: theme === 'dark' ? '#1a1a1a' : '#e8e8e8' }}
             zoomControl={true}
@@ -617,7 +659,6 @@ export function MapView({ pendingFilters, onClearPending, onViewAsGrid }: {
             />
             <MapEventHandler onBoundsChange={handleBoundsChange} />
             <InvalidateSize />
-            {!isSearchActive && <FitBounds clusters={clusters} />}
 
             {/* Browse-all mode: cluster markers */}
             {!isSearchActive && !timelineMode && clusters.map((cluster) => (

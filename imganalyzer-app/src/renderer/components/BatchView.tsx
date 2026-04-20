@@ -15,7 +15,7 @@ export interface BatchViewProps {
   batch: UseBatchProcessReturn
   /** Pre-fill the folder path from the gallery tab. */
   initialFolder?: string
-  /** Called when a batch starts so the parent can switch to the Running tab. */
+  /** Called when a batch starts so the parent can react if needed. */
   onBatchStarted?(): void
 }
 
@@ -242,7 +242,7 @@ function LiveErrorPanel({ error, results }: { error: string | null; results: Bat
 /**
  * Renders the config + ingest phases.
  * When the user starts a batch, calls onBatchStarted so the parent can
- * navigate to the Running tab.
+ * respond without this component owning navigation state.
  */
 export function BatchConfigView({ batch, initialFolder = '', onBatchStarted }: BatchViewProps) {
   const { stats, ingestProgress, ingestSummary, error } = batch
@@ -272,10 +272,9 @@ export function BatchConfigView({ batch, initialFolder = '', onBatchStarted }: B
       profile,
       chunkSize,
     }).then(() => {
-      // startBatch resolves after ingest; if something was enqueued the status
-      // will have moved to 'running' — let the parent switch tabs.
+      // startBatch resolves after ingest; parent can react via onBatchStarted
+      // if it wants to surface that state elsewhere.
     })
-    // Switch the parent to Running tab as soon as ingest begins
     onBatchStarted?.()
   }, [batch, folder, passSel, profile, chunkSize, onBatchStarted])
 

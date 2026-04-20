@@ -369,7 +369,7 @@ contextBridge.exposeInMainWorld('api', {
   // ── Geo / Map ──────────────────────────────────────────────────────────────
 
   geoClusters: (params: {
-    north: number; south: number; east: number; west: number; zoom: number; limit?: number
+    north: number; south: number; east: number; west: number; zoom: number; detail?: number; limit?: number
   }) => ipcRenderer.invoke('geo:clusters', params),
 
   geoNearby: (params: {

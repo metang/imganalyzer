@@ -65,6 +65,7 @@ export default function App() {
   const [resumeBanner, setResumeBanner] = useState<string | null>(null)
 
   // Auto-resume any pending/running jobs from a previous session (runs once on mount)
+  // without hijacking the user's current tab.
   const didCheckRef = useRef(false)
   useEffect(() => {
     if (didCheckRef.current) return
@@ -73,13 +74,11 @@ export default function App() {
       const resumed = await batch.resumePending()
       if (resumed) {
         setResumeBanner('Resuming unfinished jobs from queue…')
-        setTab('running')
         return
       }
       const monitoring = await batch.monitorExisting()
       if (monitoring) {
         setResumeBanner('Monitoring jobs already being processed by a distributed worker…')
-        setTab('running')
       }
     })()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -97,13 +96,11 @@ export default function App() {
         if (cancelled) return
         if (resumed) {
           setResumeBanner('Resuming unfinished jobs from queue…')
-          setTab('running')
           return
         }
         const monitoring = await batch.monitorExisting()
         if (cancelled || !monitoring) return
         setResumeBanner('Monitoring jobs already being processed by a distributed worker…')
-        setTab('running')
       } finally {
         inFlight = false
       }
@@ -122,17 +119,6 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleVisibility)
     }
   }, [batch.monitorExisting, batch.resumePending, batch.stats.status])
-
-  // Auto-switch to Running tab whenever the batch transitions to running/paused/done/error
-  const prevStatusRef = useRef(batch.stats.status)
-  useEffect(() => {
-    const prev = prevStatusRef.current
-    const curr = batch.stats.status
-    prevStatusRef.current = curr
-    if (prev !== curr && (curr === 'running' || curr === 'paused' || curr === 'done' || curr === 'error')) {
-      setTab('running')
-    }
-  }, [batch.stats.status])
 
   // Whether there is an active / paused / errored batch in progress
   const batchIsActive =
@@ -260,7 +246,6 @@ export default function App() {
         <BatchConfigView
           batch={batch}
           initialFolder={galleryFolderContext}
-          onBatchStarted={() => setTab('running')}
         />
       </div>
 

@@ -156,7 +156,7 @@ export function registerGeoHandlers(): void {
     'geo:clusters',
     async (
       _evt,
-      params: { north: number; south: number; east: number; west: number; zoom: number; limit?: number },
+      params: { north: number; south: number; east: number; west: number; zoom: number; detail?: number; limit?: number },
     ): Promise<GeoClustersResponse> => {
       try {
         await ensureServerRunning()

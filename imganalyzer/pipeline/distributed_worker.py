@@ -1238,6 +1238,8 @@ class DistributedWorker:
 
     def _process_claimed_job(self, job: dict[str, Any]) -> str:
         """Process one leased job and report its final state to the coordinator."""
+        from imganalyzer.readers import is_decode_error
+
         started_monotonic = time.monotonic()
         image_id_raw = job.get("imageId")
         path = str(job.get("filePath") or f"id={image_id_raw}")
@@ -1302,6 +1304,29 @@ class DistributedWorker:
         console.print(
             f"  [blue]▶[/blue] [bold]{module}[/bold] ← {short_path} [dim](job {job_id})[/dim]"
         )
+
+        def _report_corrupt_skip(exc: BaseException) -> str:
+            elapsed = int((time.monotonic() - started_monotonic) * 1000)
+            reported = self._try_report_skip(
+                job_id=job_id,
+                lease_token=lease_token,
+                reason="corrupt_file",
+                details=str(exc),
+            )
+            if not reported:
+                return "failed"
+            self._safe_emit_result(
+                path=path,
+                module=module,
+                status="skipped",
+                elapsed_ms=elapsed,
+                error=f"corrupt file: {exc}",
+            )
+            console.print(
+                f"  [yellow]⊘[/yellow] [bold]{module}[/bold] skipped (corrupt) in "
+                f"{elapsed / 1000:.1f}s ← {short_path}"
+            )
+            return "skipped"
 
         try:
             sandbox_started = time.monotonic()
@@ -1398,33 +1423,8 @@ class DistributedWorker:
             return "skipped"
 
         except ValueError as exc:
-            err_lower = str(exc).lower()
-            if (
-                "libraw cannot decode" in err_lower
-                or "libraw postprocess failed" in err_lower
-                or "pillow cannot decode" in err_lower
-            ):
-                elapsed = int((time.monotonic() - started_monotonic) * 1000)
-                reported = self._try_report_skip(
-                    job_id=job_id,
-                    lease_token=lease_token,
-                    reason="corrupt_file",
-                    details=str(exc),
-                )
-                if not reported:
-                    return "failed"
-                self._safe_emit_result(
-                    path=path,
-                    module=module,
-                    status="skipped",
-                    elapsed_ms=elapsed,
-                    error=f"corrupt file: {exc}",
-                )
-                console.print(
-                    f"  [yellow]⊘[/yellow] [bold]{module}[/bold] skipped (corrupt) in "
-                    f"{elapsed / 1000:.1f}s ← {short_path}"
-                )
-                return "skipped"
+            if is_decode_error(exc):
+                return _report_corrupt_skip(exc)
             return self._report_failure(
                 job_id=job_id,
                 lease_token=lease_token,
@@ -1436,6 +1436,8 @@ class DistributedWorker:
             )
 
         except Exception as exc:
+            if is_decode_error(exc):
+                return _report_corrupt_skip(exc)
             return self._report_failure(
                 job_id=job_id,
                 lease_token=lease_token,

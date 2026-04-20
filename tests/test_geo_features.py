@@ -454,6 +454,7 @@ class TestGeoStatsExtended:
 
 # Import the handlers at module level after all classes are defined
 from imganalyzer.server import (
+    _handle_geo_clusters,
     _handle_geo_gap_filler_apply,
     _handle_geo_gap_filler_preview,
     _handle_geo_geocode,
@@ -554,3 +555,40 @@ class TestGeoGeocode:
         # Centroid of SF + LA — should be roughly central California
         assert 34.0 < result["lat"] < 38.0
         assert -123.0 < result["lng"] < -118.0
+
+
+class TestGeoClusters:
+    def test_detail_slider_splits_nearby_clusters(self, tmp_path):
+        conn = _make_test_db(tmp_path)
+
+        # Same city / broad area, but far enough apart to split at higher precision.
+        _insert_image(conn, "/a.jpg", lat=39.9000, lng=116.4000, city="Beijing", country="China")
+        _insert_image(conn, "/b.jpg", lat=39.9400, lng=116.4400, city="Beijing", country="China")
+        _insert_image(conn, "/c.jpg", lat=39.9800, lng=116.4800, city="Beijing", country="China")
+
+        import imganalyzer.server as srv
+        orig = srv._get_db
+        srv._get_db = lambda: conn
+        try:
+            coarse = _handle_geo_clusters({
+                "north": 40.2,
+                "south": 39.7,
+                "east": 116.7,
+                "west": 116.2,
+                "zoom": 6,
+                "detail": 0,
+            })
+            detailed = _handle_geo_clusters({
+                "north": 40.2,
+                "south": 39.7,
+                "east": 116.7,
+                "west": 116.2,
+                "zoom": 6,
+                "detail": 2,
+            })
+        finally:
+            srv._get_db = orig
+
+        assert coarse["total"] == 3
+        assert detailed["total"] == 3
+        assert len(detailed["clusters"]) > len(coarse["clusters"])

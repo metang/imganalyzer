@@ -321,45 +321,19 @@ class CloudAI:
 def _convert_raw_to_jpeg(raw_path: Path) -> Path:
     """Decode a RAW or HEIC/HEIF/AVIF file, resize to ≤1568 px, return a temp JPEG path.
 
-    - True RAW files (in _RAW_EXTENSIONS) are decoded via rawpy.
-    - HEIC/HEIF/AVIF and other non-RAW formats are opened directly with Pillow
-      (requires pillow-heif plugin for HEIC/HEIF).
+    Uses the shared reader stack so RAW files benefit from the same fallback
+    behavior as the rest of the pipeline.
     Caller is responsible for deleting the returned file.
     """
     from PIL import Image
+    from imganalyzer.readers import open_as_pil
 
-    if raw_path.suffix.lower() in _RAW_EXTENSIONS:
-        try:
-            import rawpy
-        except ImportError:
-            raise ImportError("rawpy required for RAW conversion: pip install rawpy")
-        from imganalyzer.readers.raw import _suppress_c_stderr
-        with _suppress_c_stderr():
-            raw_ctx = rawpy.imread(str(raw_path))
-        with raw_ctx as raw:
-            rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
-        img = Image.fromarray(rgb)
-    else:
-        # HEIC/HEIF/AVIF — Pillow opens these directly (with pillow-heif registered).
-        from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
-
-        register_optional_pillow_opener(raw_path)
-        with pillow_decode_guard(raw_path):
-            img = Image.open(raw_path)
-            if img.mode not in ("RGB", "L"):
-                img = img.convert("RGB")
-
-            w, h = img.size
-            max_dim = 1568
-            if max(w, h) > max_dim:
-                ratio = max_dim / max(w, h)
-                img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-    if raw_path.suffix.lower() in _RAW_EXTENSIONS:
-        w, h = img.size
-        max_dim = 1568
-        if max(w, h) > max_dim:
-            ratio = max_dim / max(w, h)
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+    img = open_as_pil(raw_path)
+    w, h = img.size
+    max_dim = 1568
+    if max(w, h) > max_dim:
+        ratio = max_dim / max(w, h)
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     tmp.close()

@@ -1339,6 +1339,8 @@ class Worker:
         Uses a per-thread SQLite connection (via _get_thread_db) so that
         ThreadPoolExecutor workers never share a single connection.
         """
+        from imganalyzer.readers import is_decode_error
+
         image_id = job["image_id"]
         module = job["module"]
         job_id = job["id"]
@@ -1354,6 +1356,25 @@ class Worker:
 
         attempts = _LOCK_RETRY_ATTEMPTS
         delay_s = _LOCK_RETRY_INITIAL_DELAY_S
+
+        def _skip_corrupt_file(exc: BaseException) -> str:
+            elapsed = int(time.time() * 1000) - start_ms
+            queue.mark_skipped(job_id, "corrupt_file")
+            queue.mark_image_pending_jobs_skipped(image_id, "corrupt_file")
+            _emit_result(path, module, "skipped", elapsed, f"corrupt file: {exc}")
+            conn, _, _, _ = self._get_thread_db()
+            conn.execute(
+                "INSERT OR IGNORE INTO corrupt_files (image_id, file_path, error_msg)"
+                " VALUES (?, ?, ?)",
+                [image_id, path, str(exc)],
+            )
+            conn.commit()
+            if self.verbose:
+                console.print(
+                    f"  [yellow]Skipped:[/yellow] {path} module={module}: corrupt file"
+                )
+            return "skipped"
+
         for attempt in range(1, attempts + 1):
             try:
             # ── Cache check ──────────────────────────────────────────────────
@@ -1423,32 +1444,13 @@ class Worker:
                 return "skipped"
 
             except ValueError as exc:
-                err_lower = str(exc).lower()
-                if (
-                    "libraw cannot decode" in err_lower
-                    or "libraw postprocess failed" in err_lower
-                    or "pillow cannot decode" in err_lower
-                ):
-                    elapsed = int(time.time() * 1000) - start_ms
-                    queue.mark_skipped(job_id, "corrupt_file")
-                    queue.mark_image_pending_jobs_skipped(image_id, "corrupt_file")
-                    _emit_result(path, module, "skipped", elapsed, f"corrupt file: {exc}")
-                    # Persist corrupt file path for later handling
-                    conn, _, _, _ = self._get_thread_db()
-                    conn.execute(
-                        "INSERT OR IGNORE INTO corrupt_files (image_id, file_path, error_msg)"
-                        " VALUES (?, ?, ?)",
-                        [image_id, path, str(exc)],
-                    )
-                    conn.commit()
-                    if self.verbose:
-                        console.print(
-                            f"  [yellow]Skipped:[/yellow] {path} module={module}: corrupt file"
-                        )
-                    return "skipped"
+                if is_decode_error(exc):
+                    return _skip_corrupt_file(exc)
                 raise
 
             except Exception as exc:
+                if is_decode_error(exc):
+                    return _skip_corrupt_file(exc)
                 if _is_transient_db_lock_error(exc) and attempt < attempts:
                     if self.verbose:
                         console.print(

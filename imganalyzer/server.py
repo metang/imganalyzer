@@ -3334,29 +3334,10 @@ def _handle_thumbnail(params: dict) -> dict:
     """
     image_path = params["imagePath"]
     path = Path(image_path)
-    ext = path.suffix.lower()
-
-    RAW_EXTS = {
-        ".arw", ".cr2", ".cr3", ".nef", ".nrw", ".orf", ".raf", ".rw2",
-        ".dng", ".pef", ".srw", ".erf", ".kdc", ".mrw", ".3fr", ".fff",
-        ".sr2", ".srf", ".x3f", ".iiq", ".mos", ".raw",
-    }
-
     from PIL import Image
-    from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
+    from imganalyzer.readers import open_as_pil
 
-    if ext in RAW_EXTS:
-        import rawpy
-        with _suppress_c_stderr():
-            raw_ctx = rawpy.imread(str(path))
-        with raw_ctx as raw:
-            rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
-        img = Image.fromarray(rgb)
-    else:
-        register_optional_pillow_opener(path)
-        with pillow_decode_guard(path):
-            img = Image.open(path)
-            img = img.convert("RGB")
+    img = open_as_pil(path)
 
     img.thumbnail((400, 300), Image.LANCZOS)
     buf = io.BytesIO()
@@ -3460,31 +3441,14 @@ def _handle_fullimage(params: dict) -> dict:
     ext = path.suffix.lower()
 
     NATIVE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
-    RAW_EXTS = {
-        ".arw", ".cr2", ".cr3", ".nef", ".nrw", ".orf", ".raf", ".rw2",
-        ".dng", ".pef", ".srw", ".erf", ".kdc", ".mrw", ".3fr", ".fff",
-        ".sr2", ".srf", ".x3f", ".iiq", ".mos", ".raw",
-    }
-
     if ext in NATIVE_EXTS:
         # Electron can read these directly — no need to decode via Python
         return {"native": True, "path": image_path}
 
     from PIL import Image
-    from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
+    from imganalyzer.readers import open_as_pil
 
-    if ext in RAW_EXTS:
-        import rawpy
-        with _suppress_c_stderr():
-            raw_ctx = rawpy.imread(str(path))
-        with raw_ctx as raw:
-            rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
-        img = Image.fromarray(rgb)
-    else:
-        register_optional_pillow_opener(path)
-        with pillow_decode_guard(path):
-            img = Image.open(path)
-            img = img.convert("RGB")
+    img = open_as_pil(path)
 
     # Limit to 4K display size
     MAX_DIM = 3840
@@ -3955,6 +3919,7 @@ _RAW_FACE_CROP_EXTS = {
 
 def _open_face_crop_image(path: Path):
     from PIL import Image
+    from imganalyzer.readers import open_as_pil
     from imganalyzer.readers.standard import pillow_decode_guard, register_optional_pillow_opener
     from imganalyzer.analysis.ai.faces import _get_pil_exif_orientation
 
@@ -3963,13 +3928,7 @@ def _open_face_crop_image(path: Path):
     ext = path.suffix.lower()
     register_optional_pillow_opener(path)
     if ext in _RAW_FACE_CROP_EXTS:
-        import rawpy
-
-        with _suppress_c_stderr():
-            raw_ctx = rawpy.imread(str(path))
-        with raw_ctx as raw:
-            rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
-        return Image.fromarray(rgb), 1  # RAW files have no EXIF orientation
+        return open_as_pil(path), 1  # RAW files have no EXIF orientation
 
     with pillow_decode_guard(path):
         img = Image.open(path)
@@ -4371,21 +4330,23 @@ def _handle_image_details(params: dict) -> dict:
 # ── Geo/map handlers ────────────────────────────────────────────────────────
 
 
-def _zoom_to_geohash_precision(zoom: int) -> int:
+def _zoom_to_geohash_precision(zoom: int, detail: int = 0) -> int:
     """Map a Leaflet zoom level to a geohash prefix length for clustering."""
     if zoom <= 2:
-        return 1
-    if zoom <= 5:
-        return 2
-    if zoom <= 9:
-        return 3
-    if zoom <= 13:
-        return 4
-    if zoom <= 16:
-        return 5
-    if zoom <= 18:
-        return 6
-    return 7
+        precision = 1
+    elif zoom <= 5:
+        precision = 2
+    elif zoom <= 9:
+        precision = 3
+    elif zoom <= 13:
+        precision = 4
+    elif zoom <= 16:
+        precision = 5
+    elif zoom <= 18:
+        precision = 6
+    else:
+        precision = 7
+    return max(1, min(8, precision + detail))
 
 
 def _handle_geo_clusters(params: dict) -> dict:
@@ -4394,6 +4355,7 @@ def _handle_geo_clusters(params: dict) -> dict:
     Params:
         north, south, east, west (float): bounding box
         zoom (int): Leaflet zoom level (1-20)
+        detail (int): clustering detail boost (-2 to +4, default 0)
         limit (int): max clusters to return (default 500)
     Returns:
         clusters: [{cell, center_lat, center_lng, count, sample_ids}]
@@ -4405,9 +4367,10 @@ def _handle_geo_clusters(params: dict) -> dict:
     east = float(params.get("east", 180))
     west = float(params.get("west", -180))
     zoom = int(params.get("zoom", 2))
+    detail = max(-2, min(4, int(params.get("detail", 0))))
     limit = min(int(params.get("limit", 500)), 2000)
 
-    precision = _zoom_to_geohash_precision(zoom)
+    precision = _zoom_to_geohash_precision(zoom, detail)
 
     # Use R*tree for fast bounding-box lookup, then cluster by geohash prefix
     try:

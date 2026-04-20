@@ -743,7 +743,7 @@ declare global {
 
       // Geo / Map
       geoClusters(params: {
-        north: number; south: number; east: number; west: number; zoom: number; limit?: number
+        north: number; south: number; east: number; west: number; zoom: number; detail?: number; limit?: number
       }): Promise<{ clusters: GeoCluster[]; total: number; error?: string }>
       geoNearby(params: {
         lat: number; lng: number; radiusKm?: number; limit?: number; excludeId?: number
