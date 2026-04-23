@@ -70,6 +70,83 @@ from imganalyzer.pipeline.scheduler import ResourceScheduler
 
 console = Console()
 
+
+class _AdaptiveBackoff:
+    """Exponential backoff state for idle-polling loops.
+
+    Callers invoke :meth:`wait` in place of ``event.wait(interval)``.  The
+    first wait uses ``min_s``; each subsequent wait doubles (``* factor``)
+    up to ``max_s``.  Calling :meth:`reset` puts the next wait back to
+    ``min_s`` — use this immediately after a successful claim / any signal
+    that new work has arrived, so the loop stays snappy under load.
+
+    Defaults (min=0.5s, max=15s, factor=2) keep latency low on the first
+    post-idle poll while preventing 100 workers from issuing ~100 q/s of
+    claim attempts against an idle queue.
+    """
+
+    __slots__ = ("min_s", "max_s", "factor", "_next")
+
+    def __init__(
+        self,
+        min_s: float = 0.5,
+        max_s: float = 15.0,
+        factor: float = 2.0,
+    ) -> None:
+        self.min_s = max(0.0, float(min_s))
+        self.max_s = max(self.min_s, float(max_s))
+        self.factor = max(1.0, float(factor))
+        self._next = self.min_s
+
+    @property
+    def current(self) -> float:
+        """Interval that the next call to :meth:`wait` will use."""
+        return self._next
+
+    def reset(self) -> None:
+        """Reset the next wait to ``min_s`` (call when work arrives)."""
+        self._next = self.min_s
+
+    def wait(self, event: threading.Event) -> bool:
+        """Wait up to the current interval on ``event`` then advance.
+
+        Returns ``True`` if the event was set (shutdown) during the wait.
+        After returning, the internal next-interval is doubled up to
+        ``max_s``.  Callers should check ``event.is_set()`` in the loop
+        condition so shutdown is respected at every tick.
+        """
+        interval = self._next
+        if interval > 0:
+            was_set = event.wait(interval)
+        else:
+            was_set = event.is_set()
+        if self._next <= 0:
+            self._next = self.min_s
+        else:
+            self._next = min(self.max_s, self._next * self.factor)
+        return was_set
+
+
+def _adaptive_wait(
+    event: threading.Event,
+    state: _AdaptiveBackoff,
+    min_s: float | None = None,
+    max_s: float | None = None,
+) -> bool:
+    """Convenience wrapper around :meth:`_AdaptiveBackoff.wait`.
+
+    ``min_s`` / ``max_s`` are accepted for call-site readability but are
+    only applied on first use (when state is at its initial value) — the
+    canonical configuration lives on the ``state`` object itself.
+    """
+    if min_s is not None and state.current == state.min_s and state.min_s != min_s:
+        state.min_s = max(0.0, float(min_s))
+        state._next = state.min_s
+    if max_s is not None:
+        state.max_s = max(state.min_s, float(max_s))
+    return state.wait(event)
+
+
 # Modules that use GPU — must run single-threaded on the main thread
 GPU_MODULES = {"caption", "embedding", "objects", "faces", "perception"}
 # Local I/O-bound modules — parallel, governed by `workers`
@@ -281,6 +358,14 @@ class Worker:
         """
         idle_polls = 0
         wait_deadline = time.perf_counter() + max_wait_s
+        # Adaptive backoff: start at the caller-supplied ``poll_interval_s``
+        # (0 in tests, 1s in production) and double up to 15s while idle.
+        base_s = max(0.0, poll_interval_s)
+        backoff = _AdaptiveBackoff(
+            min_s=base_s,
+            max_s=max(base_s, 15.0),
+            factor=2.0,
+        )
         while not self._shutdown.is_set():
             pending_image_ids = self.queue.get_pending_image_ids()
             if pending_image_ids:
@@ -329,6 +414,7 @@ class Worker:
                         )
             if released > 0:
                 idle_polls = 0
+                backoff.reset()
                 continue
 
             log_every = max(1, int(30 / max(poll_interval_s, 0.1)))
@@ -337,7 +423,7 @@ class Worker:
                     f"[dim]Waiting for {running_jobs} running distributed job(s) "
                     "to free pending work...[/dim]"
                 )
-            self._shutdown.wait(poll_interval_s)
+            backoff.wait(self._shutdown)
 
         return []
 
@@ -543,9 +629,11 @@ class Worker:
                 if leased <= 0:
                     return []
                 waited = 0.0
+                claim_backoff = _AdaptiveBackoff(min_s=0.5, max_s=5.0, factor=2.0)
                 while waited < _DISTRIBUTED_WAIT_S and not self._shutdown.is_set():
-                    self._shutdown.wait(_DISTRIBUTED_POLL_S)
-                    waited += _DISTRIBUTED_POLL_S
+                    interval = claim_backoff.current
+                    claim_backoff.wait(self._shutdown)
+                    waited += interval
                     try:
                         tl_queue.release_expired_leases()
                     except Exception:
@@ -769,9 +857,11 @@ class Worker:
                                 if leased <= 0:
                                     return []
                                 waited = 0.0
+                                mini_backoff = _AdaptiveBackoff(min_s=0.5, max_s=5.0, factor=2.0)
                                 while waited < _DISTRIBUTED_WAIT_S and not self._shutdown.is_set():
-                                    self._shutdown.wait(_DISTRIBUTED_POLL_S)
-                                    waited += _DISTRIBUTED_POLL_S
+                                    interval = mini_backoff.current
+                                    mini_backoff.wait(self._shutdown)
+                                    waited += interval
                                     try:
                                         tl_queue.release_expired_leases()
                                     except Exception:
@@ -951,9 +1041,11 @@ class Worker:
                             if leased <= 0:
                                 return []
                             waited = 0.0
+                            retry_backoff = _AdaptiveBackoff(min_s=0.5, max_s=5.0, factor=2.0)
                             while waited < _DISTRIBUTED_WAIT_S and not self._shutdown.is_set():
-                                self._shutdown.wait(_DISTRIBUTED_POLL_S)
-                                waited += _DISTRIBUTED_POLL_S
+                                interval = retry_backoff.current
+                                retry_backoff.wait(self._shutdown)
+                                waited += interval
                                 try:
                                     tl_queue.release_expired_leases()
                                 except Exception:

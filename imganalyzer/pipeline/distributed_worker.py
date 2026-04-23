@@ -24,7 +24,7 @@ from imganalyzer.db.repository import Repository
 from imganalyzer.db.schema import ensure_schema
 from imganalyzer.pipeline.distributed_payloads import extract_result_payload, seed_job_context
 from imganalyzer.pipeline.modules import ModuleRunner
-from imganalyzer.pipeline.worker import _emit_result
+from imganalyzer.pipeline.worker import _AdaptiveBackoff, _emit_result
 
 console = Console()
 
@@ -475,6 +475,16 @@ class DistributedWorker:
         self._empty_claim_polls = 0
         self._last_claim_reason: str | None = None
         self._startup_lease_recovery_done = False
+
+        # Adaptive backoff for idle claim polling.  ``poll_interval_seconds``
+        # is treated as the minimum wait after a successful claim; the
+        # interval doubles on each consecutive empty claim up to 15s, so
+        # 100 idle workers don't pound the coordinator at ~100 q/s.
+        self._idle_backoff = _AdaptiveBackoff(
+            min_s=self.poll_interval_seconds,
+            max_s=max(self.poll_interval_seconds, 15.0),
+            factor=2.0,
+        )
 
         # In-memory cache for pre-fetched decoded images from the coordinator.
         # Key: image_id, Value: (image_bytes, metadata_dict | None).
@@ -1518,18 +1528,22 @@ class DistributedWorker:
                     "Waiting for resume...[/yellow]"
                 )
                 self._pause_notice_emitted = True
-            self._shutdown.wait(self.poll_interval_seconds)
+            # Reuse the idle backoff so a paused worker doesn't hammer the
+            # coordinator; reset when the pause clears.
+            self._idle_backoff.wait(self._shutdown)
             self._maybe_check_for_update()
             return True
         if self._pause_notice_emitted:
             console.print("[green]Worker resumed by coordinator.[/green]")
             self._pause_notice_emitted = False
+            self._idle_backoff.reset()
         return False
 
     def _handle_empty_claim_poll(self) -> None:
         """Handle an empty claim result and poll again."""
         self._empty_claim_polls += 1
-        poll_interval = max(self.poll_interval_seconds, 0.5)
+        current_interval = self._idle_backoff.current
+        poll_interval = max(current_interval, 0.5)
         idle_log_every = max(1, int(30 / poll_interval))
         if self._empty_claim_polls % idle_log_every == 0:
             queue_summary = self._coordinator_queue_summary()
@@ -1541,13 +1555,13 @@ class DistributedWorker:
             )
             console.print(
                 "[dim]No jobs claimed yet; "
-                f"still polling every {self.poll_interval_seconds:g}s "
+                f"polling in {current_interval:g}s "
                 f"(empty polls={self._empty_claim_polls}, "
                 f"active leases={len(self._snapshot_active())}"
                 f"{reason_hint}{queue_hint})[/dim]"
             )
         self._maybe_reprobe_modules()
-        self._shutdown.wait(self.poll_interval_seconds)
+        self._idle_backoff.wait(self._shutdown)
         self._maybe_check_for_update()
 
     def _teardown_runtime_session(self) -> None:
@@ -1628,6 +1642,7 @@ class DistributedWorker:
                     continue
 
                 self._empty_claim_polls = 0
+                self._idle_backoff.reset()
                 console.print(f"[cyan]Claimed {len(jobs)} job(s)[/cyan]")
                 self._mark_all_active(jobs)
                 self._batch_prefetch_decoded(jobs)
@@ -1736,6 +1751,7 @@ class DistributedWorker:
                 self._shutdown.clear()
                 self._update_pending = False
                 self._empty_claim_polls = 0
+                self._idle_backoff.reset()
                 console.print("[dim]Resuming worker…[/dim]")
         finally:
             if not started_session:
