@@ -334,12 +334,16 @@ function ChunkProgress({
     .filter(([, cnt]) => cnt > 0)
     .sort(([, a], [, b]) => b - a)
   const totalRemaining = moduleEntries.reduce((s, [, c]) => s + c, 0)
+  const totalCompleted = moduleEntries.reduce(
+    (sum, [, count]) => sum + Math.max(0, chunk.size - count),
+    0,
+  )
 
   return (
     <section className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
       <div className="mb-3 flex items-baseline justify-between">
         <span className="text-sm font-semibold text-neutral-100">
-          Current chunk
+          Current chunk progress
         </span>
         <span className="text-xs font-mono text-neutral-500">
           {chunk.index + 1} / {chunk.total}
@@ -349,24 +353,32 @@ function ChunkProgress({
 
       {moduleEntries.length > 0 ? (
         <div className="grid gap-1.5">
-          {moduleEntries.map(([mod, count]) => (
-            <div key={mod} className="flex items-center gap-3 text-xs">
-              <span className="min-w-[90px] text-neutral-400">
-                {MODULE_LABELS[mod] ?? mod}
-              </span>
-              <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
-                <div
-                  className="h-full rounded-full bg-cyan-600/70 transition-all duration-300"
-                  style={{ width: `${Math.min(100, (count / chunk.size) * 100)}%` }}
-                />
+          {moduleEntries.map(([mod, count]) => {
+            const remaining = Math.max(0, count)
+            const completed = Math.max(0, chunk.size - remaining)
+            const pct = chunk.size > 0 ? (completed / chunk.size) * 100 : 0
+
+            return (
+              <div key={mod} className="flex items-center gap-3 text-xs">
+                <span className="min-w-[90px] text-neutral-400">
+                  {MODULE_LABELS[mod] ?? mod}
+                </span>
+                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
+                  <div
+                    className="h-full rounded-full bg-cyan-600/70 transition-all duration-300"
+                    style={{ width: `${Math.min(100, pct)}%` }}
+                  />
+                </div>
+                <span className="w-20 shrink-0 text-right font-mono text-neutral-300">
+                  {completed.toLocaleString()} / {chunk.size.toLocaleString()}
+                </span>
               </div>
-              <span className="w-12 shrink-0 text-right font-mono text-neutral-300">
-                {count.toLocaleString()}
-              </span>
-            </div>
-          ))}
+            )
+          })}
           <div className="mt-1 text-right text-[11px] font-mono text-neutral-500">
-            {totalRemaining.toLocaleString()} remaining
+            {totalCompleted.toLocaleString()} done
+            <span className="mx-1 text-neutral-700">/</span>
+            {totalRemaining.toLocaleString()} left
           </div>
         </div>
       ) : (
