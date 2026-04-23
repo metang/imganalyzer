@@ -254,16 +254,25 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
-def _get_face_clusters_for_images(
+# SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999 on some builds; stay well under.
+_FACE_CLUSTER_IN_CHUNK = 500
+
+
+def _get_face_clusters_for_image_ids(
     conn: sqlite3.Connection,
     image_ids: list[int],
 ) -> dict[int, list[dict[str, Any]]]:
-    """Return face cluster memberships keyed by image_id."""
+    """Return face cluster memberships keyed by image_id in a single pass.
+
+    Issues one SQL query per chunk of up to ``_FACE_CLUSTER_IN_CHUNK`` ids
+    (not one per image), so a page of N result images costs at most
+    ceil(N / 500) queries — typically one. Replaces the previous per-image
+    N+1 pattern.
+    """
     if not image_ids or not _table_exists(conn, "face_occurrences"):
         return {}
 
     unique_image_ids: list[int] = list(dict.fromkeys(image_ids))
-    placeholders = ",".join("?" * len(unique_image_ids))
 
     has_cluster_labels = _table_exists(conn, "face_cluster_labels")
     has_persons = _table_exists(conn, "face_persons")
@@ -284,39 +293,46 @@ def _get_face_clusters_for_images(
         else ""
     )
 
-    rows = conn.execute(
-        f"""
-        SELECT
-            fo.image_id AS image_id,
-            fo.cluster_id AS cluster_id,
-            MAX({cluster_name_expr}) AS cluster_label,
-            MAX(fo.person_id) AS person_id,
-            MAX({person_name_expr}) AS person_name,
-            COUNT(*) AS face_count
-        FROM face_occurrences fo
-        {cluster_label_join}
-        {person_join}
-        WHERE fo.image_id IN ({placeholders})
-          AND fo.cluster_id IS NOT NULL
-        GROUP BY fo.image_id, fo.cluster_id
-        ORDER BY fo.image_id, face_count DESC, fo.cluster_id
-        """,
-        unique_image_ids,
-    ).fetchall()
-
     clusters_by_image: dict[int, list[dict[str, Any]]] = {}
-    for row in rows:
-        image_id = int(row["image_id"])
-        clusters_by_image.setdefault(image_id, []).append(
-            {
-                "cluster_id": int(row["cluster_id"]),
-                "cluster_label": row["cluster_label"],
-                "person_id": int(row["person_id"]) if row["person_id"] is not None else None,
-                "person_name": row["person_name"],
-                "face_count": int(row["face_count"]),
-            }
-        )
+    for chunk_start in range(0, len(unique_image_ids), _FACE_CLUSTER_IN_CHUNK):
+        chunk = unique_image_ids[chunk_start : chunk_start + _FACE_CLUSTER_IN_CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"""
+            SELECT
+                fo.image_id AS image_id,
+                fo.cluster_id AS cluster_id,
+                MAX({cluster_name_expr}) AS cluster_label,
+                MAX(fo.person_id) AS person_id,
+                MAX({person_name_expr}) AS person_name,
+                COUNT(*) AS face_count
+            FROM face_occurrences fo
+            {cluster_label_join}
+            {person_join}
+            WHERE fo.image_id IN ({placeholders})
+              AND fo.cluster_id IS NOT NULL
+            GROUP BY fo.image_id, fo.cluster_id
+            ORDER BY fo.image_id, face_count DESC, fo.cluster_id
+            """,
+            chunk,
+        ).fetchall()
+
+        for row in rows:
+            image_id = int(row["image_id"])
+            clusters_by_image.setdefault(image_id, []).append(
+                {
+                    "cluster_id": int(row["cluster_id"]),
+                    "cluster_label": row["cluster_label"],
+                    "person_id": int(row["person_id"]) if row["person_id"] is not None else None,
+                    "person_name": row["person_name"],
+                    "face_count": int(row["face_count"]),
+                }
+            )
     return clusters_by_image
+
+
+# Back-compat alias — existing call sites use this name.
+_get_face_clusters_for_images = _get_face_clusters_for_image_ids
 
 
 def _is_transient_db_lock_error(exc: Exception) -> bool:
@@ -2552,14 +2568,19 @@ def _handle_search(params: dict) -> dict:
         def _rows_to_records(
             rows: list[sqlite3.Row],
             score_lookup: dict[int, float] | None,
+            *,
+            include_face_clusters: bool = True,
         ) -> list[dict[str, Any]]:
             has_face_occurrences = _table_exists(conn, "face_occurrences")
-            image_ids = [int(row["image_id"]) for row in rows]
-            face_clusters_by_image = (
-                _get_face_clusters_for_images(conn, image_ids)
-                if has_face_occurrences
-                else {}
-            )
+            if include_face_clusters:
+                image_ids = [int(row["image_id"]) for row in rows]
+                face_clusters_by_image = (
+                    _get_face_clusters_for_image_ids(conn, image_ids)
+                    if has_face_occurrences
+                    else {}
+                )
+            else:
+                face_clusters_by_image = {}
             records = []
             for row in rows:
                 image_id = int(row["image_id"])
@@ -2629,13 +2650,63 @@ def _handle_search(params: dict) -> dict:
         def _fetch_records(
             candidate_ids: list[int] | None,
             score_lookup: dict[int, float] | None,
+            *,
+            include_face_clusters: bool = True,
         ) -> list[dict[str, Any]]:
             where_clause, query_params = _build_where_clause(candidate_ids)
             rows = conn.execute(
                 f"SELECT {select_cols} {joins} {where_clause}",
                 query_params,
             ).fetchall()
-            return _rows_to_records(rows, score_lookup)
+            return _rows_to_records(
+                rows, score_lookup, include_face_clusters=include_face_clusters
+            )
+
+        def _fetch_records_page(
+            candidate_ids: list[int] | None,
+            score_lookup: dict[int, float] | None,
+            order_clause: str,
+            page_limit: int,
+            page_offset: int,
+        ) -> tuple[list[dict[str, Any]], int]:
+            """Fetch a single page with SQL-level ORDER BY + LIMIT/OFFSET.
+
+            Returns (page_records, total_count) where total_count is the total
+            number of images matching the filters (possibly restricted to
+            candidate_ids). Face clusters are NOT attached here — call
+            ``_attach_face_clusters`` on the returned page slice.
+            """
+            where_clause, query_params = _build_where_clause(candidate_ids)
+            total_row = conn.execute(
+                f"SELECT COUNT(*) AS cnt {joins} {where_clause}",
+                query_params,
+            ).fetchone()
+            total_count = int(total_row["cnt"]) if total_row else 0
+            rows = conn.execute(
+                f"SELECT {select_cols} {joins} {where_clause}{order_clause}"
+                " LIMIT ? OFFSET ?",
+                [*query_params, page_limit, page_offset],
+            ).fetchall()
+            return (
+                _rows_to_records(rows, score_lookup, include_face_clusters=False),
+                total_count,
+            )
+
+        def _attach_face_clusters(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            """Populate ``face_clusters`` on the provided records in one SQL pass."""
+            if not records:
+                return records
+            if not _table_exists(conn, "face_occurrences"):
+                for record in records:
+                    record["face_clusters"] = None
+                return records
+            image_ids = [int(record["image_id"]) for record in records]
+            clusters_by_image = _get_face_clusters_for_image_ids(conn, image_ids)
+            for record in records:
+                record["face_clusters"] = clusters_by_image.get(
+                    int(record["image_id"]), []
+                )
+            return records
 
         def _quality_score(record: dict[str, Any]) -> float:
             aesthetic = float(record["aesthetic_score"] or 0.0)
@@ -2918,7 +2989,46 @@ def _handle_search(params: dict) -> dict:
                     for result in search_results
                 }
                 _progress("filtering", "Filtering results…", 0.85)
-                records = _fetch_records(candidate_ids, score_map)
+
+                # B3: When the final sort is not score-based, push ORDER BY +
+                # LIMIT/OFFSET to SQL so we never materialize the full
+                # candidate pool (up to ``max_candidate_limit`` rows, currently
+                # 5000) in Python. The ``relevance`` branch still needs the
+                # whole filtered set in memory to preserve engine-supplied
+                # fusion scores — that pool stays capped at 5000 candidates
+                # and is sorted/paginated in Python.
+                if sort_by != "relevance":
+                    order_clause = _browse_order_clause()
+                    page_records, matched_total = _fetch_records_page(
+                        candidate_ids,
+                        score_map,
+                        order_clause,
+                        limit,
+                        offset,
+                    )
+                    enough_for_page = matched_total > page_end
+                    if (
+                        search_exhausted
+                        or enough_for_page
+                        or candidate_limit >= max_candidate_limit
+                        or time.monotonic() >= _search_deadline
+                    ):
+                        _attach_face_clusters(page_records)
+                        has_more = matched_total > page_end or not search_exhausted
+                        total_out: int | None = matched_total if search_exhausted else None
+                        return {
+                            "results": page_records,
+                            "total": total_out,
+                            "hasMore": has_more,
+                        }
+                    candidate_limit = min(max_candidate_limit, candidate_limit * 2)
+                    continue
+
+                # sort_by == "relevance": fetch full candidate set (cluster
+                # lookup deferred) and re-rank in Python by fused score.
+                records = _fetch_records(
+                    candidate_ids, score_map, include_face_clusters=False
+                )
                 records = _sort_records(records)
                 enough_for_page = len(records) > page_end
                 if (
@@ -2930,10 +3040,14 @@ def _handle_search(params: dict) -> dict:
                     break
                 candidate_limit = min(max_candidate_limit, candidate_limit * 2)
 
+            # B4: fetch face clusters only for the paginated slice (not the
+            # entire candidate pool).
+            page_records = records[offset: offset + limit]
+            _attach_face_clusters(page_records)
             has_more = len(records) > page_end or not search_exhausted
             total: int | None = len(records) if search_exhausted else None
             return {
-                "results": records[offset: offset + limit],
+                "results": page_records,
                 "total": total,
                 "hasMore": has_more,
             }

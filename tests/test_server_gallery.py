@@ -1578,3 +1578,4 @@ def test_search_text_mode_handles_partial_description_query(
 
     assert result["total"] == 2
     assert [item["image_id"] for item in result["results"]][:1] == [1]
+
