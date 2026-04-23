@@ -1,65 +1,6 @@
 import { useState, useEffect } from 'react'
 import type { ImageFile } from '../global'
-
-const THUMB_BATCH_SIZE = 16
-const THUMB_CACHE_MAX = 1000
-const thumbCache = new Map<string, string>()
-
-function thumbCacheSet(key: string, value: string) {
-  thumbCache.delete(key) // move to end if exists
-  thumbCache.set(key, value)
-  if (thumbCache.size > THUMB_CACHE_MAX) {
-    const oldest = thumbCache.keys().next().value
-    if (oldest !== undefined) thumbCache.delete(oldest)
-  }
-}
-const pendingThumbs = new Set<string>()
-const pendingCallbacks = new Map<string, Array<(src: string | null) => void>>()
-let thumbBatchTimer: ReturnType<typeof setTimeout> | null = null
-
-function requestThumbnail(
-  imagePath: string,
-  callback: (src: string | null) => void,
-): void {
-  const cached = thumbCache.get(imagePath)
-  if (cached) {
-    callback(cached)
-    return
-  }
-
-  const callbacks = pendingCallbacks.get(imagePath) ?? []
-  callbacks.push(callback)
-  pendingCallbacks.set(imagePath, callbacks)
-  pendingThumbs.add(imagePath)
-
-  if (thumbBatchTimer !== null) return
-  thumbBatchTimer = setTimeout(() => {
-    const paths = [...pendingThumbs]
-    pendingThumbs.clear()
-    thumbBatchTimer = null
-
-    for (let i = 0; i < paths.length; i += THUMB_BATCH_SIZE) {
-      const chunk = paths.slice(i, i + THUMB_BATCH_SIZE)
-      void window.api.getThumbnailsBatch(
-        chunk.map((file_path) => ({ file_path }))
-      ).then((result) => {
-        for (const filePath of chunk) {
-          const src = result[filePath] ?? null
-          if (src) thumbCacheSet(filePath, src)
-          const chunkCallbacks = pendingCallbacks.get(filePath) ?? []
-          pendingCallbacks.delete(filePath)
-          for (const cb of chunkCallbacks) cb(src)
-        }
-      }).catch(() => {
-        for (const filePath of chunk) {
-          const chunkCallbacks = pendingCallbacks.get(filePath) ?? []
-          pendingCallbacks.delete(filePath)
-          for (const cb of chunkCallbacks) cb(null)
-        }
-      })
-    }
-  }, 16)
-}
+import { requestImageThumbnail } from '../lib/thumbnailCache'
 
 interface ThumbnailProps {
   image: ImageFile
@@ -78,10 +19,10 @@ export function Thumbnail({ image, onClick, selected }: ThumbnailProps) {
     setError(false)
     setSrc('')
 
-    requestThumbnail(image.path, (dataUrl) => {
+    requestImageThumbnail(image.path, undefined, (url) => {
       if (cancelled) return
-      if (dataUrl) {
-        setSrc(dataUrl)
+      if (url) {
+        setSrc(url)
       } else {
         setError(true)
       }

@@ -13,36 +13,22 @@ import type {
   SearchResult,
 } from '../global'
 import { AnalysisSidebar } from './SearchLightbox'
+import {
+  requestImageThumbnail,
+  requestFaceThumbnail,
+  primeFaceThumbCache,
+  getCachedFaceThumb,
+} from '../lib/thumbnailCache'
 
 // ── Thumbnail cache & batch fetcher ───────────────────────────────────────────
-
-const THUMB_CACHE_MAX = 2000
-const thumbCache = new Map<number, string>() // occurrence_id → base64 data URI
-const pendingIds = new Set<number>()
-const pendingCallbacks = new Map<number, Array<(src: string | null) => void>>()
-let batchTimer: ReturnType<typeof setTimeout> | null = null
+// All thumbnail storage & batching is now centralised in
+// ../lib/thumbnailCache.ts (blob URLs + shared LRU + shared batcher).
 
 const CLUSTER_PAGE_SIZE = 200
 const DEFAULT_UNLINKED_CLUSTER_TARGET = 100
 const DEFAULT_SIMILARITY_THRESHOLD = 0.35
 const MAX_EAGER_CLUSTER_PAGES = 4
 const MAX_EAGER_CLUSTER_WARMUP_MS = 5000
-
-function normalizeImageSrc(value: string | null | undefined): string | null {
-  if (!value) return null
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  if (
-    trimmed.startsWith('data:image/')
-    || trimmed.startsWith('blob:')
-    || trimmed.startsWith('http://')
-    || trimmed.startsWith('https://')
-    || trimmed.startsWith('file://')
-  ) {
-    return trimmed
-  }
-  return `data:image/jpeg;base64,${trimmed}`
-}
 
 function countActiveUnlinkedClusters(
   clusters: FaceCluster[],
@@ -75,155 +61,6 @@ function appendUniqueClusters(
   return [...existing, ...appended]
 }
 
-function requestThumbnail(
-  occurrenceId: number,
-  callback: (src: string | null) => void
-): void {
-  // Serve from cache
-  const cached = thumbCache.get(occurrenceId)
-  if (cached) {
-    callback(cached)
-    return
-  }
-
-  // Register callback
-  const cbs = pendingCallbacks.get(occurrenceId) ?? []
-  cbs.push(callback)
-  pendingCallbacks.set(occurrenceId, cbs)
-  pendingIds.add(occurrenceId)
-
-  // Debounce: flush batch after 16ms (one animation frame)
-  if (batchTimer === null) {
-    batchTimer = setTimeout(flushBatch, 16)
-  }
-}
-
-/** Pre-populate the thumbnail cache from inline base64 data (e.g. from
- *  faces/persons or faces/person-clusters responses).  Avoids separate
- *  RPC roundtrips for thumbnails the server already returned. */
-function primeThumbCache(entries: Array<{ id: number; base64: string }>): void {
-  for (const { id, base64 } of entries) {
-    if (thumbCache.has(id)) continue
-    if (thumbCache.size >= THUMB_CACHE_MAX) {
-      const oldest = thumbCache.keys().next().value
-      if (oldest !== undefined) thumbCache.delete(oldest)
-    }
-    thumbCache.set(id, `data:image/jpeg;base64,${base64}`)
-  }
-}
-
-async function flushBatch(): Promise<void> {
-  batchTimer = null
-  if (pendingIds.size === 0) return
-
-  const ids = [...pendingIds]
-  pendingIds.clear()
-
-  // Process chunks in parallel for faster loading
-  const CHUNK = 50
-  const chunks: number[][] = []
-  for (let i = 0; i < ids.length; i += CHUNK) {
-    chunks.push(ids.slice(i, i + CHUNK))
-  }
-
-  await Promise.all(chunks.map(async (chunk) => {
-    try {
-      const result = await window.api.getFaceCropBatch(chunk)
-      for (const id of chunk) {
-        const b64 = result.thumbnails?.[String(id)]
-        const dataUri = b64 ? `data:image/jpeg;base64,${b64}` : null
-        if (dataUri) {
-          if (thumbCache.size >= THUMB_CACHE_MAX) {
-            const oldest = thumbCache.keys().next().value
-            if (oldest !== undefined) thumbCache.delete(oldest)
-          }
-          thumbCache.set(id, dataUri)
-        }
-        const cbs = pendingCallbacks.get(id) ?? []
-        pendingCallbacks.delete(id)
-        for (const cb of cbs) cb(dataUri)
-      }
-    } catch {
-      for (const id of chunk) {
-        const cbs = pendingCallbacks.get(id) ?? []
-        pendingCallbacks.delete(id)
-        for (const cb of cbs) cb(null)
-      }
-    }
-  }))
-}
-
-const IMAGE_THUMB_CACHE_MAX = 2000
-const imageThumbCache = new Map<string, string>()
-const pendingImageThumbs = new Map<string, { file_path: string; image_id?: number }>()
-const pendingImageCallbacks = new Map<string, Array<(src: string | null) => void>>()
-let imageThumbBatchTimer: ReturnType<typeof setTimeout> | null = null
-
-function requestImageThumbnail(
-  filePath: string,
-  imageId: number | null | undefined,
-  callback: (src: string | null) => void,
-): void {
-  const cached = imageThumbCache.get(filePath)
-  if (cached) {
-    callback(cached)
-    return
-  }
-
-  const callbacks = pendingImageCallbacks.get(filePath) ?? []
-  callbacks.push(callback)
-  pendingImageCallbacks.set(filePath, callbacks)
-  pendingImageThumbs.set(filePath, imageId != null
-    ? { file_path: filePath, image_id: imageId }
-    : { file_path: filePath })
-
-  if (imageThumbBatchTimer !== null) return
-  imageThumbBatchTimer = setTimeout(() => {
-    void flushImageThumbnailBatch()
-  }, 16)
-}
-
-async function flushImageThumbnailBatch(): Promise<void> {
-  imageThumbBatchTimer = null
-  if (pendingImageThumbs.size === 0) return
-
-  const items = [...pendingImageThumbs.values()]
-  pendingImageThumbs.clear()
-
-  const CHUNK = 24
-  const chunks: Array<typeof items> = []
-  for (let i = 0; i < items.length; i += CHUNK) {
-    chunks.push(items.slice(i, i + CHUNK))
-  }
-
-  await Promise.all(chunks.map(async (chunk) => {
-    try {
-      const result = await window.api.getThumbnailsBatch(chunk)
-      for (const item of chunk) {
-        const src = normalizeImageSrc(
-          result[item.file_path] ?? (item.image_id != null ? result[String(item.image_id)] : undefined)
-        )
-        if (src) {
-          if (imageThumbCache.size >= IMAGE_THUMB_CACHE_MAX) {
-            const oldest = imageThumbCache.keys().next().value
-            if (oldest !== undefined) imageThumbCache.delete(oldest)
-          }
-          imageThumbCache.set(item.file_path, src)
-        }
-        const callbacks = pendingImageCallbacks.get(item.file_path) ?? []
-        pendingImageCallbacks.delete(item.file_path)
-        for (const cb of callbacks) cb(src)
-      }
-    } catch {
-      for (const item of chunk) {
-        const callbacks = pendingImageCallbacks.get(item.file_path) ?? []
-        pendingImageCallbacks.delete(item.file_path)
-        for (const cb of callbacks) cb(null)
-      }
-    }
-  }))
-}
-
 // ── Face crop thumbnail (batch-loaded with LRU cache) ─────────────────────────
 
 const FaceCropThumbnail = memo(function FaceCropThumbnail({
@@ -233,13 +70,13 @@ const FaceCropThumbnail = memo(function FaceCropThumbnail({
   occurrenceId: number
   size?: 'sm' | 'md' | 'lg' | 'fill'
 }) {
-  const [src, setSrc] = useState<string | null>(() => thumbCache.get(occurrenceId) ?? null)
+  const [src, setSrc] = useState<string | null>(() => getCachedFaceThumb(occurrenceId) ?? null)
   const [failed, setFailed] = useState(false)
   const requested = useRef(false)
   const containerRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    const cached = thumbCache.get(occurrenceId) ?? null
+    const cached = getCachedFaceThumb(occurrenceId) ?? null
     setSrc(cached)
     setFailed(false)
     requested.current = cached !== null
@@ -254,10 +91,10 @@ const FaceCropThumbnail = memo(function FaceCropThumbnail({
     const load = () => {
       if (requested.current || cancelled) return
       requested.current = true
-      requestThumbnail(occurrenceId, (dataUri) => {
+      requestFaceThumbnail(occurrenceId, (url) => {
         if (cancelled) return
-        if (dataUri) {
-          setSrc(dataUri)
+        if (url) {
+          setSrc(url)
         } else {
           setFailed(true)
         }
@@ -402,7 +239,7 @@ const SimilarImageCard = memo(function SimilarImageCard({
   useEffect(() => {
     if (image.best_occurrence_id == null) return
     let cancelled = false
-    requestThumbnail(image.best_occurrence_id, (data) => {
+    requestFaceThumbnail(image.best_occurrence_id, (data) => {
       if (!cancelled) setFaceCrop(data)
     })
     return () => { cancelled = true }
@@ -841,7 +678,7 @@ export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesVi
         const thumbEntries = personsResult.persons
           .filter((p) => p.representative_id != null && p.representative_thumbnail != null)
           .map((p) => ({ id: p.representative_id!, base64: p.representative_thumbnail! }))
-        if (thumbEntries.length > 0) primeThumbCache(thumbEntries)
+        if (thumbEntries.length > 0) primeFaceThumbCache(thumbEntries)
         // Auto-switch to people view if persons exist and no view preference yet
         if (personsResult.persons.length > 0) {
           setViewMode('people')
@@ -1388,7 +1225,7 @@ export function FacesView({ deepLinkRequest = null, onDeepLinkHandled }: FacesVi
         const thumbEntries = result.clusters
           .filter((c) => c.representative_id != null && c.representative_thumbnail != null)
           .map((c) => ({ id: c.representative_id!, base64: c.representative_thumbnail! }))
-        if (thumbEntries.length > 0) primeThumbCache(thumbEntries)
+        if (thumbEntries.length > 0) primeFaceThumbCache(thumbEntries)
         setPersonClusters((prev) => ({ ...prev, [personId]: result.clusters }))
       } catch (err) {
         setPersonClusterErrors((prev) => ({ ...prev, [personId]: String(err) }))

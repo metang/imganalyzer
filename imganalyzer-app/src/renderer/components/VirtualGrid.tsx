@@ -14,14 +14,13 @@
  */
 import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import type { SearchResult } from '../global'
+import { requestImageThumbnail, getCachedImageThumb } from '../lib/thumbnailCache'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const CELL_MIN = 160  // minimum cell width in px
 const CELL_MAX = 220  // maximum cell width — drives column count
 const OVERSCAN_ROWS = 3  // extra rows rendered above/below viewport
-const BATCH_DEBOUNCE_MS = 60  // debounce batch prefetch on scroll
-const CHUNK_SIZE = 8  // items per batch RPC call for progressive loading
 const FALLBACK_THUMB_DELAY_MS = 1500
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -39,56 +38,59 @@ interface GridCellProps {
   item: SearchResult
   selected: boolean
   onClick: () => void
-  /** Pre-fetched data URL from the batch loader, if available. */
-  prefetchedSrc: string | undefined
 }
 
-const GridCell = memo(function GridCell({ item, selected, onClick, prefetchedSrc }: GridCellProps) {
-  const [src, setSrc] = useState<string>(prefetchedSrc ?? '')
+const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellProps) {
+  const [src, setSrc] = useState<string>(() => getCachedImageThumb(item.file_path) ?? '')
   const [loadFailed, setLoadFailed] = useState(false)
   const loading = !src && !loadFailed
 
+  // Request through shared cache/batcher. Re-runs when the item changes.
   useEffect(() => {
-    setSrc(prefetchedSrc ?? '')
-    setLoadFailed(false)
-  }, [item.image_id, prefetchedSrc])
-
-  // Pick up prefetchedSrc when it arrives after mount
-  useEffect(() => {
-    if (prefetchedSrc && !src) {
-      setSrc(prefetchedSrc)
+    let cancelled = false
+    const cached = getCachedImageThumb(item.file_path)
+    if (cached) {
+      setSrc(cached)
       setLoadFailed(false)
+      return
     }
-  }, [prefetchedSrc, src])
+    setSrc('')
+    setLoadFailed(false)
+    requestImageThumbnail(item.file_path, item.image_id, (url) => {
+      if (cancelled) return
+      if (url) {
+        setSrc(url)
+        setLoadFailed(false)
+      } else {
+        setLoadFailed(true)
+      }
+    })
+    return () => { cancelled = true }
+  }, [item.file_path, item.image_id])
 
-  // Rescue path: if the batch request stalls, fall back to an individual
-  // single-item batch request so cells don't spin forever and still benefit
-  // from the faster image_id cache path.
+  // Rescue path: if the batched request stalls (e.g. upstream backpressure),
+  // fire a fresh request. The shared batcher will dedup against any still
+  // in-flight entry.
   useEffect(() => {
-    if (prefetchedSrc || src) return
+    if (src) return
     let cancelled = false
     const timer = window.setTimeout(() => {
-      void window.api.getThumbnailsBatch([{ file_path: item.file_path, image_id: item.image_id }])
-        .then((result) => {
-          if (cancelled) return
-          const dataUrl = result[item.file_path] ?? result[String(item.image_id)] ?? ''
-          if (dataUrl) {
-            setSrc(dataUrl)
-            setLoadFailed(false)
-          } else {
-            setLoadFailed(true)
-          }
-        })
-        .catch(() => {
-          if (!cancelled) setLoadFailed(true)
-        })
+      requestImageThumbnail(item.file_path, item.image_id, (url) => {
+        if (cancelled) return
+        if (url) {
+          setSrc(url)
+          setLoadFailed(false)
+        } else {
+          setLoadFailed(true)
+        }
+      })
     }, FALLBACK_THUMB_DELAY_MS)
 
     return () => {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [item.file_path, item.image_id, prefetchedSrc, src])
+  }, [item.file_path, item.image_id, src])
 
   // Top-level badge uses IAA (Aesthetic Appeal)
   const scoreColor = item.perception_iaa !== null
@@ -185,21 +187,6 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(600)
   const endReachedLatchRef = useRef(false)
-  const mountedRef = useRef(true)
-
-  // Shared thumbnail cache: image_id → data URL
-  const [thumbMap, setThumbMap] = useState<Record<number, string>>({})
-  const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const pendingBatchRef = useRef(new Set<number>())
-  // Ref mirror of thumbMap to avoid dependency cycle in batch effect
-  const thumbMapRef = useRef<Record<number, string>>({})
-  thumbMapRef.current = thumbMap
-
-  useEffect(() => {
-    return () => {
-      mountedRef.current = false
-    }
-  }, [])
 
   // ── Measure container ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -239,53 +226,19 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
     Math.ceil((scrollTop + viewportHeight - PADDING) / rowHeight) + OVERSCAN_ROWS
   )
 
-  // ── Progressive chunked batch thumbnail prefetch ────────────────────────
+  // ── Prefetch visible-row thumbnails via shared cache/batcher ──────────────
+  // GridCell itself requests its own thumbnail; this effect simply warms the
+  // shared cache for rows that are visible (incl. overscan) so the requests
+  // coalesce across many cells mounting simultaneously.
   useEffect(() => {
     if (items.length === 0 || cols <= 0) return
-
-    if (batchTimerRef.current) clearTimeout(batchTimerRef.current)
-
-    batchTimerRef.current = setTimeout(() => {
-      const startIdx = firstVisibleRow * cols
-      const endIdx = Math.min(items.length, (lastVisibleRow + 1) * cols)
-      const visibleItems = items.slice(startIdx, endIdx)
-
-      const needed: Array<{ file_path: string; image_id: number }> = []
-      for (const item of visibleItems) {
-        if (!thumbMapRef.current[item.image_id] && !pendingBatchRef.current.has(item.image_id)) {
-          needed.push({ file_path: item.file_path, image_id: item.image_id })
-          pendingBatchRef.current.add(item.image_id)
-        }
-      }
-
-      if (needed.length === 0) return
-
-      // Split into small chunks and fire in parallel so thumbnails appear
-      // progressively as each chunk completes (row-by-row).
-      const chunks: Array<typeof needed> = []
-      for (let i = 0; i < needed.length; i += CHUNK_SIZE) {
-        chunks.push(needed.slice(i, i + CHUNK_SIZE))
-      }
-
-      for (const chunk of chunks) {
-        window.api.getThumbnailsBatch(chunk).then((result) => {
-          const newEntries: Record<number, string> = {}
-          for (const item of chunk) {
-            const url = result[item.file_path] ?? result[String(item.image_id)]
-            if (url) newEntries[item.image_id] = url
-            pendingBatchRef.current.delete(item.image_id)
-          }
-          if (mountedRef.current && Object.keys(newEntries).length > 0) {
-            setThumbMap((prev) => ({ ...prev, ...newEntries }))
-          }
-        }).catch(() => {
-          for (const item of chunk) pendingBatchRef.current.delete(item.image_id)
-        })
-      }
-    }, BATCH_DEBOUNCE_MS)
-
-    return () => {
-      if (batchTimerRef.current) clearTimeout(batchTimerRef.current)
+    const startIdx = firstVisibleRow * cols
+    const endIdx = Math.min(items.length, (lastVisibleRow + 1) * cols)
+    for (let i = startIdx; i < endIdx; i++) {
+      const item = items[i]
+      if (!item) continue
+      if (getCachedImageThumb(item.file_path)) continue
+      requestImageThumbnail(item.file_path, item.image_id, () => { /* prefetch */ })
     }
   }, [firstVisibleRow, lastVisibleRow, cols, items])
 
@@ -356,7 +309,6 @@ export function VirtualGrid({ items, selectedId, onSelect, onEndReached }: Virtu
                     item={item}
                     selected={item.image_id === selectedId}
                     onClick={() => onSelect(item)}
-                    prefetchedSrc={thumbMap[item.image_id]}
                   />
                 </div>
               ))}
