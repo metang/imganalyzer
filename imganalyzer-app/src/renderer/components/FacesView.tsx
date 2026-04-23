@@ -168,6 +168,8 @@ const FaceCropThumbnail = memo(function FaceCropThumbnail({
         src={src}
         alt=""
         className="w-full h-full object-cover"
+        loading="lazy"
+        decoding="async"
         draggable={false}
       />
     </div>
@@ -202,6 +204,8 @@ function ImageThumbnail({ filePath, imageId }: { filePath: string; imageId?: num
       src={src}
       alt=""
       className="w-24 h-24 rounded object-cover shrink-0"
+      loading="lazy"
+      decoding="async"
       draggable={false}
     />
   )
@@ -275,17 +279,17 @@ const SimilarImageCard = memo(function SimilarImageCard({
       )}
       {faceCrop && !onToggleSelect && (
         <div className="absolute right-2 top-2 z-10 h-8 w-8 rounded-full border-2 border-amber-600/70 overflow-hidden bg-neutral-800">
-          <img src={faceCrop} alt="" className="h-full w-full object-cover" />
+          <img src={faceCrop} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" />
         </div>
       )}
       {faceCrop && onToggleSelect && (
         <div className="absolute right-10 top-2 z-10 h-6 w-6 rounded-full border border-amber-600/70 overflow-hidden bg-neutral-800">
-          <img src={faceCrop} alt="" className="h-full w-full object-cover" />
+          <img src={faceCrop} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" />
         </div>
       )}
       <div className="aspect-[4/3] w-full overflow-hidden rounded-t-xl bg-neutral-800">
         {thumb ? (
-          <img src={thumb} alt="" className="h-full w-full object-cover" />
+          <img src={thumb} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" />
         ) : (
           <div className="flex h-full w-full items-center justify-center">
             <svg className="h-8 w-8 text-neutral-700 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>
@@ -335,7 +339,7 @@ const DirectLinkCard = memo(function DirectLinkCard({
     >
       <div className="aspect-[4/3] w-full overflow-hidden rounded-t-xl bg-neutral-800">
         {thumb ? (
-          <img src={thumb} alt="" className="h-full w-full object-cover" />
+          <img src={thumb} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" />
         ) : (
           <div className="flex h-full w-full items-center justify-center">
             <svg className="h-8 w-8 text-neutral-700 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.75}>

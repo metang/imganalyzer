@@ -60,6 +60,8 @@ export function Thumbnail({ image, onClick, selected }: ThumbnailProps) {
           src={src}
           alt={image.name}
           className="w-full h-full object-cover"
+          loading="lazy"
+          decoding="async"
           draggable={false}
         />
       )}

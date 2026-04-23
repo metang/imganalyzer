@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, Component } from 'react'
+import { useState, useEffect, useRef, useCallback, Component, lazy, Suspense } from 'react'
 import type { ErrorInfo, ReactNode } from 'react'
 import type { SearchFilters } from './global'
 import { DbGalleryView } from './components/DbGalleryView'
@@ -6,8 +6,13 @@ import { BatchConfigView, BatchRunView } from './components/BatchView'
 import { SearchView } from './components/SearchView'
 import { FacesView } from './components/FacesView'
 import { SettingsView } from './components/SettingsView'
-import { MapView } from './components/MapView'
 import { AlbumsView } from './components/AlbumsView'
+
+// Leaflet is heavy (~150 KB min+gz). Code-split so the rest of the app loads
+// faster — MapView is only needed when the user opens the Map tab.
+const MapView = lazy(() =>
+  import('./components/MapView').then((m) => ({ default: m.MapView })),
+)
 import { useBatchProcess } from './hooks/useBatchProcess'
 
 type Tab = 'gallery' | 'batch' | 'running' | 'search' | 'albums' | 'faces' | 'map' | 'settings'
@@ -106,16 +111,30 @@ export default function App() {
       }
     }
 
-    const timer = window.setInterval(() => {
-      void poll()
-    }, 15000)
+    // Visibility-aware polling: fast (15s) when the document is visible,
+    // slow (60s) when hidden. On visibilitychange we re-poll immediately and
+    // re-arm the interval at the appropriate cadence.
+    const ACTIVE_MS = 15000
+    const HIDDEN_MS = 60000
+    let timer: number = 0
+    const arm = (ms: number) => {
+      if (timer) window.clearInterval(timer)
+      timer = window.setInterval(() => { void poll() }, ms)
+    }
+    arm(document.hidden ? HIDDEN_MS : ACTIVE_MS)
+
     const handleVisibility = () => {
-      if (!document.hidden) void poll()
+      if (!document.hidden) {
+        void poll()
+        arm(ACTIVE_MS)
+      } else {
+        arm(HIDDEN_MS)
+      }
     }
     document.addEventListener('visibilitychange', handleVisibility)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      if (timer) window.clearInterval(timer)
       document.removeEventListener('visibilitychange', handleVisibility)
     }
   }, [batch.monitorExisting, batch.resumePending, batch.stats.status])
@@ -170,7 +189,7 @@ export default function App() {
     <div className="h-full flex flex-col">
 
       {/* ── Tab bar ──────────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-1.5 px-3 py-2 border-b border-neutral-800/80 bg-neutral-950/30 shrink-0 backdrop-blur-sm">
+      <div className="flex items-center gap-1.5 px-3 py-2 border-b border-neutral-800/80 bg-neutral-950 shrink-0">
         <div className="mr-2 rounded-full border border-cyan-500/20 bg-cyan-500/5 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-cyan-200">
           imganalyzer
         </div>
@@ -284,11 +303,17 @@ export default function App() {
 
       {/* ── Map tab ──────────────────────────────────────────────────────────── */}
       <div className={`flex-1 min-h-0 overflow-hidden flex flex-col${tab === 'map' ? '' : ' hidden'}`}>
-        <MapView
-          pendingFilters={pendingMapFilters}
-          onClearPending={() => setPendingMapFilters(null)}
-          onViewAsGrid={handleViewAsGrid}
-        />
+        <Suspense fallback={
+          <div className="flex-1 flex items-center justify-center text-neutral-500 text-sm">
+            Loading map…
+          </div>
+        }>
+          <MapView
+            pendingFilters={pendingMapFilters}
+            onClearPending={() => setPendingMapFilters(null)}
+            onViewAsGrid={handleViewAsGrid}
+          />
+        </Suspense>
       </div>
 
       {/* ── Settings tab ─────────────────────────────────────────────────────── */}

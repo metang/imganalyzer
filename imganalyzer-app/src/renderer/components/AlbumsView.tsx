@@ -1197,6 +1197,8 @@ function CollageCell({
           src={thumb}
           alt=""
           className="absolute inset-0 w-full h-full object-cover object-top"
+          loading="lazy"
+          decoding="async"
         />
       ) : (
         <div className="absolute inset-0 bg-neutral-800" />
@@ -1298,6 +1300,8 @@ function MomentCollage({
                   src={thumbs[img.image_id]}
                   alt=""
                   className="absolute inset-0 w-full h-full object-cover object-top"
+                  loading="lazy"
+                  decoding="async"
                 />
               ) : (
                 <div className="absolute inset-0 bg-neutral-800" />
@@ -1413,7 +1417,7 @@ function ExpandedChapterDetail({
                 />
               ) : moment.hero_image_id && heroThumbs[moment.hero_image_id] ? (
                 <div className="rounded-lg overflow-hidden">
-                  <img src={heroThumbs[moment.hero_image_id]} alt="" className="w-full aspect-[3/2] object-cover object-top" />
+                  <img src={heroThumbs[moment.hero_image_id]} alt="" className="w-full aspect-[3/2] object-cover object-top" loading="lazy" decoding="async" />
                 </div>
               ) : (
                 <div className="w-full h-32 rounded-lg bg-neutral-800 flex items-center justify-center">
@@ -1502,6 +1506,8 @@ function QuiltedGrid({
                   src={coverThumb}
                   alt=""
                   className="absolute inset-0 w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
+                  loading="lazy"
+                  decoding="async"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
               </>
@@ -1693,6 +1699,8 @@ function ZigzagTimeline({
                                   src={coverThumb}
                                   alt=""
                                   className="w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
+                                  loading="lazy"
+                                  decoding="async"
                                 />
                                 <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
                                 <div className="absolute bottom-0 left-0 right-0 p-3">
@@ -1746,6 +1754,8 @@ function ZigzagTimeline({
                                   src={coverThumb}
                                   alt=""
                                   className="w-full h-full object-cover object-top transition-transform duration-300 group-hover:scale-105"
+                                  loading="lazy"
+                                  decoding="async"
                                 />
                                 <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
                                 <div className="absolute bottom-0 left-0 right-0 p-3">
@@ -1983,7 +1993,7 @@ function StoryTimeline({
   return (
     <div className="flex flex-col h-full">
       {/* ── Header bar ── */}
-      <div className="shrink-0 border-b border-neutral-800 bg-neutral-900/60 px-5 py-4 backdrop-blur-sm xl:px-6 2xl:px-8">
+      <div className="shrink-0 border-b border-neutral-800 bg-neutral-900 px-5 py-4 xl:px-6 2xl:px-8">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="text-xl font-bold text-white tracking-tight">{album.name}</h2>

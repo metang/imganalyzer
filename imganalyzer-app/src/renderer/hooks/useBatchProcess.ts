@@ -130,8 +130,17 @@ export function useBatchProcess(): UseBatchProcessReturn {
     })
     unsubResultRef.current = window.api.onBatchResult((r) => {
       setResults((prev) => {
-        const next = [r, ...prev]
-        return next.length > MAX_RESULTS ? next.slice(0, MAX_RESULTS) : next
+        // Below cap: simple prepend (cheap — single spread).
+        if (prev.length < MAX_RESULTS) {
+          return [r, ...prev]
+        }
+        // At cap: single allocation of exactly MAX_RESULTS. Avoids the
+        // [r, ...prev] + slice(0, 200) double-allocation which at 10 results/s
+        // produced ~4000 throwaway array slots per second.
+        const next = new Array<BatchResult>(MAX_RESULTS)
+        next[0] = r
+        for (let i = 0; i < MAX_RESULTS - 1; i++) next[i + 1] = prev[i]
+        return next
       })
     })
     unsubIngestRef.current = window.api.onBatchIngestLine((line) => {

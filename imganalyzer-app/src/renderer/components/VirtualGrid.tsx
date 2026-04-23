@@ -23,6 +23,14 @@ const CELL_MAX = 220  // maximum cell width — drives column count
 const OVERSCAN_ROWS = 3  // extra rows rendered above/below viewport
 const FALLBACK_THUMB_DELAY_MS = 1500
 
+// RAW extensions — module-level Set so the membership test is O(1) and the
+// allocation happens exactly once (previously every GridCell render rebuilt a
+// 22-element array literal and called .includes() on it).
+const RAW_EXTS: ReadonlySet<string> = new Set([
+  'ARW','CR2','CR3','NEF','NRW','ORF','RAF','RW2','DNG','PEF',
+  'SRW','ERF','KDC','MRW','3FR','FFF','SR2','SRF','X3F','IIQ','MOS','RAW',
+])
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface VirtualGridProps {
@@ -100,9 +108,7 @@ const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellPro
     : null
 
   const ext = item.file_path.split('.').pop()?.toUpperCase() ?? ''
-  const isRaw = ['ARW','CR2','CR3','NEF','NRW','ORF','RAF','RW2','DNG','PEF',
-                 'SRW','ERF','KDC','MRW','3FR','FFF','SR2','SRF','X3F','IIQ','MOS','RAW']
-    .includes(ext)
+  const isRaw = RAW_EXTS.has(ext)
 
   return (
     <button
@@ -132,6 +138,8 @@ const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellPro
           src={src}
           alt={item.file_path.split(/[/\\]/).pop() ?? ''}
           className="w-full h-full object-cover"
+          loading="lazy"
+          decoding="async"
           draggable={false}
         />
       )}
