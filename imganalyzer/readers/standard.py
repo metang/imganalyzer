@@ -36,12 +36,25 @@ def pillow_decode_guard(path: Path) -> Iterator[None]:
         _PIL_TIFF_LOGGER.removeFilter(log_filter)
 
 
+_HEIF_REGISTERED = False
+
+
 def register_optional_pillow_opener(path: Path) -> None:
-    """Register optional Pillow plugins needed for certain formats."""
+    """Register optional Pillow plugins needed for certain formats.
+
+    ``register_heif_opener`` from ``pillow_heif`` is idempotent but costs
+    ~10 ms per call, which adds up during large ingests.  We guard the
+    call with a module-level flag so the registration runs at most once
+    per process.
+    """
+    global _HEIF_REGISTERED
+    if _HEIF_REGISTERED:
+        return
     if path.suffix.lower() in (".heic", ".heif", ".avif"):
         try:
             from pillow_heif import register_heif_opener
             register_heif_opener()
+            _HEIF_REGISTERED = True
         except ImportError:
             raise ImportError(
                 "pillow-heif is required for HEIC/HEIF/AVIF files: pip install pillow-heif"

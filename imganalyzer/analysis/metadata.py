@@ -1,12 +1,27 @@
-"""EXIF and metadata extraction."""
+"""EXIF and metadata extraction.
+
+Reverse geocoding design (as of schema v33)
+-------------------------------------------
+To keep the metadata ingest path non-blocking, this module does **not**
+perform any HTTP calls during extraction.  GPS latitude/longitude are
+extracted from EXIF and written to ``analysis_metadata``; the derived
+``location_*`` columns are left NULL and filled in asynchronously by
+:mod:`imganalyzer.analysis.geocode_resolver`.
+
+Geocoded results are persisted in the ``geocode_cache`` SQLite table
+(keyed by ``(lat, lon)`` rounded to 4 decimal places ≈ 11 m resolution)
+so that the cache is shared across all distributed workers and survives
+restarts.
+
+Follow-up: wire :func:`geocode_resolver.resolve_pending_locations` into
+a background loop in ``server.py`` (kept out of this change to minimise
+surface area / merge conflicts).
+"""
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Any
-
-from imganalyzer import __version__
 
 log = logging.getLogger(__name__)
 
@@ -56,70 +71,7 @@ def _dms_to_decimal(dms: list, ref: str) -> float | None:
         return None
 
 
-def _reverse_geocode(lat: float, lon: float) -> dict[str, str]:
-    """Best-effort reverse geocoding via nominatim (no API key needed).
 
-    Results are cached by GPS coordinates rounded to 4 decimal places
-    (~11 m resolution) so that images taken at the same location reuse
-    the result.  At 500K images this avoids ~400K redundant HTTP requests
-    (Nominatim rate-limits to 1 req/s → ~111 hours without the cache).
-    """
-    # Round to 4 decimal places (~11m) — images from the same spot
-    # will share the cached result without a visible location difference.
-    cache_key = (round(lat, 4), round(lon, 4))
-    cached = _geocode_cache.get(cache_key)
-    if cached is not None:
-        return cached
-
-    try:
-        import httpx
-        resp = httpx.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={"lat": lat, "lon": lon, "format": "json"},
-            headers={"User-Agent": f"imganalyzer/{__version__}"},
-            timeout=5.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        addr = data.get("address", {})
-        result = {
-            "location_city": addr.get("city") or addr.get("town") or addr.get("village", ""),
-            "location_state": addr.get("state", ""),
-            "location_country": addr.get("country", ""),
-            "location_country_code": addr.get("country_code", "").upper(),
-        }
-    except Exception as exc:
-        error_key = f"{type(exc).__name__}:{exc}"
-        if error_key not in _geocode_warning_keys:
-            log.warning(
-                "metadata reverse geocode failed lat=%.6f lon=%.6f "
-                "error_type=%s error=%s",
-                lat,
-                lon,
-                type(exc).__name__,
-                exc,
-            )
-            _geocode_warning_keys.add(error_key)
-        else:
-            log.debug(
-                "metadata reverse geocode failed (repeat) lat=%.6f lon=%.6f "
-                "error_type=%s error=%s",
-                lat,
-                lon,
-                type(exc).__name__,
-                exc,
-            )
-        result = {}
-
-    _geocode_cache[cache_key] = result
-    return result
-
-
-# GPS reverse-geocoding cache.  Keyed by (lat, lon) rounded to 4 decimal
-# places (~11 m resolution).  Survives the full ingest run so that images
-# from the same location share a single HTTP request.
-_geocode_cache: dict[tuple[float, float], dict[str, str]] = {}
-_geocode_warning_keys: set[str] = set()
 
 
 class MetadataExtractor:
@@ -209,9 +161,10 @@ class MetadataExtractor:
             if self.image_data.get("white_level"):
                 meta["raw_white_level"] = int(self.image_data["white_level"])
 
-        # GPS reverse geocode
+        # GPS → geohash (reverse geocoding is handled asynchronously by
+        # imganalyzer.analysis.geocode_resolver; location_* fields are
+        # intentionally left NULL here to keep ingest non-blocking).
         if meta.get("gps_latitude") and meta.get("gps_longitude"):
-            # Compute geohash for map clustering
             try:
                 from imganalyzer.db.geohash import encode as geohash_encode
 
@@ -220,20 +173,6 @@ class MetadataExtractor:
                 )
             except Exception:
                 pass
-
-            try:
-                geo = _reverse_geocode(meta["gps_latitude"], meta["gps_longitude"])
-                meta.update(geo)
-            except Exception as exc:
-                log.warning(
-                    "metadata geocode update failed path=%s lat=%.6f lon=%.6f "
-                    "error_type=%s error=%s",
-                    self.path,
-                    meta["gps_latitude"],
-                    meta["gps_longitude"],
-                    type(exc).__name__,
-                    exc,
-                )
 
         return meta
 

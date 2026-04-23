@@ -188,10 +188,12 @@ class TestSchemaV32:
         assert "story_moments" in tables
         assert "moment_images" in tables
 
-    def test_schema_version_is_32(self, tmp_path):
+    def test_schema_version_is_current(self, tmp_path):
+        from imganalyzer.db.schema import SCHEMA_VERSION
+
         conn = _make_test_db(tmp_path)
         row = conn.execute("SELECT version FROM schema_version").fetchone()
-        assert row["version"] == 32
+        assert row["version"] == SCHEMA_VERSION
 
 
 # ── Test: Rule Compiler ──────────────────────────────────────────────────────

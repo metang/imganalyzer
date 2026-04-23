@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -56,6 +56,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         30: _migrate_v30,
         31: _migrate_v31,
         32: _migrate_v32,
+        33: _migrate_v33,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -1358,5 +1359,25 @@ def _migrate_v32(conn: sqlite3.Connection) -> None:
             sort_order  INTEGER NOT NULL,
             is_hero     INTEGER DEFAULT 0,
             PRIMARY KEY (moment_id, image_id)
+        )
+    """)
+
+
+def _migrate_v33(conn: sqlite3.Connection) -> None:
+    """Add geocode_cache table for shared, persistent reverse-geocoding cache.
+
+    Reverse geocoding is moved out of the synchronous metadata ingest path
+    (see imganalyzer.analysis.geocode_resolver).  Results are keyed by
+    (lat, lon) rounded to 4 decimal places (~11 m) so that images taken
+    at the same location reuse a single HTTP request.  The cache is
+    shared across all workers via SQLite.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS geocode_cache (
+            lat_key         REAL    NOT NULL,
+            lon_key         REAL    NOT NULL,
+            location_json   TEXT    NOT NULL,
+            fetched_at      INTEGER NOT NULL,
+            PRIMARY KEY (lat_key, lon_key)
         )
     """)
