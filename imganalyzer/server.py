@@ -76,6 +76,7 @@ import inspect
 import json
 import os
 import re
+import contextlib
 import sqlite3
 import sys
 import threading
@@ -172,17 +173,77 @@ def _get_db() -> sqlite3.Connection:
 
 
 # Cached SearchEngine — avoids rebuilding embedding matrices on every RPC call.
+#
+# IMPORTANT: cache is keyed by DB path, NOT by ``sqlite3.Connection`` identity.
+# The JSON-RPC server uses thread-local connections via ``_get_db()``; keying
+# on the connection object would defeat the cache whenever a different thread
+# handled the request, forcing a ~1.5 GB embedding-matrix rebuild each time.
+# See perf_plan.md item B1.
+#
+# ``engine.conn`` is swapped to the caller's current thread-local connection
+# on every acquisition, guarded by ``_search_engine_lock`` so concurrent RPC
+# threads don't race on the shared engine's mutable ``conn`` field.  Callers
+# obtained via ``_get_search_engine(conn)`` MUST call
+# ``_release_search_engine()`` in a ``finally`` block (or use the
+# ``_search_engine_ctx`` context manager) when done.
 _cached_search_engine: Any = None
+_cached_search_engine_key: tuple[str, int] | None = None
+_search_engine_lock = threading.RLock()
 
 
 def _get_search_engine(conn: sqlite3.Connection) -> Any:
-    """Return a cached SearchEngine instance, reusing embedding matrix caches."""
-    global _cached_search_engine
-    from imganalyzer.db.search import SearchEngine
+    """Return the process-wide cached SearchEngine, bound to *conn*.
 
-    if _cached_search_engine is None or _cached_search_engine.conn is not conn:
-        _cached_search_engine = SearchEngine(conn)
+    Acquires ``_search_engine_lock`` (caller must call
+    ``_release_search_engine()`` when done) and swaps the engine's
+    ``conn``/``repo.conn`` to the caller's thread-local connection so
+    SQLite calls stay on the owning thread while the embedding-matrix
+    caches on the engine persist across RPC calls and threads.
+    """
+    global _cached_search_engine, _cached_search_engine_key
+    from imganalyzer.db import search as _search_module
+    from imganalyzer.db.connection import get_db_path
+
+    # Include the SearchEngine class ``id`` in the cache key so that tests
+    # which monkeypatch ``imganalyzer.db.search.SearchEngine`` with a fake
+    # get a fresh instance instead of the previously-cached real engine.
+    db_key: tuple[str, int] = (str(get_db_path()), id(_search_module.SearchEngine))
+    _search_engine_lock.acquire()
+    try:
+        if (
+            _cached_search_engine is None
+            or _cached_search_engine_key != db_key
+        ):
+            _cached_search_engine = _search_module.SearchEngine(conn)
+            _cached_search_engine_key = db_key
+        _cached_search_engine.conn = conn
+        repo = getattr(_cached_search_engine, "repo", None)
+        if repo is not None:
+            repo.conn = conn
+    except BaseException:
+        _search_engine_lock.release()
+        raise
     return _cached_search_engine
+
+
+def _release_search_engine() -> None:
+    """Release the lock held by ``_get_search_engine``."""
+    try:
+        _search_engine_lock.release()
+    except RuntimeError:
+        # Not held by this thread — ignore so callers can use finally blocks
+        # without worrying about early-exit paths before acquisition.
+        pass
+
+
+@contextlib.contextmanager
+def _search_engine_ctx(conn: sqlite3.Connection) -> Any:
+    """Context-manager wrapper around ``_get_search_engine``."""
+    engine = _get_search_engine(conn)
+    try:
+        yield engine
+    finally:
+        _release_search_engine()
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -2111,784 +2172,787 @@ def _handle_search(params: dict) -> dict:
 
     conn = _get_db()
     engine = _get_search_engine(conn)
-
-    # Progress callback — sends JSON-RPC notifications during slow phases
-    _progress_sent: set[str] = set()
-
-    def _progress(phase: str, message: str, progress: float) -> None:
-        if phase in _progress_sent:
-            return
-        _progress_sent.add(phase)
-        _send_notification("search/progress", {
-            "phase": phase,
-            "message": message,
-            "progress": progress,
-        })
-
-    query = params.get("query", "")
-    mode = params.get("mode", "hybrid")
-    semantic_weight = params.get("semanticWeight", 0.5)
-    semantic_profile = params.get("semanticProfile", "balanced")
-    face = params.get("face")
-    faces_raw = params.get("faces")
-    face_match = params.get("faceMatch", "all")
-    similar_to_image_id = params.get("similarToImageId")
-    camera = params.get("camera")
-    lens = params.get("lens")
-    location = params.get("location")
-    country = params.get("country")
-    aesthetic_min = params.get("aestheticMin")
-    aesthetic_max = params.get("aestheticMax")
-    sharpness_min = params.get("sharpnessMin")
-    sharpness_max = params.get("sharpnessMax")
-    noise_max = params.get("noiseMax")
-    iso_min = params.get("isoMin")
-    iso_max = params.get("isoMax")
-    faces_min = params.get("facesMin")
-    faces_max = params.get("facesMax")
-    date_from = params.get("dateFrom")
-    date_to = params.get("dateTo")
-    recurring_month_day = params.get("recurringMonthDay")
-    time_of_day = params.get("timeOfDay")
-    has_people = params.get("hasPeople")
-    map_bounds = params.get("mapBounds")  # {north, south, east, west}
-    sort_by = params.get("sortBy", "relevance")
-    rank_preference = params.get("rankPreference")
-    expanded_terms_raw = params.get("expandedTerms", [])
-    must_terms_raw = params.get("mustTerms", [])
-    should_terms_raw = params.get("shouldTerms", [])
-    debug_search = params.get("debugSearch", False)
-    facet_request = params.get("facetRequest", False)
     try:
-        limit = int(params.get("limit", 200))
-    except (TypeError, ValueError):
-        raise ValueError("limit must be an integer")
-    try:
-        offset = int(params.get("offset", 0))
-    except (TypeError, ValueError):
-        raise ValueError("offset must be an integer")
-    limit = max(1, min(limit, 500))
-    offset = max(0, offset)
 
-    if recurring_month_day is not None:
-        recurring_month_day = str(recurring_month_day).strip()
-        if recurring_month_day and not re.fullmatch(r"\d{2}-\d{2}", recurring_month_day):
-            raise ValueError("recurringMonthDay must be in MM-DD format")
-    valid_time_of_day = {"morning", "afternoon", "evening", "night"}
-    if time_of_day is not None and time_of_day not in valid_time_of_day:
-        raise ValueError("timeOfDay must be one of morning, afternoon, evening or night")
-    valid_sort_by = {"relevance", "best", "aesthetic", "sharpness", "cleanest", "newest"}
-    if sort_by not in valid_sort_by:
-        raise ValueError("sortBy must be one of relevance, best, aesthetic, sharpness, cleanest or newest")
-    valid_rank_preference = {"relevance", "quality", "recency", "aesthetic", "cleanest", "sharpest"}
-    valid_semantic_profile = {"image_dominant", "balanced", "description_dominant"}
-    if rank_preference is not None and rank_preference not in valid_rank_preference:
-        raise ValueError("rankPreference must be one of relevance, quality, recency, aesthetic, cleanest or sharpest")
-    if semantic_profile is None:
-        semantic_profile = "balanced"
-    if not isinstance(semantic_profile, str):
-        raise ValueError("semanticProfile must be one of image_dominant, balanced or description_dominant")
-    semantic_profile = semantic_profile.strip().lower()
-    if semantic_profile not in valid_semantic_profile:
-        raise ValueError("semanticProfile must be one of image_dominant, balanced or description_dominant")
-    if sort_by == "relevance" and rank_preference:
-        sort_by = {
-            "relevance": "relevance",
-            "quality": "best",
-            "recency": "newest",
-            "aesthetic": "aesthetic",
-            "cleanest": "cleanest",
-            "sharpest": "sharpness",
-        }[rank_preference]
-    if not isinstance(debug_search, bool):
-        raise ValueError("debugSearch must be a boolean")
-    if not isinstance(facet_request, bool):
-        raise ValueError("facetRequest must be a boolean")
-    if expanded_terms_raw is None:
-        expanded_terms_raw = []
-    if not isinstance(expanded_terms_raw, list):
-        raise ValueError("expandedTerms must be an array")
-    expanded_terms: list[str] = []
-    seen_terms: set[str] = set()
-    for term in expanded_terms_raw:
-        if not isinstance(term, str):
-            raise ValueError("expandedTerms entries must be strings")
-        clean = term.strip()
-        lowered = clean.casefold()
-        if clean and lowered not in seen_terms:
-            seen_terms.add(lowered)
-            expanded_terms.append(clean)
-    if must_terms_raw is None:
-        must_terms_raw = []
-    if should_terms_raw is None:
-        should_terms_raw = []
-    if not isinstance(must_terms_raw, list):
-        raise ValueError("mustTerms must be an array")
-    if not isinstance(should_terms_raw, list):
-        raise ValueError("shouldTerms must be an array")
-    must_terms: list[str] = []
-    should_terms: list[str] = []
-    seen_must: set[str] = set()
-    seen_should: set[str] = set()
-    for term in must_terms_raw:
-        if not isinstance(term, str):
-            raise ValueError("mustTerms entries must be strings")
-        clean = term.strip()
-        lowered = clean.casefold()
-        if clean and lowered not in seen_must:
-            seen_must.add(lowered)
-            must_terms.append(clean)
-    for term in should_terms_raw:
-        if not isinstance(term, str):
-            raise ValueError("shouldTerms entries must be strings")
-        clean = term.strip()
-        lowered = clean.casefold()
-        if clean and lowered not in seen_should:
-            seen_should.add(lowered)
-            should_terms.append(clean)
+        # Progress callback — sends JSON-RPC notifications during slow phases
+        _progress_sent: set[str] = set()
 
-    if faces_raw is None:
-        faces_raw = []
-    if not isinstance(faces_raw, list):
-        raise ValueError("faces must be an array")
-    if face_match not in {None, "any", "all"}:
-        raise ValueError("faceMatch must be 'any' or 'all'")
-    normalized_faces: list[str] = []
-    seen_faces: set[str] = set()
-    for raw_face in [*faces_raw, face]:
-        if raw_face is None:
-            continue
-        if not isinstance(raw_face, str):
-            raise ValueError("face and faces entries must be strings")
-        clean = raw_face.strip()
-        lowered = clean.casefold()
-        if clean and lowered not in seen_faces:
-            seen_faces.add(lowered)
-            normalized_faces.append(clean)
-    faces = normalized_faces
-    face = faces[0] if faces else None
-    face_match = "all" if face_match is None else face_match
-
-    if not faces and query:
-        _progress("resolving", "Resolving names…", 0.0)
-        resolve_face_queries = getattr(engine, "resolve_face_queries", None)
-        if callable(resolve_face_queries):
-            resolved_faces, remaining_query, resolved_match = resolve_face_queries(str(query))
-            if resolved_faces:
-                faces = resolved_faces
-                face = faces[0]
-                face_match = resolved_match
-                query = remaining_query
-        else:
-            resolve_face_query = getattr(engine, "resolve_face_query", None)
-            if callable(resolve_face_query):
-                resolved_face, remaining_query = resolve_face_query(str(query))
-                if resolved_face:
-                    faces = [resolved_face]
-                    face = resolved_face
-                    query = remaining_query
-
-    if not faces:
-        resolve_face_queries = getattr(engine, "resolve_face_queries", None)
-        if callable(resolve_face_queries):
-            normalized_faces: list[str] = []
-            seen_resolved_faces: set[str] = set()
-
-            def _consume_face_terms(terms: list[str]) -> list[str]:
-                nonlocal face_match
-                remaining_terms: list[str] = []
-                for raw_term in terms:
-                    resolved_from_term, remaining_term, resolved_match = resolve_face_queries(raw_term)
-                    if resolved_from_term:
-                        for resolved_face in resolved_from_term:
-                            lowered = resolved_face.casefold()
-                            if lowered in seen_resolved_faces:
-                                continue
-                            seen_resolved_faces.add(lowered)
-                            normalized_faces.append(resolved_face)
-                        if len(normalized_faces) > 1:
-                            face_match = resolved_match if resolved_match in {"any", "all"} else "all"
-                    cleaned_remaining = remaining_term.strip()
-                    if cleaned_remaining:
-                        remaining_terms.append(cleaned_remaining)
-                return remaining_terms
-
-            must_terms = _consume_face_terms(must_terms)
-            should_terms = _consume_face_terms(should_terms)
-            if normalized_faces:
-                faces = normalized_faces
-                face = faces[0]
-                if len(faces) > 1 and face_match not in {"any", "all"}:
-                    face_match = "all"
-
-    has_text_query = bool(query and query.strip())
-    base_conditions: list[str] = []
-    base_params: list[Any] = []
-    datetime_expr = "replace(COALESCE(m.date_time_original, ''), ' ', 'T')"
-    hour_expr = (
-        "CASE "
-        f"WHEN length({datetime_expr}) >= 13 "
-        f"THEN CAST(substr({datetime_expr}, 12, 2) AS INTEGER) "
-        "END"
-    )
-
-    if camera:
-        cam_esc = _escape_like(camera)
-        base_conditions.append(
-            "(m.camera_make LIKE ? ESCAPE '\\' OR m.camera_model LIKE ? ESCAPE '\\')"
-        )
-        base_params.extend([f"%{cam_esc}%", f"%{cam_esc}%"])
-    if lens:
-        base_conditions.append("m.lens_model LIKE ? ESCAPE '\\'")
-        base_params.append(f"%{_escape_like(lens)}%")
-    if country:
-        base_conditions.append("m.location_country LIKE ? ESCAPE '\\'")
-        base_params.append(f"%{_escape_like(country)}%")
-    if location:
-        loc_esc = _escape_like(location)
-        base_conditions.append(
-            "(m.location_city LIKE ? ESCAPE '\\'"
-            " OR m.location_state LIKE ? ESCAPE '\\'"
-            " OR m.location_country LIKE ? ESCAPE '\\')"
-        )
-        base_params.extend([f"%{loc_esc}%", f"%{loc_esc}%", f"%{loc_esc}%"])
-    if map_bounds and isinstance(map_bounds, dict) and _table_exists(conn, "geo_rtree"):
-        mb_south = float(map_bounds.get("south", -90))
-        mb_north = float(map_bounds.get("north", 90))
-        mb_west = float(map_bounds.get("west", -180))
-        mb_east = float(map_bounds.get("east", 180))
-        base_conditions.append(
-            "m.image_id IN ("
-            "  SELECT r.id FROM geo_rtree r"
-            "  WHERE r.min_lat >= ? AND r.max_lat <= ?"
-            "  AND r.min_lng >= ? AND r.max_lng <= ?)"
-        )
-        base_params.extend([mb_south, mb_north, mb_west, mb_east])
-    if date_from:
-        base_conditions.append("m.date_time_original >= ?")
-        base_params.append(date_from)
-    if date_to:
-        base_conditions.append("m.date_time_original <= ?")
-        base_params.append(date_to + "T23:59:59")
-    if recurring_month_day:
-        base_conditions.append(f"substr({datetime_expr}, 6, 5) = ?")
-        base_params.append(recurring_month_day)
-    if time_of_day == "morning":
-        base_conditions.append(f"{hour_expr} BETWEEN 5 AND 11")
-    elif time_of_day == "afternoon":
-        base_conditions.append(f"{hour_expr} BETWEEN 12 AND 16")
-    elif time_of_day == "evening":
-        base_conditions.append(f"{hour_expr} BETWEEN 17 AND 20")
-    elif time_of_day == "night":
-        base_conditions.append(f"({hour_expr} >= 21 OR {hour_expr} < 5)")
-    if iso_min is not None:
-        base_conditions.append("CAST(m.iso AS REAL) >= ?")
-        base_params.append(iso_min)
-    if iso_max is not None:
-        base_conditions.append("CAST(m.iso AS REAL) <= ?")
-        base_params.append(iso_max)
-    if aesthetic_min is not None:
-        base_conditions.append("COALESCE(ap.perception_iaa, ae.aesthetic_score) >= ?")
-        base_params.append(aesthetic_min)
-    if aesthetic_max is not None:
-        base_conditions.append("COALESCE(ap.perception_iaa, ae.aesthetic_score) <= ?")
-        base_params.append(aesthetic_max)
-    if sharpness_min is not None:
-        base_conditions.append("t.sharpness_score >= ?")
-        base_params.append(sharpness_min)
-    if sharpness_max is not None:
-        base_conditions.append("t.sharpness_score <= ?")
-        base_params.append(sharpness_max)
-    if noise_max is not None:
-        base_conditions.append("t.noise_level <= ?")
-        base_params.append(noise_max)
-    if faces_min is not None:
-        base_conditions.append("COALESCE(la.face_count, af.face_count) >= ?")
-        base_params.append(faces_min)
-    if faces_max is not None:
-        base_conditions.append("COALESCE(la.face_count, af.face_count) <= ?")
-        base_params.append(faces_max)
-    if has_people is True:
-        base_conditions.append("COALESCE(la.has_people, ob.has_person) = 1")
-    elif has_people is False:
-        base_conditions.append(
-            "(COALESCE(la.has_people, ob.has_person) = 0 OR "
-            "COALESCE(la.has_people, ob.has_person) IS NULL)"
-        )
-
-    select_cols = """
-        i.id AS image_id, i.file_path, i.width, i.height, i.file_size,
-        m.camera_make, m.camera_model, m.lens_model, m.focal_length,
-        m.f_number, m.exposure_time, m.iso, m.date_time_original,
-        m.gps_latitude, m.gps_longitude, m.location_city, m.location_state,
-        m.location_country,
-        t.sharpness_score, t.sharpness_label, t.exposure_ev, t.exposure_label,
-        t.noise_level, t.noise_label, t.snr_db, t.dynamic_range_stops,
-        t.highlight_clipping_pct, t.shadow_clipping_pct, t.avg_saturation,
-        t.dominant_colors,
-        COALESCE(la.description, b2.description) AS description,
-        COALESCE(la.scene_type, b2.scene_type) AS scene_type,
-        COALESCE(la.main_subject, b2.main_subject) AS main_subject,
-        COALESCE(la.lighting, b2.lighting) AS lighting,
-        COALESCE(la.mood, b2.mood) AS mood,
-        COALESCE(la.keywords, b2.keywords) AS keywords,
-        COALESCE(la.detected_objects, ob.detected_objects) AS detected_objects,
-        COALESCE(la.face_count, af.face_count) AS face_count,
-        COALESCE(la.face_identities, af.face_identities) AS face_identities,
-        COALESCE(la.has_people, ob.has_person) AS has_people,
-        COALESCE(la.ocr_text, ocr.ocr_text) AS ocr_text,
-        (
-            SELECT ca.description
-            FROM analysis_cloud_ai ca
-            WHERE ca.image_id = i.id
-              AND ca.description IS NOT NULL
-              AND TRIM(ca.description) != ''
-            ORDER BY ca.analyzed_at DESC, ca.id DESC
-            LIMIT 1
-        ) AS cloud_description,
-        COALESCE(ap.perception_iaa, ae.aesthetic_score) AS aesthetic_score,
-        COALESCE(ap.perception_iaa_label, ae.aesthetic_label) AS aesthetic_label,
-        NULL AS aesthetic_reason,
-        ap.perception_iaa, ap.perception_iaa_label,
-        ap.perception_iqa, ap.perception_iqa_label,
-        ap.perception_ista, ap.perception_ista_label
-    """
-
-    joins = """
-        FROM images i
-        LEFT JOIN analysis_metadata    m  ON m.image_id  = i.id
-        LEFT JOIN analysis_technical   t  ON t.image_id  = i.id
-        LEFT JOIN analysis_caption     la ON la.image_id = i.id
-        LEFT JOIN analysis_blip2       b2 ON b2.image_id = i.id
-        LEFT JOIN analysis_objects     ob ON ob.image_id = i.id
-        LEFT JOIN analysis_ocr        ocr ON ocr.image_id = i.id
-        LEFT JOIN analysis_faces       af ON af.image_id = i.id
-        LEFT JOIN analysis_aesthetic   ae ON ae.image_id = i.id
-        LEFT JOIN analysis_perception  ap ON ap.image_id = i.id
-    """
-
-    def _json_field(val: Any) -> Any:
-        if val is None:
-            return None
-        try:
-            return _json.loads(val)
-        except Exception:
-            return val
-
-    def _build_where_clause(candidate_ids: list[int] | None = None) -> tuple[str, list[Any]]:
-        conditions = list(base_conditions)
-        query_params = list(base_params)
-        if candidate_ids is not None:
-            if not candidate_ids:
-                return "WHERE 1 = 0", []
-            placeholders = ",".join("?" * len(candidate_ids))
-            conditions.insert(0, f"i.id IN ({placeholders})")
-            query_params = [*candidate_ids, *query_params]
-        where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-        return where_clause, query_params
-
-    def _rows_to_records(
-        rows: list[sqlite3.Row],
-        score_lookup: dict[int, float] | None,
-    ) -> list[dict[str, Any]]:
-        has_face_occurrences = _table_exists(conn, "face_occurrences")
-        image_ids = [int(row["image_id"]) for row in rows]
-        face_clusters_by_image = (
-            _get_face_clusters_for_images(conn, image_ids)
-            if has_face_occurrences
-            else {}
-        )
-        records = []
-        for row in rows:
-            image_id = int(row["image_id"])
-            records.append({
-                "image_id": image_id,
-                "file_path": row["file_path"],
-                "score": score_lookup.get(image_id) if score_lookup is not None else None,
-                "width": row["width"],
-                "height": row["height"],
-                "file_size": row["file_size"],
-                "camera_make": row["camera_make"],
-                "camera_model": row["camera_model"],
-                "lens_model": row["lens_model"],
-                "focal_length": row["focal_length"],
-                "f_number": row["f_number"],
-                "exposure_time": row["exposure_time"],
-                "iso": row["iso"],
-                "date_time_original": row["date_time_original"],
-                "gps_latitude": row["gps_latitude"],
-                "gps_longitude": row["gps_longitude"],
-                "location_city": row["location_city"],
-                "location_state": row["location_state"],
-                "location_country": row["location_country"],
-                "sharpness_score": row["sharpness_score"],
-                "sharpness_label": row["sharpness_label"],
-                "exposure_ev": row["exposure_ev"],
-                "exposure_label": row["exposure_label"],
-                "noise_level": row["noise_level"],
-                "noise_label": row["noise_label"],
-                "snr_db": row["snr_db"],
-                "dynamic_range_stops": row["dynamic_range_stops"],
-                "highlight_clipping_pct": row["highlight_clipping_pct"],
-                "shadow_clipping_pct": row["shadow_clipping_pct"],
-                "avg_saturation": row["avg_saturation"],
-                "dominant_colors": _json_field(row["dominant_colors"]),
-                "description": row["description"],
-                "scene_type": row["scene_type"],
-                "main_subject": row["main_subject"],
-                "lighting": row["lighting"],
-                "mood": row["mood"],
-                "keywords": _json_field(row["keywords"]),
-                "detected_objects": _json_field(row["detected_objects"]),
-                "face_count": row["face_count"],
-                "face_identities": _json_field(row["face_identities"]),
-                "has_people": bool(row["has_people"]) if row["has_people"] is not None else None,
-                "ocr_text": row["ocr_text"],
-                "cloud_description": row["cloud_description"],
-                "aesthetic_score": row["aesthetic_score"],
-                "aesthetic_label": row["aesthetic_label"],
-                "aesthetic_reason": row["aesthetic_reason"],
-                "perception_iaa": row["perception_iaa"],
-                "perception_iaa_label": row["perception_iaa_label"],
-                "perception_iqa": row["perception_iqa"],
-                "perception_iqa_label": row["perception_iqa_label"],
-                "perception_ista": row["perception_ista"],
-                "perception_ista_label": row["perception_ista_label"],
-                "face_clusters": (
-                    face_clusters_by_image.get(image_id, [])
-                    if has_face_occurrences
-                    else None
-                ),
+        def _progress(phase: str, message: str, progress: float) -> None:
+            if phase in _progress_sent:
+                return
+            _progress_sent.add(phase)
+            _send_notification("search/progress", {
+                "phase": phase,
+                "message": message,
+                "progress": progress,
             })
-        if score_lookup is not None and sort_by == "relevance":
-            records.sort(key=lambda record: -(record["score"] or 0.0))
-        return records
 
-    def _fetch_records(
-        candidate_ids: list[int] | None,
-        score_lookup: dict[int, float] | None,
-    ) -> list[dict[str, Any]]:
-        where_clause, query_params = _build_where_clause(candidate_ids)
-        rows = conn.execute(
-            f"SELECT {select_cols} {joins} {where_clause}",
-            query_params,
-        ).fetchall()
-        return _rows_to_records(rows, score_lookup)
+        query = params.get("query", "")
+        mode = params.get("mode", "hybrid")
+        semantic_weight = params.get("semanticWeight", 0.5)
+        semantic_profile = params.get("semanticProfile", "balanced")
+        face = params.get("face")
+        faces_raw = params.get("faces")
+        face_match = params.get("faceMatch", "all")
+        similar_to_image_id = params.get("similarToImageId")
+        camera = params.get("camera")
+        lens = params.get("lens")
+        location = params.get("location")
+        country = params.get("country")
+        aesthetic_min = params.get("aestheticMin")
+        aesthetic_max = params.get("aestheticMax")
+        sharpness_min = params.get("sharpnessMin")
+        sharpness_max = params.get("sharpnessMax")
+        noise_max = params.get("noiseMax")
+        iso_min = params.get("isoMin")
+        iso_max = params.get("isoMax")
+        faces_min = params.get("facesMin")
+        faces_max = params.get("facesMax")
+        date_from = params.get("dateFrom")
+        date_to = params.get("dateTo")
+        recurring_month_day = params.get("recurringMonthDay")
+        time_of_day = params.get("timeOfDay")
+        has_people = params.get("hasPeople")
+        map_bounds = params.get("mapBounds")  # {north, south, east, west}
+        sort_by = params.get("sortBy", "relevance")
+        rank_preference = params.get("rankPreference")
+        expanded_terms_raw = params.get("expandedTerms", [])
+        must_terms_raw = params.get("mustTerms", [])
+        should_terms_raw = params.get("shouldTerms", [])
+        debug_search = params.get("debugSearch", False)
+        facet_request = params.get("facetRequest", False)
+        try:
+            limit = int(params.get("limit", 200))
+        except (TypeError, ValueError):
+            raise ValueError("limit must be an integer")
+        try:
+            offset = int(params.get("offset", 0))
+        except (TypeError, ValueError):
+            raise ValueError("offset must be an integer")
+        limit = max(1, min(limit, 500))
+        offset = max(0, offset)
 
-    def _quality_score(record: dict[str, Any]) -> float:
-        aesthetic = float(record["aesthetic_score"] or 0.0)
-        sharpness = float(record["sharpness_score"] or 0.0)
-        noise = float(record["noise_level"] or 0.0)
-        return (aesthetic * 12.0) + (sharpness * 0.25) - (noise * 120.0)
+        if recurring_month_day is not None:
+            recurring_month_day = str(recurring_month_day).strip()
+            if recurring_month_day and not re.fullmatch(r"\d{2}-\d{2}", recurring_month_day):
+                raise ValueError("recurringMonthDay must be in MM-DD format")
+        valid_time_of_day = {"morning", "afternoon", "evening", "night"}
+        if time_of_day is not None and time_of_day not in valid_time_of_day:
+            raise ValueError("timeOfDay must be one of morning, afternoon, evening or night")
+        valid_sort_by = {"relevance", "best", "aesthetic", "sharpness", "cleanest", "newest"}
+        if sort_by not in valid_sort_by:
+            raise ValueError("sortBy must be one of relevance, best, aesthetic, sharpness, cleanest or newest")
+        valid_rank_preference = {"relevance", "quality", "recency", "aesthetic", "cleanest", "sharpest"}
+        valid_semantic_profile = {"image_dominant", "balanced", "description_dominant"}
+        if rank_preference is not None and rank_preference not in valid_rank_preference:
+            raise ValueError("rankPreference must be one of relevance, quality, recency, aesthetic, cleanest or sharpest")
+        if semantic_profile is None:
+            semantic_profile = "balanced"
+        if not isinstance(semantic_profile, str):
+            raise ValueError("semanticProfile must be one of image_dominant, balanced or description_dominant")
+        semantic_profile = semantic_profile.strip().lower()
+        if semantic_profile not in valid_semantic_profile:
+            raise ValueError("semanticProfile must be one of image_dominant, balanced or description_dominant")
+        if sort_by == "relevance" and rank_preference:
+            sort_by = {
+                "relevance": "relevance",
+                "quality": "best",
+                "recency": "newest",
+                "aesthetic": "aesthetic",
+                "cleanest": "cleanest",
+                "sharpest": "sharpness",
+            }[rank_preference]
+        if not isinstance(debug_search, bool):
+            raise ValueError("debugSearch must be a boolean")
+        if not isinstance(facet_request, bool):
+            raise ValueError("facetRequest must be a boolean")
+        if expanded_terms_raw is None:
+            expanded_terms_raw = []
+        if not isinstance(expanded_terms_raw, list):
+            raise ValueError("expandedTerms must be an array")
+        expanded_terms: list[str] = []
+        seen_terms: set[str] = set()
+        for term in expanded_terms_raw:
+            if not isinstance(term, str):
+                raise ValueError("expandedTerms entries must be strings")
+            clean = term.strip()
+            lowered = clean.casefold()
+            if clean and lowered not in seen_terms:
+                seen_terms.add(lowered)
+                expanded_terms.append(clean)
+        if must_terms_raw is None:
+            must_terms_raw = []
+        if should_terms_raw is None:
+            should_terms_raw = []
+        if not isinstance(must_terms_raw, list):
+            raise ValueError("mustTerms must be an array")
+        if not isinstance(should_terms_raw, list):
+            raise ValueError("shouldTerms must be an array")
+        must_terms: list[str] = []
+        should_terms: list[str] = []
+        seen_must: set[str] = set()
+        seen_should: set[str] = set()
+        for term in must_terms_raw:
+            if not isinstance(term, str):
+                raise ValueError("mustTerms entries must be strings")
+            clean = term.strip()
+            lowered = clean.casefold()
+            if clean and lowered not in seen_must:
+                seen_must.add(lowered)
+                must_terms.append(clean)
+        for term in should_terms_raw:
+            if not isinstance(term, str):
+                raise ValueError("shouldTerms entries must be strings")
+            clean = term.strip()
+            lowered = clean.casefold()
+            if clean and lowered not in seen_should:
+                seen_should.add(lowered)
+                should_terms.append(clean)
 
-    def _sort_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if sort_by == "relevance":
-            return records
-        if sort_by == "best":
-            return sorted(
-                records,
-                key=lambda record: (
-                    _quality_score(record),
-                    float(record["aesthetic_score"] or 0.0),
-                    float(record["sharpness_score"] or 0.0),
-                ),
-                reverse=True,
-            )
-        if sort_by == "aesthetic":
-            return sorted(
-                records,
-                key=lambda record: (
-                    float(record["aesthetic_score"] or 0.0),
-                    float(record["sharpness_score"] or 0.0),
-                ),
-                reverse=True,
-            )
-        if sort_by == "sharpness":
-            return sorted(
-                records,
-                key=lambda record: (
-                    float(record["sharpness_score"] or 0.0),
-                    float(record["aesthetic_score"] or 0.0),
-                ),
-                reverse=True,
-            )
-        if sort_by == "cleanest":
-            return sorted(
-                records,
-                key=lambda record: (
-                    record["noise_level"] is None,
-                    float(record["noise_level"]) if record["noise_level"] is not None else float("inf"),
-                    -float(record["sharpness_score"] or 0.0),
-                ),
-            )
-        if sort_by == "newest":
-            return sorted(
-                records,
-                key=lambda record: ((record["date_time_original"] or ""), int(record["image_id"])),
-                reverse=True,
-            )
-        return records
+        if faces_raw is None:
+            faces_raw = []
+        if not isinstance(faces_raw, list):
+            raise ValueError("faces must be an array")
+        if face_match not in {None, "any", "all"}:
+            raise ValueError("faceMatch must be 'any' or 'all'")
+        normalized_faces: list[str] = []
+        seen_faces: set[str] = set()
+        for raw_face in [*faces_raw, face]:
+            if raw_face is None:
+                continue
+            if not isinstance(raw_face, str):
+                raise ValueError("face and faces entries must be strings")
+            clean = raw_face.strip()
+            lowered = clean.casefold()
+            if clean and lowered not in seen_faces:
+                seen_faces.add(lowered)
+                normalized_faces.append(clean)
+        faces = normalized_faces
+        face = faces[0] if faces else None
+        face_match = "all" if face_match is None else face_match
 
-    def _browse_order_clause() -> str:
-        if sort_by == "best":
-            return (
-                " ORDER BY "
-                "((COALESCE(ap.perception_iaa, ae.aesthetic_score, 0) * 12.0) + "
-                "(COALESCE(t.sharpness_score, 0) * 0.25) - "
-                "(COALESCE(t.noise_level, 0) * 120.0)) DESC, "
-                "COALESCE(ap.perception_iaa, ae.aesthetic_score) DESC, "
-                "t.sharpness_score DESC, i.id DESC"
-            )
-        if sort_by == "aesthetic":
-            return (
-                " ORDER BY COALESCE(ap.perception_iaa, ae.aesthetic_score) DESC, "
-                "t.sharpness_score DESC, i.id DESC"
-            )
-        if sort_by == "sharpness":
-            return (
-                " ORDER BY t.sharpness_score DESC, "
-                "COALESCE(ap.perception_iaa, ae.aesthetic_score) DESC, i.id DESC"
-            )
-        if sort_by == "cleanest":
-            return " ORDER BY t.noise_level ASC, t.sharpness_score DESC, i.id DESC"
-        if sort_by == "newest":
-            return " ORDER BY m.date_time_original DESC, i.id DESC"
-        return ""
-
-    search_params = inspect.signature(engine.search).parameters
-    search_supports_profile = "semantic_profile" in search_params
-    search_supports_progress = "progress_cb" in search_params
-    search_supports_candidate_ids = "candidate_ids" in search_params
-    face_candidate_ids_cache: set[int] | None = None
-
-    def _search_text_terms(
-        candidate_limit: int,
-        *,
-        candidate_ids: set[int] | None = None,
-    ) -> list[dict[str, Any]]:
-        if candidate_ids is not None and not candidate_ids:
-            return []
-
-        def _run_search(term: str) -> list[dict[str, Any]]:
-            kwargs: dict[str, Any] = {
-                "limit": candidate_limit,
-                "semantic_weight": semantic_weight,
-                "mode": mode,
-            }
-            if search_supports_profile:
-                kwargs["semantic_profile"] = semantic_profile
-            if search_supports_progress:
-                kwargs["progress_cb"] = _progress
-            if search_supports_candidate_ids and candidate_ids is not None:
-                kwargs["candidate_ids"] = candidate_ids
-            return engine.search(term, **kwargs)
-
-        terms: list[str] = []
-        terms.extend(must_terms)
-        if has_text_query:
-            terms.append(query.strip())
-        terms.extend(should_terms)
-        seen_local = {term.casefold() for term in terms}
-        for term in expanded_terms:
-            lowered = term.casefold()
-            if lowered not in seen_local:
-                seen_local.add(lowered)
-                terms.append(term)
-        if not terms:
-            return []
-        if len(terms) == 1:
-            return _run_search(terms[0])
-
-        fused_scores: dict[int, float] = {}
-        file_paths: dict[int, str] = {}
-        for term in terms:
-            term_results = _run_search(term)
-            for rank, result in enumerate(term_results):
-                image_id = int(result["image_id"])
-                fused_scores[image_id] = fused_scores.get(image_id, 0.0) + (1.0 / (61 + rank))
-                if "file_path" in result:
-                    file_paths.setdefault(image_id, str(result["file_path"]))
-
-        return [
-            {
-                "image_id": image_id,
-                "file_path": file_paths.get(image_id, ""),
-                "score": score,
-            }
-            for image_id, score in sorted(
-                fused_scores.items(),
-                key=lambda item: -item[1],
-            )[:candidate_limit]
-        ]
-
-    def _get_face_candidate_ids() -> set[int]:
-        nonlocal face_candidate_ids_cache
-        if face_candidate_ids_cache is not None:
-            return face_candidate_ids_cache
-        if not faces:
-            face_candidate_ids_cache = set()
-            return face_candidate_ids_cache
-        if len(faces) == 1:
-            face_rows = engine.search_face(faces[0], limit=None)
-        else:
-            search_faces = getattr(engine, "search_faces", None)
-            if callable(search_faces):
-                face_rows = search_faces(faces, limit=None, match_mode=face_match)
+        if not faces and query:
+            _progress("resolving", "Resolving names…", 0.0)
+            resolve_face_queries = getattr(engine, "resolve_face_queries", None)
+            if callable(resolve_face_queries):
+                resolved_faces, remaining_query, resolved_match = resolve_face_queries(str(query))
+                if resolved_faces:
+                    faces = resolved_faces
+                    face = faces[0]
+                    face_match = resolved_match
+                    query = remaining_query
             else:
-                face_rows = _search_face_terms(0)
-        face_candidate_ids_cache = {int(row["image_id"]) for row in face_rows}
-        return face_candidate_ids_cache
+                resolve_face_query = getattr(engine, "resolve_face_query", None)
+                if callable(resolve_face_query):
+                    resolved_face, remaining_query = resolve_face_query(str(query))
+                    if resolved_face:
+                        faces = [resolved_face]
+                        face = resolved_face
+                        query = remaining_query
 
-    def _search_face_terms(candidate_limit: int) -> list[dict[str, Any]]:
         if not faces:
-            return []
-        if len(faces) == 1:
-            return engine.search_face(faces[0], limit=candidate_limit)
-        search_faces = getattr(engine, "search_faces", None)
-        if callable(search_faces):
-            return search_faces(faces, limit=candidate_limit, match_mode=face_match)
+            resolve_face_queries = getattr(engine, "resolve_face_queries", None)
+            if callable(resolve_face_queries):
+                normalized_faces: list[str] = []
+                seen_resolved_faces: set[str] = set()
 
-        per_face_results = [engine.search_face(name, limit=candidate_limit) for name in faces]
-        if face_match != "any" and any(not rows for rows in per_face_results):
-            return []
+                def _consume_face_terms(terms: list[str]) -> list[str]:
+                    nonlocal face_match
+                    remaining_terms: list[str] = []
+                    for raw_term in terms:
+                        resolved_from_term, remaining_term, resolved_match = resolve_face_queries(raw_term)
+                        if resolved_from_term:
+                            for resolved_face in resolved_from_term:
+                                lowered = resolved_face.casefold()
+                                if lowered in seen_resolved_faces:
+                                    continue
+                                seen_resolved_faces.add(lowered)
+                                normalized_faces.append(resolved_face)
+                            if len(normalized_faces) > 1:
+                                face_match = resolved_match if resolved_match in {"any", "all"} else "all"
+                        cleaned_remaining = remaining_term.strip()
+                        if cleaned_remaining:
+                            remaining_terms.append(cleaned_remaining)
+                    return remaining_terms
 
-        aggregate: dict[int, dict[str, Any]] = {}
-        for rows in per_face_results:
+                must_terms = _consume_face_terms(must_terms)
+                should_terms = _consume_face_terms(should_terms)
+                if normalized_faces:
+                    faces = normalized_faces
+                    face = faces[0]
+                    if len(faces) > 1 and face_match not in {"any", "all"}:
+                        face_match = "all"
+
+        has_text_query = bool(query and query.strip())
+        base_conditions: list[str] = []
+        base_params: list[Any] = []
+        datetime_expr = "replace(COALESCE(m.date_time_original, ''), ' ', 'T')"
+        hour_expr = (
+            "CASE "
+            f"WHEN length({datetime_expr}) >= 13 "
+            f"THEN CAST(substr({datetime_expr}, 12, 2) AS INTEGER) "
+            "END"
+        )
+
+        if camera:
+            cam_esc = _escape_like(camera)
+            base_conditions.append(
+                "(m.camera_make LIKE ? ESCAPE '\\' OR m.camera_model LIKE ? ESCAPE '\\')"
+            )
+            base_params.extend([f"%{cam_esc}%", f"%{cam_esc}%"])
+        if lens:
+            base_conditions.append("m.lens_model LIKE ? ESCAPE '\\'")
+            base_params.append(f"%{_escape_like(lens)}%")
+        if country:
+            base_conditions.append("m.location_country LIKE ? ESCAPE '\\'")
+            base_params.append(f"%{_escape_like(country)}%")
+        if location:
+            loc_esc = _escape_like(location)
+            base_conditions.append(
+                "(m.location_city LIKE ? ESCAPE '\\'"
+                " OR m.location_state LIKE ? ESCAPE '\\'"
+                " OR m.location_country LIKE ? ESCAPE '\\')"
+            )
+            base_params.extend([f"%{loc_esc}%", f"%{loc_esc}%", f"%{loc_esc}%"])
+        if map_bounds and isinstance(map_bounds, dict) and _table_exists(conn, "geo_rtree"):
+            mb_south = float(map_bounds.get("south", -90))
+            mb_north = float(map_bounds.get("north", 90))
+            mb_west = float(map_bounds.get("west", -180))
+            mb_east = float(map_bounds.get("east", 180))
+            base_conditions.append(
+                "m.image_id IN ("
+                "  SELECT r.id FROM geo_rtree r"
+                "  WHERE r.min_lat >= ? AND r.max_lat <= ?"
+                "  AND r.min_lng >= ? AND r.max_lng <= ?)"
+            )
+            base_params.extend([mb_south, mb_north, mb_west, mb_east])
+        if date_from:
+            base_conditions.append("m.date_time_original >= ?")
+            base_params.append(date_from)
+        if date_to:
+            base_conditions.append("m.date_time_original <= ?")
+            base_params.append(date_to + "T23:59:59")
+        if recurring_month_day:
+            base_conditions.append(f"substr({datetime_expr}, 6, 5) = ?")
+            base_params.append(recurring_month_day)
+        if time_of_day == "morning":
+            base_conditions.append(f"{hour_expr} BETWEEN 5 AND 11")
+        elif time_of_day == "afternoon":
+            base_conditions.append(f"{hour_expr} BETWEEN 12 AND 16")
+        elif time_of_day == "evening":
+            base_conditions.append(f"{hour_expr} BETWEEN 17 AND 20")
+        elif time_of_day == "night":
+            base_conditions.append(f"({hour_expr} >= 21 OR {hour_expr} < 5)")
+        if iso_min is not None:
+            base_conditions.append("CAST(m.iso AS REAL) >= ?")
+            base_params.append(iso_min)
+        if iso_max is not None:
+            base_conditions.append("CAST(m.iso AS REAL) <= ?")
+            base_params.append(iso_max)
+        if aesthetic_min is not None:
+            base_conditions.append("COALESCE(ap.perception_iaa, ae.aesthetic_score) >= ?")
+            base_params.append(aesthetic_min)
+        if aesthetic_max is not None:
+            base_conditions.append("COALESCE(ap.perception_iaa, ae.aesthetic_score) <= ?")
+            base_params.append(aesthetic_max)
+        if sharpness_min is not None:
+            base_conditions.append("t.sharpness_score >= ?")
+            base_params.append(sharpness_min)
+        if sharpness_max is not None:
+            base_conditions.append("t.sharpness_score <= ?")
+            base_params.append(sharpness_max)
+        if noise_max is not None:
+            base_conditions.append("t.noise_level <= ?")
+            base_params.append(noise_max)
+        if faces_min is not None:
+            base_conditions.append("COALESCE(la.face_count, af.face_count) >= ?")
+            base_params.append(faces_min)
+        if faces_max is not None:
+            base_conditions.append("COALESCE(la.face_count, af.face_count) <= ?")
+            base_params.append(faces_max)
+        if has_people is True:
+            base_conditions.append("COALESCE(la.has_people, ob.has_person) = 1")
+        elif has_people is False:
+            base_conditions.append(
+                "(COALESCE(la.has_people, ob.has_person) = 0 OR "
+                "COALESCE(la.has_people, ob.has_person) IS NULL)"
+            )
+
+        select_cols = """
+            i.id AS image_id, i.file_path, i.width, i.height, i.file_size,
+            m.camera_make, m.camera_model, m.lens_model, m.focal_length,
+            m.f_number, m.exposure_time, m.iso, m.date_time_original,
+            m.gps_latitude, m.gps_longitude, m.location_city, m.location_state,
+            m.location_country,
+            t.sharpness_score, t.sharpness_label, t.exposure_ev, t.exposure_label,
+            t.noise_level, t.noise_label, t.snr_db, t.dynamic_range_stops,
+            t.highlight_clipping_pct, t.shadow_clipping_pct, t.avg_saturation,
+            t.dominant_colors,
+            COALESCE(la.description, b2.description) AS description,
+            COALESCE(la.scene_type, b2.scene_type) AS scene_type,
+            COALESCE(la.main_subject, b2.main_subject) AS main_subject,
+            COALESCE(la.lighting, b2.lighting) AS lighting,
+            COALESCE(la.mood, b2.mood) AS mood,
+            COALESCE(la.keywords, b2.keywords) AS keywords,
+            COALESCE(la.detected_objects, ob.detected_objects) AS detected_objects,
+            COALESCE(la.face_count, af.face_count) AS face_count,
+            COALESCE(la.face_identities, af.face_identities) AS face_identities,
+            COALESCE(la.has_people, ob.has_person) AS has_people,
+            COALESCE(la.ocr_text, ocr.ocr_text) AS ocr_text,
+            (
+                SELECT ca.description
+                FROM analysis_cloud_ai ca
+                WHERE ca.image_id = i.id
+                  AND ca.description IS NOT NULL
+                  AND TRIM(ca.description) != ''
+                ORDER BY ca.analyzed_at DESC, ca.id DESC
+                LIMIT 1
+            ) AS cloud_description,
+            COALESCE(ap.perception_iaa, ae.aesthetic_score) AS aesthetic_score,
+            COALESCE(ap.perception_iaa_label, ae.aesthetic_label) AS aesthetic_label,
+            NULL AS aesthetic_reason,
+            ap.perception_iaa, ap.perception_iaa_label,
+            ap.perception_iqa, ap.perception_iqa_label,
+            ap.perception_ista, ap.perception_ista_label
+        """
+
+        joins = """
+            FROM images i
+            LEFT JOIN analysis_metadata    m  ON m.image_id  = i.id
+            LEFT JOIN analysis_technical   t  ON t.image_id  = i.id
+            LEFT JOIN analysis_caption     la ON la.image_id = i.id
+            LEFT JOIN analysis_blip2       b2 ON b2.image_id = i.id
+            LEFT JOIN analysis_objects     ob ON ob.image_id = i.id
+            LEFT JOIN analysis_ocr        ocr ON ocr.image_id = i.id
+            LEFT JOIN analysis_faces       af ON af.image_id = i.id
+            LEFT JOIN analysis_aesthetic   ae ON ae.image_id = i.id
+            LEFT JOIN analysis_perception  ap ON ap.image_id = i.id
+        """
+
+        def _json_field(val: Any) -> Any:
+            if val is None:
+                return None
+            try:
+                return _json.loads(val)
+            except Exception:
+                return val
+
+        def _build_where_clause(candidate_ids: list[int] | None = None) -> tuple[str, list[Any]]:
+            conditions = list(base_conditions)
+            query_params = list(base_params)
+            if candidate_ids is not None:
+                if not candidate_ids:
+                    return "WHERE 1 = 0", []
+                placeholders = ",".join("?" * len(candidate_ids))
+                conditions.insert(0, f"i.id IN ({placeholders})")
+                query_params = [*candidate_ids, *query_params]
+            where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+            return where_clause, query_params
+
+        def _rows_to_records(
+            rows: list[sqlite3.Row],
+            score_lookup: dict[int, float] | None,
+        ) -> list[dict[str, Any]]:
+            has_face_occurrences = _table_exists(conn, "face_occurrences")
+            image_ids = [int(row["image_id"]) for row in rows]
+            face_clusters_by_image = (
+                _get_face_clusters_for_images(conn, image_ids)
+                if has_face_occurrences
+                else {}
+            )
+            records = []
             for row in rows:
                 image_id = int(row["image_id"])
-                current = aggregate.setdefault(image_id, {
+                records.append({
                     "image_id": image_id,
-                    "file_path": row.get("file_path", ""),
-                    "score": 0.0,
-                    "matches": 0,
+                    "file_path": row["file_path"],
+                    "score": score_lookup.get(image_id) if score_lookup is not None else None,
+                    "width": row["width"],
+                    "height": row["height"],
+                    "file_size": row["file_size"],
+                    "camera_make": row["camera_make"],
+                    "camera_model": row["camera_model"],
+                    "lens_model": row["lens_model"],
+                    "focal_length": row["focal_length"],
+                    "f_number": row["f_number"],
+                    "exposure_time": row["exposure_time"],
+                    "iso": row["iso"],
+                    "date_time_original": row["date_time_original"],
+                    "gps_latitude": row["gps_latitude"],
+                    "gps_longitude": row["gps_longitude"],
+                    "location_city": row["location_city"],
+                    "location_state": row["location_state"],
+                    "location_country": row["location_country"],
+                    "sharpness_score": row["sharpness_score"],
+                    "sharpness_label": row["sharpness_label"],
+                    "exposure_ev": row["exposure_ev"],
+                    "exposure_label": row["exposure_label"],
+                    "noise_level": row["noise_level"],
+                    "noise_label": row["noise_label"],
+                    "snr_db": row["snr_db"],
+                    "dynamic_range_stops": row["dynamic_range_stops"],
+                    "highlight_clipping_pct": row["highlight_clipping_pct"],
+                    "shadow_clipping_pct": row["shadow_clipping_pct"],
+                    "avg_saturation": row["avg_saturation"],
+                    "dominant_colors": _json_field(row["dominant_colors"]),
+                    "description": row["description"],
+                    "scene_type": row["scene_type"],
+                    "main_subject": row["main_subject"],
+                    "lighting": row["lighting"],
+                    "mood": row["mood"],
+                    "keywords": _json_field(row["keywords"]),
+                    "detected_objects": _json_field(row["detected_objects"]),
+                    "face_count": row["face_count"],
+                    "face_identities": _json_field(row["face_identities"]),
+                    "has_people": bool(row["has_people"]) if row["has_people"] is not None else None,
+                    "ocr_text": row["ocr_text"],
+                    "cloud_description": row["cloud_description"],
+                    "aesthetic_score": row["aesthetic_score"],
+                    "aesthetic_label": row["aesthetic_label"],
+                    "aesthetic_reason": row["aesthetic_reason"],
+                    "perception_iaa": row["perception_iaa"],
+                    "perception_iaa_label": row["perception_iaa_label"],
+                    "perception_iqa": row["perception_iqa"],
+                    "perception_iqa_label": row["perception_iqa_label"],
+                    "perception_ista": row["perception_ista"],
+                    "perception_ista_label": row["perception_ista_label"],
+                    "face_clusters": (
+                        face_clusters_by_image.get(image_id, [])
+                        if has_face_occurrences
+                        else None
+                    ),
                 })
-                current["score"] = float(current["score"]) + float(row.get("score", 0.0))
-                current["matches"] = int(current["matches"]) + 1
+            if score_lookup is not None and sort_by == "relevance":
+                records.sort(key=lambda record: -(record["score"] or 0.0))
+            return records
 
-        required_matches = len(faces) if face_match == "all" else 1
-        combined = [
-            {
-                "image_id": int(item["image_id"]),
-                "file_path": item["file_path"],
-                "score": float(item["score"]),
-            }
-            for item in aggregate.values()
-            if int(item["matches"]) >= required_matches
-        ]
-        combined.sort(key=lambda item: (-float(item["score"]), int(item["image_id"])))
-        return combined[:candidate_limit]
+        def _fetch_records(
+            candidate_ids: list[int] | None,
+            score_lookup: dict[int, float] | None,
+        ) -> list[dict[str, Any]]:
+            where_clause, query_params = _build_where_clause(candidate_ids)
+            rows = conn.execute(
+                f"SELECT {select_cols} {joins} {where_clause}",
+                query_params,
+            ).fetchall()
+            return _rows_to_records(rows, score_lookup)
 
-    def _combine_face_and_text_terms(candidate_limit: int) -> tuple[list[dict[str, Any]], bool]:
-        if search_supports_candidate_ids:
-            face_candidate_ids = _get_face_candidate_ids()
-            text_results = _search_text_terms(candidate_limit, candidate_ids=face_candidate_ids)
-            return text_results, len(text_results) < candidate_limit
+        def _quality_score(record: dict[str, Any]) -> float:
+            aesthetic = float(record["aesthetic_score"] or 0.0)
+            sharpness = float(record["sharpness_score"] or 0.0)
+            noise = float(record["noise_level"] or 0.0)
+            return (aesthetic * 12.0) + (sharpness * 0.25) - (noise * 120.0)
 
-        face_results = _search_face_terms(candidate_limit)
-        text_results = _search_text_terms(candidate_limit)
-        face_exhausted = len(face_results) < candidate_limit
-        text_exhausted = len(text_results) < candidate_limit
-        if not face_results or not text_results:
-            # If face set is exhausted and intersection is empty, retrying
-            # with a larger candidate_limit will never produce results.
-            return [], face_exhausted or (face_exhausted and text_exhausted)
+        def _sort_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            if sort_by == "relevance":
+                return records
+            if sort_by == "best":
+                return sorted(
+                    records,
+                    key=lambda record: (
+                        _quality_score(record),
+                        float(record["aesthetic_score"] or 0.0),
+                        float(record["sharpness_score"] or 0.0),
+                    ),
+                    reverse=True,
+                )
+            if sort_by == "aesthetic":
+                return sorted(
+                    records,
+                    key=lambda record: (
+                        float(record["aesthetic_score"] or 0.0),
+                        float(record["sharpness_score"] or 0.0),
+                    ),
+                    reverse=True,
+                )
+            if sort_by == "sharpness":
+                return sorted(
+                    records,
+                    key=lambda record: (
+                        float(record["sharpness_score"] or 0.0),
+                        float(record["aesthetic_score"] or 0.0),
+                    ),
+                    reverse=True,
+                )
+            if sort_by == "cleanest":
+                return sorted(
+                    records,
+                    key=lambda record: (
+                        record["noise_level"] is None,
+                        float(record["noise_level"]) if record["noise_level"] is not None else float("inf"),
+                        -float(record["sharpness_score"] or 0.0),
+                    ),
+                )
+            if sort_by == "newest":
+                return sorted(
+                    records,
+                    key=lambda record: ((record["date_time_original"] or ""), int(record["image_id"])),
+                    reverse=True,
+                )
+            return records
 
-        face_scores = {
-            int(result["image_id"]): float(result["score"])
-            for result in face_results
-        }
-        combined_results: list[dict[str, Any]] = []
-        for result in text_results:
-            image_id = int(result["image_id"])
-            if image_id not in face_scores:
-                continue
-            combined_results.append({
-                **result,
-                "score": float(result["score"]) + face_scores[image_id],
-            })
+        def _browse_order_clause() -> str:
+            if sort_by == "best":
+                return (
+                    " ORDER BY "
+                    "((COALESCE(ap.perception_iaa, ae.aesthetic_score, 0) * 12.0) + "
+                    "(COALESCE(t.sharpness_score, 0) * 0.25) - "
+                    "(COALESCE(t.noise_level, 0) * 120.0)) DESC, "
+                    "COALESCE(ap.perception_iaa, ae.aesthetic_score) DESC, "
+                    "t.sharpness_score DESC, i.id DESC"
+                )
+            if sort_by == "aesthetic":
+                return (
+                    " ORDER BY COALESCE(ap.perception_iaa, ae.aesthetic_score) DESC, "
+                    "t.sharpness_score DESC, i.id DESC"
+                )
+            if sort_by == "sharpness":
+                return (
+                    " ORDER BY t.sharpness_score DESC, "
+                    "COALESCE(ap.perception_iaa, ae.aesthetic_score) DESC, i.id DESC"
+                )
+            if sort_by == "cleanest":
+                return " ORDER BY t.noise_level ASC, t.sharpness_score DESC, i.id DESC"
+            if sort_by == "newest":
+                return " ORDER BY m.date_time_original DESC, i.id DESC"
+            return ""
 
-        # When the face set is fully known (exhausted), the intersection
-        # can't grow by fetching more text candidates — report exhausted.
-        search_exhausted = face_exhausted or (face_exhausted and text_exhausted)
-        return combined_results, search_exhausted
+        search_params = inspect.signature(engine.search).parameters
+        search_supports_profile = "semantic_profile" in search_params
+        search_supports_progress = "progress_cb" in search_params
+        search_supports_candidate_ids = "candidate_ids" in search_params
+        face_candidate_ids_cache: set[int] | None = None
 
-    if similar_to_image_id is not None:
-        try:
-            similar_to_image_id = int(similar_to_image_id)
-        except (TypeError, ValueError):
-            raise ValueError("similarToImageId must be an integer")
+        def _search_text_terms(
+            candidate_limit: int,
+            *,
+            candidate_ids: set[int] | None = None,
+        ) -> list[dict[str, Any]]:
+            if candidate_ids is not None and not candidate_ids:
+                return []
 
-    if similar_to_image_id is not None or faces or ((has_text_query or expanded_terms) and mode != "browse"):
-        page_end = offset + limit
-        quality_sort_floor = 400 if sort_by in {"best", "aesthetic", "sharpness", "cleanest"} else 200
-        candidate_limit = max((page_end + 1) * 4, quality_sort_floor)
-        max_candidate_limit = max(candidate_limit, 5000)
-        search_exhausted = True
-        records: list[dict[str, Any]] = []
-        _search_deadline = time.monotonic() + 30.0  # wall-clock timeout
+            def _run_search(term: str) -> list[dict[str, Any]]:
+                kwargs: dict[str, Any] = {
+                    "limit": candidate_limit,
+                    "semantic_weight": semantic_weight,
+                    "mode": mode,
+                }
+                if search_supports_profile:
+                    kwargs["semantic_profile"] = semantic_profile
+                if search_supports_progress:
+                    kwargs["progress_cb"] = _progress
+                if search_supports_candidate_ids and candidate_ids is not None:
+                    kwargs["candidate_ids"] = candidate_ids
+                return engine.search(term, **kwargs)
 
-        while True:
-            if similar_to_image_id is not None:
-                search_results = engine.search_similar_image(similar_to_image_id, limit=candidate_limit)
-                search_exhausted = len(search_results) < candidate_limit
-            elif faces and (has_text_query or expanded_terms):
-                search_results, search_exhausted = _combine_face_and_text_terms(candidate_limit)
-            elif faces:
-                search_results = _search_face_terms(candidate_limit)
-                search_exhausted = len(search_results) < candidate_limit
+            terms: list[str] = []
+            terms.extend(must_terms)
+            if has_text_query:
+                terms.append(query.strip())
+            terms.extend(should_terms)
+            seen_local = {term.casefold() for term in terms}
+            for term in expanded_terms:
+                lowered = term.casefold()
+                if lowered not in seen_local:
+                    seen_local.add(lowered)
+                    terms.append(term)
+            if not terms:
+                return []
+            if len(terms) == 1:
+                return _run_search(terms[0])
+
+            fused_scores: dict[int, float] = {}
+            file_paths: dict[int, str] = {}
+            for term in terms:
+                term_results = _run_search(term)
+                for rank, result in enumerate(term_results):
+                    image_id = int(result["image_id"])
+                    fused_scores[image_id] = fused_scores.get(image_id, 0.0) + (1.0 / (61 + rank))
+                    if "file_path" in result:
+                        file_paths.setdefault(image_id, str(result["file_path"]))
+
+            return [
+                {
+                    "image_id": image_id,
+                    "file_path": file_paths.get(image_id, ""),
+                    "score": score,
+                }
+                for image_id, score in sorted(
+                    fused_scores.items(),
+                    key=lambda item: -item[1],
+                )[:candidate_limit]
+            ]
+
+        def _get_face_candidate_ids() -> set[int]:
+            nonlocal face_candidate_ids_cache
+            if face_candidate_ids_cache is not None:
+                return face_candidate_ids_cache
+            if not faces:
+                face_candidate_ids_cache = set()
+                return face_candidate_ids_cache
+            if len(faces) == 1:
+                face_rows = engine.search_face(faces[0], limit=None)
             else:
-                search_results = _search_text_terms(candidate_limit)
-                search_exhausted = len(search_results) < candidate_limit
+                search_faces = getattr(engine, "search_faces", None)
+                if callable(search_faces):
+                    face_rows = search_faces(faces, limit=None, match_mode=face_match)
+                else:
+                    face_rows = _search_face_terms(0)
+            face_candidate_ids_cache = {int(row["image_id"]) for row in face_rows}
+            return face_candidate_ids_cache
 
-            candidate_ids = [int(result["image_id"]) for result in search_results]
-            if not candidate_ids:
-                if (
-                    not search_exhausted
-                    and candidate_limit < max_candidate_limit
-                    and time.monotonic() < _search_deadline
-                ):
-                    candidate_limit = min(max_candidate_limit, candidate_limit * 2)
-                    continue
-                return {"results": [], "total": 0, "hasMore": False}
+        def _search_face_terms(candidate_limit: int) -> list[dict[str, Any]]:
+            if not faces:
+                return []
+            if len(faces) == 1:
+                return engine.search_face(faces[0], limit=candidate_limit)
+            search_faces = getattr(engine, "search_faces", None)
+            if callable(search_faces):
+                return search_faces(faces, limit=candidate_limit, match_mode=face_match)
 
-            score_map = {
+            per_face_results = [engine.search_face(name, limit=candidate_limit) for name in faces]
+            if face_match != "any" and any(not rows for rows in per_face_results):
+                return []
+
+            aggregate: dict[int, dict[str, Any]] = {}
+            for rows in per_face_results:
+                for row in rows:
+                    image_id = int(row["image_id"])
+                    current = aggregate.setdefault(image_id, {
+                        "image_id": image_id,
+                        "file_path": row.get("file_path", ""),
+                        "score": 0.0,
+                        "matches": 0,
+                    })
+                    current["score"] = float(current["score"]) + float(row.get("score", 0.0))
+                    current["matches"] = int(current["matches"]) + 1
+
+            required_matches = len(faces) if face_match == "all" else 1
+            combined = [
+                {
+                    "image_id": int(item["image_id"]),
+                    "file_path": item["file_path"],
+                    "score": float(item["score"]),
+                }
+                for item in aggregate.values()
+                if int(item["matches"]) >= required_matches
+            ]
+            combined.sort(key=lambda item: (-float(item["score"]), int(item["image_id"])))
+            return combined[:candidate_limit]
+
+        def _combine_face_and_text_terms(candidate_limit: int) -> tuple[list[dict[str, Any]], bool]:
+            if search_supports_candidate_ids:
+                face_candidate_ids = _get_face_candidate_ids()
+                text_results = _search_text_terms(candidate_limit, candidate_ids=face_candidate_ids)
+                return text_results, len(text_results) < candidate_limit
+
+            face_results = _search_face_terms(candidate_limit)
+            text_results = _search_text_terms(candidate_limit)
+            face_exhausted = len(face_results) < candidate_limit
+            text_exhausted = len(text_results) < candidate_limit
+            if not face_results or not text_results:
+                # If face set is exhausted and intersection is empty, retrying
+                # with a larger candidate_limit will never produce results.
+                return [], face_exhausted or (face_exhausted and text_exhausted)
+
+            face_scores = {
                 int(result["image_id"]): float(result["score"])
-                for result in search_results
+                for result in face_results
             }
-            _progress("filtering", "Filtering results…", 0.85)
-            records = _fetch_records(candidate_ids, score_map)
-            records = _sort_records(records)
-            enough_for_page = len(records) > page_end
-            if (
-                search_exhausted
-                or enough_for_page
-                or candidate_limit >= max_candidate_limit
-                or time.monotonic() >= _search_deadline
-            ):
-                break
-            candidate_limit = min(max_candidate_limit, candidate_limit * 2)
+            combined_results: list[dict[str, Any]] = []
+            for result in text_results:
+                image_id = int(result["image_id"])
+                if image_id not in face_scores:
+                    continue
+                combined_results.append({
+                    **result,
+                    "score": float(result["score"]) + face_scores[image_id],
+                })
 
-        has_more = len(records) > page_end or not search_exhausted
-        total: int | None = len(records) if search_exhausted else None
-        return {
-            "results": records[offset: offset + limit],
-            "total": total,
-            "hasMore": has_more,
-        }
+            # When the face set is fully known (exhausted), the intersection
+            # can't grow by fetching more text candidates — report exhausted.
+            search_exhausted = face_exhausted or (face_exhausted and text_exhausted)
+            return combined_results, search_exhausted
 
-    where_clause, query_params = _build_where_clause()
-    total_row = conn.execute(
-        f"SELECT COUNT(*) AS cnt {joins} {where_clause}",
-        query_params,
-    ).fetchone()
-    total = int(total_row["cnt"]) if total_row else 0
-    rows = conn.execute(
-        f"SELECT {select_cols} {joins} {where_clause}{_browse_order_clause()} LIMIT ? OFFSET ?",
-        [*query_params, limit, offset],
-    ).fetchall()
-    records = _rows_to_records(rows, None)
-    has_more = offset + len(records) < total
-    return {"results": records, "total": total, "hasMore": has_more}
+        if similar_to_image_id is not None:
+            try:
+                similar_to_image_id = int(similar_to_image_id)
+            except (TypeError, ValueError):
+                raise ValueError("similarToImageId must be an integer")
+
+        if similar_to_image_id is not None or faces or ((has_text_query or expanded_terms) and mode != "browse"):
+            page_end = offset + limit
+            quality_sort_floor = 400 if sort_by in {"best", "aesthetic", "sharpness", "cleanest"} else 200
+            candidate_limit = max((page_end + 1) * 4, quality_sort_floor)
+            max_candidate_limit = max(candidate_limit, 5000)
+            search_exhausted = True
+            records: list[dict[str, Any]] = []
+            _search_deadline = time.monotonic() + 30.0  # wall-clock timeout
+
+            while True:
+                if similar_to_image_id is not None:
+                    search_results = engine.search_similar_image(similar_to_image_id, limit=candidate_limit)
+                    search_exhausted = len(search_results) < candidate_limit
+                elif faces and (has_text_query or expanded_terms):
+                    search_results, search_exhausted = _combine_face_and_text_terms(candidate_limit)
+                elif faces:
+                    search_results = _search_face_terms(candidate_limit)
+                    search_exhausted = len(search_results) < candidate_limit
+                else:
+                    search_results = _search_text_terms(candidate_limit)
+                    search_exhausted = len(search_results) < candidate_limit
+
+                candidate_ids = [int(result["image_id"]) for result in search_results]
+                if not candidate_ids:
+                    if (
+                        not search_exhausted
+                        and candidate_limit < max_candidate_limit
+                        and time.monotonic() < _search_deadline
+                    ):
+                        candidate_limit = min(max_candidate_limit, candidate_limit * 2)
+                        continue
+                    return {"results": [], "total": 0, "hasMore": False}
+
+                score_map = {
+                    int(result["image_id"]): float(result["score"])
+                    for result in search_results
+                }
+                _progress("filtering", "Filtering results…", 0.85)
+                records = _fetch_records(candidate_ids, score_map)
+                records = _sort_records(records)
+                enough_for_page = len(records) > page_end
+                if (
+                    search_exhausted
+                    or enough_for_page
+                    or candidate_limit >= max_candidate_limit
+                    or time.monotonic() >= _search_deadline
+                ):
+                    break
+                candidate_limit = min(max_candidate_limit, candidate_limit * 2)
+
+            has_more = len(records) > page_end or not search_exhausted
+            total: int | None = len(records) if search_exhausted else None
+            return {
+                "results": records[offset: offset + limit],
+                "total": total,
+                "hasMore": has_more,
+            }
+
+        where_clause, query_params = _build_where_clause()
+        total_row = conn.execute(
+            f"SELECT COUNT(*) AS cnt {joins} {where_clause}",
+            query_params,
+        ).fetchone()
+        total = int(total_row["cnt"]) if total_row else 0
+        rows = conn.execute(
+            f"SELECT {select_cols} {joins} {where_clause}{_browse_order_clause()} LIMIT ? OFFSET ?",
+            [*query_params, limit, offset],
+        ).fetchall()
+        records = _rows_to_records(rows, None)
+        has_more = offset + len(records) < total
+        return {"results": records, "total": total, "hasMore": has_more}
+    finally:
+        _release_search_engine()
 
 
 def _handle_search_resolve_face_query(params: dict) -> dict[str, Any]:
@@ -2899,14 +2963,14 @@ def _handle_search_resolve_face_query(params: dict) -> dict[str, Any]:
         raise ValueError("query must be a string")
 
     conn = _get_db()
-    engine = _get_search_engine(conn)
-    resolve_face_queries = getattr(engine, "resolve_face_queries", None)
-    if callable(resolve_face_queries):
-        faces, remaining_query, face_match = resolve_face_queries(query)
-    else:
-        face, remaining_query = engine.resolve_face_query(query)
-        faces = [face] if face else []
-        face_match = "all"
+    with _search_engine_ctx(conn) as engine:
+        resolve_face_queries = getattr(engine, "resolve_face_queries", None)
+        if callable(resolve_face_queries):
+            faces, remaining_query, face_match = resolve_face_queries(query)
+        else:
+            face, remaining_query = engine.resolve_face_query(query)
+            faces = [face] if face else []
+            face_match = "all"
     return {
         "face": faces[0] if faces else None,
         "faces": faces,
@@ -2924,13 +2988,13 @@ def _handle_search_warmup(_params: dict) -> dict:
     import sys
 
     conn = _get_db()
-    engine = _get_search_engine(conn)
-    try:
-        engine._image_clip_cache.get(conn, "image_clip")
-        engine._desc_clip_cache.get(conn, "description_clip")
-        engine._get_rich_desc_image_ids()
-    except Exception as exc:
-        print(f"[search/warmup] partial failure: {exc}", file=sys.stderr)
+    with _search_engine_ctx(conn) as engine:
+        try:
+            engine._image_clip_cache.get(conn, "image_clip")
+            engine._desc_clip_cache.get(conn, "description_clip")
+            engine._get_rich_desc_image_ids()
+        except Exception as exc:
+            print(f"[search/warmup] partial failure: {exc}", file=sys.stderr)
     return {"ok": True}
 
 
@@ -4168,7 +4232,8 @@ def _handle_faces_crop_batch(params: dict) -> dict:
 
     return {"thumbnails": thumbnails}
 
-
+
+
 # ── Image details (single-image metadata lookup) ────────────────────────────
 
 
