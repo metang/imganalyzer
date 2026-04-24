@@ -39,3 +39,7 @@ imganalyzer-app/out/
 # Test images (large binaries)
 test_images/
 test_thumb.jpg
+
+decode_backfill.log
+decode_backfill.err
+debug_search.log
