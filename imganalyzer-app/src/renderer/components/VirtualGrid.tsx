@@ -21,7 +21,7 @@ import { requestImageThumbnail, getCachedImageThumb } from '../lib/thumbnailCach
 const CELL_MIN = 160  // minimum cell width in px
 const CELL_MAX = 220  // maximum cell width — drives column count
 const OVERSCAN_ROWS = 3  // extra rows rendered above/below viewport
-const FALLBACK_THUMB_DELAY_MS = 1500
+const FALLBACK_THUMB_DELAY_MS = 8000
 
 // RAW extensions — module-level Set so the membership test is O(1) and the
 // allocation happens exactly once (previously every GridCell render rebuilt a

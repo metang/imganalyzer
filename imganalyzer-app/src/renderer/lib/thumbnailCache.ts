@@ -49,8 +49,20 @@ class BlobUrlLru<K> {
   set(key: K, url: string): void {
     const existing = this.map.get(key)
     if (existing) {
-      if (existing.url !== url) revokeBlobUrl(existing.url)
+      if (existing.url === url) {
+        // Same URL — just touch (move to MRU end).
+        this.map.delete(key)
+        this.map.set(key, existing)
+        return
+      }
+      // Different URL for the same key — keep the existing one rather than
+      // revoking it, because cells are likely already rendering <img src=…>
+      // pointing at the existing URL. Revoking it mid-load would break those
+      // images. Drop the new (duplicate) blob URL instead.
+      revokeBlobUrl(url)
       this.map.delete(key)
+      this.map.set(key, existing)
+      return
     }
     this.map.set(key, { url })
     this.evictIfNeeded()
@@ -137,6 +149,12 @@ const FACE_CACHE_MAX = 3000
 const imageCache = new BlobUrlLru<string>(IMAGE_CACHE_MAX)
 const imagePendingCallbacks = new Map<string, ThumbCallback[]>()
 const imagePendingItems = new Map<string, { file_path: string; image_id?: number }>()
+// Tracks file paths whose batch RPC has been dispatched but not yet resolved.
+// Used to dedupe a second `requestImageThumbnail` call (e.g. from a fallback
+// timer or a re-mounted cell) into the in-flight request — without this, the
+// duplicate request fires a second RPC, whose resolution would overwrite the
+// already-displayed blob URL with a fresh one and revoke the original mid-load.
+const imageInFlight = new Set<string>()
 let imageBatchTimer: ReturnType<typeof setTimeout> | null = null
 
 export function getCachedImageThumb(filePath: string): string | undefined {
@@ -157,6 +175,11 @@ export function requestImageThumbnail(
   const cbs = imagePendingCallbacks.get(filePath) ?? []
   cbs.push(callback)
   imagePendingCallbacks.set(filePath, cbs)
+
+  // Already dispatched and waiting — the callback above will fire when the
+  // in-flight RPC resolves. No need to enqueue a duplicate batch entry.
+  if (imageInFlight.has(filePath)) return
+
   imagePendingItems.set(
     filePath,
     imageId != null ? { file_path: filePath, image_id: imageId } : { file_path: filePath },
@@ -172,6 +195,7 @@ async function flushImageBatch(): Promise<void> {
 
   const items = [...imagePendingItems.values()]
   imagePendingItems.clear()
+  for (const item of items) imageInFlight.add(item.file_path)
 
   const chunks: Array<typeof items> = []
   for (let i = 0; i < items.length; i += IMAGE_CHUNK_SIZE) {
@@ -188,12 +212,14 @@ async function flushImageBatch(): Promise<void> {
         if (url) imageCache.set(item.file_path, url)
         const cbs = imagePendingCallbacks.get(item.file_path) ?? []
         imagePendingCallbacks.delete(item.file_path)
+        imageInFlight.delete(item.file_path)
         for (const cb of cbs) cb(url)
       }
     } catch {
       for (const item of chunk) {
         const cbs = imagePendingCallbacks.get(item.file_path) ?? []
         imagePendingCallbacks.delete(item.file_path)
+        imageInFlight.delete(item.file_path)
         for (const cb of cbs) cb(null)
       }
     }
@@ -205,6 +231,7 @@ async function flushImageBatch(): Promise<void> {
 const faceCache = new BlobUrlLru<number>(FACE_CACHE_MAX)
 const facePendingCallbacks = new Map<number, ThumbCallback[]>()
 const facePendingIds = new Set<number>()
+const faceInFlight = new Set<number>()
 let faceBatchTimer: ReturnType<typeof setTimeout> | null = null
 
 export function getCachedFaceThumb(occurrenceId: number): string | undefined {
@@ -224,6 +251,9 @@ export function requestFaceThumbnail(
   const cbs = facePendingCallbacks.get(occurrenceId) ?? []
   cbs.push(callback)
   facePendingCallbacks.set(occurrenceId, cbs)
+
+  if (faceInFlight.has(occurrenceId)) return
+
   facePendingIds.add(occurrenceId)
 
   if (faceBatchTimer !== null) return
@@ -246,6 +276,7 @@ async function flushFaceBatch(): Promise<void> {
 
   const ids = [...facePendingIds]
   facePendingIds.clear()
+  for (const id of ids) faceInFlight.add(id)
 
   const chunks: number[][] = []
   for (let i = 0; i < ids.length; i += FACE_CHUNK_SIZE) {
@@ -261,12 +292,14 @@ async function flushFaceBatch(): Promise<void> {
         if (url) faceCache.set(id, url)
         const cbs = facePendingCallbacks.get(id) ?? []
         facePendingCallbacks.delete(id)
+        faceInFlight.delete(id)
         for (const cb of cbs) cb(url)
       }
     } catch {
       for (const id of chunk) {
         const cbs = facePendingCallbacks.get(id) ?? []
         facePendingCallbacks.delete(id)
+        faceInFlight.delete(id)
         for (const cb of cbs) cb(null)
       }
     }
@@ -304,4 +337,10 @@ export function getCachedThumb(id: number | string): string | undefined {
 export function clearThumbCache(): void {
   imageCache.clear()
   faceCache.clear()
+  imagePendingCallbacks.clear()
+  imagePendingItems.clear()
+  imageInFlight.clear()
+  facePendingCallbacks.clear()
+  facePendingIds.clear()
+  faceInFlight.clear()
 }
