@@ -3695,6 +3695,64 @@ def _handle_decode_status(params: dict) -> dict:
         return {"done": 0, "failed": 0, "total": 0, "running": False}
 
 
+def _handle_decode_enqueue_missing(params: dict) -> dict:
+    """Enqueue decode jobs for every image not present in the decoded cache.
+
+    Params (all optional):
+        limit (int): cap the number of images enqueued in this call.
+        raw_first (bool): prioritise RAW formats first (default True).
+
+    Returns counters describing how many images were missing, fed, and
+    already cached / queued.
+    """
+    limit = params.get("limit")
+    raw_first = bool(params.get("raw_first", True))
+    try:
+        limit_int = int(limit) if limit is not None else None
+    except (TypeError, ValueError):
+        limit_int = None
+
+    store = _get_decoded_store()
+    cached_ids = store.cached_image_ids()
+
+    from imganalyzer.db.connection import create_connection
+    conn = create_connection(busy_timeout_ms=_DB_BUSY_TIMEOUT_MS)
+    try:
+        rows = conn.execute(
+            "SELECT id, file_path FROM images ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    total_images = len(rows)
+    missing: list[tuple[int, str]] = [
+        (int(r["id"]), str(r["file_path"]))
+        for r in rows
+        if int(r["id"]) not in cached_ids
+    ]
+    missing_count = len(missing)
+    if limit_int is not None and limit_int >= 0:
+        missing = missing[:limit_int]
+
+    fed = 0
+    if missing:
+        decoder = _get_pre_decoder()
+        fed = decoder.feed(missing, raw_first=raw_first)
+
+    sys.stderr.write(
+        f"[server] decode/enqueue_missing: total={total_images}"
+        f" cached={len(cached_ids)} missing={missing_count}"
+        f" requested={len(missing)} fed={fed}\n"
+    )
+    return {
+        "total_images": total_images,
+        "cached": len(cached_ids),
+        "missing": missing_count,
+        "requested": len(missing),
+        "fed": fed,
+    }
+
+
 # ── Face management handlers ─────────────────────────────────────────────────
 
 def _handle_faces_list(params: dict) -> dict:
@@ -5885,6 +5943,7 @@ _SYNC_METHODS: dict[str, Any] = {
     "fullimage": _handle_fullimage,
     "cachedimage": _handle_cachedimage,
     "decode/status": _handle_decode_status,
+    "decode/enqueue_missing": _handle_decode_enqueue_missing,
     "cancel_run": _handle_cancel_run,
     "cancel_analyze": _handle_cancel_analyze,
     "faces/list": _handle_faces_list,

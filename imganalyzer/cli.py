@@ -830,6 +830,91 @@ def queue_clear(
     console.print(f"[green]Cleared {deleted} job(s) for {scope}.[/green]")
 
 
+@app.command(name="decode-missing")
+def decode_missing(
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        "-n",
+        help="Cap the number of images enqueued in this call (default: all).",
+    ),
+    raw_first: bool = typer.Option(
+        True,
+        "--raw-first/--no-raw-first",
+        help="Prioritise RAW formats first (default: enabled).",
+    ),
+    wait: bool = typer.Option(
+        False,
+        "--wait",
+        help="Block until the pre-decoder finishes processing this batch.",
+    ),
+) -> None:
+    """Find images without a decoded-image-cache entry and enqueue decode jobs.
+
+    Scans the ``images`` table, diffs against the on-disk
+    :class:`~imganalyzer.cache.decoded_store.DecodedImageStore`, and feeds
+    the missing image_ids to the background :class:`PreDecoder`.
+
+    Examples::
+
+        imganalyzer decode-missing
+        imganalyzer decode-missing --limit 1000
+        imganalyzer decode-missing --no-raw-first --wait
+    """
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    import time as _time
+
+    from imganalyzer.cache.decoded_store import DecodedImageStore
+    from imganalyzer.cache.pre_decode import PreDecoder
+    from imganalyzer.db.connection import get_db
+
+    conn = get_db()
+    rows = conn.execute("SELECT id, file_path FROM images ORDER BY id").fetchall()
+    total_images = len(rows)
+
+    store = DecodedImageStore()
+    cached_ids = store.cached_image_ids()
+
+    missing = [
+        (int(r["id"]), str(r["file_path"]))
+        for r in rows
+        if int(r["id"]) not in cached_ids
+    ]
+    missing_count = len(missing)
+    if limit is not None and limit >= 0:
+        missing = missing[:limit]
+
+    console.print(
+        f"[cyan]Images:[/cyan] {total_images}  "
+        f"[cyan]cached:[/cyan] {len(cached_ids)}  "
+        f"[cyan]missing:[/cyan] {missing_count}  "
+        f"[cyan]requested:[/cyan] {len(missing)}"
+    )
+
+    if not missing:
+        console.print("[green]Nothing to do — all images are decoded.[/green]")
+        return
+
+    decoder = PreDecoder(store)
+    fed = decoder.feed(missing, raw_first=raw_first)
+    console.print(f"[green]Fed {fed} image(s) to the pre-decoder.[/green]")
+
+    if wait:
+        with console.status("[cyan]Waiting for pre-decode to finish…"):
+            while True:
+                prog = decoder.progress()
+                in_flight = prog["total"] - prog["done"] - prog["failed"]
+                if in_flight <= 0 and not prog.get("running"):
+                    break
+                _time.sleep(1.0)
+        prog = decoder.progress()
+        console.print(
+            f"[green]Done — decoded {prog['done']}, failed {prog['failed']}.[/green]"
+        )
+
+
 @app.command()
 def rebuild(
     module: str = typer.Argument(
