@@ -140,6 +140,22 @@ class DecodedImageStore:
         self._decode_locks: dict[int, threading.Lock] = {}
         self._decode_locks_guard = threading.Lock()
 
+        # Deferred LRU updates -----------------------------------------------
+        # Touching `last_accessed` synchronously on every read causes severe
+        # SQLite lock contention (especially while the PreDecoder is writing
+        # new entries) and blocks thumbnail RPCs.  Buffer the updates here and
+        # let a background thread flush them every few seconds.
+        self._lru_buffer: dict[int, float] = {}
+        self._lru_buffer_lock = threading.Lock()
+        self._lru_flush_interval = 5.0
+        self._lru_stop = threading.Event()
+        self._lru_thread = threading.Thread(
+            target=self._lru_flush_loop,
+            name="DecodedStoreLRUFlush",
+            daemon=True,
+        )
+        self._lru_thread.start()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -225,6 +241,33 @@ class DecodedImageStore:
     # Public API
     # ------------------------------------------------------------------
 
+    def _touch(self, image_id: int) -> None:
+        """Record a hot-path access; flushed to SQLite by the background thread."""
+        with self._lru_buffer_lock:
+            self._lru_buffer[image_id] = time.time()
+
+    def _lru_flush_loop(self) -> None:
+        """Background thread: periodically batch-flush LRU touches to SQLite."""
+        while not self._lru_stop.wait(self._lru_flush_interval):
+            try:
+                self._flush_lru_buffer()
+            except Exception as exc:
+                log.warning("LRU flush failed: %s", exc)
+
+    def _flush_lru_buffer(self) -> None:
+        """Drain the in-memory LRU buffer in a single transaction."""
+        with self._lru_buffer_lock:
+            if not self._lru_buffer:
+                return
+            pending = list(self._lru_buffer.items())
+            self._lru_buffer.clear()
+        with self._db_lock:
+            self._conn.executemany(
+                "UPDATE entries SET last_accessed = ? WHERE image_id = ?",
+                [(ts, iid) for iid, ts in pending],
+            )
+            self._conn.commit()
+
     def has(self, image_id: int) -> bool:
         """Fast O(1) check whether *image_id* is in the cache."""
         with self._ids_lock:
@@ -263,12 +306,7 @@ class DecodedImageStore:
                     metadata = _decode_binary_fields(json.load(f))
 
             now = time.time()
-            with self._db_lock:
-                self._conn.execute(
-                    "UPDATE entries SET last_accessed = ? WHERE image_id = ?",
-                    (now, image_id),
-                )
-                self._conn.commit()
+            self._touch(image_id)
 
             return pil_image, metadata
         except Exception:
@@ -303,13 +341,7 @@ class DecodedImageStore:
 
         try:
             data = img_path.read_bytes()
-            now = time.time()
-            with self._db_lock:
-                self._conn.execute(
-                    "UPDATE entries SET last_accessed = ? WHERE image_id = ?",
-                    (now, image_id),
-                )
-                self._conn.commit()
+            self._touch(image_id)
             return data
         except Exception:
             return None
@@ -413,6 +445,9 @@ class DecodedImageStore:
         return self._evict_to_target(target_bytes)
 
     def _evict_to_target(self, target_bytes: int) -> int:
+        # Make sure pending LRU touches are committed before we read
+        # last_accessed for ordering decisions.
+        self._flush_lru_buffer()
         freed = 0
         with self._db_lock:
             current = self._conn.execute(
@@ -527,6 +562,11 @@ class DecodedImageStore:
 
     def close(self) -> None:
         """Close the SQLite index connection."""
+        try:
+            self._lru_stop.set()
+            self._flush_lru_buffer()
+        except Exception:
+            pass
         try:
             self._conn.close()
         except Exception:

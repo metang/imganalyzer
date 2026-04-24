@@ -3566,8 +3566,11 @@ def _handle_thumbnails_batch(params: dict) -> dict:
     store = _get_decoded_store()
     conn = _get_db()
 
-    slow_items: list[tuple[str, str]] = []
-    for item in raw_items[:50]:
+    cached_jobs: list[tuple[str, int]] = []   # (cache_key, image_id) — fast path
+    slow_items: list[tuple[str, str]] = []    # (cache_key, file_path) — slow path
+
+    # Cap per-batch work so a huge call doesn't monopolize the worker pool.
+    for item in raw_items[:200]:
         file_path = item.get("file_path", "") if isinstance(item, dict) else str(item)
         image_id = item.get("image_id") if isinstance(item, dict) else None
         cache_key = file_path or (str(image_id) if image_id is not None else "")
@@ -3580,20 +3583,11 @@ def _handle_thumbnails_batch(params: dict) -> dict:
                 if row is not None:
                     file_path = str(row["file_path"] or "")
 
-            # Fast path: resize from pre-decoded 1024px cache (~5ms vs ~200-500ms)
-            if image_id is not None and store.has(image_id):
-                img_bytes = store.get_image_bytes(image_id)
-                if img_bytes:
-                    img = PILImage.open(io.BytesIO(img_bytes))
-                    img.thumbnail((400, 300), PILImage.LANCZOS)
-                    buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=80)
-                    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-                    if cache_key:
-                        thumbnails[cache_key] = f"data:image/jpeg;base64,{b64}"
-                    continue
+            if image_id is not None and store.has(int(image_id)):
+                if cache_key:
+                    cached_jobs.append((cache_key, int(image_id)))
+                continue
 
-            # Slow path: full decode from source file
             if not file_path:
                 raise ValueError("file_path or image_id is required")
             if cache_key:
@@ -3602,7 +3596,61 @@ def _handle_thumbnails_batch(params: dict) -> dict:
             if cache_key:
                 errors[cache_key] = str(exc)
 
+    # Fast path: parallelize the cache-bytes-read + resize + JPEG encode + b64.
+    # Each one is ~5-15ms but doing them sequentially blocks the RPC thread.
+    def _resize_cached(cache_key: str, image_id: int) -> tuple[str, str | None, str | None]:
+        try:
+            img_bytes = store.get_image_bytes(image_id)
+            if not img_bytes:
+                return cache_key, None, "cache miss"
+            img = PILImage.open(io.BytesIO(img_bytes))
+            img.thumbnail((400, 300), PILImage.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80)
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            return cache_key, f"data:image/jpeg;base64,{b64}", None
+        except Exception as exc:
+            return cache_key, None, str(exc)
+
+    if cached_jobs:
+        max_workers = min(8, len(cached_jobs))
+        with ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="thumb-cached"
+        ) as pool:
+            for cache_key, dataurl, err in pool.map(
+                lambda job: _resize_cached(*job), cached_jobs
+            ):
+                if dataurl is not None:
+                    thumbnails[cache_key] = dataurl
+                elif err and cache_key not in thumbnails:
+                    errors[cache_key] = err
+
     if slow_items:
+        # Opportunistically feed every missing item to the background decoder.
+        # The slow-path full decode below will render *this* batch; the
+        # PreDecoder warms the cache for the rest of the folder so the user's
+        # next scroll is served from the fast path.
+        try:
+            decoder = _get_pre_decoder()
+            feed_pairs: list[tuple[int, str]] = []
+            seen_ids: set[int] = set()
+            for raw in raw_items[:200]:
+                if not isinstance(raw, dict):
+                    continue
+                rid = raw.get("image_id")
+                rfp = raw.get("file_path")
+                if rid is None or not rfp:
+                    continue
+                rid_int = int(rid)
+                if rid_int in seen_ids or store.has(rid_int):
+                    continue
+                seen_ids.add(rid_int)
+                feed_pairs.append((rid_int, str(rfp)))
+            if feed_pairs:
+                decoder.feed(feed_pairs)
+        except Exception as exc:
+            sys.stderr.write(f"[server] thumb prefetch feed failed: {exc}\n")
+
         max_workers = min(4, len(slow_items))
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="thumb-batch") as pool:
             future_map = {
