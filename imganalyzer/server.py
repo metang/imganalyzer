@@ -3212,7 +3212,9 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
     import json as _json
 
     conn = _get_db()
-    path_expr = "REPLACE(i.file_path, '\\', '/')"
+    # Use file_path natively (no REPLACE) so SQLite can use idx_images_file_path
+    # for both the LIKE prefix scan and the ORDER BY.
+    path_expr = "i.file_path"
 
     try:
         chunk_size = int(params.get("chunkSize", 300))
@@ -3232,12 +3234,22 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
             raise ValueError("folderPath must be a string")
         folder_norm = folder_path.replace("\\", "/").rstrip("/")
         if folder_norm:
-            escaped = _escape_like(folder_norm)
-            conditions.append(f"{path_expr} LIKE ? ESCAPE '\\'")
-            sql_params.append(f"{escaped}/%")
+            # Build LIKE patterns for both separators using '!' as the escape
+            # character (so literal '\' in the backslash pattern is preserved).
+            def _esc(s: str) -> str:
+                return s.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            fwd = _esc(folder_norm) + "/%"
+            bwd = _esc(folder_norm.replace("/", "\\")) + "\\%"
+            conditions.append(
+                "(i.file_path LIKE ? ESCAPE '!' OR i.file_path LIKE ? ESCAPE '!')"
+            )
+            sql_params.extend([fwd, bwd])
             if not recursive:
-                conditions.append(f"INSTR(SUBSTR({path_expr}, LENGTH(?) + 2), '/') = 0")
-                sql_params.append(folder_norm)
+                conditions.append(
+                    "(INSTR(SUBSTR(i.file_path, LENGTH(?) + 2), '/') = 0 AND "
+                    "INSTR(SUBSTR(i.file_path, LENGTH(?) + 2), '\\') = 0)"
+                )
+                sql_params.extend([folder_norm, folder_norm])
 
     base_conditions = list(conditions)
     base_params = list(sql_params)
