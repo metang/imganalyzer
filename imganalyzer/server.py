@@ -3647,7 +3647,7 @@ def _handle_thumbnails_batch(params: dict) -> dict:
                 seen_ids.add(rid_int)
                 feed_pairs.append((rid_int, str(rfp)))
             if feed_pairs:
-                decoder.feed(feed_pairs)
+                decoder.feed_priority(feed_pairs)
         except Exception as exc:
             sys.stderr.write(f"[server] thumb prefetch feed failed: {exc}\n")
 

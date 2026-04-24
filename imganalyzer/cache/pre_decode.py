@@ -207,6 +207,11 @@ class PreDecoder:
         self._max_workers = max_workers or max(2, min(cpu - 2, 6))
         self._resource_sampler = resource_sampler or ResourceSampler()
         self._executor: ThreadPoolExecutor | None = None
+        # Dedicated small executor for interactive on-demand requests (e.g.
+        # gallery scroll). Bypasses the bulk backfill queue so user-visible
+        # thumbnails don't wait behind 100k+ backfill items.
+        self._priority_executor: ThreadPoolExecutor | None = None
+        self._priority_workers = max(2, min((os.cpu_count() or 4) // 2, 3))
         self._futures: list[Future[bool]] = []
         self._monitor_thread: threading.Thread | None = None
 
@@ -336,12 +341,70 @@ class PreDecoder:
         self._ensure_monitor()
         return len(new)
 
+    def feed_priority(
+        self,
+        items: list[tuple[int, str]],
+        *,
+        raw_first: bool = False,
+    ) -> int:
+        """Add interactive on-demand decode requests with high priority.
+
+        Routes work through a dedicated small executor whose queue is not
+        shared with the bulk backfill, so user-visible requests (gallery
+        scroll, thumbnails) get serviced within seconds instead of waiting
+        hours behind a multi-hundred-thousand item backfill backlog.
+
+        Returns the number of new images actually enqueued.
+        """
+        if self._cancel_event.is_set():
+            return 0
+
+        cached = self._store.cached_image_ids()
+        # Priority feed bypasses _queued_ids dedup so user-visible requests
+        # can preempt items already sitting in the bulk backfill queue. The
+        # per-image decode lock + has() recheck in _decode_one ensures the
+        # bulk worker becomes a cheap no-op when priority finishes first.
+        new = [(iid, fp) for iid, fp in items if iid not in cached]
+        if not new:
+            return 0
+
+        if raw_first:
+            new = self._sort_raw_first(new)
+
+        if self._priority_executor is None:
+            self._priority_executor = ThreadPoolExecutor(
+                max_workers=self._priority_workers,
+                thread_name_prefix="predecode-prio",
+            )
+            self._cancel_event.clear()
+
+        with self._lock:
+            for iid, _ in new:
+                self._queued_ids.add(iid)
+            # Increment total for every submission so per-future _done bumps
+            # in _decode_one stay balanced (the dedup short-circuit there
+            # also increments _done exactly once per submitted future).
+            self._total += len(new)
+            self._running = True
+
+        for iid, fp in new:
+            future = self._priority_executor.submit(self._decode_one, iid, fp)
+            with self._lock:
+                self._futures.append(future)
+
+        log.info("Fed %d priority images to pre-decoder", len(new))
+        self._ensure_monitor()
+        return len(new)
+
     def stop(self) -> None:
         """Cancel any in-progress pre-decode work."""
         self._cancel_event.set()
         if self._executor:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
+        if self._priority_executor:
+            self._priority_executor.shutdown(wait=False, cancel_futures=True)
+            self._priority_executor = None
         with self._lock:
             self._running = False
         log.info("PreDecoder stopped")
