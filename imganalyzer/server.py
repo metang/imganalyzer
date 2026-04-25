@@ -398,6 +398,38 @@ _decoded_store: Any = None  # DecodedImageStore | None
 _decoded_store_lock = threading.Lock()
 _pre_decoder: Any = None    # PreDecoder | None
 
+# Long-lived thread pools for the thumbnails/batch fast and slow paths.
+# Previously each RPC created a fresh ThreadPoolExecutor, which costs
+# ~20-50ms in Windows thread spawn/join overhead per call. Under fast
+# scrolling that wastes 10-20% of throughput.
+_THUMB_CACHED_POOL: Any = None  # ThreadPoolExecutor | None
+_THUMB_SLOW_POOL: Any = None    # ThreadPoolExecutor | None
+_thumb_pool_lock = threading.Lock()
+
+
+def _get_thumb_cached_pool() -> Any:
+    global _THUMB_CACHED_POOL
+    if _THUMB_CACHED_POOL is not None:
+        return _THUMB_CACHED_POOL
+    with _thumb_pool_lock:
+        if _THUMB_CACHED_POOL is None:
+            _THUMB_CACHED_POOL = ThreadPoolExecutor(
+                max_workers=8, thread_name_prefix="thumb-cached"
+            )
+    return _THUMB_CACHED_POOL
+
+
+def _get_thumb_slow_pool() -> Any:
+    global _THUMB_SLOW_POOL
+    if _THUMB_SLOW_POOL is not None:
+        return _THUMB_SLOW_POOL
+    with _thumb_pool_lock:
+        if _THUMB_SLOW_POOL is None:
+            _THUMB_SLOW_POOL = ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="thumb-slow"
+            )
+    return _THUMB_SLOW_POOL
+
 
 def _get_decoded_store() -> Any:
     """Return the global DecodedImageStore, creating it lazily on first use."""
@@ -3613,17 +3645,14 @@ def _handle_thumbnails_batch(params: dict) -> dict:
             return cache_key, None, str(exc)
 
     if cached_jobs:
-        max_workers = min(8, len(cached_jobs))
-        with ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="thumb-cached"
-        ) as pool:
-            for cache_key, dataurl, err in pool.map(
-                lambda job: _resize_cached(*job), cached_jobs
-            ):
-                if dataurl is not None:
-                    thumbnails[cache_key] = dataurl
-                elif err and cache_key not in thumbnails:
-                    errors[cache_key] = err
+        pool = _get_thumb_cached_pool()
+        for cache_key, dataurl, err in pool.map(
+            lambda job: _resize_cached(*job), cached_jobs
+        ):
+            if dataurl is not None:
+                thumbnails[cache_key] = dataurl
+            elif err and cache_key not in thumbnails:
+                errors[cache_key] = err
 
     if slow_items:
         # Opportunistically feed the missing items (only those actually in
@@ -3659,19 +3688,18 @@ def _handle_thumbnails_batch(params: dict) -> dict:
         except Exception as exc:
             sys.stderr.write(f"[server] thumb prefetch feed failed: {exc}\n")
 
-        max_workers = min(4, len(slow_items))
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="thumb-batch") as pool:
-            future_map = {
-                pool.submit(_handle_thumbnail, {"imagePath": file_path}): cache_key
-                for cache_key, file_path in slow_items
-            }
-            for future in as_completed(future_map):
-                cache_key = future_map[future]
-                try:
-                    result = future.result()
-                    thumbnails[cache_key] = f"data:image/jpeg;base64,{result['data']}"
-                except Exception as exc:
-                    errors[cache_key] = str(exc)
+        pool = _get_thumb_slow_pool()
+        future_map = {
+            pool.submit(_handle_thumbnail, {"imagePath": file_path}): cache_key
+            for cache_key, file_path in slow_items
+        }
+        for future in as_completed(future_map):
+            cache_key = future_map[future]
+            try:
+                result = future.result()
+                thumbnails[cache_key] = f"data:image/jpeg;base64,{result['data']}"
+            except Exception as exc:
+                errors[cache_key] = str(exc)
 
     return {"thumbnails": thumbnails, "errors": errors}
 
@@ -6115,6 +6143,30 @@ def _graceful_shutdown() -> None:
         w._shutdown.set()
     if _run_thread is not None and _run_thread.is_alive():
         _run_thread.join(timeout=5)
+
+    # Stop the PreDecoder so its non-daemon ThreadPoolExecutors don't
+    # keep the interpreter alive for ~15s waiting on a 100k-item queue.
+    global _pre_decoder, _decoded_store, _THUMB_CACHED_POOL, _THUMB_SLOW_POOL
+    try:
+        if _pre_decoder is not None:
+            _pre_decoder.stop()
+    except Exception:
+        pass
+    # Flush deferred LRU touches before close.
+    try:
+        if _decoded_store is not None and hasattr(_decoded_store, "close"):
+            _decoded_store.close()
+    except Exception:
+        pass
+    # Drain the long-lived thumbnail pools so workers are joined cleanly.
+    for pool_name in ("_THUMB_CACHED_POOL", "_THUMB_SLOW_POOL"):
+        pool = globals().get(pool_name)
+        if pool is not None:
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            globals()[pool_name] = None
 
 
 def _dispatch_http_request(msg: Any) -> tuple[dict[str, Any], bool]:

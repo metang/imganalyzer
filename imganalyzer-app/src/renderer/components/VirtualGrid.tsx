@@ -14,7 +14,7 @@
  */
 import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import type { SearchResult } from '../global'
-import { requestImageThumbnail, getCachedImageThumb } from '../lib/thumbnailCache'
+import { requestImageThumbnail, getCachedImageThumb, cancelImageThumbnails } from '../lib/thumbnailCache'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -73,7 +73,13 @@ const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellPro
         setLoadFailed(true)
       }
     })
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      // If the cell unmounts before the RPC resolves (user scrolled away,
+      // changed folder), drop the pending callback so flushImageBatch
+      // doesn't fire setSrc on an unmounted component (React warning).
+      cancelImageThumbnails([item.file_path])
+    }
   }, [item.file_path, item.image_id])
 
   // Rescue path: if the batched request stalls (e.g. upstream backpressure),
@@ -97,6 +103,7 @@ const GridCell = memo(function GridCell({ item, selected, onClick }: GridCellPro
     return () => {
       cancelled = true
       window.clearTimeout(timer)
+      cancelImageThumbnails([item.file_path])
     }
   }, [item.file_path, item.image_id, src])
 

@@ -156,6 +156,19 @@ class DecodedImageStore:
         )
         self._lru_thread.start()
 
+        # Flush any buffered LRU touches at interpreter exit so daemon-thread
+        # death doesn't drop them on the floor (would cause LRU drift over
+        # time: hot entries with stale last_accessed get evicted prematurely).
+        import atexit
+        atexit.register(self._atexit_flush)
+
+    def _atexit_flush(self) -> None:
+        """Best-effort LRU flush at interpreter shutdown."""
+        try:
+            self._flush_lru_buffer()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -357,18 +370,21 @@ class DecodedImageStore:
         if not exists:
             # Self-heal: remove stale DB/index entry so the cache gate
             # won't dispatch jobs for this image again.
-            with self._ids_lock:
-                if image_id in self._cached_ids:
-                    self._cached_ids.discard(image_id)
-                    with self._db_lock:
+            # Lock order: _db_lock → _ids_lock everywhere (matches put/delete
+            # paths and avoids any future AB-BA deadlock with _flush_lru_buffer
+            # if it ever needs to consult _cached_ids).
+            with self._db_lock:
+                with self._ids_lock:
+                    if image_id in self._cached_ids:
+                        self._cached_ids.discard(image_id)
                         self._conn.execute(
                             "DELETE FROM entries WHERE image_id = ?",
                             (image_id,),
                         )
                         self._conn.commit()
-                    log.debug(
-                        "Purged stale cache entry %d (file missing)", image_id
-                    )
+                        log.debug(
+                            "Purged stale cache entry %d (file missing)", image_id
+                        )
             return None
 
         try:
