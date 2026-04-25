@@ -188,8 +188,15 @@ class DecodedImageStore:
             for image_id in stale:
                 # Remove DB entry and any leftover sidecar
                 meta = self._meta_path(image_id)
-                if meta.exists():
-                    meta.unlink(missing_ok=True)
+                try:
+                    meta_exists = meta.exists()
+                except OSError:
+                    meta_exists = True  # try to unlink it anyway
+                if meta_exists:
+                    try:
+                        meta.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 self._conn.execute(
                     "DELETE FROM entries WHERE image_id = ?", (image_id,)
                 )
@@ -380,11 +387,24 @@ class DecodedImageStore:
     def get_metadata(self, image_id: int) -> dict[str, Any] | None:
         """Return sidecar metadata without loading the image pixels."""
         meta_path = self._meta_path(image_id)
-        if not meta_path.exists():
+        try:
+            if not meta_path.exists():
+                return None
+        except OSError as exc:
+            log.warning(
+                "Corrupted metadata sidecar %d (%s) — removing", image_id, exc
+            )
+            self.delete(image_id)
             return None
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 return _decode_binary_fields(json.load(f))
+        except OSError as exc:
+            log.warning(
+                "Corrupted metadata sidecar %d (%s) — removing", image_id, exc
+            )
+            self.delete(image_id)
+            return None
         except Exception:
             return None
 
