@@ -5,6 +5,7 @@ import type {
 } from '../global'
 import { SearchLightbox } from './SearchLightbox'
 import { VirtualGrid } from './VirtualGrid'
+import { cancelImageThumbnails } from '../lib/thumbnailCache'
 
 const CHUNK_SIZE = 150
 
@@ -239,6 +240,10 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
   }, [loadFolders])
 
   useEffect(() => {
+    // Drop in-flight thumbnail RPCs from the previous folder so their
+    // results don't pollute the LRU cache and evict thumbs the user is
+    // actually looking at now.
+    cancelImageThumbnails(null)
     void loadInitialChunk()
   }, [loadInitialChunk])
 

@@ -3626,14 +3626,16 @@ def _handle_thumbnails_batch(params: dict) -> dict:
                     errors[cache_key] = err
 
     if slow_items:
-        # Opportunistically feed every missing item to the background decoder.
-        # The slow-path full decode below will render *this* batch; the
-        # PreDecoder warms the cache for the rest of the folder so the user's
-        # next scroll is served from the fast path.
+        # Opportunistically feed the missing items (only those actually in
+        # the slow path) to the priority decoder. Cap to PRIORITY_FEED_MAX
+        # so rapid scrolling doesn't pile thousands of futures onto the
+        # 2-3 worker priority pool.
         try:
             decoder = _get_pre_decoder()
+            slow_paths = {fp for _, fp in slow_items}
             feed_pairs: list[tuple[int, str]] = []
             seen_ids: set[int] = set()
+            PRIORITY_FEED_MAX = 50
             for raw in raw_items[:200]:
                 if not isinstance(raw, dict):
                     continue
@@ -3641,11 +3643,17 @@ def _handle_thumbnails_batch(params: dict) -> dict:
                 rfp = raw.get("file_path")
                 if rid is None or not rfp:
                     continue
+                # Only feed items that actually missed the cache in this batch
+                # (slow_items keys by the resolved file_path).
+                if str(rfp) not in slow_paths:
+                    continue
                 rid_int = int(rid)
                 if rid_int in seen_ids or store.has(rid_int):
                     continue
                 seen_ids.add(rid_int)
                 feed_pairs.append((rid_int, str(rfp)))
+                if len(feed_pairs) >= PRIORITY_FEED_MAX:
+                    break
             if feed_pairs:
                 decoder.feed_priority(feed_pairs)
         except Exception as exc:

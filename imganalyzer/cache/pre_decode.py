@@ -217,6 +217,12 @@ class PreDecoder:
 
         # Track which IDs have been submitted to avoid duplicates
         self._queued_ids: set[int] = set()
+        # Track image IDs currently sitting in the priority queue so a
+        # second call (e.g. user scrolls past the same item twice) doesn't
+        # pile duplicate futures onto the small priority pool. The bulk
+        # _queued_ids dedup is intentionally bypassed so priority work can
+        # preempt items already queued in the bulk backfill.
+        self._priority_pending: set[int] = set()
 
         # Progress tracking
         self._lock = threading.Lock()
@@ -364,7 +370,14 @@ class PreDecoder:
         # can preempt items already sitting in the bulk backfill queue. The
         # per-image decode lock + has() recheck in _decode_one ensures the
         # bulk worker becomes a cheap no-op when priority finishes first.
-        new = [(iid, fp) for iid, fp in items if iid not in cached]
+        # However we still dedupe against _priority_pending so rapid scroll
+        # doesn't submit the same iid to the priority pool repeatedly.
+        with self._lock:
+            new = [
+                (iid, fp)
+                for iid, fp in items
+                if iid not in cached and iid not in self._priority_pending
+            ]
         if not new:
             return 0
 
@@ -380,6 +393,7 @@ class PreDecoder:
 
         with self._lock:
             for iid, _ in new:
+                self._priority_pending.add(iid)
                 self._queued_ids.add(iid)
             # Increment total for every submission so per-future _done bumps
             # in _decode_one stay balanced (the dedup short-circuit there
@@ -511,12 +525,15 @@ class PreDecoder:
         to prevent duplicate work.
         """
         if self._cancel_event.is_set():
+            with self._lock:
+                self._priority_pending.discard(image_id)
             return False
 
         # Double-check (another thread may have cached it)
         if self._store.has(image_id):
             with self._lock:
                 self._done += 1
+                self._priority_pending.discard(image_id)
             return True
 
         lock = self._store.get_decode_lock(image_id)
@@ -603,6 +620,7 @@ class PreDecoder:
             finally:
                 with self._lock:
                     self._queued_ids.discard(image_id)
+                    self._priority_pending.discard(image_id)
 
     def _read_image(self, path: Path) -> dict[str, Any]:
         """Read full image data (pixels + metadata)."""

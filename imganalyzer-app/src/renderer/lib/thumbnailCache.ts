@@ -161,6 +161,29 @@ export function getCachedImageThumb(filePath: string): string | undefined {
   return imageCache.get(filePath)
 }
 
+/**
+ * Drop pending callbacks and in-flight markers for paths the caller no longer
+ * cares about (e.g. after switching folder/year filter). The RPCs themselves
+ * can't be cancelled but their results will be ignored, freeing the in-flight
+ * dedup so the same path can be requested fresh later, and preventing stale
+ * thumbnails from polluting the LRU cache.
+ *
+ * Pass `null` to drop ALL pending image requests.
+ */
+export function cancelImageThumbnails(filePaths: Iterable<string> | null): void {
+  if (filePaths === null) {
+    for (const path of imageInFlight) imagePendingCallbacks.delete(path)
+    imageInFlight.clear()
+    imagePendingItems.clear()
+    return
+  }
+  for (const path of filePaths) {
+    imagePendingCallbacks.delete(path)
+    imageInFlight.delete(path)
+    imagePendingItems.delete(path)
+  }
+}
+
 export function requestImageThumbnail(
   filePath: string,
   imageId: number | null | undefined,
@@ -209,6 +232,14 @@ async function flushImageBatch(): Promise<void> {
         const raw = result[item.file_path]
           ?? (item.image_id != null ? result[String(item.image_id)] : undefined)
         const url = toBlobUrl(raw)
+        // If cancelImageThumbnails() ran while we were awaiting, the path was
+        // removed from imageInFlight. Drop the result rather than poisoning
+        // the LRU cache with an entry no visible cell asked for.
+        const cancelled = !imageInFlight.has(item.file_path)
+        if (cancelled) {
+          if (url) revokeBlobUrl(url)
+          continue
+        }
         if (url) imageCache.set(item.file_path, url)
         const cbs = imagePendingCallbacks.get(item.file_path) ?? []
         imagePendingCallbacks.delete(item.file_path)
