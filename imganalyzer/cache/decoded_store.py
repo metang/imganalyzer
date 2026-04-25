@@ -172,7 +172,11 @@ class DecodedImageStore:
         stale: list[int] = []
         for r in rows:
             image_id = r[0]
-            if self._image_path(image_id).exists():
+            try:
+                exists = self._image_path(image_id).exists()
+            except OSError:
+                exists = False
+            if exists:
                 valid.add(image_id)
             else:
                 stale.append(image_id)
@@ -289,7 +293,15 @@ class DecodedImageStore:
         Updates the LRU timestamp on every successful read.
         """
         img_path = self._image_path(image_id)
-        if not img_path.exists():
+        try:
+            exists = img_path.exists()
+        except OSError as exc:
+            log.warning(
+                "Corrupted cache entry %d (%s) — removing", image_id, exc
+            )
+            self.delete(image_id)
+            return None
+        if not exists:
             # Stale index entry — clean up
             with self._ids_lock:
                 self._cached_ids.discard(image_id)
@@ -301,11 +313,14 @@ class DecodedImageStore:
 
             metadata: dict[str, Any] = {}
             meta_path = self._meta_path(image_id)
-            if meta_path.exists():
+            try:
+                meta_exists = meta_path.exists()
+            except OSError:
+                meta_exists = False
+            if meta_exists:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     metadata = _decode_binary_fields(json.load(f))
 
-            now = time.time()
             self._touch(image_id)
 
             return pil_image, metadata
@@ -318,11 +333,21 @@ class DecodedImageStore:
         """Return raw image file bytes without PIL decode.
 
         Useful for HTTP serving where we send binary directly.
-        Updates LRU timestamp.  Automatically purges stale index entries
-        when the file is missing on disk.
+        Updates LRU timestamp.  Automatically purges stale or corrupted
+        index entries.
         """
         img_path = self._image_path(image_id)
-        if not img_path.exists():
+        try:
+            exists = img_path.exists()
+        except OSError as exc:
+            # Filesystem-level corruption (e.g. WinError 1392). Purge so we
+            # never try to read this entry again.
+            log.warning(
+                "Corrupted cache entry %d (%s) — removing", image_id, exc
+            )
+            self.delete(image_id)
+            return None
+        if not exists:
             # Self-heal: remove stale DB/index entry so the cache gate
             # won't dispatch jobs for this image again.
             with self._ids_lock:
@@ -343,6 +368,12 @@ class DecodedImageStore:
             data = img_path.read_bytes()
             self._touch(image_id)
             return data
+        except OSError as exc:
+            log.warning(
+                "Corrupted cache file %d (%s) — removing", image_id, exc
+            )
+            self.delete(image_id)
+            return None
         except Exception:
             return None
 
@@ -382,7 +413,15 @@ class DecodedImageStore:
         if self._fmt == "webp":
             save_kwargs["method"] = 4  # speed / compression trade-off
         pil_format = "JPEG" if self._fmt == "jpeg" else self._fmt.upper()
-        resized.save(str(img_path), format=pil_format, **save_kwargs)
+        try:
+            resized.save(str(img_path), format=pil_format, **save_kwargs)
+        except OSError:
+            # Existing file may be corrupted (WinError 1392). Unlink and retry.
+            try:
+                img_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            resized.save(str(img_path), format=pil_format, **save_kwargs)
 
         file_size = img_path.stat().st_size
         meta_size = 0
