@@ -115,4 +115,3 @@ def test_search_engine_cache_resets_when_search_class_changes(tmp_path: Path) ->
 
     assert second is not first
     assert isinstance(second, SecondSearchEngine)
-

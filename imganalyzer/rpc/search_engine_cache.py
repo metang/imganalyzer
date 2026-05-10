@@ -96,4 +96,3 @@ class SearchEngineCache:
             yield engine
         finally:
             self.release()
-

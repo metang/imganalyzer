@@ -63,4 +63,3 @@ class RpcHandlerRegistry:
                 delay_s = min(delay_s * 2, 1.0) if delay_s > 0 else 0.0
 
         raise RuntimeError("unreachable retry loop exit")
-
