@@ -5,6 +5,13 @@ Electron + React 18 + TypeScript + Tailwind CSS frontend (`imganalyzer-app/`) wi
 
 See `ARCHITECTURE.md` for full project structure.
 
+## Ownership Map
+
+- Backend module metadata is canonical in `imganalyzer\pipeline\module_registry.py` (active/legacy module names, table map, priorities, prerequisites, GPU phases, VRAM estimates, queue remaps, distributed flags). Keep scheduler, worker, repository, VRAM budget, batch enqueueing, server remap constants, and distributed routing derived from it.
+- Frontend module metadata is canonical in `imganalyzer-app\src\shared\moduleMetadata.ts` (labels, pass selector order, result/progress labels, retry aliases). `PassSelector`, `ProgressDashboard`, `LiveResultsFeed`, batch error display, and IPC/global types consume it.
+- RPC seams live in `imganalyzer\rpc\handler_registry.py` (method lookup + transient DB-lock retry) and `imganalyzer\rpc\search_engine_cache.py` (thread-safe `SearchEngine` reuse/rebind). `server.py` owns public JSON-RPC method names and transports.
+- Repo hygiene is enforced by `.gitignore`: generated root logs, caches, build outputs, `*.egg-info`, `__pycache__`, and generated `model-eval` reports are disposable; source, tests, fixtures, lockfiles, and canonical docs stay tracked.
+
 ## Critical Rules
 
 ### 1. SQLite: NEVER reuse connections across threads
@@ -51,31 +58,29 @@ db = get_db()
 - Use direct callback references (e.g., `worker._result_notify = callback`) instead of monkey-patching builtins.
 
 ### 5. ThreadPoolExecutor futures must be collected
-- The worker uses `ThreadPoolExecutor` for IO/cloud analysis modules.
+- The worker/scheduler uses `ThreadPoolExecutor` for local I/O and per-module execution tasks.
 - Futures from the executor must be explicitly collected and their results/exceptions handled.
 - Uncollected futures with exceptions are silently swallowed.
 - Always emit result notifications for both success AND failure cases.
 
-### 6. Scheduler/pipeline module changes require 3 mandatory steps
-Any change that renames, adds, or removes a pipeline module **must** complete all three steps:
+### 6. Scheduler/pipeline module changes require 4 mandatory steps
+Any change that renames, adds, or removes a pipeline module **must** complete all four steps:
 
-1. **Update scheduler & worker code**
-   - `imganalyzer/pipeline/scheduler.py`: Update `_GPU_PHASES`, `INDEPENDENT_GPU_MODULES`, `_PREREQUISITES`, module sets.
-   - `imganalyzer/pipeline/worker.py`: Update `GPU_MODULES`, `_PREREQUISITES`, docstrings, phase labels.
-   - `imganalyzer/pipeline/modules.py`: Add/remove module runner and `unload_gpu_model()` handler.
-   - `imganalyzer/db/repository.py`: Update `MODULE_TABLE_MAP`, `_LEGACY_MODULES`, and `ALL_MODULES`.
-   - `imganalyzer/pipeline/vram_budget.py`: Update `_MODULE_VRAM_GB` entries.
+1. **Update backend metadata**
+   - `imganalyzer\pipeline\module_registry.py`: active/legacy name, table map, priority, prerequisite, VRAM, GPU phase, distributed flags, queue remap.
+   - Downstream scheduler/worker/repository/VRAM/server constants should import from the registry instead of adding parallel hard-coded lists.
 
-2. **Ensure distributed worker compatibility**
-   - `imganalyzer/pipeline/distributed_worker.py`: Update `_probe_available_modules()` — it checks Ollama for caption, CUDA for perception, etc. If a module isn't probed, workers won't advertise it.
-   - `imganalyzer-app/src/renderer/components/PassSelector.tsx`: Update UI module keys/labels.
-   - `imganalyzer-app/src/renderer/components/ProgressDashboard.tsx`: Update `MODULE_LABELS`.
+2. **Update execution/runtime seams**
+   - `imganalyzer\pipeline\modules.py`: add/remove module runner and `unload_gpu_model()` handler.
+   - `imganalyzer\analysis\*` or `imganalyzer\pipeline\passes\*`: add/remove implementation.
+   - `imganalyzer\pipeline\distributed_worker.py`: update `_probe_available_modules()` when runtime dependencies or hardware requirements change.
 
-3. **Migrate the live job queue**
-   - Add old→new mapping to `remap_pending_modules()` calls in **both**:
-     - `worker.py` `_run_loop()` (~line 306)
-     - `server.py` `_serve_http_jsonrpc()` (~line 2648)
-   - Run the remap on the production database to convert existing pending jobs:
+3. **Update frontend metadata**
+   - `imganalyzer-app\src\shared\moduleMetadata.ts`: labels, selector order, progress/result labels, legacy retry aliases.
+   - UI components should consume shared metadata rather than defining their own module label maps.
+
+4. **Migrate the live job queue**
+   - Add/remove `queue_remap_to` in the registry and run the remap on existing pending/running jobs:
      ```python
      from imganalyzer.db.queue import JobQueue
      q = JobQueue(conn)
@@ -83,7 +88,7 @@ Any change that renames, adds, or removes a pipeline module **must** complete al
      q.recover_stale(timeout_minutes=0)  # clear stuck running jobs
      ```
 
-**Why all 3 steps?** Missing step 1 crashes the coordinator. Missing step 2 causes workers to silently skip jobs ("no claimable pending modules"). Missing step 3 leaves old module names in the queue that no worker recognizes.
+**Why all 4 steps?** Missing metadata breaks scheduling or DB ownership. Missing runtime/probe updates causes claim-then-fail or no-claim behavior. Missing frontend metadata leaves stale UI labels/retry behavior. Missing queue migration leaves old module names unclaimable.
 
 ## Architecture Reminders
 
@@ -104,14 +109,18 @@ worker.py _emit_result()
 - These are independent systems. Progress can work while results are broken (and vice versa).
 
 ### Key file locations
-- Python server: `imganalyzer/server.py`
-- Batch worker: `imganalyzer/pipeline/worker.py`
-- DB connection: `imganalyzer/db/connection.py`
-- Job queue: `imganalyzer/db/queue.py`
-- Electron batch handler: `imganalyzer-app/src/main/batch.ts`
-- JSON-RPC transport: `imganalyzer-app/src/main/python-rpc.ts`
-- React batch hook: `imganalyzer-app/src/renderer/hooks/useBatchProcess.ts`
-- LiveResultsFeed: `imganalyzer-app/src/renderer/components/LiveResultsFeed.tsx`
+- Python server: `imganalyzer\server.py`
+- RPC handler registry: `imganalyzer\rpc\handler_registry.py`
+- SearchEngine cache seam: `imganalyzer\rpc\search_engine_cache.py`
+- Backend module metadata: `imganalyzer\pipeline\module_registry.py`
+- Batch worker: `imganalyzer\pipeline\worker.py`
+- DB connection: `imganalyzer\db\connection.py`
+- Job queue: `imganalyzer\db\queue.py`
+- Frontend module metadata: `imganalyzer-app\src\shared\moduleMetadata.ts`
+- Electron batch handler: `imganalyzer-app\src\main\batch.ts`
+- JSON-RPC transport: `imganalyzer-app\src\main\python-rpc.ts`
+- React batch hook: `imganalyzer-app\src\renderer\hooks\useBatchProcess.ts`
+- LiveResultsFeed: `imganalyzer-app\src\renderer\components\LiveResultsFeed.tsx`
 
 ## Code Style
 - Python: Follow existing patterns in the codebase. Use type hints. Use `typer` for CLI.

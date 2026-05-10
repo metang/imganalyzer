@@ -1,27 +1,10 @@
-import type { ModuleKey } from '../hooks/useBatchProcess'
-
-// ── Pass definitions ──────────────────────────────────────────────────────────
-
-/**
- * A UI pass row.  `uiKey` is unique per row and used for checkbox state.
- * `moduleKey` is the CLI key sent to the backend (one-to-one since the refactor).
- */
-interface PassDef {
-  label: string
-  uiKey: string
-  moduleKey: ModuleKey
-  note?: string
-}
-
-const PASSES: PassDef[] = [
-  { label: 'Metadata (EXIF / GPS / IPTC)',           uiKey: 'metadata',   moduleKey: 'metadata'  },
-  { label: 'Technical (sharpness, exposure, noise)',  uiKey: 'technical',  moduleKey: 'technical' },
-  { label: 'Object Detection (GroundingDINO)',        uiKey: 'objects',    moduleKey: 'objects'   },
-  { label: 'Face Recognition (InsightFace)',          uiKey: 'faces',      moduleKey: 'faces',     note: 'requires objects' },
-  { label: 'Caption & Keywords (Qwen 3.5)',           uiKey: 'caption',    moduleKey: 'caption'  },
-  { label: 'Perception (UniPercept)',                  uiKey: 'perception', moduleKey: 'perception' },
-  { label: 'Embeddings',                              uiKey: 'embedding',  moduleKey: 'embedding' },
-]
+import {
+  DEFAULT_PASS_SELECTOR_KEYS,
+  PASS_SELECTOR_MODULES,
+  WORKER_THREAD_POOL_MODULE_KEYS,
+  formatModuleResultLabelList,
+} from '../../shared/moduleMetadata'
+import type { ModuleKey } from '../../shared/moduleMetadata'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -30,7 +13,7 @@ const PASSES: PassDef[] = [
  * Call `resolveModuleKeys(selectedKeys)` to get the CLI module keys.
  */
 export interface PassSelectorValue {
-  selectedKeys: Set<string>
+  selectedKeys: Set<ModuleKey>
   workers: number
   recursive: boolean
   noHash: boolean
@@ -41,9 +24,9 @@ export interface PassSelectorValue {
  * Convert the UI-level selectedKeys set to the CLI module key array.
  * Each UI pass maps to a distinct module key since the split-pass refactor.
  */
-export function resolveModuleKeys(selectedKeys: Set<string>): ModuleKey[] {
+export function resolveModuleKeys(selectedKeys: ReadonlySet<ModuleKey>): ModuleKey[] {
   const result = new Set<ModuleKey>()
-  for (const pass of PASSES) {
+  for (const pass of PASS_SELECTOR_MODULES) {
     if (selectedKeys.has(pass.uiKey)) {
       result.add(pass.moduleKey)
     }
@@ -61,8 +44,9 @@ interface Props {
 
 export function PassSelector({ value, onChange, disabled }: Props) {
   const { selectedKeys, workers, recursive, noHash, forceReprocess } = value
+  const workerThreadPoolLabel = formatModuleResultLabelList(WORKER_THREAD_POOL_MODULE_KEYS)
 
-  const toggleKey = (uiKey: string) => {
+  const toggleKey = (uiKey: ModuleKey) => {
     const next = new Set(selectedKeys)
     if (next.has(uiKey)) next.delete(uiKey)
     else next.add(uiKey)
@@ -77,7 +61,7 @@ export function PassSelector({ value, onChange, disabled }: Props) {
         <legend className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-2">
           Analysis passes
         </legend>
-        {PASSES.map((pass) => {
+        {PASS_SELECTOR_MODULES.map((pass) => {
           const checked = selectedKeys.has(pass.uiKey)
           return (
             <label
@@ -108,11 +92,11 @@ export function PassSelector({ value, onChange, disabled }: Props) {
       <div className="flex flex-col gap-3">
         <p className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">Options</p>
 
-        {/* Workers slider — metadata & technical thread pool */}
+        {/* Workers slider — local thread pool modules */}
         <div className="flex items-center gap-3">
           <label className="text-sm text-neutral-300 w-36 shrink-0">
             Workers
-            <span className="block text-xs text-neutral-600 font-normal">metadata, technical</span>
+            <span className="block text-xs text-neutral-600 font-normal">{workerThreadPoolLabel}</span>
           </label>
           <input
             type="range"
@@ -171,9 +155,8 @@ export function PassSelector({ value, onChange, disabled }: Props) {
 /** Default value — all passes enabled, 2 workers. */
 export function defaultPassSelectorValue(): PassSelectorValue {
   return {
-    selectedKeys: new Set<string>([
-      'metadata', 'technical', 'objects', 'faces',
-      'caption', 'perception', 'embedding',
+    selectedKeys: new Set<ModuleKey>([
+      ...DEFAULT_PASS_SELECTOR_KEYS,
     ]),
     workers: 2,
     recursive: true,

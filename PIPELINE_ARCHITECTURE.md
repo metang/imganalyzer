@@ -3,6 +3,11 @@
 This document describes the current scheduler implementation used by both the
 local coordinator worker and distributed workers.
 
+`imganalyzer\pipeline\module_registry.py` is the backend source of truth for
+active modules, legacy remaps, priorities, prerequisites, VRAM estimates, GPU
+phases, and distributed flags. Frontend labels/order live separately in
+`imganalyzer-app\src\shared\moduleMetadata.ts`.
+
 ## 1) Active modules and legacy compatibility
 
 Active pipeline modules:
@@ -29,34 +34,46 @@ reconciliation so resume works with old queues.
 
 Scheduling logic is split by responsibility:
 
-- `imganalyzer/pipeline/unified_scheduler.py`
+- `imganalyzer\pipeline\module_registry.py`
+  - Canonical backend module metadata (`ACTIVE_MODULES`, table map, priorities,
+    prerequisites, GPU phases, VRAM estimates, legacy queue remaps, distributed
+    master/cache flags).
+  - Imported by scheduler, worker, repository, VRAM budget, batch enqueueing,
+    server remap constants, and distributed routing.
+
+- `imganalyzer\pipeline\unified_scheduler.py`
   - Central claim policy kernel.
   - Worker control states (`active`, `pause-drain`, `pause-immediate`, `paused`).
   - Capability filtering (including CUDA-gated `perception`).
   - Module affinity epoch + ETA-aware preference via per-worker EWMA timings.
 
-- `imganalyzer/db/queue.py`
+- `imganalyzer\db\queue.py`
   - Persistent queue and lease primitives (enqueue/claim/lease heartbeat/complete/fail).
   - Runtime reconciliation primitives (`reconcile_runtime_state`, `recover_stale`).
 
-- `imganalyzer/pipeline/worker.py`
+- `imganalyzer\pipeline\worker.py`
   - Local master worker execution loop.
   - Chunk and mini-batch orchestration.
   - Anti-idle behavior while remote leases are still running.
 
-- `imganalyzer/pipeline/scheduler.py`
+- `imganalyzer\pipeline\scheduler.py`
   - GPU phase execution engine.
   - In-phase concurrency and IO/GPU interleaving.
   - VRAM-ready gating and phase model load/unload boundaries.
 
-- `imganalyzer/pipeline/distributed_worker.py`
+- `imganalyzer\pipeline\distributed_worker.py`
   - Remote worker claim/execute/report loop.
-  - Capability probing and pause/resume honoring.
+  - Capability probing for host-specific runtimes and pause/resume honoring.
 
-- `imganalyzer/server.py`
+- `imganalyzer\server.py`
   - RPC control plane (`workers/*`, `jobs/*`).
   - Delegates claim policy decisions to `compute_claim_policy`.
   - One-time startup reconciliation.
+
+- `imganalyzer\rpc\handler_registry.py` and
+  `imganalyzer\rpc\search_engine_cache.py`
+  - JSON-RPC dispatch/retry and SearchEngine cache seams used by `server.py`
+    without changing public method names.
 
 ## 3) Queue and claim model
 
@@ -180,10 +197,15 @@ using `(completed_at - started_at)` in SQL.
 
 When adding/removing/renaming modules:
 
-1. Update scheduler + worker/module dispatch + repository map + VRAM budget.
-2. Update distributed worker capability probe + UI module labels/selectors.
-3. Add legacy remap mapping in both worker run loop and coordinator reconciliation,
-   and run queue remap for existing pending/running jobs.
+1. Update `module_registry.py` for backend metadata (active/legacy name, table,
+   priority, prerequisite, VRAM, phase, distributed flags, and queue remap).
+2. Update execution/runtime seams that cannot be data-only: module dispatch and
+   model unload handlers in `pipeline/modules.py`, pass/analysis implementation,
+   and `distributed_worker.py` capability probes when dependencies change.
+3. Update frontend metadata in `imganalyzer-app\src\shared\moduleMetadata.ts`
+   for labels, ordering, and retry aliases.
+4. Run queue remap/recovery for existing pending/running jobs when a legacy
+   mapping changes.
 
 Skipping any of these can leave jobs permanently unclaimable.
 

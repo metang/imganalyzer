@@ -160,6 +160,35 @@ class TestDecodedImageStore:
     def test_get_image_bytes_miss(self, store: DecodedImageStore) -> None:
         assert store.get_image_bytes(999) is None
 
+    def test_get_image_bytes_purges_stale_index_entry(
+        self, store: DecodedImageStore, sample_image: Image.Image
+    ) -> None:
+        store.put(1, sample_image)
+        assert store.has(1)
+
+        store._image_path(1).unlink()
+
+        assert store.get_image_bytes(1) is None
+        assert not store.has(1)
+        assert store.entry_count == 0
+        row = store._conn.execute(
+            "SELECT 1 FROM entries WHERE image_id = ?",
+            (1,),
+        ).fetchone()
+        assert row is None
+
+    def test_get_purges_corrupt_cached_image(
+        self, store: DecodedImageStore, sample_image: Image.Image
+    ) -> None:
+        store.put(2, sample_image)
+        assert store.has(2)
+
+        store._image_path(2).write_bytes(b"not a valid image")
+
+        assert store.get(2) is None
+        assert not store.has(2)
+        assert store.entry_count == 0
+
     def test_metadata_with_binary(
         self, store: DecodedImageStore, sample_image: Image.Image
     ) -> None:

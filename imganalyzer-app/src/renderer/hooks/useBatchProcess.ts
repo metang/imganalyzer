@@ -7,21 +7,12 @@ import type {
   BatchStatus,
   BatchIngestProgress,
 } from '../global'
+import type { ModuleKey } from '../../shared/moduleMetadata'
 
 // ── Pass config ───────────────────────────────────────────────────────────────
 
-/** All CLI module keys selectable by the user. */
-export const ALL_MODULE_KEYS = [
-  'metadata',
-  'technical',
-  'caption',
-  'objects',
-  'faces',
-  'perception',
-  'embedding',
-] as const
-
-export type ModuleKey = (typeof ALL_MODULE_KEYS)[number]
+export { ALL_MODULE_KEYS } from '../../shared/moduleMetadata'
+export type { ModuleKey } from '../../shared/moduleMetadata'
 
 /** Default empty stats object. */
 function emptyStats(): BatchStats {
@@ -85,7 +76,7 @@ export interface UseBatchProcessReturn {
   /** Re-enqueue all failed jobs for the given modules and re-run. */
   retryFailed(modules: string[]): Promise<void>
   /** Re-enqueue ALL images for a single module (force rebuild) and run. */
-  rebuildModule(module: string): Promise<void>
+  rebuildModule(module: ModuleKey): Promise<void>
   /** Wipe the entire job queue and reset to idle. Returns number of deleted jobs. */
   clearQueue(): Promise<number>
   /** Remove completed (done + skipped) jobs from the queue. Returns number of deleted jobs. */
@@ -293,7 +284,7 @@ export function useBatchProcess(): UseBatchProcessReturn {
     }
   }, [])
 
-  const rebuildModule = useCallback(async (module: string) => {
+  const rebuildModule = useCallback(async (module: ModuleKey) => {
     try {
       setStats((prev) => ({ ...prev, status: 'running' as BatchStatus, monitorOnly: false }))
       await window.api.batchRebuildModule(module)

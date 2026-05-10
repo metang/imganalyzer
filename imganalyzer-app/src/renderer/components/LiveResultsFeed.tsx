@@ -1,5 +1,6 @@
 import { memo, useMemo } from 'react'
 import type { BatchResult } from '../global'
+import { getModuleResultLabel } from '../../shared/moduleMetadata'
 
 interface Props {
   results: BatchResult[]
@@ -9,16 +10,6 @@ const STATUS_COLORS: Record<BatchResult['status'], string> = {
   done:    'text-emerald-400',
   failed:  'text-red-400',
   skipped: 'text-yellow-400',
-}
-
-const MODULE_LABELS: Record<string, string> = {
-  metadata: 'metadata',
-  technical: 'technical',
-  caption: 'caption',
-  objects: 'objects',
-  faces: 'faces',
-  perception: 'perception',
-  embedding: 'embedding',
 }
 
 const STATUS_LABELS: Record<BatchResult['status'], string> = {
@@ -117,7 +108,7 @@ const ResultRow = memo(function ResultRow({ result: r, nodeColor: nc }: ResultRo
         {r.nodeLabel}
       </span>
       {/* Module name — fixed width */}
-      <span className="w-20 shrink-0 text-neutral-500">{MODULE_LABELS[r.module] ?? r.module}</span>
+      <span className="w-20 shrink-0 text-neutral-500">{getModuleResultLabel(r.module)}</span>
       {/* Filename — shrinks to make room for error */}
       <span
         className="shrink-0 text-neutral-300 truncate max-w-[180px]"

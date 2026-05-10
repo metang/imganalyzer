@@ -11,6 +11,7 @@ from rich.console import Console
 from imganalyzer.db.queue import JobQueue
 from imganalyzer.db.repository import Repository, ALL_MODULES
 from imganalyzer.pipeline.modules import compute_file_fingerprint
+from imganalyzer.pipeline.module_registry import module_priority as _registry_module_priority
 
 console = Console()
 
@@ -298,12 +299,4 @@ class BatchProcessor:
 
 def _module_priority(module: str) -> int:
     """Assign default priorities — metadata first, objects highest GPU, embedding last."""
-    return {
-        "metadata":   100,
-        "technical":   90,
-        "objects":     85,
-        "caption":     80,
-        "faces":       77,
-        "perception":  60,
-        "embedding":   50,
-    }.get(module, 0)
+    return _registry_module_priority(module)

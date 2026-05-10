@@ -13,20 +13,18 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
+from imganalyzer.pipeline.module_registry import (
+    EXCLUSIVE_GPU_MODULES,
+    MODULE_VRAM_GB,
+)
+
 
 # Peak VRAM (GB) per module including model weights + batch activations.
 # Tuned for the default _GPU_BATCH_SIZES in worker.py.
-_MODULE_VRAM_GB: dict[str, float] = {
-    "caption":   8.7,   # qwen3.5:9b Q4_K_M via Ollama (8.7 GB per `ollama ps`)
-    "objects":    2.4,   # GroundingDINO mixed fp16/fp32, batch=4
-    "faces":     1.0,   # InsightFace buffalo_l ONNX (1 GB arena cap)
-    "embedding": 0.95,  # CLIP ViT-L/14 fp16, batch=16
-    # UniPercept 4-bit NF4 quantized; loader caps CUDA allocation at 14 GiB.
-    "perception": 13.8,
-}
+_MODULE_VRAM_GB: dict[str, float] = dict(MODULE_VRAM_GB)
 
 # Modules that must run alone (peak VRAM > 50% of a typical budget).
-_EXCLUSIVE_MODULES: frozenset[str] = frozenset({"perception"})
+_EXCLUSIVE_MODULES: frozenset[str] = frozenset(EXCLUSIVE_GPU_MODULES)
 
 # Default VRAM reservation fraction (matches set_per_process_memory_fraction).
 _DEFAULT_FRACTION = 0.70

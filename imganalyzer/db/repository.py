@@ -13,6 +13,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from imganalyzer.db.connection import begin_immediate as _begin_immediate
+from imganalyzer.pipeline.module_registry import (
+    ACTIVE_MODULES as _REGISTRY_ACTIVE_MODULES,
+    FULL_RESULT_MODULES as _REGISTRY_FULL_RESULT_MODULES,
+    LEGACY_MODULES as _REGISTRY_LEGACY_MODULES,
+    MODULE_TABLE_MAP as _REGISTRY_MODULE_TABLE_MAP,
+)
 
 
 def _now() -> str:
@@ -73,26 +79,11 @@ def _best_name_matches(
 
 
 # ── Module → table mapping ────────────────────────────────────────────────────
-MODULE_TABLE_MAP: dict[str, str] = {
-    "metadata":   "analysis_metadata",
-    "technical":  "analysis_technical",
-    "caption":    "analysis_caption",
-    "local_ai":   "analysis_caption",   # legacy alias
-    "blip2":      "analysis_blip2",
-    "objects":    "analysis_objects",
-    "ocr":        "analysis_ocr",
-    "faces":      "analysis_faces",
-    "cloud_ai":   "analysis_cloud_ai",
-    "aesthetic":  "analysis_aesthetic",
-    "perception": "analysis_perception",
-    "embedding":  "embeddings",
-}
-
-# Active pipeline modules.  Legacy modules (blip2, cloud_ai, aesthetic, local_ai, ocr)
-# stay in MODULE_TABLE_MAP for backward-compatible reads of existing analysis data
-# but are excluded here so they are never enqueued or processed.
-_LEGACY_MODULES = frozenset({"blip2", "cloud_ai", "aesthetic", "local_ai", "ocr"})
-ALL_MODULES = [m for m in MODULE_TABLE_MAP if m not in _LEGACY_MODULES]
+# Public names are kept here for compatibility; the canonical metadata lives in
+# imganalyzer.pipeline.module_registry.
+MODULE_TABLE_MAP: dict[str, str] = dict(_REGISTRY_MODULE_TABLE_MAP)
+_LEGACY_MODULES = frozenset(_REGISTRY_LEGACY_MODULES)
+ALL_MODULES = list(_REGISTRY_ACTIVE_MODULES)
 
 # ── Suggestion algorithm tuning ───────────────────────────────────────────────
 _MAX_REPRESENTATIVES = 150          # cap on person representative centroids
@@ -3125,7 +3116,7 @@ class Repository:
         if img:
             result["image"] = img
 
-        for module in ("metadata", "technical", "caption", "blip2", "objects", "ocr", "faces", "aesthetic", "perception"):
+        for module in _REGISTRY_FULL_RESULT_MODULES:
             data = self.get_analysis(image_id, module)
             if data:
                 # Apply overrides on top

@@ -76,7 +76,6 @@ import inspect
 import json
 import os
 import re
-import contextlib
 import sqlite3
 import sys
 import threading
@@ -87,6 +86,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+from imganalyzer.rpc.handler_registry import RpcHandlerRegistry
+from imganalyzer.rpc.search_engine_cache import SearchEngineCache
+from imganalyzer.pipeline.module_registry import (
+    ACTIVE_MODULES,
+    DISTRIBUTED_CACHE_OPTIONAL_MODULES as _REGISTRY_DISTRIBUTED_CACHE_OPTIONAL_MODULES,
+    DISTRIBUTED_CONTEXT_MODULES as _REGISTRY_DISTRIBUTED_CONTEXT_MODULES,
+    DISTRIBUTED_MASTER_ONLY_MODULES as _REGISTRY_DISTRIBUTED_MASTER_ONLY_MODULES,
+    DISTRIBUTED_SEARCH_MODULES as _REGISTRY_DISTRIBUTED_SEARCH_MODULES,
+    LEASE_TTL_FLOORS_SECONDS as _REGISTRY_LEASE_TTL_FLOORS_SECONDS,
+    LEGACY_QUEUE_MODULE_MAP as _REGISTRY_LEGACY_QUEUE_MODULE_MAP,
+    PREREQUISITES as _REGISTRY_PREREQUISITES,
+    REMOTE_DECODE_PRIORITY_MODULES as _REGISTRY_REMOTE_DECODE_PRIORITY_MODULES,
+)
 from imganalyzer.readers.raw import _suppress_c_stderr
 
 warnings.filterwarnings(
@@ -181,69 +193,35 @@ def _get_db() -> sqlite3.Connection:
 # See perf_plan.md item B1.
 #
 # ``engine.conn`` is swapped to the caller's current thread-local connection
-# on every acquisition, guarded by ``_search_engine_lock`` so concurrent RPC
-# threads don't race on the shared engine's mutable ``conn`` field.  Callers
-# obtained via ``_get_search_engine(conn)`` MUST call
-# ``_release_search_engine()`` in a ``finally`` block (or use the
-# ``_search_engine_ctx`` context manager) when done.
-_cached_search_engine: Any = None
-_cached_search_engine_key: tuple[str, int] | None = None
-_search_engine_lock = threading.RLock()
+# on every acquisition, guarded by the cache lock so concurrent RPC threads
+# don't race on the shared engine's mutable ``conn`` field.  Callers obtained
+# via ``_get_search_engine(conn)`` MUST call ``_release_search_engine()`` in a
+# ``finally`` block (or use the ``_search_engine_ctx`` context manager) when
+# done.
+_search_engine_cache = SearchEngineCache()
+_search_engine_lock = _search_engine_cache.lock
 
 
 def _get_search_engine(conn: sqlite3.Connection) -> Any:
     """Return the process-wide cached SearchEngine, bound to *conn*.
 
-    Acquires ``_search_engine_lock`` (caller must call
-    ``_release_search_engine()`` when done) and swaps the engine's
-    ``conn``/``repo.conn`` to the caller's thread-local connection so
-    SQLite calls stay on the owning thread while the embedding-matrix
-    caches on the engine persist across RPC calls and threads.
+    Acquires the cache lock (caller must call ``_release_search_engine()``
+    when done) and swaps the engine's ``conn``/``repo.conn`` to the caller's
+    thread-local connection so SQLite calls stay on the owning thread while
+    the embedding-matrix caches on the engine persist across RPC calls and
+    threads.
     """
-    global _cached_search_engine, _cached_search_engine_key
-    from imganalyzer.db import search as _search_module
-    from imganalyzer.db.connection import get_db_path
-
-    # Include the SearchEngine class ``id`` in the cache key so that tests
-    # which monkeypatch ``imganalyzer.db.search.SearchEngine`` with a fake
-    # get a fresh instance instead of the previously-cached real engine.
-    db_key: tuple[str, int] = (str(get_db_path()), id(_search_module.SearchEngine))
-    _search_engine_lock.acquire()
-    try:
-        if (
-            _cached_search_engine is None
-            or _cached_search_engine_key != db_key
-        ):
-            _cached_search_engine = _search_module.SearchEngine(conn)
-            _cached_search_engine_key = db_key
-        _cached_search_engine.conn = conn
-        repo = getattr(_cached_search_engine, "repo", None)
-        if repo is not None:
-            repo.conn = conn
-    except BaseException:
-        _search_engine_lock.release()
-        raise
-    return _cached_search_engine
+    return _search_engine_cache.acquire(conn)
 
 
 def _release_search_engine() -> None:
     """Release the lock held by ``_get_search_engine``."""
-    try:
-        _search_engine_lock.release()
-    except RuntimeError:
-        # Not held by this thread — ignore so callers can use finally blocks
-        # without worrying about early-exit paths before acquisition.
-        pass
+    _search_engine_cache.release()
 
 
-@contextlib.contextmanager
 def _search_engine_ctx(conn: sqlite3.Connection) -> Any:
     """Context-manager wrapper around ``_get_search_engine``."""
-    engine = _get_search_engine(conn)
-    try:
-        yield engine
-    finally:
-        _release_search_engine()
+    return _search_engine_cache.context(conn)
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -355,12 +333,8 @@ _analyze_cancel: dict[str, threading.Event] = {}  # imagePath -> cancel event
 _MASTER_WORKER_ID = "master"
 _MASTER_WORKER_LABEL = "Master device"
 _DB_BUSY_TIMEOUT_MS = 30000
-_LEGACY_QUEUE_MODULE_MAP: dict[str, str] = {
-    "blip2": "caption",
-    "cloud_ai": "caption",
-    "local_ai": "caption",
-    "aesthetic": "perception",
-}
+_LEGACY_QUEUE_MODULE_MAP: dict[str, str] = dict(_REGISTRY_LEGACY_QUEUE_MODULE_MAP)
+_PREREQUISITES: dict[str, str] = dict(_REGISTRY_PREREQUISITES)
 _PERSON_LINK_SUGGESTION_CACHE_TTL_SECONDS = 30.0
 _person_link_suggestion_cache: dict[tuple[int, int], tuple[float, list[dict[str, Any]]]] = {}
 _TRANSIENT_DB_LOCK_MARKERS = (
@@ -479,7 +453,7 @@ _DECODE_BUFFER_SIZE = int(os.getenv("IMGANALYZER_DECODE_BUFFER_SIZE", "10"))
 _MIN_DECODE_BUFFER = 5  # never let in-flight drop below this
 _last_replenish_time: float = 0.0
 _REPLENISH_INTERVAL: float = 5.0  # seconds between buffer checks
-_REMOTE_DECODE_PRIORITY_MODULES = ("caption", "objects", "embedding", "perception")
+_REMOTE_DECODE_PRIORITY_MODULES = tuple(_REGISTRY_REMOTE_DECODE_PRIORITY_MODULES)
 
 
 def _auto_trigger_pre_decode() -> None:
@@ -786,10 +760,9 @@ def _handle_status(params: dict) -> dict:
     if include_module_avg_ms:
         module_avg_ms = queue.module_avg_processing_ms(last_n=100)
 
-    from imganalyzer.db.repository import ALL_MODULES
     queue_modules = list(module_stats.keys())
-    ordered = [m for m in ALL_MODULES if m in module_stats]
-    extra = [m for m in queue_modules if m not in ALL_MODULES]
+    ordered = [m for m in ACTIVE_MODULES if m in module_stats]
+    extra = [m for m in queue_modules if m not in ACTIVE_MODULES]
     all_modules = ordered + extra
 
     modules_out: dict[str, dict[str, int]] = {}
@@ -1558,17 +1531,13 @@ def _upsert_master_worker_node(conn: sqlite3.Connection, status: str = "online")
     conn.commit()
 
 
-_DISTRIBUTED_CONTEXT_MODULES: dict[str, tuple[str, ...]] = {
-    "faces": ("objects",),
-    "embedding": ("caption",),
-}
-_DISTRIBUTED_SEARCH_MODULES = {"metadata", "caption", "faces"}
-_DISTRIBUTED_MASTER_ONLY_MODULES = frozenset({"metadata", "technical", "faces"})
-_DISTRIBUTED_CACHE_OPTIONAL_MODULES = frozenset({"embedding"})
-_LEASE_TTL_FLOORS_SECONDS: dict[str, int] = {
-    "caption": 300,
-    "perception": 300,
-}
+_DISTRIBUTED_CONTEXT_MODULES: dict[str, tuple[str, ...]] = dict(
+    _REGISTRY_DISTRIBUTED_CONTEXT_MODULES
+)
+_DISTRIBUTED_SEARCH_MODULES = set(_REGISTRY_DISTRIBUTED_SEARCH_MODULES)
+_DISTRIBUTED_MASTER_ONLY_MODULES = frozenset(_REGISTRY_DISTRIBUTED_MASTER_ONLY_MODULES)
+_DISTRIBUTED_CACHE_OPTIONAL_MODULES = frozenset(_REGISTRY_DISTRIBUTED_CACHE_OPTIONAL_MODULES)
+_LEASE_TTL_FLOORS_SECONDS: dict[str, int] = dict(_REGISTRY_LEASE_TTL_FLOORS_SECONDS)
 
 
 def _claim_lease_ttl_seconds(
@@ -1631,7 +1600,6 @@ def _handle_jobs_claim(params: dict) -> dict:
         get_worker_capabilities,
         record_worker_affinity,
     )
-    from imganalyzer.pipeline.worker import _PREREQUISITES
 
     worker_id = str(params.get("workerId", "")).strip()
     if not worker_id:
@@ -6118,21 +6086,21 @@ _STDIO_ASYNC_METHODS: dict[str, Any] = {
 }
 
 
+_RPC_METHODS = RpcHandlerRegistry(
+    sync_methods=_SYNC_METHODS,
+    async_methods=_ASYNC_METHODS,
+    stdio_async_methods=_STDIO_ASYNC_METHODS,
+    lock_retryable_methods=_LOCK_RETRYABLE_METHODS,
+    is_transient_lock_error=_is_transient_db_lock_error,
+    retry_attempts=_LOCK_RETRY_ATTEMPTS,
+    retry_initial_delay_s=_LOCK_RETRY_INITIAL_DELAY_S,
+    sleeper=lambda seconds: time.sleep(seconds),
+)
+
+
 def _call_sync_handler(method: str, params: dict[str, Any]) -> Any:
     """Invoke a sync JSON-RPC handler with transient DB lock retries when needed."""
-    handler = _SYNC_METHODS[method]
-    if method not in _LOCK_RETRYABLE_METHODS:
-        return handler(params)
-
-    delay_s = _LOCK_RETRY_INITIAL_DELAY_S
-    for attempt in range(1, _LOCK_RETRY_ATTEMPTS + 1):
-        try:
-            return handler(params)
-        except Exception as exc:
-            if not _is_transient_db_lock_error(exc) or attempt >= _LOCK_RETRY_ATTEMPTS:
-                raise
-            time.sleep(delay_s)
-            delay_s = min(delay_s * 2, 1.0)
+    return _RPC_METHODS.call_sync(method, params)
 
 
 def _graceful_shutdown() -> None:
@@ -6197,7 +6165,7 @@ def _dispatch_http_request(msg: Any) -> tuple[dict[str, Any], bool]:
         _graceful_shutdown()
         return {"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}}, True
 
-    if method in _SYNC_METHODS:
+    if _RPC_METHODS.has_sync(method):
         try:
             result = _call_sync_handler(method, params)
             return {"jsonrpc": "2.0", "id": req_id, "result": result}, False
@@ -6208,7 +6176,7 @@ def _dispatch_http_request(msg: Any) -> tuple[dict[str, Any], bool]:
                 "error": {"code": -1, "message": str(exc)},
             }, False
 
-    if method in _ASYNC_METHODS:
+    if _RPC_METHODS.has_async(method):
         return {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -6462,34 +6430,37 @@ def _dispatch(msg: dict) -> None:
         _send_result(req_id, {"ok": True})
         sys.exit(0)
 
-    if method in _STDIO_ASYNC_METHODS:
+    stdio_async_handler = _RPC_METHODS.stdio_async_handler(method)
+    if stdio_async_handler is not None:
         def _run_async():
             try:
-                _STDIO_ASYNC_METHODS[method](req_id, params)
+                stdio_async_handler(req_id, params)
             except Exception as exc:
                 _send_error(req_id, -1, str(exc))
 
         t = threading.Thread(target=_run_async, daemon=True, name=f"rpc-{method}")
         t.start()
-    elif method in _SYNC_METHODS:
+    elif _RPC_METHODS.has_sync(method):
         try:
             result = _call_sync_handler(method, params)
             _send_result(req_id, result)
         except Exception as exc:
             _send_error(req_id, -1, str(exc))
-    elif method in _ASYNC_METHODS:
+    else:
+        async_handler = _RPC_METHODS.async_handler(method)
+        if async_handler is None:
+            _send_error(req_id, -32601, f"Method not found: {method}")
+            return
         # Async methods run in their own thread and send the response themselves.
         # Run in a thread to keep the main loop responsive.
         def _run_async():
             try:
-                _ASYNC_METHODS[method](req_id, params)
+                async_handler(req_id, params)
             except Exception as exc:
                 _send_error(req_id, -1, str(exc))
 
         t = threading.Thread(target=_run_async, daemon=True, name=f"rpc-{method}")
         t.start()
-    else:
-        _send_error(req_id, -32601, f"Method not found: {method}")
 
 
 # ── Main loop ────────────────────────────────────────────────────────────────

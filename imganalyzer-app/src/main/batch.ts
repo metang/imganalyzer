@@ -27,6 +27,7 @@ import { rpc, ensureServerRunning, setNotificationListener, shutdownServer } fro
 import { getCoordinatorStatus, startCoordinator, stopCoordinator } from './coordinator'
 import { getAppSettings } from './settings'
 import type { CoordinatorStatus } from './settings'
+import type { ModuleKey } from '../shared/moduleMetadata'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -42,13 +43,15 @@ const CHUNK_AVG_WINDOW = 20
 
 export interface SessionConfig {
   folder: string
-  modules: string[]
+  modules: BatchModuleKey[]
   workers: number
   recursive: boolean
   noHash: boolean
   forceReprocess: boolean
   profile: boolean
 }
+
+export type BatchModuleKey = ModuleKey
 
 export interface BatchModuleStats {
   pending: number
@@ -1058,7 +1061,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     async (
       _evt,
       folder: string,
-      modules: string[],
+      modules: BatchModuleKey[],
       recursive: boolean,
       noHash: boolean,
       forceReprocess = false
@@ -1095,7 +1098,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
     async (
       _evt,
       folder: string,
-      modules: string[],
+      modules: BatchModuleKey[],
       workers: number,
       recursive = true,
       noHash = false,
@@ -1473,7 +1476,7 @@ export function registerBatchHandlers(win: BrowserWindow): void {
   // already running, the new jobs are picked up automatically.
   ipcMain.handle(
     'batch:rebuild-module',
-    async (_evt, module: string): Promise<void> => {
+    async (_evt, module: BatchModuleKey): Promise<void> => {
       await ensureServerRunning()
       await rpc.call('rebuild', { module, force: true })
 

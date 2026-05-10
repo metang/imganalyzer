@@ -11,5 +11,5 @@
     "rootDir": "src",
     "resolveJsonModule": true
   },
-  "include": ["src/main/**/*", "src/preload/**/*"]
+  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*"]
 }

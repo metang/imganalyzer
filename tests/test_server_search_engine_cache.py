@@ -42,8 +42,7 @@ def test_search_engine_cached_across_connections(tmp_path, monkeypatch):
     # Point the cache key at an isolated DB.
     monkeypatch.setenv("IMGANALYZER_DB_PATH", str(tmp_path / "imganalyzer.db"))
     # Clear any previously-cached engine from other tests.
-    server._cached_search_engine = None
-    server._cached_search_engine_key = None
+    server._search_engine_cache.clear()
 
     conn1 = _fresh_conn(tmp_path)
     conn2 = _fresh_conn(tmp_path)
@@ -72,15 +71,13 @@ def test_search_engine_cached_across_connections(tmp_path, monkeypatch):
     finally:
         conn1.close()
         conn2.close()
-        server._cached_search_engine = None
-        server._cached_search_engine_key = None
+        server._search_engine_cache.clear()
 
 
 def test_search_engine_ctx_releases_lock(tmp_path, monkeypatch):
     """The context manager must release the lock even when the body raises."""
     monkeypatch.setenv("IMGANALYZER_DB_PATH", str(tmp_path / "imganalyzer.db"))
-    server._cached_search_engine = None
-    server._cached_search_engine_key = None
+    server._search_engine_cache.clear()
 
     conn = _fresh_conn(tmp_path)
     try:
@@ -95,5 +92,4 @@ def test_search_engine_ctx_releases_lock(tmp_path, monkeypatch):
         server._search_engine_lock.release()
     finally:
         conn.close()
-        server._cached_search_engine = None
-        server._cached_search_engine_key = None
+        server._search_engine_cache.clear()

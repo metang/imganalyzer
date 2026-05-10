@@ -487,6 +487,51 @@ def test_search_people_filters_support_country_recurring_day_and_time_of_day(
     assert [item["image_id"] for item in result["results"]] == [1]
 
 
+def test_search_filters_apply_before_offset_pagination(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for image_id in range(1, 7):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\filtered\img{image_id}.jpg")
+
+    for image_id, captured_at in [
+        (1, "2024-02-01T08:15:00"),
+        (2, "2025-02-01T08:15:00"),
+        (3, "2026-02-01T08:15:00"),
+        (4, "2027-02-01T08:15:00"),
+    ]:
+        gallery_db.execute(
+            "UPDATE analysis_metadata SET location_country = ?, date_time_original = ? "
+            "WHERE image_id = ?",
+            ("US", captured_at, image_id),
+        )
+    gallery_db.execute(
+        "UPDATE analysis_metadata SET location_country = ?, date_time_original = ? WHERE image_id = ?",
+        ("CA", "2028-02-01T08:15:00", 5),
+    )
+    gallery_db.execute(
+        "UPDATE analysis_metadata SET location_country = ?, date_time_original = ? WHERE image_id = ?",
+        ("US", "2029-02-01T18:15:00", 6),
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    result = server._handle_search(
+        {
+            "mode": "browse",
+            "country": "US",
+            "recurringMonthDay": "02-01",
+            "timeOfDay": "morning",
+            "sortBy": "newest",
+            "limit": 2,
+            "offset": 1,
+        }
+    )
+
+    assert result["total"] == 4
+    assert result["hasMore"] is True
+    assert [item["image_id"] for item in result["results"]] == [3, 2]
+
+
 def test_search_alias_prompt_routes_to_face_search(
     gallery_db: sqlite3.Connection,
     monkeypatch: pytest.MonkeyPatch,

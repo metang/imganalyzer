@@ -23,23 +23,29 @@ from rich.markup import escape
 from imganalyzer.db.repository import Repository
 from imganalyzer.db.schema import ensure_schema
 from imganalyzer.pipeline.distributed_payloads import extract_result_payload, seed_job_context
+from imganalyzer.pipeline.module_registry import (
+    ACTIVE_MODULES,
+    DISTRIBUTED_ALWAYS_AVAILABLE_MODULES,
+    DISTRIBUTED_LOCAL_AI_MODULES,
+    DISTRIBUTED_MASTER_ONLY_MODULES,
+)
 from imganalyzer.pipeline.modules import ModuleRunner
 from imganalyzer.pipeline.worker import _AdaptiveBackoff, _emit_result
 
 console = Console()
 
 # Modules that require local-AI packages (torch, transformers, etc.)
-_LOCAL_AI_MODULES = {"objects", "caption", "faces", "embedding", "perception"}
+_LOCAL_AI_MODULES = set(DISTRIBUTED_LOCAL_AI_MODULES)
 
 # Modules that always work (pure Python / stdlib)
-_ALWAYS_AVAILABLE_MODULES: set[str] = set()
+_ALWAYS_AVAILABLE_MODULES: set[str] = set(DISTRIBUTED_ALWAYS_AVAILABLE_MODULES)
 
 # Modules that must run on the master device because they need
 # the original file on disk for accurate results:
 #   metadata — exifread needs the raw file bytes for full EXIF extraction
 #   technical — noise/sharpness estimates are destroyed by resizing
 #   faces — small faces lost at 1024px, embedding quality degrades
-_MASTER_ONLY_MODULES = frozenset({"metadata", "technical", "faces"})
+_MASTER_ONLY_MODULES = frozenset(DISTRIBUTED_MASTER_ONLY_MODULES)
 _TRANSIENT_DB_LOCK_MARKERS = (
     "database is locked",
     "database table is locked",
@@ -1682,9 +1688,7 @@ class DistributedWorker:
         try:
             self._log_connectivity_context()
             if self.supported_modules is not None:
-                from imganalyzer.db.repository import ALL_MODULES
-
-                missing = sorted(set(ALL_MODULES) - set(self.supported_modules))
+                missing = sorted(set(ACTIVE_MODULES) - set(self.supported_modules))
                 console.print(
                     f"[dim]Supported modules:[/dim] {', '.join(self.supported_modules)}"
                 )

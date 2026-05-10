@@ -6,6 +6,7 @@ import type {
   BatchPauseMode,
   BatchStats,
 } from '../global'
+import { getModuleProgressLabel, resolveRetryModuleKey } from '../../shared/moduleMetadata'
 import { MetricCard, SectionHeading, StatusBadge, SurfaceCard, UiButton } from './ui'
 
 interface Props {
@@ -72,25 +73,8 @@ function statusSummary(status: string, monitorOnly: boolean): { title: string; t
   }
 }
 
-const MODULE_LABELS: Record<string, string> = {
-  metadata: 'Metadata',
-  technical: 'Technical',
-  caption: 'Caption',
-  objects: 'Objects (DINO)',
-  faces: 'Faces',
-  perception: 'Perception',
-  embedding: 'Embeddings',
-}
-
-const LEGACY_RETRY_MODULE_MAP: Record<string, string> = {
-  blip2: 'caption',
-  cloud_ai: 'caption',
-  local_ai: 'caption',
-  aesthetic: 'perception',
-}
-
 function formatModuleLabel(module: string): string {
-  return MODULE_LABELS[module] ?? module
+  return getModuleProgressLabel(module)
 }
 
 function SummaryCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
@@ -147,7 +131,7 @@ function ModuleTableRow({ name, stats }: { name: string; stats: BatchModuleStats
   return (
     <tr className="text-xs">
       <td className="py-1.5 pr-3 text-neutral-400 whitespace-nowrap">
-        {MODULE_LABELS[name] ?? name}
+        {formatModuleLabel(name)}
       </td>
       <td className="py-1.5 pr-3 min-w-[180px]">
         <div className="flex items-center gap-2">
@@ -361,7 +345,7 @@ function ChunkProgress({
             return (
               <div key={mod} className="flex items-center gap-3 text-xs">
                 <span className="min-w-[90px] text-neutral-400">
-                  {MODULE_LABELS[mod] ?? mod}
+                  {formatModuleLabel(mod)}
                 </span>
                 <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
                   <div
@@ -428,7 +412,7 @@ export function ProgressDashboard({
     new Set(
       moduleEntries
         .filter(([, s]) => s && s.failed > 0)
-        .map(([mod]) => LEGACY_RETRY_MODULE_MAP[mod] ?? mod)
+        .map(([mod]) => resolveRetryModuleKey(mod))
     )
   )
 

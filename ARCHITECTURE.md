@@ -18,29 +18,35 @@ imganalyzer/
 ├── imganalyzer/                       # Python package
 │   ├── __init__.py                    # Version string
 │   ├── cli.py                         # Typer CLI (20+ commands)
-│   ├── server.py                      # JSON-RPC 2.0 stdio server (25+ methods)
+│   ├── server.py                      # JSON-RPC 2.0 stdio/HTTP server
 │   ├── analyzer.py                    # Orchestrator: AnalysisResult dataclass + pipeline dispatch
+│   ├── rpc/
+│   │   ├── handler_registry.py         # JSON-RPC method lookup + transient lock retry seam
+│   │   └── search_engine_cache.py      # Thread-safe SearchEngine cache/rebind seam
 │   ├── readers/
 │   │   ├── raw.py                     # RAW decoder via rawpy (LibRaw), header-only mode
 │   │   └── standard.py               # Standard formats via Pillow, header-only mode
 │   ├── analysis/
 │   │   ├── metadata.py                # EXIF/IPTC extraction + reverse geocoding
 │   │   ├── technical.py               # Sharpness, exposure, noise, color (NumPy/OpenCV)
+│   │   ├── perception.py              # UniPercept IAA/IQA/ISTA scoring
 │   │   └── ai/
-│   │       ├── local.py               # BLIP-2 captioning + VQA (batched)
+│   │       ├── local.py               # Legacy BLIP-2 single-image compatibility
 │   │       ├── local_full.py          # 4-stage local AI orchestrator (legacy single-image mode)
 │   │       ├── objects.py             # GroundingDINO object detection (via transformers, batched)
-│   │       ├── ocr.py                 # TrOCR text recognition with document tiling
+│   │       ├── ocr.py                 # Legacy TrOCR text recognition
 │   │       ├── faces.py               # InsightFace detection + recognition (buffalo_l)
 │   │       ├── face_db.py             # Legacy JSON-file face database
+│   │       ├── ollama.py              # Qwen caption/keyword runtime via Ollama
 │   │       └── cloud.py               # OpenAI / Anthropic / Google / Copilot backends
 │   ├── db/
 │   │   ├── connection.py              # SQLite singleton, WAL mode, thread-safe
-│   │   ├── schema.py                  # 20 migrations, scheduler state + FTS5
+│   │   ├── schema.py                  # Sequential migrations, scheduler state + FTS5
 │   │   ├── repository.py             # CRUD, overrides, face management, FTS5 index
 │   │   ├── queue.py                   # Job queue with atomic claim + priority ordering
 │   │   └── search.py                  # Hybrid FTS5 + CLIP search with RRF scoring
 │   ├── pipeline/
+│   │   ├── module_registry.py         # Canonical backend module metadata/aliases/phases
 │   │   ├── batch.py                   # Folder scanning, image registration, job enqueue
 │   │   ├── worker.py                  # Chunk-first local worker loop
 │   │   ├── scheduler.py              # GPU phase execution engine + IO interleave
@@ -61,6 +67,8 @@ imganalyzer/
 │
 ├── imganalyzer-app/                   # Electron desktop GUI
 │   ├── src/
+│   │   ├── shared/
+│   │   │   └── moduleMetadata.ts       # Canonical frontend module labels/order/retry aliases
 │   │   ├── main/                      # Electron main process (Node.js)
 │   │   │   ├── index.ts               # App bootstrap, IPC registration, quit cleanup
 │   │   │   ├── python-rpc.ts          # Persistent JSON-RPC 2.0 client over stdin/stdout
@@ -93,7 +101,8 @@ imganalyzer/
 │   │       │   ├── SearchBar.tsx       # Query input + filter fields + mode selector
 │   │       │   ├── VirtualGrid.tsx     # Virtualized grid (ResizeObserver + IntersectionObserver)
 │   │       │   ├── SearchLightbox.tsx  # Lightbox for search results with analysis sidebar
-│   │       │   └── FacesView.tsx       # Face clusters + alias editing
+│   │       │   ├── FacesView.tsx       # Face clusters/people mode orchestration
+│   │       │   └── faces/              # Extracted thumbnail/card/lightbox/helper seams
 │   │       └── hooks/
 │   │           ├── useAnalysis.ts      # Single-image: XMP cache → auto-analyze → progress
 │   │           ├── useCloudAnalysis.ts # Cloud AI via Copilot SDK, manual trigger
@@ -102,13 +111,25 @@ imganalyzer/
 │   ├── tailwind.config.js
 │   └── package.json
 │
-├── tests/                             # Python unit tests (pytest, 165 tests across 4 files)
+├── tests/                             # Python unit/regression tests (pytest)
 ├── scripts/                           # Diagnostic utilities + worker setup
 ├── pyproject.toml                     # Python project config + dependencies
 ├── ARCHITECTURE.md                    # This file
 ├── AGENTS.md                          # Agent coding rules
 └── spec.md                            # Product specification
 ```
+
+---
+
+## Ownership Map
+
+**Module metadata.** Backend module facts are owned by `imganalyzer\pipeline\module_registry.py`: active and legacy module names, table mapping, priorities, prerequisites, VRAM estimates, GPU phases, queue remaps, and distributed flags. Scheduler, worker, repository, VRAM budget, batch enqueueing, server remap constants, and distributed routing import from that registry instead of maintaining parallel lists. Actual module execution still belongs in `imganalyzer\pipeline\modules.py` and `imganalyzer\analysis\*`; distributed capability probes stay in `imganalyzer\pipeline\distributed_worker.py` because they test host runtime dependencies.
+
+Frontend module metadata is owned by `imganalyzer-app\src\shared\moduleMetadata.ts`: labels, pass-selector ordering, worker-thread-pool display, and legacy retry aliases. `PassSelector`, `ProgressDashboard`, `LiveResultsFeed`, batch error display, and IPC/global types consume this shared metadata.
+
+**RPC seams.** `imganalyzer\rpc\handler_registry.py` owns JSON-RPC handler lookup and transient SQLite-lock retry behavior. `imganalyzer\rpc\search_engine_cache.py` owns thread-safe `SearchEngine` reuse keyed by DB path and class identity, rebinding each request to the caller's SQLite connection. `server.py` keeps the public method names/transports and delegates through these seams.
+
+**Repo hygiene.** `.gitignore` treats generated root logs, caches, build outputs, `*.egg-info`, `__pycache__`, and generated `model-eval` reports as disposable. Source, tests, fixtures, lockfiles, and canonical docs stay tracked.
 
 ---
 
@@ -204,7 +225,7 @@ Spawned by Electron as `python -m imganalyzer.server`. Reads JSON-RPC requests f
 
 ### Database Layer (`db/`)
 
-SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema managed by 20 sequential migrations.
+SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema is managed by sequential migrations in `db/schema.py`.
 
 **Core tables:**
 | Table | Purpose |
@@ -217,10 +238,10 @@ SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema managed by
 | `analysis_faces` | InsightFace detection + recognition results |
 | `analysis_perception` | UniPercept quality/aesthetic metrics |
 | `analysis_local_ai` | Legacy alias table name (migrated to `analysis_caption`) |
-| `analysis_blip2` | Legacy compatibility table for historical data |
-| `analysis_ocr` | Legacy compatibility table for historical data |
-| `analysis_cloud_ai` | Cloud AI results (description, keywords, mood, species) |
-| `analysis_aesthetic` | Aesthetic scores (1-10, from cloud AI) |
+| `analysis_blip2` | Legacy compatibility table for historical caption data |
+| `analysis_ocr` | Legacy compatibility table for historical OCR data |
+| `analysis_cloud_ai` | Legacy/cloud single-image results (inactive in the default batch module set) |
+| `analysis_aesthetic` | Legacy aesthetic scores; active scoring uses `analysis_perception` |
 | `overrides` | User manual overrides (protected from re-analysis) |
 | `job_queue` | Batch processing job queue (UNIQUE per image+module) |
 | `worker_nodes` | Distributed worker registry + desired state + affinity epoch |
@@ -336,11 +357,11 @@ Backends: OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, Google Vision, GitHub Copi
 
 Hybrid search combining three strategies via Reciprocal Rank Fusion (RRF):
 
-1. **FTS5 text search**: Full-text search over descriptions, keywords, objects, faces, OCR text, camera/lens model, location
+1. **FTS5 text search**: Full-text search over descriptions, keywords, objects, faces, camera/lens model, location, and legacy OCR text when present
 2. **CLIP semantic search (image embeddings)**: Vectorized cosine similarity between query text embedding and stored image embeddings. Tier 1 uses image CLIP with optional description CLIP boost (weight 0.25). Tier 2 is description-only fallback with z-score gating.
 3. **Hybrid**: RRF fusion of FTS5 + CLIP scores
 
-Vectorized scoring via numpy BLAS (`matrix @ query_vec`) achieves sub-10ms at 500K images. Cached embedding matrix with row-count staleness detection. Description quality gating at 100 chars filters noisy BLIP-2 captions.
+Vectorized scoring via numpy BLAS (`matrix @ query_vec`) achieves sub-10ms at 500K images. Cached embedding matrix with row-count staleness detection. Description quality gating at 100 chars filters noisy caption output.
 
 ### XMP Output (`output/xmp.py`)
 
@@ -480,9 +501,11 @@ App (5-tab layout)
 │       └── SearchLightbox (zoom/pan, analysis sidebar)
 │
 └── [Faces tab]
-    └── FacesView (cluster mode + legacy identity mode)
-        ├── FaceCropThumbnail (lazy-loaded crops)
-        └── Inline alias editing (Enter/Esc save)
+    └── FacesView (clusters, people, legacy identity mode)
+        ├── faces/FaceThumbnails (lazy-loaded face/image thumbnails)
+        ├── faces/FaceImageCards (direct/similar image cards)
+        ├── faces/FaceImageLightbox (in-tab image viewer)
+        └── faces/facesUtils (cluster and text helpers)
 ```
 
 ### Image Loading Strategy
@@ -642,7 +665,7 @@ Workers probe capabilities at startup (`supportedModules`, `cuda`, `mps`) and on
 | Package | Purpose |
 |---|---|
 | `torch` 2.x + CUDA | GPU inference |
-| `transformers` 4.40+ | BLIP-2, GroundingDINO, TrOCR |
+| `transformers` 4.40+ | GroundingDINO, UniPercept support, and legacy BLIP-2/TrOCR compatibility |
 | `open_clip_torch` 2.24+ | CLIP embeddings (ViT-L/14) |
 | `insightface` 0.7+ | Face detection + recognition (buffalo_l) |
 | `onnxruntime-gpu` 1.18+ | ONNX inference for InsightFace |
@@ -678,6 +701,10 @@ Optional cloud backends: `openai`, `anthropic`, `google-cloud-vision`.
 ## Key Design Decisions
 
 **Persistent JSON-RPC server instead of per-call subprocesses.** The original architecture spawned `conda run python <script>` for every thumbnail, full-res decode, and analysis call. This added 1-3 seconds of subprocess startup overhead per call. The current architecture spawns a single persistent Python process at app start, keeping all models loaded in memory and eliminating per-call overhead.
+
+**Centralized module metadata.** Backend scheduling and database consumers share `module_registry.py` for active module names, legacy remaps, priorities, prerequisites, phases, VRAM, and distributed flags. Frontend module labels/order live in `moduleMetadata.ts`, keeping UI naming separate but explicit.
+
+**Small RPC seams around the large server.** `server.py` remains the transport and public method owner, while `handler_registry.py` isolates dispatch/retry behavior and `search_engine_cache.py` isolates cache lifetime/rebinding for the heavy `SearchEngine`.
 
 **Chunk-first four-phase GPU processing.** The worker runs `caption -> objects -> (faces + embedding) -> perception` per mini-batch within each chunk. This improves time-to-first-fully-processed images and keeps distributed nodes focused on the same frontier.
 

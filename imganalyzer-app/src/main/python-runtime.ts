@@ -5,6 +5,30 @@ import { dirname } from 'path'
 
 export const PKG_ROOT = process.env.IMGANALYZER_PKG_ROOT || dirname(app.getAppPath())
 export const CONDA_ENV = 'imganalyzer'
+const PYTHON_MODULE_COMMAND_ENV = 'IMGANALYZER_PYTHON_MODULE_COMMAND'
+
+function getPythonModuleCommandOverride(): { command: string; args: string[] } | null {
+  const raw = process.env[PYTHON_MODULE_COMMAND_ENV]?.trim()
+  if (!raw) return null
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error(`${PYTHON_MODULE_COMMAND_ENV} must be a JSON array, e.g. ["node","fake-server.cjs"]`)
+  }
+
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    !parsed.every((part): part is string => typeof part === 'string' && part.length > 0)
+  ) {
+    throw new Error(`${PYTHON_MODULE_COMMAND_ENV} must be a non-empty JSON array of strings`)
+  }
+
+  const [command, ...args] = parsed
+  return { command, args }
+}
 
 export function createPythonEnv(extraEnv: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
@@ -22,6 +46,20 @@ export function spawnPythonModule(
   options: Omit<SpawnOptions, 'cwd' | 'env'> & { extraEnv?: NodeJS.ProcessEnv } = {},
 ): ChildProcess {
   const { extraEnv = {}, ...spawnOptions } = options
+  const override = getPythonModuleCommandOverride()
+  if (override) {
+    return spawn(
+      override.command,
+      override.args,
+      {
+        cwd: PKG_ROOT,
+        env: createPythonEnv(extraEnv),
+        stdio: ['pipe', 'pipe', 'pipe'],
+        ...spawnOptions,
+      },
+    )
+  }
+
   return spawn(
     'conda',
     [

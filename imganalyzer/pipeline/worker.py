@@ -65,6 +65,18 @@ from imganalyzer.db.repository import Repository
 from imganalyzer.pipeline.modules import (
     ModuleRunner, write_xmp_from_db, unload_gpu_model, _read_image, _pre_resize,
 )
+from imganalyzer.pipeline.module_registry import (
+    BATCH_CAPABLE_MODULES,
+    DEFAULT_GPU_BATCH_SIZES,
+    DEPENDENTS,
+    FTS_MODULES as _REGISTRY_FTS_MODULES,
+    GPU_MODULES as _REGISTRY_GPU_MODULES,
+    IO_MODULES as _REGISTRY_IO_MODULES,
+    LEGACY_QUEUE_MODULE_MAP,
+    LOCAL_IO_MODULES as _REGISTRY_LOCAL_IO_MODULES,
+    PREREQUISITES,
+    gpu_phase_labels,
+)
 from imganalyzer.pipeline.vram_budget import VRAMBudget
 from imganalyzer.pipeline.scheduler import ResourceScheduler
 
@@ -148,27 +160,24 @@ def _adaptive_wait(
 
 
 # Modules that use GPU — must run single-threaded on the main thread
-GPU_MODULES = {"caption", "embedding", "objects", "faces", "perception"}
+GPU_MODULES = set(_REGISTRY_GPU_MODULES)
 # Local I/O-bound modules — parallel, governed by `workers`
-LOCAL_IO_MODULES = {"metadata", "technical"}
+LOCAL_IO_MODULES = set(_REGISTRY_LOCAL_IO_MODULES)
 # Combined IO set
-IO_MODULES = LOCAL_IO_MODULES
+IO_MODULES = set(_REGISTRY_IO_MODULES)
 
 # Modules whose output contributes to the FTS5 search index.
 # The search index is rebuilt *once* per image after all its jobs complete,
 # rather than after every individual module write (saves ~3M FTS5 cycles
 # at 500K images with 6 text-producing modules each).
-_FTS_MODULES = {"metadata", "caption", "faces"}
+_FTS_MODULES = set(_REGISTRY_FTS_MODULES)
 
 # The ``objects`` pass must complete for an image before faces/embedding
 # may run (it provides detection-derived gating/context).
-_PREREQUISITES: dict[str, str] = {
-    "faces": "objects",
-    "embedding": "objects",
+_PREREQUISITES: dict[str, str] = dict(PREREQUISITES)
+_DEPENDENTS: dict[str, list[str]] = {
+    module: list(dependents) for module, dependents in DEPENDENTS.items()
 }
-_DEPENDENTS: dict[str, list[str]] = {}
-for _mod, _prereq in _PREREQUISITES.items():
-    _DEPENDENTS.setdefault(_prereq, []).append(_mod)
 
 _LOCK_RETRY_ATTEMPTS = 4
 _LOCK_RETRY_INITIAL_DELAY_S = 0.15
@@ -505,13 +514,8 @@ class Worker:
         )
 
         # Backward compatibility: remap legacy queue modules to their
-        # current replacements (blip2/cloud_ai/local_ai → caption, aesthetic → perception).
-        remapped = self.queue.remap_pending_modules({
-            "blip2": "caption",
-            "cloud_ai": "caption",
-            "local_ai": "caption",
-            "aesthetic": "perception",
-        })
+        # current replacements from the canonical module registry.
+        remapped = self.queue.remap_pending_modules(dict(LEGACY_QUEUE_MODULE_MAP))
         if remapped["updated"] or remapped["deleted"]:
             console.print(
                 "[yellow]Migrated legacy queue modules:[/yellow] "
@@ -810,10 +814,7 @@ class Worker:
                     # - Model switch overhead: ~18s per mini-batch boundary
                     #   (< 1% of mini-batch time)
                     # ════════════════════════════════════════════════════════════
-                    phase_labels = [
-                        f"Phase {i} — {', '.join(scheduler.modules_for_phase(i))}"
-                        for i in range(len(scheduler.gpu_phases))
-                    ]
+                    phase_labels = gpu_phase_labels()
 
                     # Split chunk into mini-batches for interleaving
                     if chunk_ids is not None:
@@ -1269,11 +1270,7 @@ class Worker:
     # ── GPU batch sizes per module ──────────────────────────────────────
     # Tuned to stay within ~70% of GPU VRAM (e.g. ~11 GB on a 16 GB card)
     # to leave headroom for other applications and CUDA allocator overhead.
-    _GPU_BATCH_SIZES: dict[str, int] = {
-        "objects":   4,   # GroundingDINO mixed fp16/fp32, ~1.1 GB model
-        "embedding": 16,  # CLIP ViT-L/14 fp16, ~0.95 GB model
-        "faces":     8,   # InsightFace ONNX — claim granularity for prefetch
-    }
+    _GPU_BATCH_SIZES: dict[str, int] = dict(DEFAULT_GPU_BATCH_SIZES)
 
     def _process_job_batch(
         self,
@@ -1297,7 +1294,7 @@ class Worker:
             return batch_stats
 
         # Modules that support batched GPU inference
-        BATCH_MODULES = {"objects", "embedding"}
+        BATCH_MODULES = BATCH_CAPABLE_MODULES
         if module not in BATCH_MODULES:
             # Fallback: process each job individually
             for job in jobs:

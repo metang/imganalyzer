@@ -7,6 +7,7 @@ import { ConfirmStopDialog } from './ConfirmStopDialog'
 import { SectionHeading, SurfaceCard, UiButton } from './ui'
 import type { UseBatchProcessReturn } from '../hooks/useBatchProcess'
 import type { BatchIngestProgress, BatchResult } from '../global'
+import { getModuleResultLabel } from '../../shared/moduleMetadata'
 
 // ── Shared props type ─────────────────────────────────────────────────────────
 
@@ -219,7 +220,7 @@ function LiveErrorPanel({ error, results }: { error: string | null; results: Bat
             >
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className="font-semibold text-red-300">{result.nodeLabel}</span>
-                <span className="text-neutral-400">{result.module}</span>
+                <span className="text-neutral-400">{getModuleResultLabel(result.module)}</span>
                 <span className="text-neutral-500">
                   {result.path.replace(/^.*[\\/]/, '')}
                 </span>

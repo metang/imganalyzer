@@ -52,19 +52,28 @@ Renderer (React) → IPC → Main process (Electron)
 
 ### Batch pipeline
 
-Two-phase processing for GPU memory efficiency:
-1. **Phase 1**: Drain all `objects` jobs (GroundingDINO) to set `has_person`/`has_text` flags, then unload the model.
-2. **Phase 2**: Sequential GPU passes (blip2, ocr, faces, embedding) with model load/unload between each, plus a concurrent `ThreadPoolExecutor` for cloud AI.
+Chunk-first four-phase GPU processing for time-to-first-complete results and GPU memory efficiency:
+1. **Phase 0**: `caption` (Qwen 3.5 via Ollama, ~8.7 GB)
+2. **Phase 1**: `objects` (GroundingDINO, batch=4, unlocks dependents)
+3. **Phase 2**: `faces` + `embedding` (co-resident when VRAM allows)
+4. **Phase 3**: `perception` (UniPercept, CUDA-only, exclusive)
 
-Module priority order: `metadata(100) > technical(90) > objects(85) > blip2(80) > ocr(78) > faces(77) > cloud_ai(70) > aesthetic(60) > embedding(50)`.
+Module priority order: `metadata(100) > technical(90) > objects(85) > caption(80) > faces(77) > perception(60) > embedding(50)`.
 
-Prerequisites: `cloud_ai`, `aesthetic`, `ocr`, and `faces` all depend on `objects` completing first.
+Prerequisites: `faces` and `embedding` depend on `objects` completing first. Legacy queue names are remapped (`local_ai`/`blip2`/`cloud_ai` → `caption`, `aesthetic` → `perception`).
+
+### Ownership map
+
+- Backend module metadata is canonical in `imganalyzer\pipeline\module_registry.py`: active/legacy modules, table map, priorities, prerequisites, GPU phases, VRAM, queue remaps, and distributed flags.
+- Frontend module metadata is canonical in `imganalyzer-app\src\shared\moduleMetadata.ts`: labels, pass selector order, result/progress labels, and legacy retry aliases.
+- RPC seams live in `imganalyzer\rpc\handler_registry.py` (method lookup + transient SQLite-lock retry) and `imganalyzer\rpc\search_engine_cache.py` (thread-safe SearchEngine reuse/rebind). `server.py` owns public JSON-RPC names/transports.
+- Repo hygiene: generated root logs, caches, build outputs, `*.egg-info`, `__pycache__`, and generated `model-eval` reports are ignored; source, tests, fixtures, lockfiles, and canonical docs stay tracked.
 
 ### Database
 
 SQLite with WAL mode at `~/.cache/imganalyzer/imganalyzer.db`. Schema managed by sequential migrations in `db/schema.py`. The `overrides` table protects user-edited fields from being overwritten during re-analysis.
 
-for ## Critical Conventions
+## Critical Conventions
 
 ### SQLite: NEVER reuse connections across threads
 
@@ -99,7 +108,7 @@ if threading.current_thread() is threading.main_thread():
 
 ### ThreadPoolExecutor futures must be collected
 
-Uncollected futures with exceptions are silently swallowed. Always handle results/exceptions and emit result notifications for both success and failure.
+The worker/scheduler uses `ThreadPoolExecutor` for local I/O and per-module execution tasks. Uncollected futures with exceptions are silently swallowed. Always handle results/exceptions and emit result notifications for both success and failure.
 
 ### Python style
 

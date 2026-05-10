@@ -5,6 +5,7 @@ import type { AnalysisProgress } from '../main/analyzer'
 import type {
   BatchControlTarget,
   BatchIngestProgress,
+  BatchModuleKey,
   BatchPauseMode,
   BatchResult,
   BatchStats,
@@ -68,7 +69,7 @@ contextBridge.exposeInMainWorld('api', {
 
   batchIngest: (
     folder: string,
-    modules: string[],
+    modules: BatchModuleKey[],
     recursive: boolean,
     noHash: boolean,
     forceReprocess = false
@@ -77,7 +78,7 @@ contextBridge.exposeInMainWorld('api', {
 
   batchStart: (
     folder: string,
-    modules: string[],
+    modules: BatchModuleKey[],
     workers: number,
     recursive: boolean,
     noHash: boolean,
@@ -116,7 +117,7 @@ contextBridge.exposeInMainWorld('api', {
 
   batchRetryFailed: (modules: string[]): Promise<void> =>
     ipcRenderer.invoke('batch:retry-failed', modules),
-  batchRebuildModule: (module: string): Promise<void> =>
+  batchRebuildModule: (module: BatchModuleKey): Promise<void> =>
     ipcRenderer.invoke('batch:rebuild-module', module),
 
   batchQueueClearAll: (): Promise<{ deleted: number }> =>

@@ -14,7 +14,7 @@
   - **Captioning** — Qwen 3.5 9B via [Ollama](https://ollama.com)
   - **Object detection** — GroundingDINO (zero-shot, batched)
   - **Face recognition** — InsightFace buffalo_l (detection + ArcFace embeddings)
-  - **Aesthetic scoring** — UniPercept (IAA, IQA, ISTA metrics; CUDA only)
+  - **Perception/aesthetic scoring** — UniPercept (IAA, IQA, ISTA metrics; CUDA only)
   - **Semantic embeddings** — OpenCLIP ViT-L/14 (768-d vectors for search)
 - ☁️ **Cloud AI** (optional) — OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, Google Vision, GitHub Copilot
 - 🔍 **Search** — Hybrid FTS5 full-text + CLIP semantic search with Reciprocal Rank Fusion
@@ -258,6 +258,8 @@ The batch worker processes images through a multi-phase GPU pipeline:
 
 Phases load/unload models sequentially for GPU memory efficiency. Within a phase, co-resident modules (e.g., `faces` + `embedding`) share VRAM.
 
+Active batch module names are `metadata`, `technical`, `caption`, `objects`, `faces`, `perception`, and `embedding`. Legacy queue names are remapped (`local_ai`/`blip2`/`cloud_ai` → `caption`, `aesthetic` → `perception`). Backend module metadata is owned by `imganalyzer\pipeline\module_registry.py`; frontend labels/order/retry aliases are owned by `imganalyzer-app\src\shared\moduleMetadata.ts`.
+
 ---
 
 ## XMP Output
@@ -357,6 +359,8 @@ ruff check imganalyzer/
 # Type check
 mypy imganalyzer/
 ```
+
+Repo hygiene: generated logs (`*.log`, `*.err`), caches, build outputs, `*.egg-info`, `__pycache__`, and generated `model-eval` reports are ignored. Keep source, tests, fixtures, lockfiles, and canonical docs tracked.
 
 ---
 

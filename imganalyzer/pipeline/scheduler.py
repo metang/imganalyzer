@@ -19,24 +19,28 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
+from imganalyzer.pipeline.module_registry import (
+    BATCH_CAPABLE_MODULES,
+    GPU_MODULES as _REGISTRY_GPU_MODULES,
+    GPU_PHASES,
+    INDEPENDENT_GPU_MODULES as _REGISTRY_INDEPENDENT_GPU_MODULES,
+    IO_MODULES as _REGISTRY_IO_MODULES,
+    LOCAL_IO_MODULES as _REGISTRY_LOCAL_IO_MODULES,
+    PREREQUISITES,
+)
 from imganalyzer.pipeline.vram_budget import VRAMBudget
 
 # ── Module classifications ────────────────────────────────────────────────────
 
-GPU_MODULES: frozenset[str] = frozenset({
-    "caption", "objects", "faces", "embedding", "perception",
-})
-LOCAL_IO_MODULES: frozenset[str] = frozenset({"metadata", "technical"})
-IO_MODULES: frozenset[str] = LOCAL_IO_MODULES
+GPU_MODULES: frozenset[str] = frozenset(_REGISTRY_GPU_MODULES)
+LOCAL_IO_MODULES: frozenset[str] = frozenset(_REGISTRY_LOCAL_IO_MODULES)
+IO_MODULES: frozenset[str] = frozenset(_REGISTRY_IO_MODULES)
 
 # Dependency graph: module -> prerequisite that must complete first.
-_PREREQUISITES: dict[str, str] = {
-    "faces":     "objects",
-    "embedding": "objects",
-}
+_PREREQUISITES: dict[str, str] = dict(PREREQUISITES)
 
 # GPU modules that support batched forward passes.
-_BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "embedding"})
+_BATCH_CAPABLE: frozenset[str] = frozenset(BATCH_CAPABLE_MODULES)
 
 # Ordered phases for GPU execution.  Within a phase, all modules can
 # be loaded simultaneously (VRAM permitting).  Between phases, all
@@ -50,19 +54,14 @@ _BATCH_CAPABLE: frozenset[str] = frozenset({"objects", "embedding"})
 # Perception is interleaved per mini-batch so the CUDA machine doesn't
 # spend hours on perception at the end while macOS workers sit idle.
 # During perception, macOS workers continue processing caption jobs.
-_GPU_PHASES: list[list[str]] = [
-    ["caption"],
-    ["objects"],
-    ["faces", "embedding"],
-    ["perception"],
-]
+_GPU_PHASES: list[list[str]] = [list(phase) for phase in GPU_PHASES]
 
 # GPU modules that run independently alongside the IO drain rather than
 # in the sequential phase pipeline.  Currently empty — perception was
 # moved into the phase pipeline for better scheduling with distributed
 # workers (macOS workers can't do perception, so deferring it to the end
 # wastes CUDA time while macOS workers idle).
-INDEPENDENT_GPU_MODULES: frozenset[str] = frozenset()
+INDEPENDENT_GPU_MODULES: frozenset[str] = frozenset(_REGISTRY_INDEPENDENT_GPU_MODULES)
 
 
 class ResourceScheduler:

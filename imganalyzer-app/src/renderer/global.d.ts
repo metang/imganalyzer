@@ -12,6 +12,7 @@ import type {
   WorkerPathMapping,
   WorkerSetupInfo,
 } from '../main/settings'
+import type { ModuleKey } from '../shared/moduleMetadata'
 
 export interface XmpData {
   description?: string
@@ -270,15 +271,7 @@ export interface GalleryChunkResponse {
 
 // ── Batch processing types ────────────────────────────────────────────────────
 
-export type BatchModuleKey =
-  | 'metadata'
-  | 'technical'
-  | 'caption'
-  | 'objects'
-  | 'faces'
-  | 'cloud_ai'
-  | 'aesthetic'
-  | 'embedding'
+export type BatchModuleKey = ModuleKey
 
 export type BatchStatus =
   | 'idle'
@@ -786,14 +779,14 @@ declare global {
       // Batch processing
       batchIngest(
         folder: string,
-        modules: string[],
+        modules: BatchModuleKey[],
         recursive: boolean,
         noHash: boolean,
         forceReprocess?: boolean
       ): Promise<{ registered: number; enqueued: number; skipped: number }>
       batchStart(
         folder: string,
-        modules: string[],
+        modules: BatchModuleKey[],
         workers: number,
         recursive: boolean,
         noHash: boolean,
@@ -811,7 +804,7 @@ declare global {
       batchMonitorExisting(): Promise<boolean>
       batchResumePending(workers?: number): Promise<void>
       batchRetryFailed(modules: string[]): Promise<void>
-      batchRebuildModule(module: string): Promise<void>
+      batchRebuildModule(module: BatchModuleKey): Promise<void>
       batchQueueClearAll(): Promise<{ deleted: number }>
       batchQueueClearDone(): Promise<{ deleted: number }>
       onBatchTick(cb: (stats: BatchStats) => void): () => void
