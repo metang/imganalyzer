@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 # ── Current schema version ────────────────────────────────────────────────────
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -57,6 +57,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         31: _migrate_v31,
         32: _migrate_v32,
         33: _migrate_v33,
+        34: _migrate_v34,
     }
 
     for v in range(current + 1, SCHEMA_VERSION + 1):
@@ -1381,3 +1382,11 @@ def _migrate_v33(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (lat_key, lon_key)
         )
     """)
+
+
+def _migrate_v34(conn: sqlite3.Connection) -> None:
+    """Add a covering index for gallery path-prefix browsing."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_images_file_path_gallery "
+        "ON images(file_path, id)"
+    )

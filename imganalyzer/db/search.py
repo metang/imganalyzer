@@ -100,6 +100,9 @@ _DESC_WEIGHT = 0.25
 # We filter these to only those whose cosine is at least this many standard
 # deviations above the population mean, to suppress noisy low-signal results.
 _DESC_ONLY_ZSCORE_MIN = 1.5
+_MAX_SEARCH_LIMIT = 5_000
+_MAX_FTS_CHANNEL_LIMIT = 5_000
+_SQL_IN_CANDIDATE_LIMIT = 800
 _FTS_TOKEN_RE = re.compile(r"\w+", flags=re.UNICODE)
 _FTS_QUOTED_PHRASE_RE = re.compile(r'"([^"]+)"|\'([^\']+)\'')
 _FACE_QUERY_NOISE_WORDS = frozenset({
@@ -139,6 +142,15 @@ _SEMANTIC_PROFILE_WEIGHTS: dict[str, tuple[float, float]] = {
 
 # Callback type for search progress: (phase, message, progress_fraction)
 ProgressCallback = Callable[[str, str, float], None] | None
+
+
+def _coerce_search_limit(limit: int) -> int:
+    return max(1, min(int(limit), _MAX_SEARCH_LIMIT))
+
+
+def _face_resolution_limit(limit: int) -> int:
+    """Bound per-person face lookups while preserving a small candidate pool."""
+    return min(_MAX_SEARCH_LIMIT, _coerce_search_limit(limit) * _POOL_FACTOR)
 
 
 def _rrf_score(rank: int, k: int = _RRF_K) -> float:
@@ -353,6 +365,7 @@ class SearchEngine:
 
         Returns list of {image_id, file_path, score, match_type, snippet}.
         """
+        limit = _coerce_search_limit(limit)
         if mode == "text":
             return self._fts_search(query, limit, candidate_ids=candidate_ids)
         elif mode == "semantic":
@@ -454,40 +467,52 @@ class SearchEngine:
         if len(clean_names) == 1:
             return self.search_face(clean_names[0], limit)
 
-        all_results = [self._resolve_face_rows(name, limit=None) for name in clean_names]
-        if match_mode != "any" and any(not rows for rows in all_results):
-            return []
+        result_limit = _coerce_search_limit(limit)
+        per_face_limit = _face_resolution_limit(result_limit)
+        while True:
+            all_results = [
+                self._resolve_face_rows(name, limit=per_face_limit)
+                for name in clean_names
+            ]
+            if match_mode != "any" and any(not rows for rows in all_results):
+                return []
 
-        aggregate: dict[int, dict[str, Any]] = {}
-        for rows in all_results:
-            for row in rows:
-                image_id = int(row["image_id"])
-                entry = aggregate.setdefault(image_id, {
-                    "image_id": image_id,
-                    "file_path": row["file_path"],
-                    "score": 0.0,
-                    "matches": 0,
-                })
-                entry["score"] = float(entry["score"]) + float(row["score"])
-                entry["matches"] = int(entry["matches"]) + 1
+            aggregate: dict[int, dict[str, Any]] = {}
+            for rows in all_results:
+                for row in rows:
+                    image_id = int(row["image_id"])
+                    entry = aggregate.setdefault(image_id, {
+                        "image_id": image_id,
+                        "file_path": row["file_path"],
+                        "score": 0.0,
+                        "matches": 0,
+                    })
+                    entry["score"] = float(entry["score"]) + float(row["score"])
+                    entry["matches"] = int(entry["matches"]) + 1
 
-        required_matches = len(clean_names) if match_mode == "all" else 1
-        snippet = f"People: {', '.join(clean_names)}"
-        ranked = sorted(
-            (
-                {
-                    "image_id": int(entry["image_id"]),
-                    "file_path": entry["file_path"],
-                    "score": float(entry["score"]),
-                    "match_type": "face",
-                    "snippet": snippet,
-                }
-                for entry in aggregate.values()
-                if int(entry["matches"]) >= required_matches
-            ),
-            key=lambda item: (-float(item["score"]), str(item["file_path"])),
-        )
-        return ranked[:limit]
+            required_matches = len(clean_names) if match_mode == "all" else 1
+            snippet = f"People: {', '.join(clean_names)}"
+            ranked = sorted(
+                (
+                    {
+                        "image_id": int(entry["image_id"]),
+                        "file_path": entry["file_path"],
+                        "score": float(entry["score"]),
+                        "match_type": "face",
+                        "snippet": snippet,
+                    }
+                    for entry in aggregate.values()
+                    if int(entry["matches"]) >= required_matches
+                ),
+                key=lambda item: (-float(item["score"]), str(item["file_path"])),
+            )
+            if len(ranked) >= result_limit:
+                return ranked[:result_limit]
+
+            all_sources_exhausted = all(len(rows) < per_face_limit for rows in all_results)
+            if all_sources_exhausted or per_face_limit >= _MAX_SEARCH_LIMIT:
+                return ranked[:result_limit]
+            per_face_limit = min(_MAX_SEARCH_LIMIT, per_face_limit * 2)
 
     def resolve_face_queries(self, query: str) -> tuple[list[str], str, str]:
         """Extract all face aliases/names from a freeform query."""
@@ -633,6 +658,7 @@ class SearchEngine:
 
     def search_similar_image(self, image_id: int, limit: int = 50) -> list[dict[str, Any]]:
         """Search for images visually similar to an existing image."""
+        limit = _coerce_search_limit(limit)
         seed_row = self.conn.execute(
             """SELECT embedding_type, vector
                FROM embeddings
@@ -657,12 +683,19 @@ class SearchEngine:
             return []
 
         scores = matrix @ query_vec
+        top_count = min(limit + 1, len(image_ids))
+        if top_count <= 0:
+            return []
+        if top_count < len(image_ids):
+            top_idx = np.argpartition(-scores, top_count - 1)[:top_count]
+            top_idx = top_idx[np.argsort(-scores[top_idx])]
+        else:
+            top_idx = np.argsort(-scores)
         scored = [
-            (candidate_image_id, float(scores[idx]))
-            for idx, candidate_image_id in enumerate(image_ids)
-            if candidate_image_id != image_id
-        ]
-        scored.sort(key=lambda item: -item[1])
+            (image_ids[int(idx)], float(scores[int(idx)]))
+            for idx in top_idx
+            if image_ids[int(idx)] != image_id
+        ][:limit]
 
         results: list[dict[str, Any]] = []
         for candidate_image_id, score in scored[:limit]:
@@ -680,6 +713,34 @@ class SearchEngine:
             )
         return results
 
+    def _load_temp_candidate_ids(self, candidate_ids: list[int]) -> None:
+        self.conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS search_candidate_ids "
+            "(image_id INTEGER PRIMARY KEY)"
+        )
+        self.conn.execute("DELETE FROM search_candidate_ids")
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO search_candidate_ids (image_id) VALUES (?)",
+            [(image_id,) for image_id in candidate_ids],
+        )
+
+    def _fts_candidate_filter_sql(
+        self,
+        candidate_ids: set[int] | None,
+    ) -> tuple[str, list[int]]:
+        if candidate_ids is None:
+            return "", []
+        if not candidate_ids:
+            return " AND 1 = 0", []
+
+        unique_ids = list(dict.fromkeys(int(image_id) for image_id in candidate_ids))
+        if len(unique_ids) <= _SQL_IN_CANDIDATE_LIMIT:
+            placeholders = ",".join("?" * len(unique_ids))
+            return f" AND si.rowid IN ({placeholders})", unique_ids
+
+        self._load_temp_candidate_ids(unique_ids)
+        return " AND si.rowid IN (SELECT image_id FROM temp.search_candidate_ids)", []
+
     # ── Internal search methods ────────────────────────────────────────────
 
     def _fts_search(self, query: str, limit: int, candidate_ids: set[int] | None = None) -> list[dict[str, Any]]:
@@ -691,6 +752,10 @@ class SearchEngine:
         - sliding subphrase windows (partial overlap recall)
         - soft OR-token match (broad partial recall)
         """
+        limit = _coerce_search_limit(limit)
+        candidate_filter_sql, candidate_filter_params = self._fts_candidate_filter_sql(
+            candidate_ids
+        )
         strict_query = _build_fts_match_query(query)
         phrase_query = _build_fts_phrase_match_query(query)
         subphrase_query = _build_fts_subphrase_match_query(query)
@@ -1041,19 +1106,19 @@ class SearchEngine:
         channel_priority = {"text_strict": 0, "text_phrase": 1, "text_subphrase": 2, "text_soft": 3}
 
         for match_type, match_query, weight, multiplier in channels:
-            channel_limit = channel_limit_base * multiplier
+            channel_limit = min(channel_limit_base * multiplier, _MAX_FTS_CHANNEL_LIMIT)
             try:
                 rows = self.conn.execute(
-                    """SELECT si.rowid AS image_id,
+                    f"""SELECT si.rowid AS image_id,
                               i.file_path,
                               bm25(search_index, 0.0, 3.8, 3.2, 2.2, 2.6, 0.6) AS bm25_score,
                               snippet(search_index, 1, '<b>', '</b>', '...', 32) AS snippet
                        FROM search_index si
                        JOIN images i ON i.id = si.rowid
-                       WHERE search_index MATCH ?
+                       WHERE search_index MATCH ?{candidate_filter_sql}
                        ORDER BY bm25_score
                        LIMIT ?""",
-                    [match_query, channel_limit],
+                    [match_query, *candidate_filter_params, channel_limit],
                 ).fetchall()
             except sqlite3.OperationalError:
                 rows = []
@@ -1157,13 +1222,14 @@ class SearchEngine:
         """
         from imganalyzer.embeddings.clip_embedder import CLIPEmbedder, vector_from_bytes
 
+        limit = _coerce_search_limit(limit)
         if progress_cb:
             progress_cb("loading_model", "Loading AI model…", 0.15)
         embedder = CLIPEmbedder()
         image_weight, desc_weight = _semantic_profile_weights(semantic_profile)
 
         # Fetch a larger pool so RRF has more candidates to re-rank.
-        pool = max(limit * _POOL_FACTOR, 100)
+        pool = min(max(limit * _POOL_FACTOR, 100), _MAX_SEARCH_LIMIT)
 
         # Encode two query variants:
         # - visual query: prefixed for better text->image retrieval
@@ -1315,7 +1381,8 @@ class SearchEngine:
         - When ``semantic_weight < 0.5`` (text is primary), FTS candidates
           are included unrestricted (original union behaviour).
         """
-        pool = limit * _POOL_FACTOR
+        limit = _coerce_search_limit(limit)
+        pool = min(limit * _POOL_FACTOR, _MAX_SEARCH_LIMIT)
         if progress_cb:
             progress_cb("text_search", "Searching text index…", 0.05)
         text_results     = self._fts_search(query, pool, candidate_ids=candidate_ids)

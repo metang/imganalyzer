@@ -8,6 +8,8 @@ import { VirtualGrid } from './VirtualGrid'
 import { cancelImageThumbnails } from '../lib/thumbnailCache'
 
 const CHUNK_SIZE = 150
+const FOLDER_ROW_HEIGHT = 28
+const FOLDER_ROW_OVERSCAN = 8
 
 interface FolderSidebarProps {
   folders: GalleryFolderNode[]
@@ -30,6 +32,10 @@ function FolderSidebar({
   onToggleExpand,
   onSelectFolder,
 }: FolderSidebarProps) {
+  const folderListRef = useRef<HTMLDivElement>(null)
+  const [folderScrollTop, setFolderScrollTop] = useState(0)
+  const [folderViewportHeight, setFolderViewportHeight] = useState(0)
+
   const childrenByParent = useMemo(() => {
     const map = new Map<string | null, GalleryFolderNode[]>()
     for (const folder of folders) {
@@ -56,6 +62,31 @@ function FolderSidebar({
     walk(null)
     return out
   }, [childrenByParent, expanded])
+
+  useEffect(() => {
+    const el = folderListRef.current
+    if (!el) return
+
+    const updateHeight = (): void => setFolderViewportHeight(el.clientHeight)
+    updateHeight()
+
+    const observer = new ResizeObserver(updateHeight)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  const viewportHeight = folderViewportHeight || 480
+  const firstFolderIndex = Math.max(
+    0,
+    Math.floor(folderScrollTop / FOLDER_ROW_HEIGHT) - FOLDER_ROW_OVERSCAN,
+  )
+  const renderedFolderCount = Math.ceil(viewportHeight / FOLDER_ROW_HEIGHT) + FOLDER_ROW_OVERSCAN * 2
+  const lastFolderIndex = Math.min(visibleFolders.length, firstFolderIndex + renderedFolderCount)
+  const renderedFolders = visibleFolders.slice(firstFolderIndex, lastFolderIndex)
+
+  const handleFolderScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    setFolderScrollTop(e.currentTarget.scrollTop)
+  }, [])
 
   return (
     <div className="h-full flex flex-col bg-neutral-950">
@@ -86,43 +117,62 @@ function FolderSidebar({
         </label>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 py-2 min-h-0">
+      <div
+        ref={folderListRef}
+        className="flex-1 overflow-y-auto px-2 py-2 min-h-0"
+        onScroll={handleFolderScroll}
+      >
         {visibleFolders.length === 0 && (
           <div className="text-xs text-neutral-600 px-2 py-3">No folders found.</div>
         )}
-        {visibleFolders.map((folder) => {
-          const hasChildren = folder.child_count > 0
-          const isExpanded = expanded.has(folder.path)
-          const isSelected = folder.path === selectedFolderPath
-          return (
-            <div key={folder.path} className="flex items-center gap-1 py-0.5">
-              <button
-                type="button"
-                onClick={() => hasChildren && onToggleExpand(folder.path)}
-                className={`w-5 h-5 text-[10px] rounded ${
-                  hasChildren ? 'text-neutral-500 hover:bg-neutral-800' : 'text-transparent'
-                }`}
-                title={hasChildren ? (isExpanded ? 'Collapse' : 'Expand') : undefined}
-              >
-                {hasChildren ? (isExpanded ? 'v' : '>') : '.'}
-              </button>
-              <button
-                type="button"
-                onClick={() => onSelectFolder(folder.path)}
-                className={`flex-1 min-w-0 text-left px-2 py-1 rounded text-sm transition-colors ${
-                  isSelected
-                    ? 'bg-blue-600/30 text-blue-200'
-                    : 'text-neutral-300 hover:bg-neutral-800'
-                }`}
-                style={{ paddingLeft: `${folder.depth * 12 + 8}px` }}
-                title={folder.path}
-              >
-                <span className="truncate block">{folder.name}</span>
-              </button>
-              <span className="text-[10px] text-neutral-600 pr-1">{folder.image_count}</span>
+        {visibleFolders.length > 0 && (
+          <div style={{ height: visibleFolders.length * FOLDER_ROW_HEIGHT, position: 'relative' }}>
+            <div
+              style={{
+                transform: `translateY(${firstFolderIndex * FOLDER_ROW_HEIGHT}px)`,
+                willChange: 'transform',
+              }}
+            >
+              {renderedFolders.map((folder) => {
+                const hasChildren = folder.child_count > 0
+                const isExpanded = expanded.has(folder.path)
+                const isSelected = folder.path === selectedFolderPath
+                return (
+                  <div
+                    key={folder.path}
+                    className="flex items-center gap-1"
+                    style={{ height: FOLDER_ROW_HEIGHT }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => hasChildren && onToggleExpand(folder.path)}
+                      className={`w-5 h-5 text-[10px] rounded ${
+                        hasChildren ? 'text-neutral-500 hover:bg-neutral-800' : 'text-transparent'
+                      }`}
+                      title={hasChildren ? (isExpanded ? 'Collapse' : 'Expand') : undefined}
+                    >
+                      {hasChildren ? (isExpanded ? 'v' : '>') : '.'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onSelectFolder(folder.path)}
+                      className={`flex-1 min-w-0 text-left px-2 py-1 rounded text-sm transition-colors ${
+                        isSelected
+                          ? 'bg-blue-600/30 text-blue-200'
+                          : 'text-neutral-300 hover:bg-neutral-800'
+                      }`}
+                      style={{ paddingLeft: `${folder.depth * 12 + 8}px` }}
+                      title={folder.path}
+                    >
+                      <span className="truncate block">{folder.name}</span>
+                    </button>
+                    <span className="text-[10px] text-neutral-600 pr-1">{folder.image_count}</span>
+                  </div>
+                )
+              })}
             </div>
-          )
-        })}
+          </div>
+        )}
       </div>
 
       <div className="shrink-0 border-t border-neutral-800 px-3 py-2 flex flex-col gap-2">
@@ -155,6 +205,18 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
 
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const chunkRequestTokenRef = useRef(0)
+
+  const invalidateChunkRequests = useCallback(() => {
+    chunkRequestTokenRef.current += 1
+    cancelImageThumbnails(null)
+    setLoading(true)
+    setLoadingInitial(true)
+    setError(null)
+    setSelectedItem(null)
+    setItems([])
+    setNextCursor(null)
+    setHasMore(false)
+  }, [])
 
   const loadFolders = useCallback(async () => {
     const resp = await window.api.galleryListFolders()
@@ -240,10 +302,6 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
   }, [loadFolders])
 
   useEffect(() => {
-    // Drop in-flight thumbnail RPCs from the previous folder so their
-    // results don't pollute the LRU cache and evict thumbs the user is
-    // actually looking at now.
-    cancelImageThumbnails(null)
     void loadInitialChunk()
   }, [loadInitialChunk])
 
@@ -261,9 +319,19 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
   }, [])
 
   const handleSelectFolder = useCallback((path: string | null) => {
+    if (path !== selectedFolderPath) {
+      invalidateChunkRequests()
+    }
     setSelectedFolderPath(path)
     setMobileSidebarOpen(false)
-  }, [])
+  }, [invalidateChunkRequests, selectedFolderPath])
+
+  const handleToggleRecursive = useCallback((next: boolean) => {
+    if (next !== recursive) {
+      invalidateChunkRequests()
+    }
+    setRecursive(next)
+  }, [invalidateChunkRequests, recursive])
 
   const selectedFolderLabel = selectedFolderPath ?? 'All processed images'
 
@@ -276,7 +344,7 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
           expanded={expandedFolders}
           totalImages={totalImages}
           recursive={recursive}
-          onToggleRecursive={setRecursive}
+          onToggleRecursive={handleToggleRecursive}
           onToggleExpand={toggleExpanded}
           onSelectFolder={handleSelectFolder}
         />
@@ -295,11 +363,11 @@ export function DbGalleryView({ onFolderContextChange }: DbGalleryViewProps = {}
               folders={folders}
               selectedFolderPath={selectedFolderPath}
               expanded={expandedFolders}
-              totalImages={totalImages}
-              recursive={recursive}
-              onToggleRecursive={setRecursive}
-              onToggleExpand={toggleExpanded}
-              onSelectFolder={handleSelectFolder}
+               totalImages={totalImages}
+               recursive={recursive}
+               onToggleRecursive={handleToggleRecursive}
+               onToggleExpand={toggleExpanded}
+               onSelectFolder={handleSelectFolder}
             />
           </div>
         </div>

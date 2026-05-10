@@ -71,10 +71,12 @@ import base64
 from collections import defaultdict
 import hmac
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 import io
 import inspect
 import json
 import os
+import queue
 import re
 import sqlite3
 import sys
@@ -235,6 +237,23 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 # SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999 on some builds; stay well under.
 _FACE_CLUSTER_IN_CHUNK = 500
 
+# Search RPCs are synchronous, so broad queries must never scale linearly with a
+# user's deep offset or an unbounded expansion list.
+_SEARCH_CANDIDATE_HARD_CAP = 5_000
+_SEARCH_COUNT_EXACT_FLOOR = 5_000
+_SEARCH_COUNT_SCAN_CAP = _SEARCH_COUNT_EXACT_FLOOR + 1
+_SEARCH_OFFSET_HARD_CAP = 5_000
+_SEARCH_SQL_IN_CANDIDATE_LIMIT = 800
+_SEARCH_TERM_HARD_CAP = 8
+
+
+@dataclass(frozen=True)
+class _BoundedCount:
+    total: int | None
+    counted: int
+    exact: bool
+    scan_limit: int
+
 
 def _get_face_clusters_for_image_ids(
     conn: sqlite3.Connection,
@@ -365,6 +384,170 @@ _STATUS_CACHE_DEFAULT_TTL_MS = 800
 _STATUS_CACHE_MAX_TTL_MS = 5000
 _status_cache_lock = threading.Lock()
 _status_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+@dataclass(frozen=True)
+class _RpcBackpressurePolicy:
+    max_workers: int
+    max_pending: int
+
+
+class _RpcBackpressureQueue:
+    """Small daemon worker queue that bounds expensive stdio JSON-RPC fanout."""
+
+    def __init__(
+        self,
+        method: str,
+        *,
+        max_workers: int,
+        max_pending: int,
+    ) -> None:
+        self.method = method
+        self.max_workers = max(1, int(max_workers))
+        self.max_pending = max(0, int(max_pending))
+        self._permits = threading.BoundedSemaphore(self.max_workers + self.max_pending)
+        self._queue: queue.Queue[Callable[[], None] | None] = queue.Queue(
+            maxsize=self.max_workers + self.max_pending
+        )
+        self._lock = threading.Lock()
+        self._threads: list[threading.Thread] = []
+        self._shutdown = False
+        safe_method = re.sub(r"[^A-Za-z0-9_.-]+", "-", method).strip("-") or "method"
+        self._thread_name_prefix = f"rpc-{safe_method}"
+
+    @property
+    def thread_count(self) -> int:
+        with self._lock:
+            return len(self._threads)
+
+    def submit(self, task: Callable[[], None]) -> bool:
+        with self._lock:
+            if self._shutdown:
+                return False
+            if not self._permits.acquire(blocking=False):
+                return False
+            self._ensure_workers_locked()
+            try:
+                self._queue.put_nowait(task)
+            except queue.Full:
+                self._permits.release()
+                return False
+            return True
+
+    def shutdown(self, *, cancel_pending: bool = True) -> None:
+        with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            if cancel_pending:
+                while True:
+                    try:
+                        task = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        if task is not None:
+                            self._permits.release()
+                    finally:
+                        self._queue.task_done()
+            for _thread in self._threads:
+                try:
+                    self._queue.put_nowait(None)
+                except queue.Full:
+                    break
+
+    def _ensure_workers_locked(self) -> None:
+        while len(self._threads) < self.max_workers:
+            index = len(self._threads) + 1
+            thread = threading.Thread(
+                target=self._worker,
+                daemon=True,
+                name=f"{self._thread_name_prefix}-{index}",
+            )
+            thread.start()
+            self._threads.append(thread)
+
+    def _worker(self) -> None:
+        while True:
+            task = self._queue.get()
+            try:
+                if task is None:
+                    return
+                try:
+                    task()
+                except Exception as exc:
+                    sys.stderr.write(
+                        f"[server.rpc] unhandled async task error for {self.method}: {exc}\n"
+                    )
+                finally:
+                    self._permits.release()
+            finally:
+                self._queue.task_done()
+
+
+_RPC_BACKPRESSURE_ERROR_CODE = -32001
+_RPC_BACKPRESSURE_ERROR_MESSAGE = (
+    "Server is busy handling expensive RPC method '{method}'; retry later"
+)
+_RPC_BACKPRESSURE_POLICIES: dict[str, _RpcBackpressurePolicy] = {
+    "search": _RpcBackpressurePolicy(max_workers=1, max_pending=2),
+    "gallery/listFolders": _RpcBackpressurePolicy(max_workers=1, max_pending=2),
+    "gallery/listImagesChunk": _RpcBackpressurePolicy(max_workers=2, max_pending=4),
+    "thumbnail": _RpcBackpressurePolicy(max_workers=4, max_pending=16),
+    "thumbnails/batch": _RpcBackpressurePolicy(max_workers=2, max_pending=4),
+    "fullimage": _RpcBackpressurePolicy(max_workers=2, max_pending=4),
+    "cachedimage": _RpcBackpressurePolicy(max_workers=4, max_pending=8),
+    "faces/crop-batch": _RpcBackpressurePolicy(max_workers=2, max_pending=4),
+}
+_rpc_backpressure_lock = threading.Lock()
+_rpc_backpressure_queues: dict[str, _RpcBackpressureQueue] = {}
+
+
+def _get_rpc_backpressure_queue(method: str) -> _RpcBackpressureQueue | None:
+    policy = _RPC_BACKPRESSURE_POLICIES.get(method)
+    if policy is None:
+        return None
+    with _rpc_backpressure_lock:
+        rpc_queue = _rpc_backpressure_queues.get(method)
+        if rpc_queue is None:
+            rpc_queue = _RpcBackpressureQueue(
+                method,
+                max_workers=policy.max_workers,
+                max_pending=policy.max_pending,
+            )
+            _rpc_backpressure_queues[method] = rpc_queue
+        return rpc_queue
+
+
+def _shutdown_rpc_backpressure_queues() -> None:
+    with _rpc_backpressure_lock:
+        queues = list(_rpc_backpressure_queues.values())
+        _rpc_backpressure_queues.clear()
+    for rpc_queue in queues:
+        rpc_queue.shutdown(cancel_pending=True)
+
+
+def _send_backpressure_error(req_id: int | str | None, method: str) -> None:
+    _send_error(
+        req_id,
+        _RPC_BACKPRESSURE_ERROR_CODE,
+        _RPC_BACKPRESSURE_ERROR_MESSAGE.format(method=method),
+    )
+
+
+def _start_async_rpc_task(
+    method: str,
+    req_id: int | str | None,
+    task: Callable[[], None],
+) -> None:
+    rpc_queue = _get_rpc_backpressure_queue(method)
+    if rpc_queue is not None:
+        if not rpc_queue.submit(task):
+            _send_backpressure_error(req_id, method)
+        return
+
+    thread = threading.Thread(target=task, daemon=True, name=f"rpc-{method}")
+    thread.start()
 
 # ── Decoded image cache (coordinator-mediated distribution) ──────────────────
 
@@ -2553,17 +2736,64 @@ def _handle_search(params: dict) -> dict:
             except Exception:
                 return val
 
-        def _build_where_clause(candidate_ids: list[int] | None = None) -> tuple[str, list[Any]]:
+        def _load_temp_candidate_ids(candidate_ids: list[int]) -> None:
+            conn.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS search_candidate_ids "
+                "(image_id INTEGER PRIMARY KEY)"
+            )
+            conn.execute("DELETE FROM search_candidate_ids")
+            conn.executemany(
+                "INSERT OR IGNORE INTO search_candidate_ids (image_id) VALUES (?)",
+                [(image_id,) for image_id in dict.fromkeys(candidate_ids)],
+            )
+
+        def _build_query_parts(
+            candidate_ids: list[int] | None = None,
+        ) -> tuple[str, str, list[Any]]:
             conditions = list(base_conditions)
             query_params = list(base_params)
+            query_joins = joins
             if candidate_ids is not None:
                 if not candidate_ids:
-                    return "WHERE 1 = 0", []
-                placeholders = ",".join("?" * len(candidate_ids))
-                conditions.insert(0, f"i.id IN ({placeholders})")
-                query_params = [*candidate_ids, *query_params]
+                    return query_joins, "WHERE 1 = 0", []
+                unique_ids = list(dict.fromkeys(candidate_ids))
+                if len(unique_ids) <= _SEARCH_SQL_IN_CANDIDATE_LIMIT:
+                    placeholders = ",".join("?" * len(unique_ids))
+                    conditions.insert(0, f"i.id IN ({placeholders})")
+                    query_params = [*unique_ids, *query_params]
+                else:
+                    _load_temp_candidate_ids(unique_ids)
+                    query_joins = (
+                        f"{joins}\n"
+                        "            JOIN temp.search_candidate_ids sci ON sci.image_id = i.id"
+                    )
             where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-            return where_clause, query_params
+            return query_joins, where_clause, query_params
+
+        def _count_records_bounded(
+            query_joins: str,
+            where_clause: str,
+            query_params: list[Any],
+            page_end: int,
+        ) -> _BoundedCount:
+            scan_limit = min(
+                max(page_end + 1, _SEARCH_COUNT_EXACT_FLOOR + 1),
+                _SEARCH_COUNT_SCAN_CAP,
+            )
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM ("
+                f"SELECT 1 {query_joins} {where_clause} LIMIT ?"
+                ") AS bounded_count",
+                [*query_params, scan_limit],
+            ).fetchone()
+            counted = int(row["cnt"]) if row else 0
+            exact = counted < scan_limit
+            return _BoundedCount(
+                total=counted if exact else None,
+                counted=counted,
+                exact=exact,
+                scan_limit=scan_limit,
+            )
 
         def _rows_to_records(
             rows: list[sqlite3.Row],
@@ -2653,9 +2883,9 @@ def _handle_search(params: dict) -> dict:
             *,
             include_face_clusters: bool = True,
         ) -> list[dict[str, Any]]:
-            where_clause, query_params = _build_where_clause(candidate_ids)
+            query_joins, where_clause, query_params = _build_query_parts(candidate_ids)
             rows = conn.execute(
-                f"SELECT {select_cols} {joins} {where_clause}",
+                f"SELECT {select_cols} {query_joins} {where_clause}",
                 query_params,
             ).fetchall()
             return _rows_to_records(
@@ -2668,28 +2898,29 @@ def _handle_search(params: dict) -> dict:
             order_clause: str,
             page_limit: int,
             page_offset: int,
-        ) -> tuple[list[dict[str, Any]], int]:
+        ) -> tuple[list[dict[str, Any]], _BoundedCount]:
             """Fetch a single page with SQL-level ORDER BY + LIMIT/OFFSET.
 
-            Returns (page_records, total_count) where total_count is the total
-            number of images matching the filters (possibly restricted to
-            candidate_ids). Face clusters are NOT attached here — call
+            Returns (page_records, count_info). ``count_info.total`` is exact
+            for small result sets and ``None`` once the bounded count cap is
+            reached. Face clusters are NOT attached here — call
             ``_attach_face_clusters`` on the returned page slice.
             """
-            where_clause, query_params = _build_where_clause(candidate_ids)
-            total_row = conn.execute(
-                f"SELECT COUNT(*) AS cnt {joins} {where_clause}",
+            query_joins, where_clause, query_params = _build_query_parts(candidate_ids)
+            count_info = _count_records_bounded(
+                query_joins,
+                where_clause,
                 query_params,
-            ).fetchone()
-            total_count = int(total_row["cnt"]) if total_row else 0
+                page_offset + page_limit,
+            )
             rows = conn.execute(
-                f"SELECT {select_cols} {joins} {where_clause}{order_clause}"
+                f"SELECT {select_cols} {query_joins} {where_clause}{order_clause}"
                 " LIMIT ? OFFSET ?",
                 [*query_params, page_limit, page_offset],
             ).fetchall()
             return (
                 _rows_to_records(rows, score_lookup, include_face_clusters=False),
-                total_count,
+                count_info,
             )
 
         def _attach_face_clusters(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2827,6 +3058,10 @@ def _handle_search(params: dict) -> dict:
                 if lowered not in seen_local:
                     seen_local.add(lowered)
                     terms.append(term)
+                if len(terms) >= _SEARCH_TERM_HARD_CAP:
+                    break
+            if len(terms) > _SEARCH_TERM_HARD_CAP:
+                terms = terms[:_SEARCH_TERM_HARD_CAP]
             if not terms:
                 return []
             if len(terms) == 1:
@@ -2862,13 +3097,17 @@ def _handle_search(params: dict) -> dict:
                 face_candidate_ids_cache = set()
                 return face_candidate_ids_cache
             if len(faces) == 1:
-                face_rows = engine.search_face(faces[0], limit=None)
+                face_rows = engine.search_face(faces[0], limit=_SEARCH_CANDIDATE_HARD_CAP)
             else:
                 search_faces = getattr(engine, "search_faces", None)
                 if callable(search_faces):
-                    face_rows = search_faces(faces, limit=None, match_mode=face_match)
+                    face_rows = search_faces(
+                        faces,
+                        limit=_SEARCH_CANDIDATE_HARD_CAP,
+                        match_mode=face_match,
+                    )
                 else:
-                    face_rows = _search_face_terms(0)
+                    face_rows = _search_face_terms(_SEARCH_CANDIDATE_HARD_CAP)
             face_candidate_ids_cache = {int(row["image_id"]) for row in face_rows}
             return face_candidate_ids_cache
 
@@ -2954,8 +3193,9 @@ def _handle_search(params: dict) -> dict:
         if similar_to_image_id is not None or faces or ((has_text_query or expanded_terms) and mode != "browse"):
             page_end = offset + limit
             quality_sort_floor = 400 if sort_by in {"best", "aesthetic", "sharpness", "cleanest"} else 200
-            candidate_limit = max((page_end + 1) * 4, quality_sort_floor)
-            max_candidate_limit = max(candidate_limit, 5000)
+            requested_candidate_limit = max((page_end + 1) * 4, quality_sort_floor)
+            candidate_limit = min(requested_candidate_limit, _SEARCH_CANDIDATE_HARD_CAP)
+            max_candidate_limit = _SEARCH_CANDIDATE_HARD_CAP
             search_exhausted = True
             records: list[dict[str, Any]] = []
             _search_deadline = time.monotonic() + 30.0  # wall-clock timeout
@@ -3006,7 +3246,7 @@ def _handle_search(params: dict) -> dict:
                         limit,
                         offset,
                     )
-                    enough_for_page = matched_total > page_end
+                    enough_for_page = matched_total.counted > page_end
                     if (
                         search_exhausted
                         or enough_for_page
@@ -3014,8 +3254,11 @@ def _handle_search(params: dict) -> dict:
                         or time.monotonic() >= _search_deadline
                     ):
                         _attach_face_clusters(page_records)
-                        has_more = matched_total > page_end or not search_exhausted
-                        total_out: int | None = matched_total if search_exhausted else None
+                        has_more = (
+                            matched_total.counted > offset + len(page_records)
+                            or (not search_exhausted and offset < max_candidate_limit)
+                        )
+                        total_out = matched_total.total if search_exhausted else None
                         return {
                             "results": page_records,
                             "total": total_out,
@@ -3052,19 +3295,23 @@ def _handle_search(params: dict) -> dict:
                 "hasMore": has_more,
             }
 
-        where_clause, query_params = _build_where_clause()
-        total_row = conn.execute(
-            f"SELECT COUNT(*) AS cnt {joins} {where_clause}",
+        if offset >= _SEARCH_OFFSET_HARD_CAP:
+            return {"results": [], "total": None, "hasMore": False}
+
+        query_joins, where_clause, query_params = _build_query_parts()
+        count_info = _count_records_bounded(
+            query_joins,
+            where_clause,
             query_params,
-        ).fetchone()
-        total = int(total_row["cnt"]) if total_row else 0
+            offset + limit,
+        )
         rows = conn.execute(
-            f"SELECT {select_cols} {joins} {where_clause}{_browse_order_clause()} LIMIT ? OFFSET ?",
+            f"SELECT {select_cols} {query_joins} {where_clause}{_browse_order_clause()} LIMIT ? OFFSET ?",
             [*query_params, limit, offset],
         ).fetchall()
         records = _rows_to_records(rows, None)
-        has_more = offset + len(records) < total
-        return {"results": records, "total": total, "hasMore": has_more}
+        has_more = count_info.counted > offset + len(records)
+        return {"results": records, "total": count_info.total, "hasMore": has_more}
     finally:
         _release_search_engine()
 
@@ -3153,57 +3400,117 @@ def _decode_gallery_cursor(token: str) -> tuple[str, int]:
     return path, image_id
 
 
+def _gallery_prefix_upper_bound(prefix: str) -> str:
+    return prefix + "\uffff"
+
+
+def _gallery_folder_prefixes(folder_path: str) -> list[str]:
+    folder_norm = folder_path.replace("\\", "/").rstrip("/")
+    if not folder_norm:
+        return []
+    forward_prefix = f"{folder_norm}/"
+    backslash_root = folder_norm.replace("/", "\\")
+    backslash_prefix = f"{backslash_root}\\"
+    prefixes: list[str] = []
+    for prefix in (forward_prefix, backslash_prefix):
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+    return prefixes
+
+
+_GALLERY_EXACT_COUNT_LIMIT = 10_000
+
+
 def _handle_gallery_list_folders(params: dict) -> dict:
     """List processed-image folders for the gallery sidebar tree."""
     conn = _get_db()
     processed = _processed_exists_clause("i")
     rows = conn.execute(
         f"""
-        SELECT i.file_path
-        FROM images i
-        WHERE {processed}
-        ORDER BY i.file_path COLLATE NOCASE
+        WITH RECURSIVE
+        folder_parts(image_id, parent_path, folder_path, remainder, is_folder) AS (
+            SELECT
+                i.id,
+                NULL,
+                NULL,
+                TRIM(REPLACE(i.file_path, CHAR(92), '/'), '/'),
+                0
+            FROM images i
+            WHERE {processed}
+
+            UNION ALL
+
+            SELECT
+                image_id,
+                folder_path,
+                CASE
+                    WHEN folder_path IS NULL
+                    THEN SUBSTR(remainder, 1, INSTR(remainder, '/') - 1)
+                    ELSE folder_path || '/' || SUBSTR(remainder, 1, INSTR(remainder, '/') - 1)
+                END,
+                SUBSTR(remainder, INSTR(remainder, '/') + 1),
+                1
+            FROM folder_parts
+            WHERE INSTR(remainder, '/') > 0
+              AND SUBSTR(remainder, 1, INSTR(remainder, '/') - 1) != ''
+        ),
+        folder_counts AS (
+            SELECT
+                folder_path AS path,
+                MIN(parent_path) AS parent_path,
+                COUNT(*) AS image_count
+            FROM folder_parts
+            WHERE is_folder = 1
+            GROUP BY folder_path
+        ),
+        child_counts AS (
+            SELECT parent_path AS path, COUNT(*) AS child_count
+            FROM folder_counts
+            WHERE parent_path IS NOT NULL
+            GROUP BY parent_path
+        ),
+        total_images AS (
+            SELECT COUNT(*) AS cnt
+            FROM folder_parts
+            WHERE is_folder = 0
+        )
+        SELECT
+            fc.path,
+            fc.parent_path,
+            fc.image_count,
+            COALESCE(cc.child_count, 0) AS child_count,
+            (SELECT cnt FROM total_images) AS total_images
+        FROM folder_counts fc
+        LEFT JOIN child_counts cc ON cc.path = fc.path
+        UNION ALL
+        SELECT
+            NULL AS path,
+            NULL AS parent_path,
+            0 AS image_count,
+            0 AS child_count,
+            cnt AS total_images
+        FROM total_images
+        WHERE NOT EXISTS (SELECT 1 FROM folder_counts)
+        ORDER BY path COLLATE NOCASE
         """
     ).fetchall()
 
-    total_images = len(rows)
-    folder_counts: dict[str, int] = {}
-    parent_of: dict[str, str | None] = {}
-    children_by_parent: dict[str | None, set[str]] = {}
-
-    for row in rows:
-        norm_path = str(row["file_path"]).replace("\\", "/")
-        if "/" not in norm_path:
-            continue
-        folder = norm_path.rsplit("/", 1)[0].rstrip("/")
-        if not folder:
-            continue
-        parts = [p for p in folder.split("/") if p]
-        if not parts:
-            continue
-
-        parent: str | None = None
-        current = ""
-        for part in parts:
-            current = part if not current else f"{current}/{part}"
-            folder_counts[current] = folder_counts.get(current, 0) + 1
-            if current not in parent_of:
-                parent_of[current] = parent
-            children_by_parent.setdefault(parent, set()).add(current)
-            parent = current
+    total_images = int(rows[0]["total_images"]) if rows else 0
 
     folders = []
-    for path, image_count in folder_counts.items():
+    for row in rows:
+        if row["path"] is None:
+            continue
+        path = str(row["path"])
         folders.append({
             "path": path,
             "name": path.rsplit("/", 1)[-1],
-            "parent_path": parent_of.get(path),
+            "parent_path": row["parent_path"],
             "depth": path.count("/"),
-            "image_count": image_count,
-            "child_count": len(children_by_parent.get(path, set())),
+            "image_count": int(row["image_count"]),
+            "child_count": int(row["child_count"]),
         })
 
-    folders.sort(key=lambda f: str(f["path"]).lower())
     return {"folders": folders, "totalImages": total_images}
 
 
@@ -3212,8 +3519,7 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
     import json as _json
 
     conn = _get_db()
-    # Use file_path natively (no REPLACE) so SQLite can use idx_images_file_path
-    # for both the LIKE prefix scan and the ORDER BY.
+    # Use native path-prefix ranges so SQLite can seek into the file_path index.
     path_expr = "i.file_path"
 
     try:
@@ -3232,24 +3538,21 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
     if folder_path is not None:
         if not isinstance(folder_path, str):
             raise ValueError("folderPath must be a string")
-        folder_norm = folder_path.replace("\\", "/").rstrip("/")
-        if folder_norm:
-            # Build LIKE patterns for both separators using '!' as the escape
-            # character (so literal '\' in the backslash pattern is preserved).
-            def _esc(s: str) -> str:
-                return s.replace("!", "!!").replace("%", "!%").replace("_", "!_")
-            fwd = _esc(folder_norm) + "/%"
-            bwd = _esc(folder_norm.replace("/", "\\")) + "\\%"
-            conditions.append(
-                "(i.file_path LIKE ? ESCAPE '!' OR i.file_path LIKE ? ESCAPE '!')"
-            )
-            sql_params.extend([fwd, bwd])
+        prefix_clauses: list[str] = []
+        for prefix in _gallery_folder_prefixes(folder_path):
+            range_clause = f"({path_expr} >= ? AND {path_expr} < ?"
+            params_for_prefix = [prefix, _gallery_prefix_upper_bound(prefix)]
             if not recursive:
-                conditions.append(
-                    "(INSTR(SUBSTR(i.file_path, LENGTH(?) + 2), '/') = 0 AND "
-                    "INSTR(SUBSTR(i.file_path, LENGTH(?) + 2), '\\') = 0)"
+                range_clause += (
+                    f" AND INSTR(SUBSTR({path_expr}, LENGTH(?) + 1), '/') = 0"
+                    f" AND INSTR(SUBSTR({path_expr}, LENGTH(?) + 1), '\\') = 0"
                 )
-                sql_params.extend([folder_norm, folder_norm])
+                params_for_prefix.extend([prefix, prefix])
+            range_clause += ")"
+            prefix_clauses.append(range_clause)
+            sql_params.extend(params_for_prefix)
+        if prefix_clauses:
+            conditions.append("(" + " OR ".join(prefix_clauses) + ")")
 
     base_conditions = list(conditions)
     base_params = list(sql_params)
@@ -3259,8 +3562,7 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
             raise ValueError("cursor must be a string")
         cursor_path, cursor_id = _decode_gallery_cursor(cursor)
         conditions.append(
-            f"({path_expr} COLLATE NOCASE > ? COLLATE NOCASE OR "
-            f"({path_expr} COLLATE NOCASE = ? COLLATE NOCASE AND i.id > ?))"
+            f"({path_expr} > ? OR ({path_expr} = ? AND i.id > ?))"
         )
         sql_params.extend([cursor_path, cursor_path, cursor_id])
 
@@ -3323,27 +3625,37 @@ def _handle_gallery_list_images_chunk(params: dict) -> dict:
         SELECT {select_cols}
         {joins}
         WHERE {where_clause}
-        ORDER BY {path_expr} COLLATE NOCASE, i.id
+        ORDER BY {path_expr}, i.id
         LIMIT ?
         """,
         [*sql_params, chunk_size + 1],
     ).fetchall()
 
-    total = None
-    if cursor is None:
-        total_row = conn.execute(
-            f"""
-            SELECT COUNT(*) AS cnt
-            FROM images i
-            WHERE {base_where_clause}
-            """,
-            base_params,
-        ).fetchone()
-        total = int(total_row["cnt"]) if total_row else 0
-
     has_more = len(rows) > chunk_size
     if has_more:
         rows = rows[:chunk_size]
+
+    total = None
+    if cursor is None:
+        if not has_more:
+            total = len(rows)
+        else:
+            count_limit = max(_GALLERY_EXACT_COUNT_LIMIT, chunk_size) + 1
+            total_row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM (
+                    SELECT 1
+                    FROM images i
+                    WHERE {base_where_clause}
+                    LIMIT ?
+                )
+                """,
+                [*base_params, count_limit],
+            ).fetchone()
+            bounded_total = int(total_row["cnt"]) if total_row else 0
+            if bounded_total < count_limit:
+                total = bounded_total
 
     def _json_field(val: Any) -> Any:
         if val is None:
@@ -4377,6 +4689,14 @@ def _run_async_one_shot(
         _send_error(req_id, -1, str(exc))
 
 
+def _handle_search_async(req_id: int | str, params: dict) -> None:
+    _run_async_one_shot(req_id, params, _handle_search)
+
+
+def _handle_gallery_list_folders_async(req_id: int | str, params: dict) -> None:
+    _run_async_one_shot(req_id, params, _handle_gallery_list_folders)
+
+
 def _handle_thumbnail_async(req_id: int | str, params: dict) -> None:
     _run_async_one_shot(req_id, params, _handle_thumbnail)
 
@@ -4387,6 +4707,10 @@ def _handle_thumbnails_batch_async(req_id: int | str, params: dict) -> None:
 
 def _handle_fullimage_async(req_id: int | str, params: dict) -> None:
     _run_async_one_shot(req_id, params, _handle_fullimage)
+
+
+def _handle_cachedimage_async(req_id: int | str, params: dict) -> None:
+    _run_async_one_shot(req_id, params, _handle_cachedimage)
 
 
 def _handle_gallery_list_images_chunk_async(req_id: int | str, params: dict) -> None:
@@ -6079,10 +6403,13 @@ _ASYNC_METHODS: dict[str, Any] = {
 # StdIO-only async wrappers for expensive one-shot methods. They remain sync for
 # HTTP transport so the HTTP coordinator can still serve them directly.
 _STDIO_ASYNC_METHODS: dict[str, Any] = {
+    "search": _handle_search_async,
+    "gallery/listFolders": _handle_gallery_list_folders_async,
     "gallery/listImagesChunk": _handle_gallery_list_images_chunk_async,
     "thumbnail": _handle_thumbnail_async,
     "thumbnails/batch": _handle_thumbnails_batch_async,
     "fullimage": _handle_fullimage_async,
+    "cachedimage": _handle_cachedimage_async,
 }
 
 
@@ -6111,6 +6438,8 @@ def _graceful_shutdown() -> None:
         w._shutdown.set()
     if _run_thread is not None and _run_thread.is_alive():
         _run_thread.join(timeout=5)
+
+    _shutdown_rpc_backpressure_queues()
 
     # Stop the PreDecoder so its non-daemon ThreadPoolExecutors don't
     # keep the interpreter alive for ~15s waiting on a 100k-item queue.
@@ -6438,8 +6767,7 @@ def _dispatch(msg: dict) -> None:
             except Exception as exc:
                 _send_error(req_id, -1, str(exc))
 
-        t = threading.Thread(target=_run_async, daemon=True, name=f"rpc-{method}")
-        t.start()
+        _start_async_rpc_task(method, req_id, _run_async)
     elif _RPC_METHODS.has_sync(method):
         try:
             result = _call_sync_handler(method, params)
@@ -6459,8 +6787,7 @@ def _dispatch(msg: dict) -> None:
             except Exception as exc:
                 _send_error(req_id, -1, str(exc))
 
-        t = threading.Thread(target=_run_async, daemon=True, name=f"rpc-{method}")
-        t.start()
+        _start_async_rpc_task(method, req_id, _run_async)
 
 
 # ── Main loop ────────────────────────────────────────────────────────────────

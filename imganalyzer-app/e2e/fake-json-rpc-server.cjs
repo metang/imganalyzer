@@ -7,6 +7,22 @@ const rl = readline.createInterface({
 })
 
 const fakeImagePath = path.join(process.cwd(), 'e2e', 'fixtures', 'fake-image.jpg')
+const onePixelImageBase64 = 'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='
+const onePixelImageDataUrl = `data:image/gif;base64,${onePixelImageBase64}`
+
+const JANUARY_FOLDER = 'E:/Pic/2013/01'
+const CURRENT_FOLDER = 'E:/Pic/2013/02-current'
+const SLOW_STALE_FOLDER = 'E:/Pic/2013/03-slow-stale'
+const SLOW_FAILURE_FOLDER = 'E:/Pic/2013/04-slow-failure'
+const ALL_IMAGES_TOTAL = 474186
+const SLOW_DELAY_MS = 450
+
+class RpcError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.code = code
+  }
+}
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`)
@@ -16,8 +32,12 @@ function result(id, value) {
   send({ jsonrpc: '2.0', id, result: value })
 }
 
-function error(id, message) {
-  send({ jsonrpc: '2.0', id, error: { code: -32603, message } })
+function sendError(id, code, message) {
+  send({ jsonrpc: '2.0', id, error: { code, message } })
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function emptyStatus() {
@@ -42,7 +62,7 @@ function emptyStatus() {
   }
 }
 
-function fakeSearchResult() {
+function fakeSearchResult(overrides = {}) {
   return {
     image_id: 1,
     file_path: fakeImagePath,
@@ -97,19 +117,106 @@ function fakeSearchResult() {
     perception_iqa_label: null,
     perception_ista: null,
     perception_ista_label: null,
+    ...overrides,
   }
 }
 
-function handle(method, params) {
+function folder(pathValue, name, imageCount, childCount = 0) {
+  return {
+    path: pathValue,
+    name,
+    parent_path: null,
+    depth: 0,
+    image_count: imageCount,
+    child_count: childCount,
+  }
+}
+
+const largeArchiveFolders = Array.from({ length: 1200 }, (_, index) => {
+  const suffix = String(index + 1).padStart(4, '0')
+  return folder(`E:/Pic/archive-${suffix}`, `Archive ${suffix}`, (index % 17) + 1)
+})
+
+const galleryFolders = [
+  folder(JANUARY_FOLDER, '01', 863),
+  folder(CURRENT_FOLDER, '02 Current', 2),
+  folder(SLOW_STALE_FOLDER, '03 Slow Stale', 99),
+  folder(SLOW_FAILURE_FOLDER, '04 Slow Failure', 42),
+  ...largeArchiveFolders,
+]
+
+function fakeGalleryFolders() {
+  return galleryFolders
+}
+
+function galleryChunk(items, total) {
+  return {
+    items,
+    nextCursor: null,
+    hasMore: false,
+    total,
+  }
+}
+
+async function fakeGalleryChunk(params) {
+  const folderPath = params?.folderPath ?? null
+
+  if (folderPath === SLOW_FAILURE_FOLDER) {
+    await delay(SLOW_DELAY_MS)
+    throw new RpcError(-32000, 'gallery/listImagesChunk timed out for fake slow folder')
+  }
+
+  if (folderPath === SLOW_STALE_FOLDER) {
+    await delay(SLOW_DELAY_MS)
+    return galleryChunk([
+      fakeSearchResult({
+        image_id: 303,
+        description: 'Obsolete slow gallery result that must never replace the current folder',
+      }),
+    ], 99)
+  }
+
+  if (folderPath === CURRENT_FOLDER) {
+    return galleryChunk([
+      fakeSearchResult({
+        image_id: 202,
+        description: 'Current fast gallery result',
+      }),
+    ], 2)
+  }
+
+  if (folderPath === JANUARY_FOLDER) {
+    return galleryChunk([
+      fakeSearchResult({
+        image_id: 101,
+        description: 'January gallery result',
+      }),
+    ], 863)
+  }
+
+  return galleryChunk([fakeSearchResult()], ALL_IMAGES_TOTAL)
+}
+
+function fakeThumbnailBatch(params) {
+  const thumbnails = {}
+  const items = Array.isArray(params?.items) ? params.items : []
+  for (const item of items) {
+    const key = item?.file_path || (item?.image_id != null ? String(item.image_id) : null)
+    if (key) thumbnails[key] = onePixelImageDataUrl
+  }
+  return { thumbnails, errors: {} }
+}
+
+async function handle(method, params) {
   switch (method) {
     case 'status':
       return emptyStatus()
     case 'workers/list':
       return { workers: [] }
     case 'gallery/listFolders':
-      return { folders: [], totalImages: 0 }
+      return { folders: fakeGalleryFolders(), totalImages: ALL_IMAGES_TOTAL }
     case 'gallery/listImagesChunk':
-      return { items: [], nextCursor: null, hasMore: false, total: 0 }
+      return fakeGalleryChunk(params)
     case 'search':
       send({
         jsonrpc: '2.0',
@@ -117,11 +224,21 @@ function handle(method, params) {
         params: { phase: 'fake', message: 'Fake backend search complete', progress: 1 },
       })
       return { results: [fakeSearchResult()], total: 1, hasMore: false }
+    case 'search/warmup':
+      return { ok: true }
     case 'search/resolve-face-query':
     case 'search/resolveFaceQuery':
       return { face: null, faces: [], faceMatch: 'all', remainingQuery: params?.query ?? '' }
     case 'image/details':
       return { result: fakeSearchResult() }
+    case 'thumbnail':
+      return { data: onePixelImageBase64 }
+    case 'thumbnails/batch':
+      return fakeThumbnailBatch(params)
+    case 'cachedimage':
+      return { available: true, data: onePixelImageBase64, width: 1, height: 1 }
+    case 'fullimage':
+      return { native: false, data: onePixelImageBase64 }
     case 'geo/stats':
       return { total_images: 0, geotagged: 0, countries: [], top_cities: [] }
     case 'geo/clusters':
@@ -213,35 +330,47 @@ function handle(method, params) {
     case 'shutdown':
       return { ok: true }
     default:
-      return { ok: true }
+      throw new RpcError(-32601, `Method not found: ${method}`)
   }
 }
 
 send({ jsonrpc: '2.0', method: 'server/ready', params: { fake: true } })
 
-rl.on('line', (line) => {
+async function handleLine(line) {
   if (!line.trim()) return
 
   let request
   try {
     request = JSON.parse(line)
   } catch {
+    sendError(null, -32700, 'Parse error')
     return
   }
 
-  if (typeof request.id === 'undefined' || typeof request.method !== 'string') {
+  if (typeof request.id === 'undefined') return
+
+  if (typeof request.method !== 'string') {
+    sendError(request.id, -32600, 'Invalid Request')
     return
   }
 
   try {
-    const value = handle(request.method, request.params ?? {})
+    const value = await handle(request.method, request.params ?? {})
     result(request.id, value)
     if (request.method === 'shutdown') {
       setTimeout(() => process.exit(0), 10)
     }
   } catch (err) {
-    error(request.id, err instanceof Error ? err.message : String(err))
+    if (err instanceof RpcError) {
+      sendError(request.id, err.code, err.message)
+      return
+    }
+    sendError(request.id, -32603, err instanceof Error ? err.message : String(err))
   }
+}
+
+rl.on('line', (line) => {
+  void handleLine(line)
 })
 
 rl.on('close', () => process.exit(0))

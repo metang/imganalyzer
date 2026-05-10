@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 
 import numpy as np
 import pytest
@@ -264,6 +264,115 @@ def _insert_search_index_row(
     )
 
 
+class _RecordingCursor:
+    def __init__(
+        self,
+        cursor: sqlite3.Cursor,
+        on_fetchall: Callable[[list[sqlite3.Row]], None],
+    ) -> None:
+        self._cursor = cursor
+        self._on_fetchall = on_fetchall
+
+    def fetchall(self):  # type: ignore[no-untyped-def]
+        rows = self._cursor.fetchall()
+        self._on_fetchall(rows)
+        return rows
+
+    def fetchone(self):  # type: ignore[no-untyped-def]
+        return self._cursor.fetchone()
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter(self._cursor)
+
+    def __getattr__(self, name):  # type: ignore[no-untyped-def]
+        return getattr(self._cursor, name)
+
+
+def test_gallery_schema_migration_adds_path_prefix_index() -> None:
+    from imganalyzer.db.schema import SCHEMA_VERSION, ensure_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (33);
+        CREATE TABLE images (
+            id INTEGER PRIMARY KEY,
+            file_path TEXT NOT NULL
+        );
+        """
+    )
+    try:
+        ensure_schema(conn)
+        indexes = {row["name"] for row in conn.execute("PRAGMA index_list('images')")}
+        version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
+    finally:
+        conn.close()
+
+    assert version == SCHEMA_VERSION
+    assert "idx_images_file_path_gallery" in indexes
+
+
+def test_gallery_list_folders_aggregates_in_sql_without_fetching_every_image(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gallery_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_images_file_path_gallery ON images(file_path, id)"
+    )
+    for image_id in range(1, 2501):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\Scale\{image_id:05d}.jpg")
+    _insert_processed_image(gallery_db, 3001, r"E:\Pic\Other\img.jpg")
+    gallery_db.execute(
+        "INSERT INTO images (id, file_path, width, height, file_size) VALUES (?, ?, ?, ?, ?)",
+        (4001, r"E:\Pic\Unprocessed\img.jpg", 100, 100, 12345),
+    )
+
+    class RecordingConn:
+        def __init__(self, inner: sqlite3.Connection) -> None:
+            self.inner = inner
+            self.folder_sql: str | None = None
+            self.folder_params: list[object] = []
+            self.folder_rows_fetched = 0
+
+        def execute(self, sql, params=()):  # type: ignore[no-untyped-def]
+            cursor = self.inner.execute(sql, params)
+            if "WITH RECURSIVE" in sql and "folder_counts" in sql:
+                self.folder_sql = sql
+                self.folder_params = list(params)
+                return _RecordingCursor(
+                    cursor,
+                    lambda rows: setattr(self, "folder_rows_fetched", len(rows)),
+                )
+            return cursor
+
+        def __getattr__(self, name):  # type: ignore[no-untyped-def]
+            return getattr(self.inner, name)
+
+    recording_conn = RecordingConn(gallery_db)
+    monkeypatch.setattr(server, "_get_db", lambda: recording_conn)
+    result = server._handle_gallery_list_folders({})
+
+    assert result["totalImages"] == 2501
+    folders_by_path = {folder["path"]: folder for folder in result["folders"]}
+    assert folders_by_path["E:"]["image_count"] == 2501
+    assert folders_by_path["E:/Pic"]["child_count"] == 2
+    assert folders_by_path["E:/Pic/Scale"]["image_count"] == 2500
+    assert "E:/Pic/Unprocessed" not in folders_by_path
+    assert recording_conn.folder_sql is not None
+    assert recording_conn.folder_rows_fetched == len(result["folders"])
+    assert recording_conn.folder_rows_fetched < 20
+
+    plan_rows = gallery_db.execute(
+        f"EXPLAIN QUERY PLAN {recording_conn.folder_sql}",
+        recording_conn.folder_params,
+    ).fetchall()
+    plan = "\n".join(str(row["detail"]) for row in plan_rows)
+    assert "WITH RECURSIVE" in recording_conn.folder_sql
+    assert "USING COVERING INDEX idx_images_file_path_gallery" in plan
+
+
 def test_gallery_chunk_folder_filter_works_for_windows_paths(
     gallery_db: sqlite3.Connection,
     monkeypatch: pytest.MonkeyPatch,
@@ -305,6 +414,145 @@ def test_gallery_chunk_folder_filter_escapes_like_wildcards(
     assert result["total"] == 1
     assert len(result["items"]) == 1
     assert result["items"][0]["file_path"] == r"E:\Pic\2006\100%_done\img1.jpg"
+
+
+def test_gallery_chunk_folder_filter_uses_indexable_prefix_ranges(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gallery_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_images_file_path_gallery ON images(file_path, id)"
+    )
+    for image_id in range(1, 2501):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Other\{image_id:05d}.jpg")
+    _insert_processed_image(gallery_db, 3001, r"E:\Pic\2013\01\img1.jpg")
+    _insert_processed_image(gallery_db, 3002, r"E:\Pic\2013\01\img2.jpg")
+
+    class RecordingConn:
+        def __init__(self, inner: sqlite3.Connection) -> None:
+            self.inner = inner
+            self.chunk_sql: str | None = None
+            self.chunk_params: list[object] | None = None
+
+        def execute(self, sql, params=()):  # type: ignore[no-untyped-def]
+            if "ORDER BY i.file_path, i.id" in sql and "LIMIT ?" in sql:
+                self.chunk_sql = sql
+                self.chunk_params = list(params)
+            return self.inner.execute(sql, params)
+
+        def __getattr__(self, name):  # type: ignore[no-untyped-def]
+            return getattr(self.inner, name)
+
+    recording_conn = RecordingConn(gallery_db)
+    monkeypatch.setattr(server, "_get_db", lambda: recording_conn)
+    result = server._handle_gallery_list_images_chunk(
+        {
+            "folderPath": r"E:\Pic\2013\01",
+            "recursive": True,
+            "chunkSize": 50,
+            "cursor": None,
+        }
+    )
+
+    assert result["total"] == 2
+    assert [item["image_id"] for item in result["items"]] == [3001, 3002]
+    assert recording_conn.chunk_sql is not None
+    assert recording_conn.chunk_params is not None
+    plan_rows = gallery_db.execute(
+        f"EXPLAIN QUERY PLAN {recording_conn.chunk_sql}",
+        recording_conn.chunk_params,
+    ).fetchall()
+    plan = "\n".join(str(row["detail"]) for row in plan_rows)
+    assert "idx_images_file_path_gallery" in plan
+    assert "SCAN i" not in plan
+
+
+def test_gallery_chunk_first_page_uses_loaded_rows_as_exact_total_without_count(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\small\img1.jpg")
+    _insert_processed_image(gallery_db, 2, r"E:\Pic\small\img2.jpg")
+
+    class RecordingConn:
+        def __init__(self, inner: sqlite3.Connection) -> None:
+            self.inner = inner
+            self.count_sql: str | None = None
+
+        def execute(self, sql, params=()):  # type: ignore[no-untyped-def]
+            if "SELECT COUNT(*) AS cnt" in sql:
+                self.count_sql = sql
+            return self.inner.execute(sql, params)
+
+        def __getattr__(self, name):  # type: ignore[no-untyped-def]
+            return getattr(self.inner, name)
+
+    recording_conn = RecordingConn(gallery_db)
+    monkeypatch.setattr(server, "_get_db", lambda: recording_conn)
+    result = server._handle_gallery_list_images_chunk(
+        {
+            "folderPath": r"E:\Pic\small",
+            "recursive": True,
+            "chunkSize": 50,
+            "cursor": None,
+        }
+    )
+
+    assert result["total"] == 2
+    assert result["hasMore"] is False
+    assert recording_conn.count_sql is None
+
+
+def test_gallery_chunk_first_page_bounds_count_for_large_result_sets(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gallery_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_images_file_path_gallery ON images(file_path, id)"
+    )
+    for image_id in range(1, 76):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\count\{image_id:05d}.jpg")
+
+    class RecordingConn:
+        def __init__(self, inner: sqlite3.Connection) -> None:
+            self.inner = inner
+            self.count_sql: str | None = None
+            self.count_params: list[object] | None = None
+
+        def execute(self, sql, params=()):  # type: ignore[no-untyped-def]
+            if "SELECT COUNT(*) AS cnt" in sql and "SELECT 1" in sql and "LIMIT ?" in sql:
+                self.count_sql = sql
+                self.count_params = list(params)
+            return self.inner.execute(sql, params)
+
+        def __getattr__(self, name):  # type: ignore[no-untyped-def]
+            return getattr(self.inner, name)
+
+    recording_conn = RecordingConn(gallery_db)
+    monkeypatch.setattr(server, "_get_db", lambda: recording_conn)
+    monkeypatch.setattr(server, "_GALLERY_EXACT_COUNT_LIMIT", 50)
+    result = server._handle_gallery_list_images_chunk(
+        {
+            "folderPath": r"E:\Pic\count",
+            "recursive": True,
+            "chunkSize": 50,
+            "cursor": None,
+        }
+    )
+
+    assert len(result["items"]) == 50
+    assert result["hasMore"] is True
+    assert result["total"] is None
+    assert recording_conn.count_sql is not None
+    assert recording_conn.count_params is not None
+    assert recording_conn.count_params[-1] == 51
+    plan_rows = gallery_db.execute(
+        f"EXPLAIN QUERY PLAN {recording_conn.count_sql}",
+        recording_conn.count_params,
+    ).fetchall()
+    plan = "\n".join(str(row["detail"]) for row in plan_rows)
+    assert "LIMIT ?" in recording_conn.count_sql
+    assert "idx_images_file_path_gallery" in plan
 
 
 def test_gallery_chunk_falls_back_to_split_tables_when_caption_missing(

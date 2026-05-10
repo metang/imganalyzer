@@ -27,6 +27,7 @@ from tests.test_server_gallery import (  # noqa: E402  (import after stdout fix)
     _SCHEMA_SQL,
     _insert_face_occurrence,
     _insert_processed_image,
+    _insert_search_index_row,
 )
 
 
@@ -302,3 +303,253 @@ def test_b4_search_page_face_clusters_limited_to_page(
             f"face cluster lookup pulled {count} rows; "
             "should only cover the 2-image page"
         )
+
+
+def test_search_browse_large_result_uses_bounded_total(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Broad browse/search filters should not run exact counts over every row."""
+    for image_id in range(1, 6002):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\scale\img{image_id}.jpg")
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+
+    result = server._handle_search({"mode": "browse", "limit": 3, "offset": 0})
+
+    assert len(result["results"]) == 3
+    assert result["total"] is None
+    assert result["hasMore"] is True
+
+
+def test_search_browse_deep_offset_short_circuits(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Browse-mode deep offsets should not issue a synchronous OFFSET scan."""
+    for image_id in range(1, 20):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\offset\img{image_id}.jpg")
+
+    wrapped = _RowCountingConn(gallery_db)
+    monkeypatch.setattr(server, "_get_db", lambda: wrapped)
+
+    result = server._handle_search({"mode": "browse", "limit": 3, "offset": 100_000})
+
+    assert result == {"results": [], "total": None, "hasMore": False}
+    assert not _primary_select_rows(wrapped.executions)
+
+
+def test_search_deep_offset_does_not_expand_candidates_without_bound(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large offset must not turn into a huge synchronous search limit."""
+    _insert_processed_image(gallery_db, 1, r"E:\Pic\scale\only.jpg")
+    seen_limits: list[int] = []
+
+    class FakeSearchEngine:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+
+        def search(self, query, limit, **_):  # type: ignore[no-untyped-def]
+            seen_limits.append(int(limit))
+            return [{"image_id": 1, "score": 1.0}]
+
+    import imganalyzer.db.search as search_module
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    monkeypatch.setattr(search_module, "SearchEngine", FakeSearchEngine)
+
+    result = server._handle_search(
+        {"query": "anything", "mode": "hybrid", "limit": 10, "offset": 100_000}
+    )
+
+    assert seen_limits == [5000]
+    assert result["results"] == []
+    assert result["total"] == 1
+
+
+def test_search_expanded_terms_are_capped(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expanded query entropy should not fan out into unbounded engine calls."""
+    for image_id in range(1, 10):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\terms\img{image_id}.jpg")
+
+    seen_terms: list[str] = []
+
+    class FakeSearchEngine:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+
+        def search(self, query, limit, **_):  # type: ignore[no-untyped-def]
+            seen_terms.append(str(query))
+            return [{"image_id": len(seen_terms), "score": 1.0 / len(seen_terms)}]
+
+    import imganalyzer.db.search as search_module
+
+    monkeypatch.setattr(server, "_get_db", lambda: gallery_db)
+    monkeypatch.setattr(search_module, "SearchEngine", FakeSearchEngine)
+
+    server._handle_search(
+        {
+            "query": "base",
+            "expandedTerms": [f"term-{idx}" for idx in range(20)],
+            "mode": "hybrid",
+            "limit": 3,
+            "offset": 0,
+        }
+    )
+
+    assert seen_terms == [
+        "base",
+        "term-0",
+        "term-1",
+        "term-2",
+        "term-3",
+        "term-4",
+        "term-5",
+        "term-6",
+    ]
+
+
+def test_fts_candidate_ids_are_applied_in_sql(
+    gallery_db: sqlite3.Connection,
+) -> None:
+    """Candidate-restricted FTS must find matches beyond the global top-N window."""
+    from imganalyzer.db.search import SearchEngine
+
+    for image_id in range(1, 1201):
+        _insert_processed_image(gallery_db, image_id, fr"E:\Pic\fts\img{image_id}.jpg")
+        _insert_search_index_row(gallery_db, image_id=image_id, description_text="scale target")
+
+    engine = SearchEngine(gallery_db)
+    results = engine.search("scale", mode="text", limit=5, candidate_ids={1000})
+
+    assert [result["image_id"] for result in results] == [1000]
+
+
+def test_multi_face_search_passes_bounded_limits_to_resolver(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-face search should not resolve each person with limit=None."""
+    from imganalyzer.db.search import SearchEngine
+
+    engine = SearchEngine(gallery_db)
+    seen_limits: list[tuple[str, int | None]] = []
+    rows_by_name = {
+        "alice": [
+            {"image_id": 1, "file_path": r"E:\Pic\faces\alice.jpg", "score": 1.0},
+            {"image_id": 2, "file_path": r"E:\Pic\faces\together.jpg", "score": 1.0},
+        ],
+        "bob": [
+            {"image_id": 2, "file_path": r"E:\Pic\faces\together.jpg", "score": 1.0},
+            {"image_id": 3, "file_path": r"E:\Pic\faces\bob.jpg", "score": 1.0},
+        ],
+    }
+
+    def fake_resolve_face_rows(name: str, limit: int | None = 50) -> list[dict[str, object]]:
+        seen_limits.append((name, limit))
+        row_limit = 0 if limit is None else int(limit)
+        return rows_by_name[name][:row_limit]
+
+    monkeypatch.setattr(engine, "_resolve_face_rows", fake_resolve_face_rows)
+
+    results = engine.search_faces(["alice", "bob"], limit=3, match_mode="all")
+
+    assert seen_limits == [("alice", 12), ("bob", 12)]
+    assert [result["image_id"] for result in results] == [2]
+
+
+def test_multi_face_search_any_mode_keeps_expected_ranked_results(
+    gallery_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from imganalyzer.db.search import SearchEngine
+
+    engine = SearchEngine(gallery_db)
+
+    def fake_resolve_face_rows(name: str, limit: int | None = 50) -> list[dict[str, object]]:
+        assert limit == 8
+        rows_by_name = {
+            "alice": [
+                {"image_id": 1, "file_path": r"E:\Pic\faces\alice.jpg", "score": 1.0},
+                {"image_id": 2, "file_path": r"E:\Pic\faces\together.jpg", "score": 1.0},
+            ],
+            "bob": [
+                {"image_id": 2, "file_path": r"E:\Pic\faces\together.jpg", "score": 1.0},
+                {"image_id": 3, "file_path": r"E:\Pic\faces\bob.jpg", "score": 1.0},
+            ],
+        }
+        return rows_by_name[name]
+
+    monkeypatch.setattr(engine, "_resolve_face_rows", fake_resolve_face_rows)
+
+    results = engine.search_faces(["alice", "bob"], limit=2, match_mode="any")
+
+    assert [(result["image_id"], result["score"]) for result in results] == [
+        (2, 2.0),
+        (1, 1.0),
+    ]
+
+
+def test_multi_face_search_passes_bounded_limits_to_repository_lookups(
+    gallery_db: sqlite3.Connection,
+) -> None:
+    from imganalyzer.db.search import SearchEngine
+
+    class FakeRepo:
+        def __init__(self) -> None:
+            self.person_limits: list[tuple[int, int | None]] = []
+
+        def find_face_identities_by_alias(self, name: str) -> list[dict[str, object]]:
+            return []
+
+        def find_persons_by_name(self, name: str) -> list[dict[str, object]]:
+            return [{"id": {"alice": 1, "bob": 2}[name], "name": name}]
+
+        def find_clusters_by_label(self, name: str) -> list[dict[str, object]]:
+            return []
+
+        def get_images_for_person(
+            self,
+            person_id: int,
+            limit: int | None = 100,
+        ) -> list[dict[str, object]]:
+            self.person_limits.append((person_id, limit))
+            rows_by_person = {
+                1: [
+                    {"image_id": 1, "file_path": r"E:\Pic\faces\alice.jpg"},
+                    {"image_id": 3, "file_path": r"E:\Pic\faces\together.jpg"},
+                ],
+                2: [
+                    {"image_id": 2, "file_path": r"E:\Pic\faces\bob.jpg"},
+                    {"image_id": 3, "file_path": r"E:\Pic\faces\together.jpg"},
+                ],
+            }
+            return rows_by_person[person_id]
+
+        def get_images_for_cluster(
+            self,
+            cluster_id: int,
+            limit: int | None = 100,
+        ) -> list[dict[str, object]]:
+            return []
+
+        def get_images_for_face(
+            self,
+            name: str,
+            limit: int | None = 100,
+        ) -> list[dict[str, object]]:
+            return []
+
+    engine = SearchEngine(gallery_db)
+    fake_repo = FakeRepo()
+    engine.repo = fake_repo  # type: ignore[assignment]
+
+    results = engine.search_faces(["alice", "bob"], limit=2, match_mode="all")
+
+    assert fake_repo.person_limits == [(1, 8), (2, 8)]
+    assert [result["image_id"] for result in results] == [3]
